@@ -5,7 +5,8 @@ import { NextResponse } from "next/server";
 
 
 const ROOT = path.join(process.cwd(), "..");
-const CONTROL_PATH = path.join(ROOT, "logs", "control.json");
+const LOGS_DIR = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
+const CONTROL_PATH = path.join(LOGS_DIR, "control.json");
 
 
 export const dynamic = "force-dynamic";
