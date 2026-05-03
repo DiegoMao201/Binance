@@ -80,13 +80,34 @@ class BinanceDataClient:
     def _fetch_full_balance(self) -> dict[str, Any]:
         return self._with_retries(lambda: self.private_exchange.fetch_balance())
 
+    @staticmethod
+    def _balance_aliases(asset: str) -> tuple[str, ...]:
+        aliases = [asset]
+        if asset == "USDT":
+            aliases.extend(["USD", "FDUSD", "USDC"])
+        return tuple(dict.fromkeys(aliases))
+
+    def _extract_balance_value(self, balance: dict[str, Any], asset: str, field: str) -> float:
+        for candidate in self._balance_aliases(asset):
+            info = balance.get(candidate, {}) or {}
+            value = info.get(field)
+            if value not in (None, 0, 0.0):
+                return float(value)
+
+        bucket = balance.get(field, {}) or {}
+        for candidate in self._balance_aliases(asset):
+            value = bucket.get(candidate)
+            if value not in (None, 0, 0.0):
+                return float(value)
+
+        return 0.0
+
     def fetch_balance_usd(self) -> float:
         if self.settings.dry_run or not self.settings.binance_api_key:
             return self.settings.initial_capital_usd
 
         balance = self._fetch_full_balance()
-        usdt_info = balance.get(self.quote_asset, {})
-        return float(usdt_info.get("free", 0.0))
+        return self._extract_balance_value(balance, self.quote_asset, "free")
 
     def fetch_asset_balance(self, asset: str | None = None) -> dict[str, float]:
         target = asset or self.base_asset
