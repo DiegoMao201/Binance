@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+logs/*.log
+logs/bot_state.json
+logs/status.json
+logs/control.json
+logs/order_history.json
+logs/signal_history.json
+web/node_modules/
+web/.next/
