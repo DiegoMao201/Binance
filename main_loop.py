@@ -115,6 +115,28 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     }
 
 
+def _load_recent_ai_signal(settings) -> dict[str, Any] | None:
+    previous_state = load_state(settings.state_file)
+    previous_ai_signal = previous_state.get("ai_signal")
+    updated_at = previous_state.get("updated_at")
+    if not previous_ai_signal or not updated_at:
+        return None
+
+    try:
+        previous_updated_at = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return None
+
+    age_seconds = (datetime.now(timezone.utc) - previous_updated_at).total_seconds()
+    if age_seconds > settings.ai_min_interval_seconds:
+        return None
+
+    cached_ai_signal = dict(previous_ai_signal)
+    cached_ai_signal["cached"] = True
+    cached_ai_signal["cached_age_seconds"] = round(age_seconds, 1)
+    return cached_ai_signal
+
+
 def run_cycle() -> None:
     settings = load_settings()
     logger = setup_logger(settings)
@@ -130,7 +152,14 @@ def run_cycle() -> None:
         raw_frame = client.fetch_ohlcv(limit=200)
         enriched_frame = compute_indicators(raw_frame)
         technical_signal = build_technical_signal(enriched_frame)
-        ai_signal = ai_analyzer.analyze(enriched_frame)
+        ai_signal = _load_recent_ai_signal(settings)
+        if ai_signal is None:
+            ai_signal = ai_analyzer.analyze(enriched_frame)
+        else:
+            logger.info(
+                "Reutilizando señal de IA en caché (%ss de antigüedad) para reducir coste.",
+                ai_signal.get("cached_age_seconds", 0),
+            )
         balance_usd = client.fetch_balance_usd()
         risk_snapshot = risk_manager.evaluate(balance_usd)
         order_history = load_history(settings.order_history_file)

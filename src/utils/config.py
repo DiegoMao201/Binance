@@ -36,6 +36,7 @@ class Settings:
     max_atr_pct: float
     min_volume_ratio: float
     trade_cooldown_minutes: int
+    ai_min_interval_seconds: int
     logs_dir: Path
     state_file: Path
     log_file: Path
@@ -76,6 +77,7 @@ def load_settings() -> Settings:
         max_atr_pct=float(os.getenv("MAX_ATR_PCT", "0.018")),
         min_volume_ratio=float(os.getenv("MIN_VOLUME_RATIO", "1.10")),
         trade_cooldown_minutes=int(os.getenv("TRADE_COOLDOWN_MINUTES", "15")),
+        ai_min_interval_seconds=int(os.getenv("AI_MIN_INTERVAL_SECONDS", "300")),
         logs_dir=logs_dir,
         state_file=logs_dir / "bot_state.json",
         log_file=logs_dir / "bot.log",
