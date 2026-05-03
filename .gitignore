@@ -10,5 +10,6 @@ logs/order_history.json
 logs/signal_history.json
 logs/open_positions.json
 logs/closed_trades.json
+logs/equity_history.json
 web/node_modules/
 web/.next/

@@ -8,6 +8,8 @@ from src.utils.config import Settings
 @dataclass(slots=True)
 class RiskSnapshot:
     balance_usd: float
+    equity_usd: float
+    high_water_mark: float
     max_trade_usd: float
     recommended_trade_usd: float
     drawdown_pct: float
@@ -18,39 +20,59 @@ class RiskSnapshot:
 class RiskManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.reference_balance = settings.initial_capital_usd
+        # Hard ceiling on per-trade risk. Even if env says more, we cap at 2%.
+        self.effective_risk_per_trade = min(float(settings.max_risk_per_trade), 0.02)
 
-    def evaluate(self, balance_usd: float) -> RiskSnapshot:
+    def evaluate(
+        self,
+        balance_usd: float,
+        equity_usd: float | None = None,
+        high_water_mark: float | None = None,
+    ) -> RiskSnapshot:
+        equity = float(equity_usd if equity_usd is not None else balance_usd)
+        baseline = float(self.settings.initial_capital_usd)
+        hwm = max(
+            float(high_water_mark or 0.0),
+            baseline,
+            equity,
+        )
+
         drawdown = 0.0
-        if self.reference_balance > 0:
-            drawdown = max(0.0, (self.reference_balance - balance_usd) / self.reference_balance)
+        if hwm > 0:
+            drawdown = max(0.0, (hwm - equity) / hwm)
 
-        max_trade_usd = round(balance_usd * self.settings.max_risk_per_trade, 4)
-        recommended_trade_usd = self.compute_trade_notional(balance_usd)
+        max_trade_usd = round(equity * self.effective_risk_per_trade, 4)
+        recommended_trade_usd = self.compute_trade_notional(equity)
         daily_pnl_pct = 0.0
-        if self.reference_balance > 0:
-            daily_pnl_pct = (balance_usd - self.reference_balance) / self.reference_balance
+        if baseline > 0:
+            daily_pnl_pct = (equity - baseline) / baseline
 
         return RiskSnapshot(
-            balance_usd=round(balance_usd, 4),
+            balance_usd=round(float(balance_usd), 4),
+            equity_usd=round(equity, 4),
+            high_water_mark=round(hwm, 4),
             max_trade_usd=max_trade_usd,
             recommended_trade_usd=recommended_trade_usd,
-            drawdown_pct=round(drawdown, 4),
-            daily_pnl_pct=round(daily_pnl_pct, 4),
+            drawdown_pct=round(drawdown, 6),
+            daily_pnl_pct=round(daily_pnl_pct, 6),
             kill_switch_triggered=drawdown >= self.settings.kill_switch_drawdown,
         )
 
-    def compute_trade_notional(self, balance_usd: float) -> float:
-        policy_notional = balance_usd * self.settings.max_risk_per_trade
+    def compute_trade_notional(self, equity_usd: float) -> float:
+        policy_notional = equity_usd * self.effective_risk_per_trade
         minimum_viable = self.settings.minimum_trade_usdt
 
-        if balance_usd < minimum_viable:
+        if equity_usd < minimum_viable:
+            return 0.0
+
+        # Veteran rule: never let the floor minimum exceed 2x the policy size.
+        if minimum_viable > policy_notional * 2 and equity_usd < minimum_viable * 2:
             return 0.0
 
         return round(max(policy_notional, minimum_viable), 4)
 
-    def compute_order_size(self, price: float, balance_usd: float) -> float:
-        trade_capital = self.compute_trade_notional(balance_usd)
+    def compute_order_size(self, price: float, equity_usd: float) -> float:
+        trade_capital = self.compute_trade_notional(equity_usd)
         if price <= 0:
             return 0.0
         return round(trade_capital / price, 6)

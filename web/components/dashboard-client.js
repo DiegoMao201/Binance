@@ -286,10 +286,11 @@ export default function DashboardClient({ initialData }) {
         </section>
 
         <section className="metrics-grid">
-          <MetricCard label="Balance USDT" value={formatNumber(risk.balance_usd)} subvalue={`Orden sugerida ${formatNumber(risk.recommended_trade_usd)}`} />
-          <MetricCard label="PnL diario" value={formatPercent(risk.daily_pnl_pct)} tone={Number(risk.daily_pnl_pct) >= 0 ? "buy" : "sell"} />
-          <MetricCard label="PnL realizado" value={formatNumber(portfolio.realized_pnl_usdt)} tone={Number(portfolio.realized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={`${portfolio.wins || 0} ganadas / ${portfolio.losses || 0} perdidas`} />
-          <MetricCard label="PnL flotante" value={formatNumber(portfolio.unrealized_pnl_usdt)} tone={Number(portfolio.unrealized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={`${portfolio.open_positions || 0} posiciones abiertas`} />
+          <MetricCard label="Balance USDT" value={formatNumber(risk.balance_usd)} subvalue={`Equity ${formatNumber(risk.equity_usd)}`} />
+          <MetricCard label="PnL acumulado" value={`${formatNumber(portfolio.realized_pnl_usdt)} USDT`} tone={Number(portfolio.realized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={formatPercent(portfolio.accumulated_pnl_pct)} />
+          <MetricCard label="Win rate" value={`${formatNumber(portfolio.win_rate_pct, 2)}%`} subvalue={`${portfolio.wins || 0} W / ${portfolio.losses || 0} L`} />
+          <MetricCard label="Max drawdown" value={formatPercent(portfolio.max_drawdown_pct)} tone={Number(portfolio.max_drawdown_pct) >= 0.02 ? "sell" : "buy"} subvalue={`HWM ${formatNumber(portfolio.high_water_mark_usdt)}`} />
+          <MetricCard label="Inventario spot" value={`${formatNumber(portfolio?.asset_holdings?.free, 6)} ${portfolio?.asset_holdings?.asset || ""}`} subvalue={`Total ${formatNumber(portfolio?.asset_holdings?.total, 6)}`} />
           <MetricCard label="Kill Switch" value={risk.kill_switch_triggered ? "ACTIVO" : "SEGURO"} tone={risk.kill_switch_triggered ? "sell" : "buy"} />
           <MetricCard label="Decisión" value={decision.action || decision.side || "hold"} subvalue={decision.reason || decision.status || "n/d"} />
         </section>

@@ -46,6 +46,7 @@ class Settings:
     signal_history_file: Path
     open_positions_file: Path
     closed_trades_file: Path
+    equity_history_file: Path
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -89,4 +90,5 @@ def load_settings() -> Settings:
         signal_history_file=logs_dir / "signal_history.json",
         open_positions_file=logs_dir / "open_positions.json",
         closed_trades_file=logs_dir / "closed_trades.json",
+        equity_history_file=logs_dir / "equity_history.json",
     )

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable, TypeVar
 
 import ccxt
 import pandas as pd
 
 from src.utils.config import Settings
+
+
+T = TypeVar("T")
+
+
+class BinanceClientError(Exception):
+    pass
 
 
 class BinanceDataClient:
@@ -31,11 +39,36 @@ class BinanceDataClient:
         self.private_exchange = ccxt.binance(private_config)
         self.settings = settings
 
+    @staticmethod
+    def _with_retries(operation: Callable[[], T], attempts: int = 4, base_delay: float = 0.75) -> T:
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout) as exc:
+                last_error = exc
+                time.sleep(base_delay * (2 ** (attempt - 1)))
+            except ccxt.BaseError as exc:
+                raise BinanceClientError(str(exc)) from exc
+        raise BinanceClientError(f"Binance no respondió tras {attempts} intentos: {last_error}")
+
+    @property
+    def base_asset(self) -> str:
+        symbol = self.settings.trading_symbol
+        return symbol.split("/")[0] if "/" in symbol else symbol
+
+    @property
+    def quote_asset(self) -> str:
+        symbol = self.settings.trading_symbol
+        return symbol.split("/")[1] if "/" in symbol else "USDT"
+
     def fetch_ohlcv(self, limit: int = 200) -> pd.DataFrame:
-        candles = self.public_exchange.fetch_ohlcv(
-            self.settings.trading_symbol,
-            timeframe=self.settings.timeframe,
-            limit=limit,
+        candles = self._with_retries(
+            lambda: self.public_exchange.fetch_ohlcv(
+                self.settings.trading_symbol,
+                timeframe=self.settings.timeframe,
+                limit=limit,
+            )
         )
         frame = pd.DataFrame(
             candles,
@@ -44,13 +77,43 @@ class BinanceDataClient:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
         return frame
 
+    def _fetch_full_balance(self) -> dict[str, Any]:
+        return self._with_retries(lambda: self.private_exchange.fetch_balance())
+
     def fetch_balance_usd(self) -> float:
         if self.settings.dry_run or not self.settings.binance_api_key:
             return self.settings.initial_capital_usd
 
-        balance = self.private_exchange.fetch_balance()
-        usdt_info = balance.get("USDT", {})
+        balance = self._fetch_full_balance()
+        usdt_info = balance.get(self.quote_asset, {})
         return float(usdt_info.get("free", 0.0))
 
+    def fetch_asset_balance(self, asset: str | None = None) -> dict[str, float]:
+        target = asset or self.base_asset
+        if self.settings.dry_run or not self.settings.binance_api_key:
+            return {"asset": target, "free": 0.0, "used": 0.0, "total": 0.0}
+
+        balance = self._fetch_full_balance()
+        info = balance.get(target, {}) or {}
+        return {
+            "asset": target,
+            "free": float(info.get("free", 0.0) or 0.0),
+            "used": float(info.get("used", 0.0) or 0.0),
+            "total": float(info.get("total", 0.0) or 0.0),
+        }
+
+    def fetch_ticker_price(self) -> float:
+        ticker = self._with_retries(lambda: self.public_exchange.fetch_ticker(self.settings.trading_symbol))
+        return float(ticker.get("last") or ticker.get("close") or 0.0)
+
+    def ping(self) -> bool:
+        try:
+            self._with_retries(lambda: self.public_exchange.fetch_time())
+            return True
+        except BinanceClientError:
+            return False
+
     def create_market_order(self, side: str, amount: float) -> dict[str, Any]:
-        return self.private_exchange.create_market_order(self.settings.trading_symbol, side, amount)
+        return self._with_retries(
+            lambda: self.private_exchange.create_market_order(self.settings.trading_symbol, side, amount)
+        )
