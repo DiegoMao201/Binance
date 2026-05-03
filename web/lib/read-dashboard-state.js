@@ -3,7 +3,7 @@ import path from "node:path";
 
 
 const ROOT = path.join(process.cwd(), "..");
-const LOGS = path.join(ROOT, "logs");
+const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 
 
 async function readJson(fileName, fallback) {

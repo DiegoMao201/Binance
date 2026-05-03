@@ -36,6 +36,7 @@ class Settings:
     max_atr_pct: float
     min_volume_ratio: float
     trade_cooldown_minutes: int
+    logs_dir: Path
     state_file: Path
     log_file: Path
     status_file: Path
@@ -50,6 +51,7 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 def load_settings() -> Settings:
+    logs_dir = Path(os.getenv("LOGS_DIR", str(BASE_DIR / "logs"))).expanduser()
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
@@ -74,10 +76,11 @@ def load_settings() -> Settings:
         max_atr_pct=float(os.getenv("MAX_ATR_PCT", "0.018")),
         min_volume_ratio=float(os.getenv("MIN_VOLUME_RATIO", "1.10")),
         trade_cooldown_minutes=int(os.getenv("TRADE_COOLDOWN_MINUTES", "15")),
-        state_file=BASE_DIR / "logs" / "bot_state.json",
-        log_file=BASE_DIR / "logs" / "bot.log",
-        status_file=BASE_DIR / "logs" / "status.json",
-        control_file=BASE_DIR / "logs" / "control.json",
-        order_history_file=BASE_DIR / "logs" / "order_history.json",
-        signal_history_file=BASE_DIR / "logs" / "signal_history.json",
+        logs_dir=logs_dir,
+        state_file=logs_dir / "bot_state.json",
+        log_file=logs_dir / "bot.log",
+        status_file=logs_dir / "status.json",
+        control_file=logs_dir / "control.json",
+        order_history_file=logs_dir / "order_history.json",
+        signal_history_file=logs_dir / "signal_history.json",
     )

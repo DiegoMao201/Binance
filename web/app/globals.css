@@ -11,7 +11,8 @@ body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(circle at top right, rgba(22, 48, 82, 0.35), transparent 28%),
+    radial-gradient(circle at top right, rgba(14, 45, 78, 0.45), transparent 24%),
+    radial-gradient(circle at bottom left, rgba(122, 43, 35, 0.18), transparent 28%),
     linear-gradient(180deg, #061018 0%, #071018 100%);
   color: #dce7f5;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
@@ -46,13 +47,16 @@ body {
 
 .sidebar h1,
 .hero h2,
-.panel h3 {
+.panel h3,
+.alert-card h3 {
   margin: 0;
 }
 
 .sidebar-block,
 .panel,
-.metric-card {
+.metric-card,
+.alert-card,
+.telemetry-card {
   border: 1px solid #182433;
   background: rgba(14, 23, 34, 0.9);
   border-radius: 18px;
@@ -70,8 +74,11 @@ body {
 .panel-header span,
 .timestamp,
 .metric-subvalue,
-th {
-  color: #7f92a8;
+th,
+.secondary-text,
+.timeline-content p,
+.timeline-empty {
+  color: #90a4ba;
 }
 
 .content {
@@ -88,34 +95,68 @@ th {
   gap: 16px;
 }
 
+.alerts-grid,
 .metrics-grid,
 .telemetry-grid,
 .details-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
+}
+
+.alerts-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.metrics-grid,
+.telemetry-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .details-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.telemetry-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.alert-card,
+.metric-card,
+.telemetry-card,
+.panel {
+  padding: 18px;
+}
+
+.alert-kicker,
+.metric-label,
+.telemetry-card span {
+  color: #90a4ba;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.76rem;
+}
+
+.alert-card p,
+.narrative-card p {
+  margin: 10px 0 0;
+  line-height: 1.55;
+}
+
+.alert-card.buy {
+  border-color: rgba(18, 217, 139, 0.28);
+  background: linear-gradient(180deg, rgba(8, 29, 24, 0.98), rgba(8, 17, 20, 0.98));
+}
+
+.alert-card.sell {
+  border-color: rgba(235, 75, 97, 0.28);
+  background: linear-gradient(180deg, rgba(33, 11, 18, 0.98), rgba(20, 10, 15, 0.98));
+}
+
+.alert-card.warn {
+  border-color: rgba(247, 183, 61, 0.28);
+  background: linear-gradient(180deg, rgba(35, 24, 8, 0.98), rgba(21, 15, 8, 0.98));
 }
 
 .metric-card {
-  padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.metric-label {
-  color: #7f92a8;
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
 }
 
 .metric-value {
@@ -124,35 +165,17 @@ th {
 
 .metric-card.buy,
 .tone-buy {
-  color: #0fd48a;
+  color: #12d98b;
 }
 
 .metric-card.sell,
 .tone-sell {
-  color: #e3475a;
-}
-
-.panel {
-  padding: 18px;
+  color: #eb4b61;
 }
 
 .telemetry-card {
-  border: 1px solid #182433;
-  background:
-    linear-gradient(180deg, rgba(17, 27, 40, 0.98), rgba(10, 16, 24, 0.98));
-  border-radius: 16px;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  background: linear-gradient(180deg, rgba(17, 27, 40, 0.98), rgba(10, 16, 24, 0.98));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
-.telemetry-card span {
-  color: #7f92a8;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.76rem;
 }
 
 .telemetry-card strong {
@@ -170,15 +193,29 @@ th {
   padding-bottom: 8px;
 }
 
-pre {
-  margin: 0;
-  padding: 14px;
-  border-radius: 14px;
-  background: #09111a;
-  color: #dce7f5;
-  overflow: auto;
-  font-family: "IBM Plex Mono", Menlo, monospace;
-  font-size: 0.88rem;
+.narrative-card {
+  border-radius: 16px;
+  border: 1px solid #192636;
+  background: linear-gradient(180deg, rgba(9, 16, 25, 0.98), rgba(8, 13, 20, 0.98));
+  padding: 18px;
+}
+
+.narrative-card.buy {
+  border-color: rgba(18, 217, 139, 0.25);
+}
+
+.narrative-card.sell {
+  border-color: rgba(235, 75, 97, 0.25);
+}
+
+.fact-list {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  color: #9db0c4;
+}
+
+.fact-list li + li {
+  margin-top: 6px;
 }
 
 .table-wrap {
@@ -232,18 +269,18 @@ tbody tr:hover {
 }
 
 .control-btn.run {
-  border-color: rgba(15, 212, 138, 0.35);
-  background: rgba(15, 212, 138, 0.08);
+  border-color: rgba(18, 217, 139, 0.35);
+  background: rgba(18, 217, 139, 0.08);
 }
 
 .control-btn.pause {
-  border-color: rgba(244, 185, 66, 0.35);
-  background: rgba(244, 185, 66, 0.08);
+  border-color: rgba(247, 183, 61, 0.35);
+  background: rgba(247, 183, 61, 0.08);
 }
 
 .control-btn.stop {
-  border-color: rgba(227, 71, 90, 0.35);
-  background: rgba(227, 71, 90, 0.08);
+  border-color: rgba(235, 75, 97, 0.35);
+  background: rgba(235, 75, 97, 0.08);
 }
 
 .control-btn:disabled {
@@ -271,15 +308,65 @@ tbody tr:hover {
 }
 
 .status-pill.active {
-  color: #0fd48a;
-  border-color: rgba(15, 212, 138, 0.32);
-  background: rgba(15, 212, 138, 0.09);
+  color: #12d98b;
+  border-color: rgba(18, 217, 139, 0.32);
+  background: rgba(18, 217, 139, 0.09);
 }
 
 .status-pill.inactive {
-  color: #e3475a;
-  border-color: rgba(227, 71, 90, 0.25);
-  background: rgba(227, 71, 90, 0.08);
+  color: #eb4b61;
+  border-color: rgba(235, 75, 97, 0.25);
+  background: rgba(235, 75, 97, 0.08);
+}
+
+.timeline-list {
+  display: grid;
+  gap: 14px;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.timeline-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  margin-top: 6px;
+  background: #64778d;
+  box-shadow: 0 0 0 6px rgba(100, 119, 141, 0.12);
+}
+
+.timeline-dot.buy {
+  background: #12d98b;
+  box-shadow: 0 0 0 6px rgba(18, 217, 139, 0.12);
+}
+
+.timeline-dot.sell {
+  background: #eb4b61;
+  box-shadow: 0 0 0 6px rgba(235, 75, 97, 0.12);
+}
+
+.timeline-dot.hold {
+  background: #f7b73d;
+  box-shadow: 0 0 0 6px rgba(247, 183, 61, 0.12);
+}
+
+.timeline-content {
+  border: 1px solid #172331;
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: rgba(10, 16, 24, 0.92);
+}
+
+.timeline-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
 }
 
 @media (max-width: 1180px) {
@@ -292,6 +379,7 @@ tbody tr:hover {
     border-bottom: 1px solid #182433;
   }
 
+  .alerts-grid,
   .metrics-grid,
   .telemetry-grid,
   .details-grid {
@@ -305,13 +393,16 @@ tbody tr:hover {
     padding: 18px;
   }
 
+  .alerts-grid,
   .metrics-grid,
   .telemetry-grid,
   .details-grid {
     grid-template-columns: 1fr;
   }
 
-  .hero {
+  .hero,
+  .timeline-head,
+  .panel-header {
     flex-direction: column;
     align-items: start;
   }

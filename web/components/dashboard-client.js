@@ -6,13 +6,10 @@ import { useEffect, useMemo, useState } from "react";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
-const BUY = "#0FD48A";
-const SELL = "#E3475A";
+const BUY = "#12d98b";
+const SELL = "#eb4b61";
 const BG = "#071018";
-const PANEL = "#0E1722";
-const BORDER = "#182433";
-const TEXT = "#DCE7F5";
-const MUTED = "#7F92A8";
+const TEXT = "#dce7f5";
 
 
 function formatPercent(value) {
@@ -25,10 +22,25 @@ function formatNumber(value, digits = 2) {
 }
 
 
+function formatDate(value) {
+  if (!value) {
+    return "sin dato";
+  }
+
+  return new Date(value).toLocaleString("es-ES", {
+    hour12: false,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+
 function buildChartData(payload) {
   const market = payload?.state?.market || [];
   const signalHistory = payload?.signalHistory || [];
-
   const x = market.map((item) => item.timestamp);
   const buySignals = signalHistory.filter((item) => item.technical_signal === "buy" || item.ai_signal === "buy");
   const sellSignals = signalHistory.filter((item) => item.technical_signal === "sell" || item.ai_signal === "sell");
@@ -50,7 +62,7 @@ function buildChartData(payload) {
       mode: "lines",
       x,
       y: market.map((item) => item.ema_fast),
-      line: { color: "#F4B942", width: 1.7 },
+      line: { color: "#f4b942", width: 1.6 },
       name: "EMA 9",
     },
     {
@@ -58,7 +70,7 @@ function buildChartData(payload) {
       mode: "lines",
       x,
       y: market.map((item) => item.ema_slow),
-      line: { color: "#55C1FF", width: 1.7 },
+      line: { color: "#57c1ff", width: 1.6 },
       name: "EMA 20",
     },
     {
@@ -66,7 +78,7 @@ function buildChartData(payload) {
       mode: "lines",
       x,
       y: market.map((item) => item.bb_upper),
-      line: { color: "#5D728A", width: 1 },
+      line: { color: "#68809b", width: 1 },
       name: "BB Upper",
     },
     {
@@ -74,9 +86,9 @@ function buildChartData(payload) {
       mode: "lines",
       x,
       y: market.map((item) => item.bb_lower),
-      line: { color: "#5D728A", width: 1 },
+      line: { color: "#68809b", width: 1 },
       fill: "tonexty",
-      fillcolor: "rgba(93,114,138,0.08)",
+      fillcolor: "rgba(104,128,155,0.08)",
       name: "BB Lower",
     },
     {
@@ -84,7 +96,7 @@ function buildChartData(payload) {
       mode: "markers",
       x: buySignals.map((item) => item.timestamp),
       y: buySignals.map((item) => item.technical_price),
-      marker: { color: BUY, size: 11, symbol: "triangle-up" },
+      marker: { color: BUY, size: 10, symbol: "triangle-up" },
       name: "Buy",
     },
     {
@@ -92,10 +104,68 @@ function buildChartData(payload) {
       mode: "markers",
       x: sellSignals.map((item) => item.timestamp),
       y: sellSignals.map((item) => item.technical_price),
-      marker: { color: SELL, size: 11, symbol: "triangle-down" },
+      marker: { color: SELL, size: 10, symbol: "triangle-down" },
       name: "Sell",
     },
   ];
+}
+
+
+function buildDecisionSummary(decision, technicalSignal) {
+  const action = decision?.action || decision?.side || "hold";
+  if (action === "buy") return "El bot ve una compra defendible y ya consiguió validación mínima de técnica, IA y riesgo.";
+  if (action === "sell") return "El bot ve una salida defendible y ya consiguió validación mínima de técnica, IA y riesgo.";
+  if (decision?.reason?.includes("Kill Switch")) return "El bot se bloqueó para proteger capital porque la pérdida acumulada superó el límite permitido.";
+
+  const blockers = [];
+  if (decision?.same_direction === false) blockers.push("la técnica y la IA no están de acuerdo");
+  if (decision?.ai_confident === false) blockers.push("la confianza de la IA sigue baja");
+  if (decision?.technical_confident === false) blockers.push("la fuerza técnica aún es insuficiente");
+  if (decision?.volatility_ready === false) blockers.push("la volatilidad útil no alcanza el rango deseado");
+  if (decision?.volume_ready === false) blockers.push("el volumen no respalda la entrada");
+  if (decision?.trend_ready === false && technicalSignal?.signal !== "hold") blockers.push("la tendencia principal todavía no acompaña");
+  if (decision?.cooldown_active) blockers.push("el bot sigue en cooldown");
+  if (!blockers.length) return "El bot está observando y espera una ventaja más clara antes de exponer capital.";
+  return `El bot no entra porque ${blockers.join(", ")}.`;
+}
+
+
+function buildAiSummary(ai) {
+  if (!ai?.signal) return "La IA aún no produjo una lectura utilizable.";
+  if (ai.signal === "hold") return `La IA recomienda esperar. Su convicción actual es ${formatPercent(ai.confidence)}.`;
+  return `La IA está inclinada a ${ai.signal === "buy" ? "comprar" : "vender"} con convicción ${formatPercent(ai.confidence)}.`;
+}
+
+
+function buildModelHealth(ai, isOnline) {
+  if (!isOnline) return { tone: "sell", title: "Salud degradada", detail: "No hay heartbeat reciente del bot; la lectura del modelo no es confiable." };
+  const confidence = Number(ai?.confidence || 0);
+  if (confidence >= 0.88) return { tone: "buy", title: "Modelo fuerte", detail: "La IA ya entra en el rango exigido por el bot para operar." };
+  if (confidence >= 0.7) return { tone: "warn", title: "Modelo prudente", detail: "La IA responde bien, pero todavía no ve una ventaja estadística suficiente." };
+  return { tone: "sell", title: "Modelo débil", detail: "La lectura del modelo es demasiado tibia; lo correcto es no tocar mercado." };
+}
+
+
+function buildAlerts({ status, control, risk, decision, ai, isOnline }) {
+  const alerts = [];
+  if (!isOnline) alerts.push({ tone: "sell", title: "Bot offline", detail: "No se está recibiendo heartbeat reciente del bot." });
+  if (control?.desired_state === "paused") alerts.push({ tone: "warn", title: "Bot en pausa", detail: "El proceso sigue vivo, pero no abrirá nuevas operaciones hasta que lo reanudes." });
+  if (control?.desired_state === "stopped") alerts.push({ tone: "sell", title: "Bot detenido", detail: "El proceso fue marcado para detenerse; Coolify tendrá que relanzarlo." });
+  if (risk?.kill_switch_triggered) alerts.push({ tone: "sell", title: "Kill switch activo", detail: "La protección de capital se disparó y el bot dejó de operar." });
+  if ((decision?.action === "buy" || decision?.action === "sell") && Number(ai?.confidence || 0) >= 0.88) alerts.push({ tone: "buy", title: "Entrada operable", detail: "El bot detectó una oportunidad compatible con sus filtros estrictos." });
+  if (!alerts.length) alerts.push({ tone: "neutral", title: "Monitoreo normal", detail: status?.detail || "El bot está filtrando oportunidades y protegiendo capital." });
+  return alerts;
+}
+
+
+function buildTimeline(signalHistory) {
+  return [...signalHistory].slice(-8).reverse().map((item) => ({
+    ...item,
+    action: item.decision_action === "hold" ? "Sin entrada" : item.decision_action.toUpperCase(),
+    summary: item.decision_action === "hold"
+      ? `Se descartó la entrada. Técnica=${item.technical_signal}, IA=${item.ai_signal}, convicción IA ${formatPercent(item.ai_confidence)}.`
+      : `El bot marcó ${item.decision_action} a ${formatNumber(item.technical_price, 4)}.`,
+  }));
 }
 
 
@@ -129,7 +199,6 @@ export default function DashboardClient({ initialData }) {
     const intervalId = window.setInterval(async () => {
       await refreshState();
     }, 10000);
-
     return () => window.clearInterval(intervalId);
   }, []);
 
@@ -139,20 +208,23 @@ export default function DashboardClient({ initialData }) {
   const risk = state?.risk || {};
   const decision = state?.decision || {};
   const ai = state?.ai_signal || {};
+  const technicalSignal = state?.technical_signal || {};
   const orders = payload?.orderHistory || [];
   const signalHistory = payload?.signalHistory || [];
 
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
-    if (!heartbeat) {
-      return false;
-    }
-
+    if (!heartbeat) return false;
     return Date.now() - new Date(heartbeat).getTime() < 120000;
   }, [status]);
 
   const chartData = useMemo(() => buildChartData(payload), [payload]);
   const latestSignal = signalHistory.length ? signalHistory[signalHistory.length - 1] : null;
+  const decisionSummary = buildDecisionSummary(decision, technicalSignal);
+  const aiSummary = buildAiSummary(ai);
+  const modelHealth = buildModelHealth(ai, isOnline);
+  const alerts = buildAlerts({ status, control, risk, decision, ai, isOnline });
+  const timeline = buildTimeline(signalHistory);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
@@ -160,10 +232,7 @@ export default function DashboardClient({ initialData }) {
       await fetch("/api/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          desiredState,
-          reason: `Cambio a ${desiredState} desde el panel operativo.`,
-        }),
+        body: JSON.stringify({ desiredState, reason: `Cambio a ${desiredState} desde el panel operativo.` }),
       });
       await refreshState();
     } finally {
@@ -178,30 +247,12 @@ export default function DashboardClient({ initialData }) {
           <p className="eyebrow">OptiFerre Terminal</p>
           <h1>Control operativo</h1>
         </div>
-        <div className="sidebar-block">
-          <span>Par</span>
-          <strong>{status.symbol || "ETH/USDT"}</strong>
-        </div>
-        <div className="sidebar-block">
-          <span>Heartbeat</span>
-          <strong>{status.heartbeat_at || "sin datos"}</strong>
-        </div>
-        <div className="sidebar-block">
-          <span>Bot</span>
-          <strong className={isOnline ? "tone-buy" : "tone-sell"}>{isOnline ? "ONLINE" : "OFFLINE"}</strong>
-        </div>
-        <div className="sidebar-block">
-          <span>Estado deseado</span>
-          <strong>{control.desired_state || "running"}</strong>
-        </div>
-        <div className="sidebar-block">
-          <span>Modelo IA</span>
-          <strong>{ai?.model || "OpenRouter"}</strong>
-        </div>
-        <div className="sidebar-block">
-          <span>Detalle</span>
-          <strong>{status.detail || "n/d"}</strong>
-        </div>
+        <div className="sidebar-block"><span>Par</span><strong>{status.symbol || "ETH/USDT"}</strong></div>
+        <div className="sidebar-block"><span>Heartbeat</span><strong>{formatDate(status.heartbeat_at)}</strong></div>
+        <div className="sidebar-block"><span>Bot</span><strong className={isOnline ? "tone-buy" : "tone-sell"}>{isOnline ? "ONLINE" : "OFFLINE"}</strong></div>
+        <div className="sidebar-block"><span>Estado deseado</span><strong>{control.desired_state || "running"}</strong></div>
+        <div className="sidebar-block"><span>Modelo IA</span><strong>{ai?.model || "OpenRouter"}</strong></div>
+        <div className="sidebar-block"><span>Detalle</span><strong>{status.detail || "n/d"}</strong></div>
         <div className="sidebar-block control-panel">
           <span>Mandos</span>
           <div className="button-stack">
@@ -216,10 +267,20 @@ export default function DashboardClient({ initialData }) {
         <header className="hero">
           <div>
             <p className="eyebrow">Bloomberg-style monitor</p>
-            <h2>Panel limpio para ejecución prudente</h2>
+            <h2>Centro de mando del bot</h2>
           </div>
-          <div className="timestamp">Servidor: {payload?.serverTime || "n/d"}</div>
+          <div className="timestamp">Servidor: {formatDate(payload?.serverTime)}</div>
         </header>
+
+        <section className="alerts-grid">
+          {alerts.map((alert, index) => (
+            <article key={`${alert.title}-${index}`} className={`alert-card ${alert.tone}`}>
+              <span className="alert-kicker">Alerta</span>
+              <h3>{alert.title}</h3>
+              <p>{alert.detail}</p>
+            </article>
+          ))}
+        </section>
 
         <section className="metrics-grid">
           <MetricCard label="Balance USDT" value={formatNumber(risk.balance_usd)} subvalue={`Orden sugerida ${formatNumber(risk.recommended_trade_usd)}`} />
@@ -229,69 +290,45 @@ export default function DashboardClient({ initialData }) {
         </section>
 
         <section className="telemetry-grid">
-          <div className="telemetry-card">
-            <span>AI confidence</span>
-            <strong>{formatPercent(ai.confidence)}</strong>
-          </div>
-          <div className="telemetry-card">
-            <span>RSI</span>
-            <strong>{formatNumber(state?.technical_signal?.rsi, 2)}</strong>
-          </div>
-          <div className="telemetry-card">
-            <span>ATR %</span>
-            <strong>{formatPercent(state?.technical_signal?.atr_pct)}</strong>
-          </div>
-          <div className="telemetry-card">
-            <span>Volumen relativo</span>
-            <strong>{formatNumber(state?.technical_signal?.volume_ratio, 2)}x</strong>
-          </div>
+          <div className="telemetry-card"><span>AI confidence</span><strong>{formatPercent(ai.confidence)}</strong></div>
+          <div className="telemetry-card"><span>RSI</span><strong>{formatNumber(technicalSignal.rsi, 2)}</strong></div>
+          <div className="telemetry-card"><span>ATR %</span><strong>{formatPercent(technicalSignal.atr_pct)}</strong></div>
+          <div className="telemetry-card"><span>Volumen relativo</span><strong>{formatNumber(technicalSignal.volume_ratio, 2)}x</strong></div>
         </section>
 
         <section className="panel chart-panel">
-          <div className="panel-header">
-            <h3>Precio y señales</h3>
-            <span>Últimas 50 velas</span>
-          </div>
-          <Plot
-            data={chartData}
-            layout={{
-              autosize: true,
-              paper_bgcolor: BG,
-              plot_bgcolor: BG,
-              font: { color: TEXT, family: "IBM Plex Mono, Menlo, monospace" },
-              margin: { l: 20, r: 20, t: 20, b: 30 },
-              xaxis: { rangeslider: { visible: false }, gridcolor: "#16202C" },
-              yaxis: { gridcolor: "#16202C" },
-              legend: { orientation: "h", y: 1.1, x: 0 },
-            }}
-            config={{ displayModeBar: false, responsive: true }}
-            style={{ width: "100%", height: "540px" }}
-          />
+          <div className="panel-header"><h3>Precio y señales</h3><span>Últimas 50 velas</span></div>
+          <Plot data={chartData} layout={{ autosize: true, paper_bgcolor: BG, plot_bgcolor: BG, font: { color: TEXT, family: "IBM Plex Mono, Menlo, monospace" }, margin: { l: 20, r: 20, t: 20, b: 30 }, xaxis: { rangeslider: { visible: false }, gridcolor: "#16202c" }, yaxis: { gridcolor: "#16202c" }, legend: { orientation: "h", y: 1.08, x: 0 } }} config={{ displayModeBar: false, responsive: true }} style={{ width: "100%", height: "540px" }} />
         </section>
 
         <section className="details-grid">
           <div className="panel">
-            <div className="panel-header">
-              <h3>Filtro de decisión</h3>
-              <span>Técnica + IA + guardrails</span>
+            <div className="panel-header"><h3>Qué está haciendo el bot</h3><span>Decisión traducida</span></div>
+            <div className="narrative-card">
+              <strong>{decision.action === "hold" ? "En observación" : `Acción ${decision.action}`}</strong>
+              <p>{decisionSummary}</p>
+              <ul className="fact-list">
+                <li>Precio observado: {formatNumber(technicalSignal.close, 4)}</li>
+                <li>RSI actual: {formatNumber(technicalSignal.rsi, 2)}</li>
+                <li>Volumen relativo: {formatNumber(technicalSignal.volume_ratio, 2)}x</li>
+                <li>Heartbeat: {formatDate(status.heartbeat_at)}</li>
+              </ul>
             </div>
-            <pre>{JSON.stringify(decision, null, 2)}</pre>
           </div>
           <div className="panel">
-            <div className="panel-header">
-              <h3>Opinión IA</h3>
-              <span>Confirmación OpenRouter</span>
+            <div className="panel-header"><h3>Salud del modelo IA</h3><span>Lectura operativa</span></div>
+            <div className={`narrative-card ${modelHealth.tone}`}>
+              <strong>{modelHealth.title}</strong>
+              <p>{aiSummary}</p>
+              <p className="secondary-text">{modelHealth.detail}</p>
+              <p className="secondary-text">Motivo principal: {ai?.rationale || "Sin explicación adicional."}</p>
             </div>
-            <pre>{JSON.stringify(ai, null, 2)}</pre>
           </div>
         </section>
 
         <section className="details-grid">
           <div className="panel">
-            <div className="panel-header">
-              <h3>Guardrails</h3>
-              <span>Semáforos de entrada</span>
-            </div>
+            <div className="panel-header"><h3>Guardrails</h3><span>Semáforos de entrada</span></div>
             <div className="pill-grid">
               <StatusPill label={`Dirección ${decision.same_direction ? "OK" : "NO"}`} active={Boolean(decision.same_direction)} />
               <StatusPill label={`IA ${decision.ai_confident ? "OK" : "NO"}`} active={Boolean(decision.ai_confident)} />
@@ -303,52 +340,47 @@ export default function DashboardClient({ initialData }) {
             </div>
           </div>
           <div className="panel">
-            <div className="panel-header">
-              <h3>Última señal</h3>
-              <span>Evento más reciente</span>
+            <div className="panel-header"><h3>Última evaluación</h3><span>Evento más reciente</span></div>
+            <div className="narrative-card compact">
+              <strong>{latestSignal ? latestSignal.decision_action : "Sin eventos"}</strong>
+              <p>{latestSignal ? `A las ${formatDate(latestSignal.timestamp)} el bot vio ${latestSignal.technical_signal} por técnica y ${latestSignal.ai_signal} por IA. La convicción de la IA fue ${formatPercent(latestSignal.ai_confidence)}.` : "Todavía no hay eventos suficientes para construir esta explicación."}</p>
             </div>
-            <pre>{JSON.stringify(latestSignal || {}, null, 2)}</pre>
           </div>
         </section>
 
         <section className="panel">
-          <div className="panel-header">
-            <h3>Log de operaciones</h3>
-            <span>{orders.length} registros</span>
+          <div className="panel-header"><h3>Timeline de decisiones</h3><span>Últimos 8 eventos</span></div>
+          <div className="timeline-list">
+            {timeline.length === 0 ? <div className="timeline-empty">Todavía no hay suficiente actividad para construir la línea de tiempo.</div> : timeline.map((item, index) => (
+              <article key={`${item.timestamp}-${index}`} className="timeline-item">
+                <div className={`timeline-dot ${item.decision_action === "buy" ? "buy" : item.decision_action === "sell" ? "sell" : "hold"}`} />
+                <div className="timeline-content">
+                  <div className="timeline-head"><strong>{item.action}</strong><span>{formatDate(item.timestamp)}</span></div>
+                  <p>{item.summary}</p>
+                </div>
+              </article>
+            ))}
           </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header"><h3>Log de operaciones</h3><span>{orders.length} registros</span></div>
           <div className="table-wrap">
             <table>
-              <thead>
-                <tr>
-                  <th>Hora</th>
-                  <th>Lado</th>
-                  <th>Estado</th>
-                  <th>Precio</th>
-                  <th>Monto</th>
-                  <th>Notional</th>
-                  <th>SL</th>
-                  <th>TP</th>
-                </tr>
-              </thead>
+              <thead><tr><th>Hora</th><th>Lado</th><th>Estado</th><th>Precio</th><th>Monto</th><th>Notional</th><th>SL</th><th>TP</th></tr></thead>
               <tbody>
-                {orders.length === 0 ? (
-                  <tr>
-                    <td colSpan="8" className="empty">Sin operaciones todavía.</td>
+                {orders.length === 0 ? <tr><td colSpan="8" className="empty">Sin operaciones todavía.</td></tr> : [...orders].reverse().map((order, index) => (
+                  <tr key={`${order.timestamp}-${index}`}>
+                    <td>{formatDate(order.timestamp)}</td>
+                    <td className={order.side === "buy" ? "tone-buy" : "tone-sell"}>{order.side || "-"}</td>
+                    <td>{order.status || "-"}</td>
+                    <td>{formatNumber(order.price, 4)}</td>
+                    <td>{formatNumber(order.amount, 6)}</td>
+                    <td>{formatNumber(order.notional_usdt, 2)}</td>
+                    <td>{formatNumber(order.stop_loss, 4)}</td>
+                    <td>{formatNumber(order.take_profit, 4)}</td>
                   </tr>
-                ) : (
-                  [...orders].reverse().map((order, index) => (
-                    <tr key={`${order.timestamp}-${index}`}>
-                      <td>{order.timestamp || "n/d"}</td>
-                      <td className={order.side === "buy" ? "tone-buy" : "tone-sell"}>{order.side || "-"}</td>
-                      <td>{order.status || "-"}</td>
-                      <td>{formatNumber(order.price, 4)}</td>
-                      <td>{formatNumber(order.amount, 6)}</td>
-                      <td>{formatNumber(order.notional_usdt, 2)}</td>
-                      <td>{formatNumber(order.stop_loss, 4)}</td>
-                      <td>{formatNumber(order.take_profit, 4)}</td>
-                    </tr>
-                  ))
-                )}
+                ))}
               </tbody>
             </table>
           </div>
