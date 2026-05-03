@@ -8,5 +8,7 @@ logs/status.json
 logs/control.json
 logs/order_history.json
 logs/signal_history.json
+logs/open_positions.json
+logs/closed_trades.json
 web/node_modules/
 web/.next/

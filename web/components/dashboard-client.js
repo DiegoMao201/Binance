@@ -132,7 +132,7 @@ function buildDecisionSummary(decision, technicalSignal) {
 
 function buildAiSummary(ai) {
   if (!ai?.signal) return "La IA aún no produjo una lectura utilizable.";
-  if (ai.signal === "hold") return `La IA recomienda esperar. Su convicción actual es ${formatPercent(ai.confidence)}.`;
+  if (ai.signal === "hold") return `La IA recomienda esperar. Su convicción actual es ${formatPercent(ai.confidence)}.${ai?.cached ? ` Lectura reutilizada desde caché hace ${formatNumber(ai.cached_age_seconds, 0)}s.` : ""}`;
   return `La IA está inclinada a ${ai.signal === "buy" ? "comprar" : "vender"} con convicción ${formatPercent(ai.confidence)}.`;
 }
 
@@ -206,11 +206,14 @@ export default function DashboardClient({ initialData }) {
   const status = payload?.status || {};
   const control = payload?.control || {};
   const risk = state?.risk || {};
+  const portfolio = state?.portfolio || {};
   const decision = state?.decision || {};
   const ai = state?.ai_signal || {};
   const technicalSignal = state?.technical_signal || {};
   const orders = payload?.orderHistory || [];
   const signalHistory = payload?.signalHistory || [];
+  const openPositions = payload?.openPositions || state?.open_positions || [];
+  const closedTrades = payload?.closedTrades || state?.closed_trades || [];
 
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
@@ -285,6 +288,8 @@ export default function DashboardClient({ initialData }) {
         <section className="metrics-grid">
           <MetricCard label="Balance USDT" value={formatNumber(risk.balance_usd)} subvalue={`Orden sugerida ${formatNumber(risk.recommended_trade_usd)}`} />
           <MetricCard label="PnL diario" value={formatPercent(risk.daily_pnl_pct)} tone={Number(risk.daily_pnl_pct) >= 0 ? "buy" : "sell"} />
+          <MetricCard label="PnL realizado" value={formatNumber(portfolio.realized_pnl_usdt)} tone={Number(portfolio.realized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={`${portfolio.wins || 0} ganadas / ${portfolio.losses || 0} perdidas`} />
+          <MetricCard label="PnL flotante" value={formatNumber(portfolio.unrealized_pnl_usdt)} tone={Number(portfolio.unrealized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={`${portfolio.open_positions || 0} posiciones abiertas`} />
           <MetricCard label="Kill Switch" value={risk.kill_switch_triggered ? "ACTIVO" : "SEGURO"} tone={risk.kill_switch_triggered ? "sell" : "buy"} />
           <MetricCard label="Decisión" value={decision.action || decision.side || "hold"} subvalue={decision.reason || decision.status || "n/d"} />
         </section>
@@ -311,6 +316,7 @@ export default function DashboardClient({ initialData }) {
                 <li>Precio observado: {formatNumber(technicalSignal.close, 4)}</li>
                 <li>RSI actual: {formatNumber(technicalSignal.rsi, 2)}</li>
                 <li>Volumen relativo: {formatNumber(technicalSignal.volume_ratio, 2)}x</li>
+                <li>Posiciones abiertas: {openPositions.length}</li>
                 <li>Heartbeat: {formatDate(status.heartbeat_at)}</li>
               </ul>
             </div>
@@ -379,6 +385,29 @@ export default function DashboardClient({ initialData }) {
                     <td>{formatNumber(order.notional_usdt, 2)}</td>
                     <td>{formatNumber(order.stop_loss, 4)}</td>
                     <td>{formatNumber(order.take_profit, 4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header"><h3>Resultado por operación</h3><span>{closedTrades.length} cierres</span></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Apertura</th><th>Cierre</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Motivo</th><th>PnL USDT</th><th>PnL %</th></tr></thead>
+              <tbody>
+                {closedTrades.length === 0 ? <tr><td colSpan="8" className="empty">Sin cierres todavía. El bot solo mostrará ganancia o pérdida cuando una operación alcance TP o SL.</td></tr> : [...closedTrades].reverse().map((trade, index) => (
+                  <tr key={`${trade.closed_at}-${index}`}>
+                    <td>{formatDate(trade.opened_at)}</td>
+                    <td>{formatDate(trade.closed_at)}</td>
+                    <td className={trade.side === "buy" ? "tone-buy" : "tone-sell"}>{trade.side || "-"}</td>
+                    <td>{formatNumber(trade.entry_price, 4)}</td>
+                    <td>{formatNumber(trade.exit_price, 4)}</td>
+                    <td>{trade.exit_reason || "-"}</td>
+                    <td className={Number(trade.pnl_usdt) >= 0 ? "tone-buy" : "tone-sell"}>{formatNumber(trade.pnl_usdt, 4)}</td>
+                    <td className={Number(trade.pnl_pct) >= 0 ? "tone-buy" : "tone-sell"}>{formatPercent(trade.pnl_pct)}</td>
                   </tr>
                 ))}
               </tbody>

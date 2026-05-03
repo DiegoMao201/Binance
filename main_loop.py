@@ -15,7 +15,7 @@ from src.execution.trader import TradeExecutor
 from src.safety.risk_manager import RiskManager
 from src.utils.config import load_settings
 from src.utils.logger import setup_logger
-from src.utils.state_store import append_history, build_state_snapshot, load_history, load_state, persist_state
+from src.utils.state_store import append_history, build_state_snapshot, load_history, load_state, persist_history, persist_state
 
 
 def write_heartbeat(status: str, detail: str | None = None) -> None:
@@ -115,6 +115,84 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     }
 
 
+def _settle_open_positions(open_positions: list[dict[str, Any]], latest_candle: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    remaining_positions: list[dict[str, Any]] = []
+    closed_trades: list[dict[str, Any]] = []
+    candle_high = float(latest_candle.get("high", 0.0))
+    candle_low = float(latest_candle.get("low", 0.0))
+    candle_close = float(latest_candle.get("close", 0.0))
+    closed_at = str(latest_candle.get("timestamp"))
+
+    for position in open_positions:
+        side = position.get("side")
+        entry_price = float(position.get("entry_price", 0.0))
+        amount = float(position.get("amount", 0.0))
+        stop_loss = float(position.get("stop_loss", 0.0))
+        take_profit = float(position.get("take_profit", 0.0))
+        exit_price = None
+        exit_reason = None
+
+        if side == "buy":
+            if candle_low <= stop_loss:
+                exit_price = stop_loss
+                exit_reason = "stop_loss"
+            elif candle_high >= take_profit:
+                exit_price = take_profit
+                exit_reason = "take_profit"
+        elif side == "sell":
+            if candle_high >= stop_loss:
+                exit_price = stop_loss
+                exit_reason = "stop_loss"
+            elif candle_low <= take_profit:
+                exit_price = take_profit
+                exit_reason = "take_profit"
+
+        if exit_price is None:
+            mark_price = candle_close
+            position["unrealized_pnl_usdt"] = round(
+                (mark_price - entry_price) * amount if side == "buy" else (entry_price - mark_price) * amount,
+                4,
+            )
+            position["mark_price"] = round(mark_price, 4)
+            remaining_positions.append(position)
+            continue
+
+        pnl_usdt = (exit_price - entry_price) * amount if side == "buy" else (entry_price - exit_price) * amount
+        closed_trades.append(
+            {
+                **position,
+                "closed_at": closed_at,
+                "exit_price": round(exit_price, 4),
+                "exit_reason": exit_reason,
+                "pnl_usdt": round(pnl_usdt, 4),
+                "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
+                "status": "closed",
+            }
+        )
+
+    return remaining_positions, closed_trades
+
+
+def _build_portfolio_summary(settings, risk_snapshot, open_positions: list[dict[str, Any]], closed_trades: list[dict[str, Any]]) -> dict[str, Any]:
+    realized_pnl = round(sum(float(item.get("pnl_usdt", 0.0)) for item in closed_trades), 4)
+    unrealized_pnl = round(sum(float(item.get("unrealized_pnl_usdt", 0.0)) for item in open_positions), 4)
+    simulated_equity = round(settings.initial_capital_usd + realized_pnl + unrealized_pnl, 4)
+    wins = sum(1 for item in closed_trades if float(item.get("pnl_usdt", 0.0)) > 0)
+    losses = sum(1 for item in closed_trades if float(item.get("pnl_usdt", 0.0)) < 0)
+
+    return {
+        "mode": "dry_run" if settings.dry_run else "live",
+        "open_positions": len(open_positions),
+        "closed_trades": len(closed_trades),
+        "wins": wins,
+        "losses": losses,
+        "realized_pnl_usdt": realized_pnl,
+        "unrealized_pnl_usdt": unrealized_pnl,
+        "simulated_equity_usdt": simulated_equity,
+        "balance_reference_usdt": risk_snapshot.balance_usd,
+    }
+
+
 def _load_recent_ai_signal(settings) -> dict[str, Any] | None:
     previous_state = load_state(settings.state_file)
     previous_ai_signal = previous_state.get("ai_signal")
@@ -163,6 +241,15 @@ def run_cycle() -> None:
         balance_usd = client.fetch_balance_usd()
         risk_snapshot = risk_manager.evaluate(balance_usd)
         order_history = load_history(settings.order_history_file)
+        open_positions = load_history(settings.open_positions_file)
+        closed_trades = load_history(settings.closed_trades_file)
+        latest_candle = enriched_frame.iloc[-1].to_dict()
+        open_positions, newly_closed_trades = _settle_open_positions(open_positions, latest_candle)
+        if newly_closed_trades:
+            closed_trades.extend(newly_closed_trades)
+            persist_history(settings.closed_trades_file, closed_trades)
+        persist_history(settings.open_positions_file, open_positions)
+        has_open_position = bool(open_positions)
 
         if risk_snapshot.kill_switch_triggered:
             decision = {
@@ -182,8 +269,11 @@ def run_cycle() -> None:
                     technical_signal=technical_signal,
                     ai_signal=ai_signal,
                     risk=asdict(risk_snapshot),
+                    portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades),
                     decision=decision,
                     order_history=order_history,
+                    open_positions=open_positions,
+                    closed_trades=closed_trades,
                     signal_history=load_history(settings.signal_history_file),
                 ),
             )
@@ -202,6 +292,8 @@ def run_cycle() -> None:
                 guardrails["trend_ready"],
                 not guardrails["cooldown_active"],
                 guardrails["executable_signal"],
+                not has_open_position,
+                str(technical_signal["signal"]) == "buy",
             ]
         ):
             decision = executor.execute(
@@ -211,10 +303,27 @@ def run_cycle() -> None:
             )
             append_history(settings.order_history_file, decision)
             order_history = load_history(settings.order_history_file)
+            if decision.get("status") in {"simulated", "submitted"}:
+                open_positions.append(
+                    {
+                        "opened_at": decision.get("timestamp"),
+                        "symbol": decision.get("symbol"),
+                        "side": decision.get("side"),
+                        "amount": decision.get("amount"),
+                        "entry_price": decision.get("price"),
+                        "notional_usdt": decision.get("notional_usdt"),
+                        "stop_loss": decision.get("stop_loss"),
+                        "take_profit": decision.get("take_profit"),
+                        "status": "open",
+                    }
+                )
+                persist_history(settings.open_positions_file, open_positions)
         else:
             decision = {
                 "action": "hold",
                 "reason": "No se cumplen los filtros prudentes de entrada.",
+                "position_open": has_open_position,
+                "spot_ready": str(technical_signal["signal"]) == "buy",
                 **guardrails,
             }
             logger.info("Sin operación prudente. Técnica=%s | IA=%s | Guardrails=%s", technical_signal, ai_signal, guardrails)
@@ -228,8 +337,11 @@ def run_cycle() -> None:
                 technical_signal=technical_signal,
                 ai_signal=ai_signal,
                 risk=asdict(risk_snapshot),
+                portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades),
                 decision=decision,
                 order_history=order_history,
+                open_positions=open_positions,
+                closed_trades=closed_trades,
                 signal_history=load_history(settings.signal_history_file),
             ),
         )

@@ -37,6 +37,12 @@ def append_history(path: Path, item: dict[str, Any], limit: int = 500) -> None:
     path.write_text(json.dumps(trimmed, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def persist_history(path: Path, history: list[dict[str, Any]], limit: int = 500) -> None:
+    trimmed = history[-limit:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(trimmed, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def load_history(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
