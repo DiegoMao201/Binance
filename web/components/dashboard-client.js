@@ -169,6 +169,45 @@ function buildTimeline(signalHistory) {
 }
 
 
+function buildExecutionAudit(orders, openPositions, closedTrades) {
+  const latestOrder = orders.length ? orders[orders.length - 1] : null;
+  const latestOpenPosition = openPositions.length ? openPositions[openPositions.length - 1] : null;
+  const latestClosedTrade = closedTrades.length ? closedTrades[closedTrades.length - 1] : null;
+
+  return {
+    latestOrder,
+    latestOpenPosition,
+    latestClosedTrade,
+    latestOrderStatus: latestOrder?.status || "sin ordenes",
+    latestOrderMode: latestOrder?.mode || latestOpenPosition?.mode || "n/d",
+    latestOrderReason: latestOrder?.reason || latestClosedTrade?.exit_reason || "Sin incidencias recientes.",
+  };
+}
+
+
+function buildEquityCurve(equityHistory) {
+  const points = Array.isArray(equityHistory) ? equityHistory.slice(-60) : [];
+  return [
+    {
+      type: "scatter",
+      mode: "lines",
+      x: points.map((item) => item.timestamp),
+      y: points.map((item) => item.equity_usdt),
+      line: { color: BUY, width: 2 },
+      name: "Equity",
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      x: points.map((item) => item.timestamp),
+      y: points.map((item) => item.high_water_mark),
+      line: { color: "#f4b942", width: 1.5, dash: "dot" },
+      name: "HWM",
+    },
+  ];
+}
+
+
 function MetricCard({ label, value, tone = "neutral", subvalue }) {
   return (
     <div className={`metric-card ${tone}`}>
@@ -214,6 +253,8 @@ export default function DashboardClient({ initialData }) {
   const signalHistory = payload?.signalHistory || [];
   const openPositions = payload?.openPositions || state?.open_positions || [];
   const closedTrades = payload?.closedTrades || state?.closed_trades || [];
+  const equityHistory = payload?.equityHistory || [];
+  const preFlight = payload?.preFlight || {};
 
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
@@ -228,6 +269,8 @@ export default function DashboardClient({ initialData }) {
   const modelHealth = buildModelHealth(ai, isOnline);
   const alerts = buildAlerts({ status, control, risk, decision, ai, isOnline });
   const timeline = buildTimeline(signalHistory);
+  const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
+  const equityCurve = useMemo(() => buildEquityCurve(equityHistory), [equityHistory]);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
@@ -286,11 +329,13 @@ export default function DashboardClient({ initialData }) {
         </section>
 
         <section className="metrics-grid">
+          <MetricCard label="Modo" value={portfolio.mode || (status?.dry_run ? "dry_run" : "live")} tone={(portfolio.mode || "live") === "live" ? "buy" : "warn"} subvalue={`Control ${control.desired_state || "running"}`} />
           <MetricCard label="Balance USDT" value={formatNumber(risk.balance_usd)} subvalue={`Equity ${formatNumber(risk.equity_usd)}`} />
           <MetricCard label="PnL acumulado" value={`${formatNumber(portfolio.realized_pnl_usdt)} USDT`} tone={Number(portfolio.realized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={formatPercent(portfolio.accumulated_pnl_pct)} />
           <MetricCard label="Win rate" value={`${formatNumber(portfolio.win_rate_pct, 2)}%`} subvalue={`${portfolio.wins || 0} W / ${portfolio.losses || 0} L`} />
           <MetricCard label="Max drawdown" value={formatPercent(portfolio.max_drawdown_pct)} tone={Number(portfolio.max_drawdown_pct) >= 0.02 ? "sell" : "buy"} subvalue={`HWM ${formatNumber(portfolio.high_water_mark_usdt)}`} />
           <MetricCard label="Inventario spot" value={`${formatNumber(portfolio?.asset_holdings?.free, 6)} ${portfolio?.asset_holdings?.asset || ""}`} subvalue={`Total ${formatNumber(portfolio?.asset_holdings?.total, 6)}`} />
+          <MetricCard label="Pre-flight" value={preFlight.ok ? "VERDE" : "BLOQUEADO"} tone={preFlight.ok ? "buy" : "sell"} subvalue={preFlight.detail || "Sin chequeo"} />
           <MetricCard label="Kill Switch" value={risk.kill_switch_triggered ? "ACTIVO" : "SEGURO"} tone={risk.kill_switch_triggered ? "sell" : "buy"} />
           <MetricCard label="Decisión" value={decision.action || decision.side || "hold"} subvalue={decision.reason || decision.status || "n/d"} />
         </section>
@@ -305,6 +350,26 @@ export default function DashboardClient({ initialData }) {
         <section className="panel chart-panel">
           <div className="panel-header"><h3>Precio y señales</h3><span>Últimas 50 velas</span></div>
           <Plot data={chartData} layout={{ autosize: true, paper_bgcolor: BG, plot_bgcolor: BG, font: { color: TEXT, family: "IBM Plex Mono, Menlo, monospace" }, margin: { l: 20, r: 20, t: 20, b: 30 }, xaxis: { rangeslider: { visible: false }, gridcolor: "#16202c" }, yaxis: { gridcolor: "#16202c" }, legend: { orientation: "h", y: 1.08, x: 0 } }} config={{ displayModeBar: false, responsive: true }} style={{ width: "100%", height: "540px" }} />
+        </section>
+
+        <section className="details-grid">
+          <div className="panel">
+            <div className="panel-header"><h3>Auditoría live</h3><span>Última ejecución</span></div>
+            <div className="narrative-card compact">
+              <strong>{executionAudit.latestOrderStatus}</strong>
+              <p>{executionAudit.latestOrderReason}</p>
+              <ul className="fact-list">
+                <li>Modo de orden: {executionAudit.latestOrderMode}</li>
+                <li>Última orden: {executionAudit.latestOrder ? formatDate(executionAudit.latestOrder.timestamp) : "sin ordenes"}</li>
+                <li>Posición abierta: {executionAudit.latestOpenPosition ? `${formatNumber(executionAudit.latestOpenPosition.amount, 6)} @ ${formatNumber(executionAudit.latestOpenPosition.entry_price, 4)}` : "ninguna"}</li>
+                <li>Último cierre: {executionAudit.latestClosedTrade ? `${formatNumber(executionAudit.latestClosedTrade.pnl_usdt, 4)} USDT` : "sin cierres"}</li>
+              </ul>
+            </div>
+          </div>
+          <div className="panel chart-panel">
+            <div className="panel-header"><h3>Curva de equity</h3><span>Equity vs HWM</span></div>
+            <Plot data={equityCurve} layout={{ autosize: true, paper_bgcolor: BG, plot_bgcolor: BG, font: { color: TEXT, family: "IBM Plex Mono, Menlo, monospace" }, margin: { l: 30, r: 20, t: 20, b: 30 }, xaxis: { gridcolor: "#16202c" }, yaxis: { gridcolor: "#16202c" }, legend: { orientation: "h", y: 1.08, x: 0 } }} config={{ displayModeBar: false, responsive: true }} style={{ width: "100%", height: "260px" }} />
+          </div>
         </section>
 
         <section className="details-grid">
