@@ -646,7 +646,7 @@ def run_cycle() -> None:
 
         # 1) Escaneo SECUENCIAL multi-ticker (rate-limit safe gracias a enableRateLimit de ccxt).
         scan_results: list[dict[str, Any]] = []
-        for symbol in target_symbols:
+        for index, symbol in enumerate(target_symbols):
             try:
                 scan_results.append(_scan_symbol(symbol, settings, client, order_history))
             except BinanceClientError as exc:
@@ -659,6 +659,8 @@ def run_cycle() -> None:
                     "candidate": False,
                     "candidate_reason": f"OHLCV error: {exc}",
                 })
+            if index < len(target_symbols) - 1 and settings.symbol_scan_pause_seconds > 0:
+                time.sleep(settings.symbol_scan_pause_seconds)
 
         candles_by_symbol = {s["symbol"]: s["latest_candle"] for s in scan_results if s.get("latest_candle")}
 

@@ -20,6 +20,7 @@ class Settings:
     trading_symbol: str
     target_symbols: tuple[str, ...]
     max_global_open_positions: int
+    symbol_scan_pause_seconds: float
     timeframe: str
     dry_run: bool
     initial_capital_usd: float
@@ -77,6 +78,7 @@ def load_settings() -> Settings:
         trading_symbol=primary_symbol,
         target_symbols=target_symbols,
         max_global_open_positions=int(os.getenv("MAX_GLOBAL_OPEN_POSITIONS", "1")),
+        symbol_scan_pause_seconds=float(os.getenv("SYMBOL_SCAN_PAUSE_SECONDS", "1.0")),
         timeframe=os.getenv("TIMEFRAME", "1m"),
         dry_run=_get_bool("DRY_RUN", True),
         initial_capital_usd=float(os.getenv("INITIAL_CAPITAL_USD", "20")),
