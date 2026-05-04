@@ -66,6 +66,11 @@ class BinanceDataClient:
         self.private_exchange = ccxt.binance(private_config)
         self.settings = settings
 
+    def _ensure_market_loaded(self, symbol: str) -> None:
+        self._with_retries(lambda: self.private_exchange.load_markets())
+        if symbol not in (self.private_exchange.markets or {}):
+            raise BinanceClientError(f"Mercado no disponible en Binance: {symbol}")
+
     @staticmethod
     def _with_retries(operation: Callable[[], T], attempts: int = 4, base_delay: float = 0.75) -> T:
         last_error: Exception | None = None
@@ -204,6 +209,24 @@ class BinanceDataClient:
             return True
         except BinanceClientError:
             return False
+
+    def amount_to_precision(self, amount: float, symbol: str | None = None) -> float:
+        target = symbol or self.settings.trading_symbol
+        self._ensure_market_loaded(target)
+        try:
+            formatted = self.private_exchange.amount_to_precision(target, amount)
+            return float(formatted)
+        except (ccxt.BaseError, ValueError, TypeError) as exc:
+            raise BinanceClientError(f"amount_to_precision {target}: {exc}") from exc
+
+    def price_to_precision(self, price: float, symbol: str | None = None) -> float:
+        target = symbol or self.settings.trading_symbol
+        self._ensure_market_loaded(target)
+        try:
+            formatted = self.private_exchange.price_to_precision(target, price)
+            return float(formatted)
+        except (ccxt.BaseError, ValueError, TypeError) as exc:
+            raise BinanceClientError(f"price_to_precision {target}: {exc}") from exc
 
     def create_market_order(self, side: str, amount: float, symbol: str | None = None) -> dict[str, Any]:
         target = symbol or self.settings.trading_symbol

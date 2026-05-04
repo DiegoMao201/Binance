@@ -98,7 +98,7 @@ def load_settings() -> Settings:
         min_volume_ratio=float(os.getenv("MIN_VOLUME_RATIO", "1.10")),
         trade_cooldown_minutes=int(os.getenv("TRADE_COOLDOWN_MINUTES", "15")),
         ai_min_interval_seconds=int(os.getenv("AI_MIN_INTERVAL_SECONDS", "300")),
-        position_size_pct=float(os.getenv("POSITION_SIZE_PCT", "1.0")),
+        position_size_pct=float(os.getenv("POSITION_SIZE_PCT", "0.95")),
         scenario_a_rsi_max=float(os.getenv("SCENARIO_A_RSI_MAX", "45")),
         scenario_b_rsi_max=float(os.getenv("SCENARIO_B_RSI_MAX", "32")),
         logs_dir=logs_dir,

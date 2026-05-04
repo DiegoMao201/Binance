@@ -72,6 +72,13 @@ class TradeExecutor:
             )
         return capped_amount, None
 
+    def _format_protection_levels(self, price: float, side: str, symbol: str) -> dict[str, float]:
+        raw_levels = self.risk_manager.build_protection_levels(price, side)
+        return {
+            "stop_loss": self.client.price_to_precision(float(raw_levels["stop_loss"]), symbol=symbol),
+            "take_profit": self.client.price_to_precision(float(raw_levels["take_profit"]), symbol=symbol),
+        }
+
     def execute(
         self,
         side: str,
@@ -97,7 +104,23 @@ class TradeExecutor:
                     "status": "rejected",
                     "reason": balance_reason,
                 }
-        protection_levels = self.risk_manager.build_protection_levels(market_price, side)
+        try:
+            amount = self.client.amount_to_precision(amount, symbol=target_symbol)
+            protection_levels = self._format_protection_levels(market_price, side, target_symbol)
+        except BinanceClientError as exc:
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": target_symbol,
+                "side": side,
+                "amount": 0.0,
+                "price": round(market_price, 4),
+                "signal_price": round(market_price, 4),
+                "notional_usdt": 0.0,
+                "slippage_pct": 0.0,
+                "mode": "dry_run" if self.settings.dry_run else "live",
+                "status": "rejected",
+                "reason": f"precision_formatting: {exc}",
+            }
 
         order_payload: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -162,8 +185,13 @@ class TradeExecutor:
         order_payload["amount"] = round(filled, 8)
         order_payload["price"] = round(average, 4)
         order_payload["notional_usdt"] = round(filled * average, 4)
-        # Recompute SL/TP against the real average fill, not the projected price.
-        order_payload.update(self.risk_manager.build_protection_levels(average, side))
+        # Recompute SL/TP against the real average fill using exchange-native price precision.
+        try:
+            order_payload.update(self._format_protection_levels(average, side, target_symbol))
+        except BinanceClientError as exc:
+            order_payload["status"] = "reconcile_failed"
+            order_payload["reason"] = f"precision_formatting protections: {exc}"
+            return order_payload
         self.logger.info(
             "Slippage %s en %s: signal=%s fill=%s slippage=%.4f%%",
             side,
@@ -208,6 +236,13 @@ class TradeExecutor:
             result["status"] = "rejected"
             result["reason"] = "Saldo libre del activo es 0; nada para cerrar."
             result["reconciled_holdings"] = asset_balance
+            return result
+
+        try:
+            sellable = self.client.amount_to_precision(sellable, symbol=target_symbol)
+        except BinanceClientError as exc:
+            result["status"] = "rejected"
+            result["reason"] = f"precision_formatting close: {exc}"
             return result
 
         try:
