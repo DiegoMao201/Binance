@@ -48,29 +48,31 @@ class TradeExecutor:
     def _is_insufficient_balance_error(exc: BinanceClientError) -> bool:
         return "insufficient balance" in str(exc).lower()
 
-    def _cap_buy_amount_to_free_quote(self, amount: float, market_price: float, symbol: str) -> tuple[float, str | None]:
+    def _cap_buy_amount_to_free_quote(self, amount: float, market_price: float, symbol: str) -> tuple[float, float, str | None]:
         if amount <= 0 or market_price <= 0:
-            return 0.0, "Tamaño de orden inválido."
+            return 0.0, 0.0, "Tamaño de orden inválido."
 
         try:
             quote_balance = self.client.fetch_asset_balance(asset=self.client.quote_asset_for(symbol))
         except BinanceClientError as exc:
-            return 0.0, f"fetch_quote_balance: {exc}"
+            return 0.0, 0.0, f"fetch_quote_balance: {exc}"
 
         free_quote = float(quote_balance.get("free", 0.0) or 0.0)
         # Reservamos un colchón real para fees, precisión del exchange y micro-movimientos.
         spendable_quote = max(0.0, min(free_quote * 0.95, free_quote - 1.0))
         if spendable_quote <= 0:
-            return 0.0, f"Saldo libre insuficiente en {quote_balance.get('asset', 'USDT')}."
+            return 0.0, 0.0, f"Saldo libre insuficiente en {quote_balance.get('asset', 'USDT')}."
 
         capped_amount = min(amount, round(spendable_quote / market_price, 6))
-        capped_notional = capped_amount * market_price
-        if capped_notional < self.settings.minimum_trade_usdt:
-            return 0.0, (
+        target_quote = min(capped_amount * market_price, spendable_quote)
+        # Dejamos un margen adicional justo en el presupuesto quote que Binance valida.
+        quote_budget = max(0.0, round(target_quote * 0.99, 4))
+        if quote_budget < self.settings.minimum_trade_usdt:
+            return 0.0, 0.0, (
                 f"Saldo libre insuficiente tras buffer operativo: {round(spendable_quote, 4)} "
                 f"{quote_balance.get('asset', 'USDT')}."
             )
-        return capped_amount, None
+        return capped_amount, quote_budget, None
 
     def _format_protection_levels(self, price: float, side: str, symbol: str) -> dict[str, float]:
         raw_levels = self.risk_manager.build_protection_levels(price, side)
@@ -90,7 +92,7 @@ class TradeExecutor:
         amount = self.risk_manager.compute_order_size(market_price, risk.equity_usd)
         quote_amount: float | None = None
         if side == "buy" and not self.settings.dry_run:
-            amount, balance_reason = self._cap_buy_amount_to_free_quote(amount, market_price, target_symbol)
+            amount, quote_budget, balance_reason = self._cap_buy_amount_to_free_quote(amount, market_price, target_symbol)
             if balance_reason is not None:
                 return {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -105,9 +107,10 @@ class TradeExecutor:
                     "status": "rejected",
                     "reason": balance_reason,
                 }
+            quote_amount = quote_budget
         try:
             amount = self.client.amount_to_precision(amount, symbol=target_symbol)
-            if side == "buy":
+            if side == "buy" and quote_amount is None:
                 quote_amount = self.client.cost_to_precision(amount * market_price, symbol=target_symbol)
             protection_levels = self._format_protection_levels(market_price, side, target_symbol)
         except BinanceClientError as exc:
