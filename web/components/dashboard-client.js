@@ -506,14 +506,16 @@ export default function DashboardClient({ initialData }) {
           <div className="panel-header"><h3>Log de operaciones</h3><span>{orders.length} registros</span></div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Hora</th><th>Lado</th><th>Estado</th><th>Precio</th><th>Monto</th><th>Notional</th><th>SL</th><th>TP</th></tr></thead>
+              <thead><tr><th>Hora</th><th>Lado</th><th>Estado</th><th>Señal</th><th>Fill</th><th>Slippage</th><th>Monto</th><th>Notional</th><th>SL</th><th>TP</th></tr></thead>
               <tbody>
-                {orders.length === 0 ? <tr><td colSpan="8" className="empty">Sin operaciones todavía.</td></tr> : [...orders].reverse().map((order, index) => (
+                {orders.length === 0 ? <tr><td colSpan="10" className="empty">Sin operaciones todavía.</td></tr> : [...orders].reverse().map((order, index) => (
                   <tr key={`${order.timestamp}-${index}`}>
                     <td>{formatDate(order.timestamp)}</td>
                     <td className={order.side === "buy" ? "tone-buy" : "tone-sell"}>{order.side || "-"}</td>
                     <td>{order.status || "-"}</td>
-                    <td>{formatNumber(order.price, 4)}</td>
+                    <td>{formatNumber(order.signal_price ?? order.price, 4)}</td>
+                    <td>{formatNumber(order.fill_price ?? order.avg_price ?? order.price, 4)}</td>
+                    <td className={Number(order.slippage_pct) > 0.0015 ? "tone-sell" : ""}>{formatPercent(order.slippage_pct)}</td>
                     <td>{formatNumber(order.amount, 6)}</td>
                     <td>{formatNumber(order.notional_usdt, 2)}</td>
                     <td>{formatNumber(order.stop_loss, 4)}</td>
@@ -529,9 +531,9 @@ export default function DashboardClient({ initialData }) {
           <div className="panel-header"><h3>Resultado por operación</h3><span>{closedTrades.length} cierres</span></div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Apertura</th><th>Cierre</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Motivo</th><th>MAE %</th><th>MFE %</th><th>PnL USDT</th><th>PnL %</th></tr></thead>
+              <thead><tr><th>Apertura</th><th>Cierre</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Slippage</th><th>Motivo</th><th>MAE %</th><th>MFE %</th><th>PnL USDT</th><th>PnL %</th></tr></thead>
               <tbody>
-                {closedTrades.length === 0 ? <tr><td colSpan="11" className="empty">Sin cierres todavía. El bot solo mostrará ganancia o pérdida cuando una operación alcance TP o SL.</td></tr> : [...closedTrades].reverse().map((trade, index) => (
+                {closedTrades.length === 0 ? <tr><td colSpan="12" className="empty">Sin cierres todavía. El bot solo mostrará ganancia o pérdida cuando una operación alcance TP o SL.</td></tr> : [...closedTrades].reverse().map((trade, index) => (
                   <tr key={`${trade.closed_at}-${index}`}>
                     <td>{formatDate(trade.opened_at)}</td>
                     <td>{formatDate(trade.closed_at)}</td>
@@ -539,6 +541,7 @@ export default function DashboardClient({ initialData }) {
                     <td className={trade.side === "buy" ? "tone-buy" : "tone-sell"}>{trade.side || "-"}</td>
                     <td>{formatNumber(trade.entry_price, 4)}</td>
                     <td>{formatNumber(trade.exit_price, 4)}</td>
+                    <td className={Number(trade.slippage_pct) > 0.0015 ? "tone-sell" : ""}>{formatPercent(trade.slippage_pct)}</td>
                     <td>{trade.exit_reason || "-"}</td>
                     <td className="tone-sell">{formatPercent(trade.mae_pct)}</td>
                     <td className="tone-buy">{formatPercent(trade.mfe_pct)}</td>

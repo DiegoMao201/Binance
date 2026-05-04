@@ -523,6 +523,9 @@ def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, 
         "unrealized_pnl_usdt": p.get("unrealized_pnl_usdt"),
         "mark_price": p.get("mark_price"),
         "ai_confidence": p.get("ai_confidence"),
+        "signal_price": p.get("signal_price"),
+        "fill_price": p.get("fill_price"),
+        "slippage_pct": p.get("slippage_pct"),
     }
 
 
@@ -708,7 +711,7 @@ def run_cycle() -> None:
                             ai_signal.get("cached_age_seconds", 0),
                         )
                     else:
-                        ai_signal = ai_analyzer.analyze(scan["frame"])
+                        ai_signal = ai_analyzer.analyze(scan["frame"], symbol=scan["symbol"])
                         ai_signal.setdefault("consulted", True)
 
                 guardrails = _build_guardrails(settings, technical_signal, ai_signal, order_history)
@@ -765,6 +768,9 @@ def run_cycle() -> None:
                         "scenario": technical_signal.get("scenario"),
                         "entry_rsi": technical_signal.get("rsi"),
                         "ai_confidence": ai_signal.get("confidence"),
+                        "signal_price": decision.get("signal_price"),
+                        "fill_price": decision.get("fill_price") or decision.get("price"),
+                        "slippage_pct": decision.get("slippage_pct", 0.0),
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "mae_usdt": 0.0,

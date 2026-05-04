@@ -36,6 +36,14 @@ class TradeExecutor:
                 continue
         return filled, average, fee_total
 
+    @staticmethod
+    def _compute_slippage_pct(signal_price: float, fill_price: float, side: str) -> float:
+        if signal_price <= 0 or fill_price <= 0:
+            return 0.0
+        if side == "buy":
+            return (fill_price - signal_price) / signal_price
+        return (signal_price - fill_price) / signal_price
+
     def execute(
         self,
         side: str,
@@ -53,7 +61,9 @@ class TradeExecutor:
             "side": side,
             "amount": amount,
             "price": round(market_price, 4),
+            "signal_price": round(market_price, 4),
             "notional_usdt": round(amount * market_price, 4),
+            "slippage_pct": 0.0,
             **protection_levels,
             "mode": "dry_run" if self.settings.dry_run else "live",
         }
@@ -97,7 +107,12 @@ class TradeExecutor:
         order_payload["exchange_order"] = exchange_order
         order_payload["filled_amount"] = round(filled, 8)
         order_payload["avg_price"] = round(average, 4)
+        order_payload["fill_price"] = round(average, 4)
         order_payload["fee_quote"] = round(fee_total, 6)
+        order_payload["slippage_pct"] = round(
+            self._compute_slippage_pct(float(order_payload["signal_price"]), average, side),
+            6,
+        )
         order_payload["reconciled_holdings"] = asset_balance
         # Use real reconciled fields as the source of truth for the position.
         order_payload["amount"] = round(filled, 8)
@@ -105,6 +120,14 @@ class TradeExecutor:
         order_payload["notional_usdt"] = round(filled * average, 4)
         # Recompute SL/TP against the real average fill, not the projected price.
         order_payload.update(self.risk_manager.build_protection_levels(average, side))
+        self.logger.info(
+            "Slippage %s en %s: signal=%s fill=%s slippage=%.4f%%",
+            side,
+            target_symbol,
+            order_payload["signal_price"],
+            order_payload["fill_price"],
+            order_payload["slippage_pct"] * 100,
+        )
         self.logger.info("Orden ejecutada y reconciliada: %s", order_payload)
         return order_payload
 
