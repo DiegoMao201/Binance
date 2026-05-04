@@ -246,11 +246,10 @@ class BinanceDataClient:
         quote_amount: float | None = None,
     ) -> dict[str, Any]:
         target = symbol or self.settings.trading_symbol
-        params: dict[str, Any] = {}
-        order_amount = amount
         if side == "buy" and quote_amount is not None:
-            params["quoteOrderQty"] = quote_amount
-            order_amount = None
+            return self._with_retries(
+                lambda: self.private_exchange.create_market_buy_order_with_cost(target, quote_amount)
+            )
         return self._with_retries(
-            lambda: self.private_exchange.create_market_order(target, side, order_amount, params=params)
+            lambda: self.private_exchange.create_market_order(target, side, amount)
         )
