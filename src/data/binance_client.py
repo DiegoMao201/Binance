@@ -20,12 +20,14 @@ class BinanceDataClient:
     def __init__(self, settings: Settings) -> None:
         public_config: dict[str, Any] = {
             "enableRateLimit": True,
+            "timeout": 8000,
             "options": {"defaultType": "spot"},
         }
         self.public_exchange = ccxt.binance(public_config)
 
         private_config: dict[str, Any] = {
             "enableRateLimit": True,
+            "timeout": 8000,
             "options": {"defaultType": "spot"},
         }
         if settings.binance_api_key and settings.binance_api_secret:
@@ -86,8 +88,37 @@ class BinanceDataClient:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
         return frame
 
+    def _fetch_spot_account(self) -> dict[str, Any]:
+        return self._with_retries(lambda: self.private_exchange.privateGetAccount())
+
     def _fetch_full_balance(self) -> dict[str, Any]:
-        return self._with_retries(lambda: self.private_exchange.fetch_balance())
+        account = self._fetch_spot_account()
+        balances = account.get("balances", []) or []
+        normalized: dict[str, Any] = {"info": account}
+        free_bucket: dict[str, float] = {}
+        used_bucket: dict[str, float] = {}
+        total_bucket: dict[str, float] = {}
+
+        for entry in balances:
+            asset = str(entry.get("asset") or "").upper()
+            if not asset:
+                continue
+            free = float(entry.get("free", 0.0) or 0.0)
+            locked = float(entry.get("locked", 0.0) or 0.0)
+            total = free + locked
+            normalized[asset] = {
+                "free": free,
+                "used": locked,
+                "total": total,
+            }
+            free_bucket[asset] = free
+            used_bucket[asset] = locked
+            total_bucket[asset] = total
+
+        normalized["free"] = free_bucket
+        normalized["used"] = used_bucket
+        normalized["total"] = total_bucket
+        return normalized
 
     @staticmethod
     def _balance_aliases(asset: str) -> tuple[str, ...]:
