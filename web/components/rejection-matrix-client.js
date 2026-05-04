@@ -86,6 +86,25 @@ function buildMatrixHighlights(matrixRows) {
 }
 
 
+function buildInfraBreakdown(scanHistory) {
+  const buckets = {
+    rate_limit: 0,
+    timeout_binance: 0,
+    network_local: 0,
+    exchange_other: 0,
+  };
+
+  for (const cycle of scanHistory) {
+    if (cycle?.balance_ok !== false) continue;
+    const key = cycle?.balance_error_class || "exchange_other";
+    buckets[key] = (buckets[key] || 0) + 1;
+  }
+
+  const total = Object.values(buckets).reduce((sum, value) => sum + value, 0);
+  return { buckets, total };
+}
+
+
 function formatDate(value) {
   if (!value) {
     return "sin dato";
@@ -133,6 +152,7 @@ export default function RejectionMatrixClient({ initialData }) {
   const rollingScans = useMemo(() => getRollingWindow(scanHistory, analyticsWindowMinutes), [scanHistory, analyticsWindowMinutes]);
   const rejectMatrix = useMemo(() => buildRejectMatrix(rollingScans, targetSymbols), [rollingScans, targetSymbols]);
   const matrixHighlights = useMemo(() => buildMatrixHighlights(rejectMatrix.rows), [rejectMatrix]);
+  const infraBreakdown = useMemo(() => buildInfraBreakdown(rollingScans), [rollingScans]);
 
   return (
     <main className="matrix-page-shell">
@@ -226,6 +246,28 @@ export default function RejectionMatrixClient({ initialData }) {
                 : "La matriz ya está separando ciclos con degradación de infraestructura para no mezclarlos con rechazo técnico puro."}
             </p>
           </div>
+        </div>
+      </section>
+
+      <section className="panel analytics-panel">
+        <div className="panel-header">
+          <div>
+            <h3>Taxonomía de errores</h3>
+            <span>Diferenciación operativa entre limitación del exchange y fallos de red</span>
+          </div>
+          <span>{infraBreakdown.total} ciclos degradados clasificados</span>
+        </div>
+        <div className="analytics-kpis">
+          <MetricCard label="Rate limit" value={String(infraBreakdown.buckets.rate_limit || 0)} tone={(infraBreakdown.buckets.rate_limit || 0) > 0 ? "warn" : "neutral"} subvalue={formatPercent(infraBreakdown.total ? (infraBreakdown.buckets.rate_limit || 0) / infraBreakdown.total : 0)} />
+          <MetricCard label="Timeout Binance" value={String(infraBreakdown.buckets.timeout_binance || 0)} tone={(infraBreakdown.buckets.timeout_binance || 0) > 0 ? "sell" : "neutral"} subvalue={formatPercent(infraBreakdown.total ? (infraBreakdown.buckets.timeout_binance || 0) / infraBreakdown.total : 0)} />
+          <MetricCard label="Network local" value={String(infraBreakdown.buckets.network_local || 0)} tone={(infraBreakdown.buckets.network_local || 0) > 0 ? "sell" : "neutral"} subvalue={formatPercent(infraBreakdown.total ? (infraBreakdown.buckets.network_local || 0) / infraBreakdown.total : 0)} />
+          <MetricCard label="Exchange other" value={String(infraBreakdown.buckets.exchange_other || 0)} tone={(infraBreakdown.buckets.exchange_other || 0) > 0 ? "warn" : "neutral"} subvalue={formatPercent(infraBreakdown.total ? (infraBreakdown.buckets.exchange_other || 0) / infraBreakdown.total : 0)} />
+        </div>
+        <div className="narrative-card compact">
+          <strong>Lectura de infraestructura</strong>
+          <p>
+            `rate_limit` implica presión excesiva contra Binance. `timeout_binance` apunta a latencia o saturación del exchange. `network_local` señala problemas de conectividad, DNS, SSL o transporte desde tu lado. `exchange_other` captura rechazos del exchange que no encajan en las tres clases primarias.
+          </p>
         </div>
       </section>
     </main>

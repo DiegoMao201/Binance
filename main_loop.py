@@ -90,6 +90,7 @@ def _build_scan_history_event(
     decision: dict[str, Any],
     balance_ok: bool,
     balance_error: str | None = None,
+    balance_error_class: str | None = None,
 ) -> dict[str, Any]:
     return {
         "timestamp": timestamp,
@@ -99,6 +100,7 @@ def _build_scan_history_event(
         "decision_reason": decision.get("reason", decision.get("status", "n/a")),
         "balance_ok": balance_ok,
         "balance_error": balance_error,
+        "balance_error_class": balance_error_class,
         "ai_consulted": bool(ai_signal.get("consulted")),
         "ai_consulted_symbol": ai_consulted_symbol,
         "scans": scans,
@@ -686,6 +688,7 @@ def run_cycle() -> None:
             balance_usd = client.fetch_balance_usd()
         except BinanceClientError as exc:
             logger.error("No se pudo obtener saldo: %s", exc)
+            balance_error_class = getattr(exc, "category", "exchange_other")
             degraded_scans = [
                 _build_scan_summary(s, settings, blocked_by_lock=global_lock and s["symbol"] != active_symbol)
                 for s in scan_results
@@ -706,6 +709,7 @@ def run_cycle() -> None:
                 "global_lock": global_lock,
                 "active_symbol": active_symbol,
                 "infra_error": str(exc),
+                "infra_error_class": balance_error_class,
             }
             append_history(
                 settings.scan_history_file,
@@ -719,6 +723,7 @@ def run_cycle() -> None:
                     decision=degraded_decision,
                     balance_ok=False,
                     balance_error=str(exc),
+                    balance_error_class=balance_error_class,
                 ),
                 limit=1440,
             )

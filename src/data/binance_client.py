@@ -13,7 +13,32 @@ T = TypeVar("T")
 
 
 class BinanceClientError(Exception):
-    pass
+    def __init__(self, message: str, *, category: str = "exchange_other") -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def classify_binance_error(exc: Exception | str) -> str:
+    message = str(exc).lower()
+
+    if "429" in message or "too many requests" in message or "rate limit" in message:
+        return "rate_limit"
+    if "timed out" in message or "timeout" in message or "requesttimeout" in message:
+        return "timeout_binance"
+    if any(token in message for token in [
+        "name or service not known",
+        "temporary failure in name resolution",
+        "failed to establish a new connection",
+        "connection aborted",
+        "connection reset",
+        "network is unreachable",
+        "nodename nor servname provided",
+        "max retries exceeded",
+        "remote end closed connection",
+        "ssl",
+    ]):
+        return "network_local"
+    return "exchange_other"
 
 
 class BinanceDataClient:
@@ -47,12 +72,18 @@ class BinanceDataClient:
         for attempt in range(1, attempts + 1):
             try:
                 return operation()
-            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout) as exc:
+            except ccxt.RequestTimeout as exc:
+                last_error = exc
+                time.sleep(base_delay * (2 ** (attempt - 1)))
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as exc:
                 last_error = exc
                 time.sleep(base_delay * (2 ** (attempt - 1)))
             except ccxt.BaseError as exc:
-                raise BinanceClientError(str(exc)) from exc
-        raise BinanceClientError(f"Binance no respondió tras {attempts} intentos: {last_error}")
+                raise BinanceClientError(str(exc), category=classify_binance_error(exc)) from exc
+        raise BinanceClientError(
+            f"Binance no respondió tras {attempts} intentos: {last_error}",
+            category=classify_binance_error(last_error or "timeout"),
+        )
 
     @property
     def base_asset(self) -> str:
