@@ -44,6 +44,10 @@ class TradeExecutor:
             return (fill_price - signal_price) / signal_price
         return (signal_price - fill_price) / signal_price
 
+    @staticmethod
+    def _is_insufficient_balance_error(exc: BinanceClientError) -> bool:
+        return "insufficient balance" in str(exc).lower()
+
     def _cap_buy_amount_to_free_quote(self, amount: float, market_price: float, symbol: str) -> tuple[float, str | None]:
         if amount <= 0 or market_price <= 0:
             return 0.0, "Tamaño de orden inválido."
@@ -54,8 +58,8 @@ class TradeExecutor:
             return 0.0, f"fetch_quote_balance: {exc}"
 
         free_quote = float(quote_balance.get("free", 0.0) or 0.0)
-        # Reservamos 2% para fees, redondeos y micro-movimientos entre señal y fill.
-        spendable_quote = max(0.0, free_quote * 0.98)
+        # Reservamos un colchón real para fees, precisión del exchange y micro-movimientos.
+        spendable_quote = max(0.0, min(free_quote * 0.95, free_quote - 1.0))
         if spendable_quote <= 0:
             return 0.0, f"Saldo libre insuficiente en {quote_balance.get('asset', 'USDT')}."
 
@@ -122,7 +126,7 @@ class TradeExecutor:
             exchange_order = self.client.create_market_order(side, amount, symbol=target_symbol)
         except BinanceClientError as exc:
             self.logger.error("Fallo al enviar orden %s en %s: %s", side, target_symbol, exc)
-            order_payload["status"] = "error"
+            order_payload["status"] = "rejected" if self._is_insufficient_balance_error(exc) else "error"
             order_payload["reason"] = f"create_market_order: {exc}"
             return order_payload
 
