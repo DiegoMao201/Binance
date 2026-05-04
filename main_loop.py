@@ -111,7 +111,13 @@ def _is_in_cooldown(order_history: list[dict[str, Any]], cooldown_minutes: int) 
     if not order_history:
         return False
 
-    latest = order_history[-1]
+    latest = next(
+        (order for order in reversed(order_history) if str(order.get("status", "")).lower() == "submitted"),
+        None,
+    )
+    if not latest:
+        return False
+
     timestamp = latest.get("timestamp")
     if not timestamp:
         return False
