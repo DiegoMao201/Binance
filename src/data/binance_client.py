@@ -186,12 +186,11 @@ class BinanceDataClient:
             return {"asset": target, "free": 0.0, "used": 0.0, "total": 0.0}
 
         balance = self._fetch_full_balance()
-        info = balance.get(target, {}) or {}
         return {
             "asset": target,
-            "free": float(info.get("free", 0.0) or 0.0),
-            "used": float(info.get("used", 0.0) or 0.0),
-            "total": float(info.get("total", 0.0) or 0.0),
+            "free": self._extract_balance_value(balance, target, "free"),
+            "used": self._extract_balance_value(balance, target, "used"),
+            "total": self._extract_balance_value(balance, target, "total"),
         }
 
     def fetch_ticker_price(self, symbol: str | None = None) -> float:

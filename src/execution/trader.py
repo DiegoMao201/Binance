@@ -44,6 +44,30 @@ class TradeExecutor:
             return (fill_price - signal_price) / signal_price
         return (signal_price - fill_price) / signal_price
 
+    def _cap_buy_amount_to_free_quote(self, amount: float, market_price: float, symbol: str) -> tuple[float, str | None]:
+        if amount <= 0 or market_price <= 0:
+            return 0.0, "Tamaño de orden inválido."
+
+        try:
+            quote_balance = self.client.fetch_asset_balance(asset=self.client.quote_asset_for(symbol))
+        except BinanceClientError as exc:
+            return 0.0, f"fetch_quote_balance: {exc}"
+
+        free_quote = float(quote_balance.get("free", 0.0) or 0.0)
+        # Reservamos 2% para fees, redondeos y micro-movimientos entre señal y fill.
+        spendable_quote = max(0.0, free_quote * 0.98)
+        if spendable_quote <= 0:
+            return 0.0, f"Saldo libre insuficiente en {quote_balance.get('asset', 'USDT')}."
+
+        capped_amount = min(amount, round(spendable_quote / market_price, 6))
+        capped_notional = capped_amount * market_price
+        if capped_notional < self.settings.minimum_trade_usdt:
+            return 0.0, (
+                f"Saldo libre insuficiente tras buffer operativo: {round(spendable_quote, 4)} "
+                f"{quote_balance.get('asset', 'USDT')}."
+            )
+        return capped_amount, None
+
     def execute(
         self,
         side: str,
@@ -53,6 +77,22 @@ class TradeExecutor:
     ) -> dict[str, Any]:
         target_symbol = symbol or self.settings.trading_symbol
         amount = self.risk_manager.compute_order_size(market_price, risk.equity_usd)
+        if side == "buy" and not self.settings.dry_run:
+            amount, balance_reason = self._cap_buy_amount_to_free_quote(amount, market_price, target_symbol)
+            if balance_reason is not None:
+                return {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "symbol": target_symbol,
+                    "side": side,
+                    "amount": 0.0,
+                    "price": round(market_price, 4),
+                    "signal_price": round(market_price, 4),
+                    "notional_usdt": 0.0,
+                    "slippage_pct": 0.0,
+                    "mode": "live",
+                    "status": "rejected",
+                    "reason": balance_reason,
+                }
         protection_levels = self.risk_manager.build_protection_levels(market_price, side)
 
         order_payload: dict[str, Any] = {
