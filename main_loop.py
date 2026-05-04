@@ -65,6 +65,7 @@ def _serialize_market(frame):
 def _build_signal_event(technical_signal: dict, ai_signal: dict, decision: dict) -> dict:
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "symbol": decision.get("symbol") or technical_signal.get("symbol"),
         "technical_signal": technical_signal.get("signal", "hold"),
         "technical_rsi": technical_signal.get("rsi", 0),
         "technical_price": technical_signal.get("close", 0),
@@ -803,6 +804,8 @@ def run_cycle() -> None:
         primary_scan = chosen_scan or (scan_results[0] if scan_results else None)
         primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
         primary_frame = primary_scan["frame"] if primary_scan else None
+        if primary_scan is not None and primary_scan.get("symbol"):
+            primary_signal = {**primary_signal, "symbol": primary_scan["symbol"]}
 
         append_history(settings.signal_history_file, _build_signal_event(primary_signal, ai_signal, decision))
 

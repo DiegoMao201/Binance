@@ -38,12 +38,15 @@ function formatDate(value) {
 }
 
 
-function buildChartData(payload) {
+function buildChartData(payload, focusSymbol) {
   const market = payload?.state?.market || [];
   const signalHistory = payload?.signalHistory || [];
   const x = market.map((item) => item.timestamp);
-  const buySignals = signalHistory.filter((item) => item.technical_signal === "buy" || item.ai_signal === "buy");
-  const sellSignals = signalHistory.filter((item) => item.technical_signal === "sell" || item.ai_signal === "sell");
+  const scopedSignals = focusSymbol
+    ? signalHistory.filter((item) => item.symbol === focusSymbol)
+    : signalHistory;
+  const buySignals = scopedSignals.filter((item) => item.technical_signal === "buy" || item.ai_signal === "buy");
+  const sellSignals = scopedSignals.filter((item) => item.technical_signal === "sell" || item.ai_signal === "sell");
 
   return [
     {
@@ -280,7 +283,11 @@ export default function DashboardClient({ initialData }) {
     return Date.now() - new Date(heartbeat).getTime() < 120000;
   }, [status]);
 
-  const chartData = useMemo(() => buildChartData(payload), [payload]);
+  const focusScan = useMemo(() => {
+    if (!lastScans.length) return null;
+    return lastScans.find((scan) => scan.symbol === focusSymbol) || lastScans.find((scan) => scan.symbol === activeSymbol) || lastScans[0];
+  }, [lastScans, focusSymbol, activeSymbol]);
+  const chartData = useMemo(() => buildChartData(payload, focusScan?.symbol), [payload, focusScan]);
   const latestSignal = signalHistory.length ? signalHistory[signalHistory.length - 1] : null;
   const decisionSummary = buildDecisionSummary(decision, technicalSignal);
   const aiSummary = buildAiSummary(ai);
@@ -289,10 +296,6 @@ export default function DashboardClient({ initialData }) {
   const timeline = buildTimeline(signalHistory);
   const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
   const equityCurve = useMemo(() => buildEquityCurve(equityHistory), [equityHistory]);
-  const focusScan = useMemo(() => {
-    if (!lastScans.length) return null;
-    return lastScans.find((scan) => scan.symbol === focusSymbol) || lastScans.find((scan) => scan.symbol === activeSymbol) || lastScans[0];
-  }, [lastScans, focusSymbol, activeSymbol]);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
