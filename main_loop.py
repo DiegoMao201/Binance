@@ -79,6 +79,32 @@ def _build_signal_event(technical_signal: dict, ai_signal: dict, decision: dict)
     }
 
 
+def _build_scan_history_event(
+    *,
+    timestamp: str,
+    scans: list[dict[str, Any]],
+    ai_signal: dict[str, Any],
+    ai_consulted_symbol: str | None,
+    global_lock: bool,
+    active_symbol: str | None,
+    decision: dict[str, Any],
+    balance_ok: bool,
+    balance_error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "global_lock": global_lock,
+        "active_symbol": active_symbol,
+        "decision_action": decision.get("action", decision.get("side", "hold")),
+        "decision_reason": decision.get("reason", decision.get("status", "n/a")),
+        "balance_ok": balance_ok,
+        "balance_error": balance_error,
+        "ai_consulted": bool(ai_signal.get("consulted")),
+        "ai_consulted_symbol": ai_consulted_symbol,
+        "scans": scans,
+    }
+
+
 def _is_in_cooldown(order_history: list[dict[str, Any]], cooldown_minutes: int) -> bool:
     if not order_history:
         return False
@@ -151,6 +177,16 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
     else:
         status = "waiting"
     candle = scan.get("latest_candle") or {}
+    rejection_stage = "pre_signal"
+    rejection_reason = scan.get("candidate_reason")
+    if blocked_by_lock:
+        rejection_stage = "lock"
+        rejection_reason = "mutex global activo"
+    elif candidate:
+        rejection_stage = "candidate"
+        rejection_reason = "esperando validacion IA/ejecucion"
+    elif ts.get("scenario") in {"A", "B"}:
+        rejection_stage = "guardrail"
     return {
         "symbol": scan.get("symbol"),
         "status": status,
@@ -164,9 +200,34 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "ema_slow": ts.get("ema_slow"),
         "green_candle": ts.get("green_candle"),
         "candidate_reason": scan.get("candidate_reason"),
+        "rejection_stage": rejection_stage,
+        "rejection_reason": rejection_reason,
+        "ia_consulted": bool(scan.get("ia_consulted")),
+        "ia_confidence": float(scan.get("ia_confidence") or 0.0),
         "blocked_by_lock": blocked_by_lock,
         "candle_timestamp": str(candle.get("timestamp")) if candle else None,
     }
+
+
+def _degraded_risk_snapshot(
+    previous_state: dict[str, Any],
+    *,
+    balance_error: str,
+    balance_usd: float | None = None,
+    equity_usd: float | None = None,
+) -> RiskSnapshot:
+    previous_risk = previous_state.get("risk") or {}
+    _ = balance_error
+    return RiskSnapshot(
+        balance_usd=float(balance_usd if balance_usd is not None else previous_risk.get("balance_usd", 0.0) or 0.0),
+        equity_usd=float(equity_usd if equity_usd is not None else previous_risk.get("equity_usd", 0.0) or 0.0),
+        high_water_mark=float(previous_risk.get("high_water_mark", 0.0) or 0.0),
+        max_trade_usd=float(previous_risk.get("max_trade_usd", 0.0) or 0.0),
+        recommended_trade_usd=float(previous_risk.get("recommended_trade_usd", 0.0) or 0.0),
+        drawdown_pct=float(previous_risk.get("drawdown_pct", 0.0) or 0.0),
+        daily_pnl_pct=float(previous_risk.get("daily_pnl_pct", 0.0) or 0.0),
+        kill_switch_triggered=bool(previous_risk.get("kill_switch_triggered", False)),
+    )
 
 
 def _settle_open_positions(
@@ -478,6 +539,13 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
     return checks
 
 
+def _is_degradable_preflight_failure(pre_flight: dict[str, Any]) -> bool:
+    detail = str(pre_flight.get("detail") or "")
+    if pre_flight.get("ok"):
+        return False
+    return detail.startswith("binance:")
+
+
 def _load_recent_ai_signal(settings) -> dict[str, Any] | None:
     previous_state = load_state(settings.state_file)
     previous_ai_signal = previous_state.get("ai_signal")
@@ -569,6 +637,7 @@ def run_cycle() -> None:
     write_heartbeat("online", "Ciclo iniciado")
 
     try:
+        previous_state = load_state(settings.state_file)
         order_history = load_history(settings.order_history_file)
         open_positions = load_history(settings.open_positions_file)
         closed_trades = load_history(settings.closed_trades_file)
@@ -615,7 +684,63 @@ def run_cycle() -> None:
             balance_usd = client.fetch_balance_usd()
         except BinanceClientError as exc:
             logger.error("No se pudo obtener saldo: %s", exc)
-            write_heartbeat("offline", f"Saldo no disponible: {exc}")
+            degraded_scans = [
+                _build_scan_summary(s, settings, blocked_by_lock=global_lock and s["symbol"] != active_symbol)
+                for s in scan_results
+            ]
+            degraded_risk = _degraded_risk_snapshot(previous_state, balance_error=str(exc))
+            degraded_portfolio = _build_portfolio_summary(
+                settings,
+                degraded_risk,
+                open_positions,
+                closed_trades,
+                previous_state.get("portfolio", {}).get("asset_holdings") or {},
+                equity_history,
+            )
+            degraded_decision = {
+                "action": "hold",
+                "reason": "Infra degradada: balance Binance no disponible.",
+                "status": "degraded_balance",
+                "global_lock": global_lock,
+                "active_symbol": active_symbol,
+                "infra_error": str(exc),
+            }
+            append_history(
+                settings.scan_history_file,
+                _build_scan_history_event(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    scans=degraded_scans,
+                    ai_signal=dict(AI_NOT_CONSULTED),
+                    ai_consulted_symbol=None,
+                    global_lock=global_lock,
+                    active_symbol=active_symbol,
+                    decision=degraded_decision,
+                    balance_ok=False,
+                    balance_error=str(exc),
+                ),
+                limit=1440,
+            )
+            persist_state(
+                settings.state_file,
+                build_state_snapshot(
+                    market=_serialize_market(scan_results[0]["frame"]) if scan_results and scan_results[0].get("frame") is not None else [],
+                    technical_signal=(scan_results[0]["technical_signal"] if scan_results else {"signal": "hold"}),
+                    ai_signal=dict(AI_NOT_CONSULTED),
+                    risk=asdict(degraded_risk),
+                    portfolio=degraded_portfolio,
+                    decision=degraded_decision,
+                    order_history=order_history,
+                    open_positions=open_positions,
+                    closed_trades=closed_trades,
+                    signal_history=load_history(settings.signal_history_file),
+                    open_position=_summarize_open_position(open_positions),
+                    last_scans=degraded_scans,
+                    target_symbols=target_symbols,
+                    global_lock=global_lock,
+                    active_symbol=active_symbol,
+                ),
+            )
+            write_heartbeat("degraded", f"Saldo no disponible: {exc}")
             return
 
         asset_holdings: dict[str, Any] = {}
@@ -685,6 +810,7 @@ def run_cycle() -> None:
 
         # 6) Carrera de senales: el primer simbolo que cumpla TODOS los guardarrailes dispara orden.
         ai_signal: dict[str, Any] = dict(AI_NOT_CONSULTED)
+        ai_consulted_symbol: str | None = None
         chosen_scan: dict[str, Any] | None = None
         chosen_guardrails: dict[str, Any] | None = None
         decision: dict[str, Any] = {
@@ -714,6 +840,7 @@ def run_cycle() -> None:
                     else:
                         ai_signal = ai_analyzer.analyze(scan["frame"], symbol=scan["symbol"])
                         ai_signal.setdefault("consulted", True)
+                    ai_consulted_symbol = scan["symbol"]
 
                 guardrails = _build_guardrails(settings, technical_signal, ai_signal, order_history)
                 if all([
@@ -800,6 +927,19 @@ def run_cycle() -> None:
                 global_lock, active_symbol, [(s["symbol"], s["technical_signal"].get("scenario"), s["candidate_reason"]) for s in scan_results],
             )
 
+        scan_summaries = [
+            _build_scan_summary(
+                {
+                    **scan,
+                    "ia_consulted": ai_consulted_symbol == scan["symbol"] and ai_signal.get("consulted", False),
+                    "ia_confidence": ai_signal.get("confidence", 0.0) if ai_consulted_symbol == scan["symbol"] else 0.0,
+                },
+                settings,
+                blocked_by_lock=global_lock and scan["symbol"] != active_symbol,
+            )
+            for scan in scan_results
+        ]
+
         # 7) Persistencia final con telemetria multi-ticker.
         primary_scan = chosen_scan or (scan_results[0] if scan_results else None)
         primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
@@ -808,6 +948,20 @@ def run_cycle() -> None:
             primary_signal = {**primary_signal, "symbol": primary_scan["symbol"]}
 
         append_history(settings.signal_history_file, _build_signal_event(primary_signal, ai_signal, decision))
+        append_history(
+            settings.scan_history_file,
+            _build_scan_history_event(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                scans=scan_summaries,
+                ai_signal=ai_signal,
+                ai_consulted_symbol=ai_consulted_symbol,
+                global_lock=global_lock,
+                active_symbol=active_symbol,
+                decision=decision,
+                balance_ok=True,
+            ),
+            limit=1440,
+        )
 
         persist_state(
             settings.state_file,
@@ -823,7 +977,7 @@ def run_cycle() -> None:
                 closed_trades=closed_trades,
                 signal_history=load_history(settings.signal_history_file),
                 open_position=_summarize_open_position(open_positions),
-                last_scans=[_build_scan_summary(s, settings, blocked_by_lock=global_lock and s["symbol"] != active_symbol) for s in scan_results],
+                last_scans=scan_summaries,
                 target_symbols=target_symbols,
                 global_lock=global_lock,
                 active_symbol=active_symbol,
@@ -857,9 +1011,13 @@ def main() -> None:
         {"timestamp": datetime.now(timezone.utc).isoformat(), **pre_flight},
     )
     if not pre_flight["ok"]:
-        logger.critical("Pre-flight fall\u00f3: %s. Forzando pausa.", pre_flight["detail"])
-        _set_control_state(settings, "paused", f"Pre-flight: {pre_flight['detail']}")
-        write_heartbeat("paused", f"Pre-flight: {pre_flight['detail']}")
+        if _is_degradable_preflight_failure(pre_flight):
+            logger.error("Pre-flight degradado: %s. El bot seguira en modo observacional.", pre_flight["detail"])
+            write_heartbeat("degraded", f"Pre-flight degradado: {pre_flight['detail']}")
+        else:
+            logger.critical("Pre-flight fall\u00f3: %s. Forzando pausa.", pre_flight["detail"])
+            _set_control_state(settings, "paused", f"Pre-flight: {pre_flight['detail']}")
+            write_heartbeat("paused", f"Pre-flight: {pre_flight['detail']}")
     else:
         logger.info("Pre-flight OK: %s", pre_flight["detail"])
 

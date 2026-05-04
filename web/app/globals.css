@@ -98,7 +98,8 @@ th,
 .alerts-grid,
 .metrics-grid,
 .telemetry-grid,
-.details-grid {
+.details-grid,
+.analytics-kpis {
   display: grid;
   gap: 16px;
 }
@@ -108,7 +109,8 @@ th,
 }
 
 .metrics-grid,
-.telemetry-grid {
+.telemetry-grid,
+.analytics-kpis {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
@@ -191,6 +193,39 @@ th,
 
 .chart-panel {
   padding-bottom: 8px;
+}
+
+.analytics-panel {
+  background:
+    linear-gradient(180deg, rgba(17, 24, 35, 0.98), rgba(9, 14, 21, 0.98)),
+    radial-gradient(circle at top right, rgba(18, 217, 139, 0.08), transparent 30%);
+}
+
+.matrix-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.matrix-table-wrap {
+  overflow: auto;
+}
+
+.matrix-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.matrix-cell span {
+  color: #90a4ba;
+  font-size: 0.78rem;
+}
+
+.matrix-callout {
+  position: sticky;
+  top: 18px;
 }
 
 .narrative-card {
@@ -382,8 +417,13 @@ tbody tr:hover {
   .alerts-grid,
   .metrics-grid,
   .telemetry-grid,
-  .details-grid {
+  .details-grid,
+  .analytics-kpis {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .matrix-layout {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -396,7 +436,8 @@ tbody tr:hover {
   .alerts-grid,
   .metrics-grid,
   .telemetry-grid,
-  .details-grid {
+  .details-grid,
+  .analytics-kpis {
     grid-template-columns: 1fr;
   }
 
