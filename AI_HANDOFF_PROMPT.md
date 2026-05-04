@@ -285,17 +285,17 @@ Debe cumplirse todo esto:
 ## Estado actual del modelo IA
 
 ### Modelo actual por defecto
-- `openai/gpt-4.1-mini`
+- `openai/gpt-4.1`
 
 ### Motivo del cambio
-Se cambió desde `gpt-4.1` a `gpt-4.1-mini` porque el usuario está trabajando con capital muy pequeño y el coste de IA puede comerse cualquier resultado del bot.
+Se volvió desde `gpt-4.1-mini` a `gpt-4.1` porque el objetivo actual prioriza robustez analítica, seguimiento estricto de instrucciones y formato JSON fiable por encima del ahorro marginal de coste.
 
 ### DeepSeek V3
 No está integrado por defecto, pero podría evaluarse como alternativa.
 
 Recomendación arquitectónica actual:
-- mantener `gpt-4.1-mini` como default por estabilidad de salida JSON
-- evaluar `deepseek/deepseek-chat-v3` o equivalente solo con pruebas comparativas de coste, formato JSON y consistencia de señal
+- mantener `openai/gpt-4.1` como default por calidad de razonamiento y estabilidad de salida JSON
+- evaluar alternativas solo con pruebas comparativas formales de coste, formato JSON y consistencia de señal
 
 ## Estado actual de la “memoria” de IA
 

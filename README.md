@@ -41,7 +41,7 @@ La guía para separar bot y frontend en Coolify está en `DEPLOY_COOLIFY.md`.
 ## Restricciones de seguridad incorporadas
 
 - `DRY_RUN=true` por defecto
-- `OPENROUTER_MODEL=openai/gpt-4.1-mini` por defecto para contener costes
+- `OPENROUTER_MODEL=openai/gpt-4.1` por defecto para priorizar calidad analítica y salida JSON estable
 - capital inicial limitado a 20 USD
 - máximo 10% del balance por operación
 - kill switch al 5% de pérdida acumulada

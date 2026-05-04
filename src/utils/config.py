@@ -74,7 +74,7 @@ def load_settings() -> Settings:
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-        openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1"),
         trading_symbol=primary_symbol,
         target_symbols=target_symbols,
         max_global_open_positions=int(os.getenv("MAX_GLOBAL_OPEN_POSITIONS", "1")),
