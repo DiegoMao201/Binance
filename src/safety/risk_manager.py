@@ -20,8 +20,11 @@ class RiskSnapshot:
 class RiskManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        # Hard ceiling on per-trade risk. Even if env says more, we cap at 2%.
-        self.effective_risk_per_trade = min(float(settings.max_risk_per_trade), 0.02)
+        # En esta estrategia el "riesgo" lo limita el SL fijo (1%), no el sizing.
+        # Sizing = porcentaje del equity disponible (POSITION_SIZE_PCT).
+        self.position_size_pct = max(0.0, min(float(getattr(settings, "position_size_pct", 1.0)), 1.0))
+        # Buffer 0.5% para cubrir fees + slippage en market orders.
+        self.notional_buffer = 0.995
 
     def evaluate(
         self,
@@ -41,7 +44,7 @@ class RiskManager:
         if hwm > 0:
             drawdown = max(0.0, (hwm - equity) / hwm)
 
-        max_trade_usd = round(equity * self.effective_risk_per_trade, 4)
+        max_trade_usd = round(equity * self.position_size_pct, 4)
         recommended_trade_usd = self.compute_trade_notional(equity)
         daily_pnl_pct = 0.0
         if baseline > 0:
@@ -59,17 +62,12 @@ class RiskManager:
         )
 
     def compute_trade_notional(self, equity_usd: float) -> float:
-        policy_notional = equity_usd * self.effective_risk_per_trade
         minimum_viable = self.settings.minimum_trade_usdt
-
         if equity_usd < minimum_viable:
             return 0.0
-
-        # Veteran rule: never let the floor minimum exceed 2x the policy size.
-        if minimum_viable > policy_notional * 2 and equity_usd < minimum_viable * 2:
-            return 0.0
-
-        return round(max(policy_notional, minimum_viable), 4)
+        # Usa el porcentaje configurado del equity, con buffer para fees.
+        target = equity_usd * self.position_size_pct * self.notional_buffer
+        return round(max(target, minimum_viable), 4)
 
     def compute_order_size(self, price: float, equity_usd: float) -> float:
         trade_capital = self.compute_trade_notional(equity_usd)

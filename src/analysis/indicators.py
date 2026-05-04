@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from src.utils.config import Settings
+
 
 def compute_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     data = frame.copy()
@@ -36,35 +38,61 @@ def compute_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     return data.dropna().reset_index(drop=True)
 
 
-def build_technical_signal(frame: pd.DataFrame) -> dict[str, str | float]:
+def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None) -> dict[str, object]:
     latest = frame.iloc[-1]
     previous = frame.iloc[-2]
 
+    # Lecturas crudas
+    rsi = float(latest["rsi"])
+    close = float(latest["close"])
+    open_price = float(latest["open"])
+    ema_slow = float(latest["ema_slow"])
+
+    # Umbrales (con fallback si no se pasa settings)
+    rsi_max_a = float(settings.scenario_a_rsi_max) if settings else 45.0
+    rsi_max_b = float(settings.scenario_b_rsi_max) if settings else 32.0
+
     bullish_cross = bool(previous["ema_fast"] <= previous["ema_slow"] and latest["ema_fast"] > latest["ema_slow"])
     bearish_cross = bool(previous["ema_fast"] >= previous["ema_slow"] and latest["ema_fast"] < latest["ema_slow"])
+    overbought = bool(rsi > 70)
+    green_candle = bool(close > open_price)
 
-    oversold = bool(latest["rsi"] < 30)
-    overbought = bool(latest["rsi"] > 70)
+    # Logica OR
+    scenario_a = bool(rsi <= rsi_max_a and close > ema_slow)            # Pullback con tendencia
+    scenario_b = bool(rsi <= rsi_max_b and green_candle)                # Sobreventa extrema con freno
 
-    if bullish_cross or oversold:
+    if scenario_a:
         signal = "buy"
+        scenario = "A"
+    elif scenario_b:
+        signal = "buy"
+        scenario = "B"
     elif bearish_cross or overbought:
         signal = "sell"
+        scenario = None
     else:
         signal = "hold"
+        scenario = None
 
     confidence = abs(latest["ema_fast"] - latest["ema_slow"]) / latest["close"]
     return {
         "signal": signal,
+        "scenario": scenario,
+        "scenario_a": scenario_a,
+        "scenario_b": scenario_b,
         "confidence": round(float(confidence), 4),
-        "rsi": round(float(latest["rsi"]), 2),
-        "close": round(float(latest["close"]), 4),
+        "rsi": round(rsi, 2),
+        "close": round(close, 4),
+        "open": round(open_price, 4),
+        "high": round(float(latest["high"]), 4),
+        "low": round(float(latest["low"]), 4),
+        "ema_slow": round(ema_slow, 4),
         "bb_width_pct": round(float(latest["bb_width_pct"]), 4),
         "atr_pct": round(float(latest["atr_pct"]), 4),
         "volume_ratio": round(float(latest["volume_ratio"]), 4),
         "ema_slow_slope": round(float(latest["ema_slow_slope"]), 6),
         "bullish_cross": bullish_cross,
         "bearish_cross": bearish_cross,
-        "oversold": oversold,
+        "green_candle": green_candle,
         "overbought": overbought,
     }

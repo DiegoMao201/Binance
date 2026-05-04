@@ -113,19 +113,17 @@ function buildChartData(payload) {
 
 function buildDecisionSummary(decision, technicalSignal) {
   const action = decision?.action || decision?.side || "hold";
-  if (action === "buy") return "El bot ve una compra defendible y ya consiguió validación mínima de técnica, IA y riesgo.";
-  if (action === "sell") return "El bot ve una salida defendible y ya consiguió validación mínima de técnica, IA y riesgo.";
-  if (decision?.reason?.includes("Kill Switch")) return "El bot se bloqueó para proteger capital porque la pérdida acumulada superó el límite permitido.";
+  if (action === "buy") return `El bot disparo entrada por Escenario ${decision?.scenario || technicalSignal?.scenario || "?"}.`;
+  if (action === "sell") return "El bot ve una salida defendible y ya consiguio validacion minima de tecnica, IA y riesgo.";
+  if (decision?.reason?.includes("Kill Switch")) return "El bot se bloqueo para proteger capital porque la perdida acumulada supero el limite permitido.";
 
   const blockers = [];
-  if (decision?.same_direction === false) blockers.push("la técnica y la IA no están de acuerdo");
-  if (decision?.ai_confident === false) blockers.push("la confianza de la IA sigue baja");
-  if (decision?.technical_confident === false) blockers.push("la fuerza técnica aún es insuficiente");
-  if (decision?.volatility_ready === false) blockers.push("la volatilidad útil no alcanza el rango deseado");
+  if (decision?.executable_signal === false) blockers.push("no se cumple Escenario A ni B");
+  if (decision?.ai_confident === false) blockers.push(`la confianza de la IA esta por debajo del umbral (${formatPercent(decision?.ai_confidence)})`);
+  if (decision?.volatility_ready === false) blockers.push("la volatilidad util no alcanza el rango deseado");
   if (decision?.volume_ready === false) blockers.push("el volumen no respalda la entrada");
-  if (decision?.trend_ready === false && technicalSignal?.signal !== "hold") blockers.push("la tendencia principal todavía no acompaña");
   if (decision?.cooldown_active) blockers.push("el bot sigue en cooldown");
-  if (!blockers.length) return "El bot está observando y espera una ventaja más clara antes de exponer capital.";
+  if (!blockers.length) return "El bot esta observando y espera una ventaja mas clara antes de exponer capital.";
   return `El bot no entra porque ${blockers.join(", ")}.`;
 }
 
@@ -334,6 +332,7 @@ export default function DashboardClient({ initialData }) {
           <MetricCard label="PnL acumulado" value={`${formatNumber(portfolio.realized_pnl_usdt)} USDT`} tone={Number(portfolio.realized_pnl_usdt) >= 0 ? "buy" : "sell"} subvalue={formatPercent(portfolio.accumulated_pnl_pct)} />
           <MetricCard label="Win rate" value={`${formatNumber(portfolio.win_rate_pct, 2)}%`} subvalue={`${portfolio.wins || 0} W / ${portfolio.losses || 0} L`} />
           <MetricCard label="Max drawdown" value={formatPercent(portfolio.max_drawdown_pct)} tone={Number(portfolio.max_drawdown_pct) >= 0.02 ? "sell" : "buy"} subvalue={`HWM ${formatNumber(portfolio.high_water_mark_usdt)}`} />
+          <MetricCard label="Velocidad DD" value={`${formatNumber((Number(portfolio.drawdown_velocity_seconds) || 0) / 60, 1)} min`} tone={Number(portfolio.max_drawdown_pct) >= 0.02 ? "sell" : "neutral"} subvalue={`Ultimo HWM ${formatDate(portfolio.last_hwm_at)}`} />
           <MetricCard label="Inventario spot" value={`${formatNumber(portfolio?.asset_holdings?.free, 6)} ${portfolio?.asset_holdings?.asset || ""}`} subvalue={`Total ${formatNumber(portfolio?.asset_holdings?.total, 6)}`} />
           <MetricCard label="Pre-flight" value={preFlight.ok ? "VERDE" : "BLOQUEADO"} tone={preFlight.ok ? "buy" : "sell"} subvalue={preFlight.detail || "Sin chequeo"} />
           <MetricCard label="Kill Switch" value={risk.kill_switch_triggered ? "ACTIVO" : "SEGURO"} tone={risk.kill_switch_triggered ? "sell" : "buy"} />
@@ -400,15 +399,15 @@ export default function DashboardClient({ initialData }) {
 
         <section className="details-grid">
           <div className="panel">
-            <div className="panel-header"><h3>Guardrails</h3><span>Semáforos de entrada</span></div>
+            <div className="panel-header"><h3>Guardrails (Logica OR)</h3><span>Semaforos de entrada</span></div>
             <div className="pill-grid">
-              <StatusPill label={`Dirección ${decision.same_direction ? "OK" : "NO"}`} active={Boolean(decision.same_direction)} />
-              <StatusPill label={`IA ${decision.ai_confident ? "OK" : "NO"}`} active={Boolean(decision.ai_confident)} />
-              <StatusPill label={`Técnica ${decision.technical_confident ? "OK" : "NO"}`} active={Boolean(decision.technical_confident)} />
+              <StatusPill label={`Escenario A ${decision.scenario_a ? "OK" : "NO"}`} active={Boolean(decision.scenario_a)} />
+              <StatusPill label={`Escenario B ${decision.scenario_b ? "OK" : "NO"}`} active={Boolean(decision.scenario_b)} />
+              <StatusPill label={`IA >= 0.65 ${decision.ai_confident ? "OK" : "NO"}`} active={Boolean(decision.ai_confident)} />
               <StatusPill label={`Volatilidad ${decision.volatility_ready ? "OK" : "NO"}`} active={Boolean(decision.volatility_ready)} />
               <StatusPill label={`Volumen ${decision.volume_ready ? "OK" : "NO"}`} active={Boolean(decision.volume_ready)} />
-              <StatusPill label={`Tendencia ${decision.trend_ready ? "OK" : "NO"}`} active={Boolean(decision.trend_ready)} />
               <StatusPill label={`Cooldown ${decision.cooldown_active ? "ACTIVO" : "LIBRE"}`} active={!decision.cooldown_active} />
+              <StatusPill label={`Trigger ${decision.executable_signal ? "OK" : "NO"}`} active={Boolean(decision.executable_signal)} />
             </div>
           </div>
           <div className="panel">
@@ -462,22 +461,75 @@ export default function DashboardClient({ initialData }) {
           <div className="panel-header"><h3>Resultado por operación</h3><span>{closedTrades.length} cierres</span></div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Apertura</th><th>Cierre</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Motivo</th><th>PnL USDT</th><th>PnL %</th></tr></thead>
+              <thead><tr><th>Apertura</th><th>Cierre</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>Motivo</th><th>MAE %</th><th>MFE %</th><th>PnL USDT</th><th>PnL %</th></tr></thead>
               <tbody>
-                {closedTrades.length === 0 ? <tr><td colSpan="8" className="empty">Sin cierres todavía. El bot solo mostrará ganancia o pérdida cuando una operación alcance TP o SL.</td></tr> : [...closedTrades].reverse().map((trade, index) => (
+                {closedTrades.length === 0 ? <tr><td colSpan="11" className="empty">Sin cierres todavía. El bot solo mostrará ganancia o pérdida cuando una operación alcance TP o SL.</td></tr> : [...closedTrades].reverse().map((trade, index) => (
                   <tr key={`${trade.closed_at}-${index}`}>
                     <td>{formatDate(trade.opened_at)}</td>
                     <td>{formatDate(trade.closed_at)}</td>
+                    <td>{trade.scenario || "-"}</td>
                     <td className={trade.side === "buy" ? "tone-buy" : "tone-sell"}>{trade.side || "-"}</td>
                     <td>{formatNumber(trade.entry_price, 4)}</td>
                     <td>{formatNumber(trade.exit_price, 4)}</td>
                     <td>{trade.exit_reason || "-"}</td>
+                    <td className="tone-sell">{formatPercent(trade.mae_pct)}</td>
+                    <td className="tone-buy">{formatPercent(trade.mfe_pct)}</td>
                     <td className={Number(trade.pnl_usdt) >= 0 ? "tone-buy" : "tone-sell"}>{formatNumber(trade.pnl_usdt, 4)}</td>
                     <td className={Number(trade.pnl_pct) >= 0 ? "tone-buy" : "tone-sell"}>{formatPercent(trade.pnl_pct)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        <section className="details-grid">
+          <div className="panel">
+            <div className="panel-header"><h3>Telemetría por escenario</h3><span>Lógica OR (A vs B)</span></div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Escenario</th><th>Trades</th><th>W / L</th><th>Win rate</th><th>PnL USDT</th><th>MAE prom.</th><th>MFE prom.</th></tr></thead>
+                <tbody>
+                  {["A", "B"].map((label) => {
+                    const stats = portfolio?.scenario_stats?.[label] || {};
+                    return (
+                      <tr key={label}>
+                        <td><strong>Escenario {label}</strong> <span className="secondary-text">{label === "A" ? "Pullback" : "Sobreventa extrema"}</span></td>
+                        <td>{stats.trades || 0}</td>
+                        <td>{stats.wins || 0} / {stats.losses || 0}</td>
+                        <td>{formatNumber(stats.win_rate_pct, 1)}%</td>
+                        <td className={Number(stats.pnl_usdt) >= 0 ? "tone-buy" : "tone-sell"}>{formatNumber(stats.pnl_usdt, 4)}</td>
+                        <td className="tone-sell">{formatPercent(stats.avg_mae_pct)}</td>
+                        <td className="tone-buy">{formatPercent(stats.avg_mfe_pct)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="panel">
+            <div className="panel-header"><h3>Posiciones abiertas</h3><span>{openPositions.length} en curso</span></div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Apertura</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>SL</th><th>TP</th><th>MAE %</th><th>MFE %</th><th>PnL no real.</th></tr></thead>
+                <tbody>
+                  {openPositions.length === 0 ? <tr><td colSpan="9" className="empty">Sin posiciones abiertas.</td></tr> : openPositions.map((p, i) => (
+                    <tr key={`${p.opened_at}-${i}`}>
+                      <td>{formatDate(p.opened_at)}</td>
+                      <td>{p.scenario || "-"}</td>
+                      <td className={p.side === "buy" ? "tone-buy" : "tone-sell"}>{p.side}</td>
+                      <td>{formatNumber(p.entry_price, 4)}</td>
+                      <td>{formatNumber(p.stop_loss, 4)}</td>
+                      <td>{formatNumber(p.take_profit, 4)}</td>
+                      <td className="tone-sell">{formatPercent(p.mae_pct)}</td>
+                      <td className="tone-buy">{formatPercent(p.mfe_pct)}</td>
+                      <td className={Number(p.unrealized_pnl_usdt) >= 0 ? "tone-buy" : "tone-sell"}>{formatNumber(p.unrealized_pnl_usdt, 4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
       </section>

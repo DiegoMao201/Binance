@@ -68,6 +68,9 @@ def _build_signal_event(technical_signal: dict, ai_signal: dict, decision: dict)
         "technical_signal": technical_signal.get("signal", "hold"),
         "technical_rsi": technical_signal.get("rsi", 0),
         "technical_price": technical_signal.get("close", 0),
+        "scenario": technical_signal.get("scenario"),
+        "scenario_a": technical_signal.get("scenario_a", False),
+        "scenario_b": technical_signal.get("scenario_b", False),
         "ai_signal": ai_signal.get("signal", "hold"),
         "ai_confidence": ai_signal.get("confidence", 0),
         "decision_action": decision.get("action", decision.get("side", "hold")),
@@ -95,53 +98,43 @@ def _is_in_cooldown(order_history: list[dict[str, Any]], cooldown_minutes: int) 
 
 def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_history: list[dict[str, Any]]) -> dict[str, Any]:
     signal = technical_signal["signal"]
-    same_direction = signal == ai_signal.get("signal")
+    scenario = technical_signal.get("scenario")
+    same_direction = signal == ai_signal.get("signal") if signal == "buy" else True
     ai_confidence = float(ai_signal.get("confidence", 0.0))
     ai_confident = ai_confidence >= settings.ai_confidence_threshold
-    technical_confident = float(technical_signal.get("confidence", 0.0)) >= settings.technical_confidence_threshold
-    volatility_ready = (
-        settings.min_atr_pct <= float(technical_signal.get("atr_pct", 0.0)) <= settings.max_atr_pct
-        and float(technical_signal.get("bb_width_pct", 0.0)) >= settings.min_bb_width_pct
-    )
+    # Volatilidad: solo exigimos piso de ATR (regla del usuario), techo opcional.
+    atr_pct = float(technical_signal.get("atr_pct", 0.0))
+    volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
     volume_ready = float(technical_signal.get("volume_ratio", 0.0)) >= settings.min_volume_ratio
-    trend_ready = (
-        (signal == "buy" and float(technical_signal.get("ema_slow_slope", 0.0)) > 0)
-        or (signal == "sell" and float(technical_signal.get("ema_slow_slope", 0.0)) < 0)
-    )
     cooldown_active = _is_in_cooldown(order_history, settings.trade_cooldown_minutes)
-    executable_signal = signal in {"buy", "sell"}
+    executable_signal = signal == "buy" and scenario in {"A", "B"}
 
     return {
+        "scenario": scenario,
+        "scenario_a": bool(technical_signal.get("scenario_a")),
+        "scenario_b": bool(technical_signal.get("scenario_b")),
         "same_direction": same_direction,
         "ai_confident": ai_confident,
         "ai_confidence": ai_confidence,
-        "technical_confident": technical_confident,
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
-        "trend_ready": trend_ready,
         "cooldown_active": cooldown_active,
         "executable_signal": executable_signal,
     }
 
 
 def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any]) -> tuple[bool, str]:
-    """Lazy-AI gate: only call the model when the technical layer alone is already candidate."""
-    if technical_signal.get("signal") != "buy":
-        return False, "tecnica no es buy"
-    technical_confidence = float(technical_signal.get("confidence", 0.0))
-    if technical_confidence < settings.technical_confidence_threshold:
-        return False, "confianza tecnica insuficiente"
+    """Lazy-AI gate: solo se consulta IA si Escenario A o B disparan y los filtros base se cumplen."""
+    scenario = technical_signal.get("scenario")
+    if scenario not in {"A", "B"}:
+        return False, "sin escenario A ni B"
     volume_ratio = float(technical_signal.get("volume_ratio", 0.0))
     if volume_ratio < settings.min_volume_ratio:
         return False, "volumen insuficiente"
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     if not (settings.min_atr_pct <= atr_pct <= settings.max_atr_pct):
         return False, "volatilidad fuera de rango"
-    if float(technical_signal.get("ema_slow_slope", 0.0)) <= 0:
-        return False, "tendencia no acompana"
-    if not (technical_signal.get("bullish_cross") or technical_signal.get("oversold")):
-        return False, "sin cruce alcista ni sobreventa"
-    return True, "candidato tecnico valido"
+    return True, f"candidato escenario {scenario}"
 
 
 def _settle_open_positions(
@@ -165,6 +158,31 @@ def _settle_open_positions(
         amount = float(position.get("amount", 0.0))
         stop_loss = float(position.get("stop_loss", 0.0))
         take_profit = float(position.get("take_profit", 0.0))
+
+        # ---- MAE / MFE telemetry (porcentajes y absolutos en USDT) ----
+        if entry_price > 0 and amount > 0:
+            if side == "buy":
+                adverse_price = candle_low
+                favorable_price = candle_high
+                adverse_pct = (entry_price - adverse_price) / entry_price
+                favorable_pct = (favorable_price - entry_price) / entry_price
+            else:
+                adverse_price = candle_high
+                favorable_price = candle_low
+                adverse_pct = (adverse_price - entry_price) / entry_price
+                favorable_pct = (entry_price - favorable_price) / entry_price
+
+            adverse_pct = max(0.0, adverse_pct)
+            favorable_pct = max(0.0, favorable_pct)
+            adverse_usdt = adverse_pct * entry_price * amount
+            favorable_usdt = favorable_pct * entry_price * amount
+
+            position["mae_pct"] = round(max(float(position.get("mae_pct", 0.0)), adverse_pct), 6)
+            position["mfe_pct"] = round(max(float(position.get("mfe_pct", 0.0)), favorable_pct), 6)
+            position["mae_usdt"] = round(max(float(position.get("mae_usdt", 0.0)), adverse_usdt), 4)
+            position["mfe_usdt"] = round(max(float(position.get("mfe_usdt", 0.0)), favorable_usdt), 4)
+        # ---------------------------------------------------------------
+
         exit_price: float | None = None
         exit_reason: str | None = None
 
@@ -227,6 +245,7 @@ def _build_portfolio_summary(
     open_positions: list[dict[str, Any]],
     closed_trades: list[dict[str, Any]],
     asset_holdings: dict[str, Any] | None = None,
+    equity_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     realized_pnl = round(sum(float(item.get("pnl_usdt", 0.0)) for item in closed_trades), 4)
     unrealized_pnl = round(sum(float(item.get("unrealized_pnl_usdt", 0.0)) for item in open_positions), 4)
@@ -238,6 +257,52 @@ def _build_portfolio_summary(
     accumulated_pnl_pct = 0.0
     if settings.initial_capital_usd > 0:
         accumulated_pnl_pct = round(realized_pnl / settings.initial_capital_usd, 6)
+
+    # --- Telemetria por escenario ---
+    scenario_stats: dict[str, dict[str, Any]] = {}
+    for label in ("A", "B"):
+        bucket = [t for t in closed_trades if t.get("scenario") == label]
+        if not bucket:
+            scenario_stats[label] = {"trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0, "pnl_usdt": 0.0, "avg_mae_pct": 0.0, "avg_mfe_pct": 0.0}
+            continue
+        s_wins = sum(1 for t in bucket if float(t.get("pnl_usdt", 0.0)) > 0)
+        s_losses = sum(1 for t in bucket if float(t.get("pnl_usdt", 0.0)) < 0)
+        s_pnl = round(sum(float(t.get("pnl_usdt", 0.0)) for t in bucket), 4)
+        avg_mae = round(sum(float(t.get("mae_pct", 0.0)) for t in bucket) / len(bucket), 6)
+        avg_mfe = round(sum(float(t.get("mfe_pct", 0.0)) for t in bucket) / len(bucket), 6)
+        scenario_stats[label] = {
+            "trades": len(bucket),
+            "wins": s_wins,
+            "losses": s_losses,
+            "win_rate_pct": round((s_wins / len(bucket)) * 100.0, 2),
+            "pnl_usdt": s_pnl,
+            "avg_mae_pct": avg_mae,
+            "avg_mfe_pct": avg_mfe,
+        }
+
+    # --- Velocidad de drawdown: tiempo desde el ultimo HWM nuevo ---
+    drawdown_velocity_seconds = 0.0
+    last_hwm_at: str | None = None
+    if equity_history:
+        peak = 0.0
+        peak_ts: str | None = None
+        for item in equity_history:
+            try:
+                hwm = float(item.get("high_water_mark", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if hwm > peak:
+                peak = hwm
+                peak_ts = item.get("timestamp")
+        if peak_ts:
+            last_hwm_at = peak_ts
+            try:
+                drawdown_velocity_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(peak_ts)).total_seconds(),
+                )
+            except ValueError:
+                drawdown_velocity_seconds = 0.0
 
     return {
         "mode": "dry_run" if settings.dry_run else "live",
@@ -255,6 +320,9 @@ def _build_portfolio_summary(
         "high_water_mark_usdt": risk_snapshot.high_water_mark,
         "max_drawdown_pct": risk_snapshot.drawdown_pct,
         "asset_holdings": asset_holdings or {},
+        "scenario_stats": scenario_stats,
+        "drawdown_velocity_seconds": round(drawdown_velocity_seconds, 1),
+        "last_hwm_at": last_hwm_at,
     }
 
 
@@ -392,7 +460,7 @@ def run_cycle() -> None:
     try:
         raw_frame = client.fetch_ohlcv(limit=200)
         enriched_frame = compute_indicators(raw_frame)
-        technical_signal = build_technical_signal(enriched_frame)
+        technical_signal = build_technical_signal(enriched_frame, settings)
 
         order_history = load_history(settings.order_history_file)
         open_positions = load_history(settings.open_positions_file)
@@ -480,7 +548,7 @@ def run_cycle() -> None:
                     technical_signal=technical_signal,
                     ai_signal=ai_signal,
                     risk=asdict(risk_snapshot),
-                    portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings),
+                    portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings, equity_history),
                     decision=decision,
                     order_history=order_history,
                     open_positions=open_positions,
@@ -495,14 +563,11 @@ def run_cycle() -> None:
 
         if all(
             [
-                guardrails["same_direction"],
+                guardrails["executable_signal"],
                 guardrails["ai_confident"],
-                guardrails["technical_confident"],
                 guardrails["volatility_ready"],
                 guardrails["volume_ready"],
-                guardrails["trend_ready"],
                 not guardrails["cooldown_active"],
-                guardrails["executable_signal"],
                 not has_open_position,
                 str(technical_signal["signal"]) == "buy",
                 ai_signal.get("consulted", False),
@@ -513,6 +578,8 @@ def run_cycle() -> None:
                 market_price=float(technical_signal["close"]),
                 risk=risk_snapshot,
             )
+            decision["scenario"] = technical_signal.get("scenario")
+            decision["entry_rsi"] = technical_signal.get("rsi")
             append_history(settings.order_history_file, decision)
             order_history = load_history(settings.order_history_file)
 
@@ -538,6 +605,13 @@ def run_cycle() -> None:
                         "status": "open",
                         "mode": decision.get("mode"),
                         "reconciled_holdings": decision.get("reconciled_holdings"),
+                        "scenario": technical_signal.get("scenario"),
+                        "entry_rsi": technical_signal.get("rsi"),
+                        "ai_confidence": ai_signal.get("confidence"),
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
+                        "mae_usdt": 0.0,
+                        "mfe_usdt": 0.0,
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)
@@ -562,7 +636,7 @@ def run_cycle() -> None:
                 technical_signal=technical_signal,
                 ai_signal=ai_signal,
                 risk=asdict(risk_snapshot),
-                portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings),
+                portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings, equity_history),
                 decision=decision,
                 order_history=order_history,
                 open_positions=open_positions,

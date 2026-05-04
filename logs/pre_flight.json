@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-05-04T03:19:37.531502+00:00",
+  "dry_run": false,
+  "api_keys_present": true,
+  "control_file_ok": true,
+  "binance_reachable": true,
+  "balance_ok": true,
+  "balance_usdt": 20.24,
+  "minimum_required": 11.11,
+  "ok": true,
+  "detail": "Pre-flight OK para operar live."
+}
