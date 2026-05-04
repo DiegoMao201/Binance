@@ -62,10 +62,19 @@ class BinanceDataClient:
         symbol = self.settings.trading_symbol
         return symbol.split("/")[1] if "/" in symbol else "USDT"
 
-    def fetch_ohlcv(self, limit: int = 200) -> pd.DataFrame:
+    def base_asset_for(self, symbol: str | None = None) -> str:
+        target = symbol or self.settings.trading_symbol
+        return target.split("/")[0] if "/" in target else target
+
+    def quote_asset_for(self, symbol: str | None = None) -> str:
+        target = symbol or self.settings.trading_symbol
+        return target.split("/")[1] if "/" in target else "USDT"
+
+    def fetch_ohlcv(self, limit: int = 200, symbol: str | None = None) -> pd.DataFrame:
+        target = symbol or self.settings.trading_symbol
         candles = self._with_retries(
             lambda: self.public_exchange.fetch_ohlcv(
-                self.settings.trading_symbol,
+                target,
                 timeframe=self.settings.timeframe,
                 limit=limit,
             )
@@ -107,10 +116,10 @@ class BinanceDataClient:
             return self.settings.initial_capital_usd
 
         balance = self._fetch_full_balance()
-        return self._extract_balance_value(balance, self.quote_asset, "free")
+        return self._extract_balance_value(balance, "USDT", "free")
 
-    def fetch_asset_balance(self, asset: str | None = None) -> dict[str, float]:
-        target = asset or self.base_asset
+    def fetch_asset_balance(self, asset: str | None = None, symbol: str | None = None) -> dict[str, float]:
+        target = asset or self.base_asset_for(symbol)
         if self.settings.dry_run or not self.settings.binance_api_key:
             return {"asset": target, "free": 0.0, "used": 0.0, "total": 0.0}
 
@@ -123,8 +132,9 @@ class BinanceDataClient:
             "total": float(info.get("total", 0.0) or 0.0),
         }
 
-    def fetch_ticker_price(self) -> float:
-        ticker = self._with_retries(lambda: self.public_exchange.fetch_ticker(self.settings.trading_symbol))
+    def fetch_ticker_price(self, symbol: str | None = None) -> float:
+        target = symbol or self.settings.trading_symbol
+        ticker = self._with_retries(lambda: self.public_exchange.fetch_ticker(target))
         return float(ticker.get("last") or ticker.get("close") or 0.0)
 
     def ping(self) -> bool:
@@ -134,7 +144,8 @@ class BinanceDataClient:
         except BinanceClientError:
             return False
 
-    def create_market_order(self, side: str, amount: float) -> dict[str, Any]:
+    def create_market_order(self, side: str, amount: float, symbol: str | None = None) -> dict[str, Any]:
+        target = symbol or self.settings.trading_symbol
         return self._with_retries(
-            lambda: self.private_exchange.create_market_order(self.settings.trading_symbol, side, amount)
+            lambda: self.private_exchange.create_market_order(target, side, amount)
         )

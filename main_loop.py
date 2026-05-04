@@ -124,7 +124,7 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
 
 
 def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any]) -> tuple[bool, str]:
-    """Lazy-AI gate: solo se consulta IA si Escenario A o B disparan y los filtros base se cumplen."""
+
     scenario = technical_signal.get("scenario")
     if scenario not in {"A", "B"}:
         return False, "sin escenario A ni B"
@@ -137,9 +137,40 @@ def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any
     return True, f"candidato escenario {scenario}"
 
 
+def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_lock: bool) -> dict[str, Any]:
+    """Resumen para el dashboard del estado de cada ticker en el ciclo actual."""
+    ts = scan.get("technical_signal", {})
+    candidate = bool(scan.get("candidate"))
+    if blocked_by_lock:
+        status = "locked"
+    elif candidate:
+        status = "candidate"
+    elif ts.get("scenario") in {"A", "B"}:
+        status = "scenario_only"
+    else:
+        status = "waiting"
+    candle = scan.get("latest_candle") or {}
+    return {
+        "symbol": scan.get("symbol"),
+        "status": status,
+        "scenario": ts.get("scenario"),
+        "scenario_a": bool(ts.get("scenario_a")),
+        "scenario_b": bool(ts.get("scenario_b")),
+        "rsi": ts.get("rsi"),
+        "close": ts.get("close"),
+        "atr_pct": ts.get("atr_pct"),
+        "volume_ratio": ts.get("volume_ratio"),
+        "ema_slow": ts.get("ema_slow"),
+        "green_candle": ts.get("green_candle"),
+        "candidate_reason": scan.get("candidate_reason"),
+        "blocked_by_lock": blocked_by_lock,
+        "candle_timestamp": str(candle.get("timestamp")) if candle else None,
+    }
+
+
 def _settle_open_positions(
     open_positions: list[dict[str, Any]],
-    latest_candle: dict[str, Any],
+    candles_by_symbol: dict[str, dict[str, Any]],
     *,
     live_mode: bool,
     executor: TradeExecutor,
@@ -147,12 +178,20 @@ def _settle_open_positions(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     remaining_positions: list[dict[str, Any]] = []
     closed_trades: list[dict[str, Any]] = []
-    candle_high = float(latest_candle.get("high", 0.0))
-    candle_low = float(latest_candle.get("low", 0.0))
-    candle_close = float(latest_candle.get("close", 0.0))
-    closed_at = str(latest_candle.get("timestamp"))
 
     for position in open_positions:
+        symbol = position.get("symbol")
+        latest_candle = candles_by_symbol.get(symbol) if symbol else None
+        if not latest_candle:
+            # Sin vela disponible para este simbolo; preservamos la posicion sin tocar.
+            remaining_positions.append(position)
+            continue
+
+        candle_high = float(latest_candle.get("high", 0.0))
+        candle_low = float(latest_candle.get("low", 0.0))
+        candle_close = float(latest_candle.get("close", 0.0))
+        closed_at = str(latest_candle.get("timestamp"))
+
         side = position.get("side")
         entry_price = float(position.get("entry_price", 0.0))
         amount = float(position.get("amount", 0.0))
@@ -258,19 +297,16 @@ def _build_portfolio_summary(
     if settings.initial_capital_usd > 0:
         accumulated_pnl_pct = round(realized_pnl / settings.initial_capital_usd, 6)
 
-    # --- Telemetria por escenario ---
-    scenario_stats: dict[str, dict[str, Any]] = {}
-    for label in ("A", "B"):
-        bucket = [t for t in closed_trades if t.get("scenario") == label]
+    # --- Telemetria por escenario (global) ---
+    def _bucket_stats(bucket: list[dict[str, Any]]) -> dict[str, Any]:
         if not bucket:
-            scenario_stats[label] = {"trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0, "pnl_usdt": 0.0, "avg_mae_pct": 0.0, "avg_mfe_pct": 0.0}
-            continue
+            return {"trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0, "pnl_usdt": 0.0, "avg_mae_pct": 0.0, "avg_mfe_pct": 0.0}
         s_wins = sum(1 for t in bucket if float(t.get("pnl_usdt", 0.0)) > 0)
         s_losses = sum(1 for t in bucket if float(t.get("pnl_usdt", 0.0)) < 0)
         s_pnl = round(sum(float(t.get("pnl_usdt", 0.0)) for t in bucket), 4)
         avg_mae = round(sum(float(t.get("mae_pct", 0.0)) for t in bucket) / len(bucket), 6)
         avg_mfe = round(sum(float(t.get("mfe_pct", 0.0)) for t in bucket) / len(bucket), 6)
-        scenario_stats[label] = {
+        return {
             "trades": len(bucket),
             "wins": s_wins,
             "losses": s_losses,
@@ -278,6 +314,22 @@ def _build_portfolio_summary(
             "pnl_usdt": s_pnl,
             "avg_mae_pct": avg_mae,
             "avg_mfe_pct": avg_mfe,
+        }
+
+    scenario_stats: dict[str, dict[str, Any]] = {
+        label: _bucket_stats([t for t in closed_trades if t.get("scenario") == label])
+        for label in ("A", "B")
+    }
+
+    # --- Telemetria por simbolo ---
+    symbols_in_history = sorted({t.get("symbol") for t in closed_trades if t.get("symbol")})
+    per_symbol_stats: dict[str, dict[str, Any]] = {}
+    for sym in symbols_in_history:
+        sym_trades = [t for t in closed_trades if t.get("symbol") == sym]
+        per_symbol_stats[sym] = {
+            "global": _bucket_stats(sym_trades),
+            "A": _bucket_stats([t for t in sym_trades if t.get("scenario") == "A"]),
+            "B": _bucket_stats([t for t in sym_trades if t.get("scenario") == "B"]),
         }
 
     # --- Velocidad de drawdown: tiempo desde el ultimo HWM nuevo ---
@@ -321,17 +373,20 @@ def _build_portfolio_summary(
         "max_drawdown_pct": risk_snapshot.drawdown_pct,
         "asset_holdings": asset_holdings or {},
         "scenario_stats": scenario_stats,
+        "per_symbol_stats": per_symbol_stats,
         "drawdown_velocity_seconds": round(drawdown_velocity_seconds, 1),
         "last_hwm_at": last_hwm_at,
     }
 
 
-def _compute_equity(balance_usd: float, open_positions: list[dict[str, Any]], mark_price: float) -> float:
+def _compute_equity(balance_usd: float, open_positions: list[dict[str, Any]], mark_prices: dict[str, float]) -> float:
     open_value = 0.0
     for position in open_positions:
         amount = float(position.get("amount") or 0.0)
         entry = float(position.get("entry_price") or 0.0)
         side = position.get("side")
+        symbol = position.get("symbol")
+        mark_price = float(mark_prices.get(symbol, entry) or entry)
         if side == "buy":
             open_value += amount * mark_price
         elif side == "sell":
@@ -446,6 +501,52 @@ def _load_recent_ai_signal(settings) -> dict[str, Any] | None:
     return cached_ai_signal
 
 
+def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Estructura compacta para exponer la posicion activa al dashboard."""
+    if not open_positions:
+        return None
+    p = open_positions[0]
+    return {
+        "symbol": p.get("symbol"),
+        "side": p.get("side"),
+        "scenario": p.get("scenario"),
+        "entry_price": p.get("entry_price"),
+        "stop_loss": p.get("stop_loss"),
+        "take_profit": p.get("take_profit"),
+        "amount": p.get("amount"),
+        "notional_usdt": p.get("notional_usdt"),
+        "opened_at": p.get("opened_at"),
+        "mae_pct": p.get("mae_pct"),
+        "mfe_pct": p.get("mfe_pct"),
+        "mae_usdt": p.get("mae_usdt"),
+        "mfe_usdt": p.get("mfe_usdt"),
+        "unrealized_pnl_usdt": p.get("unrealized_pnl_usdt"),
+        "mark_price": p.get("mark_price"),
+        "ai_confidence": p.get("ai_confidence"),
+    }
+
+
+def _scan_symbol(
+    symbol: str,
+    settings: Settings,
+    client: BinanceDataClient,
+    order_history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Lee OHLCV y construye se\u00f1al tecnica para un simbolo concreto."""
+    raw_frame = client.fetch_ohlcv(limit=200, symbol=symbol)
+    enriched_frame = compute_indicators(raw_frame)
+    technical_signal = build_technical_signal(enriched_frame, settings)
+    candidate, candidate_reason = _is_pre_signal_candidate(settings, technical_signal)
+    return {
+        "symbol": symbol,
+        "frame": enriched_frame,
+        "latest_candle": enriched_frame.iloc[-1].to_dict(),
+        "technical_signal": technical_signal,
+        "candidate": candidate,
+        "candidate_reason": candidate_reason,
+    }
+
+
 def run_cycle() -> None:
     settings = load_settings()
     logger = setup_logger(settings)
@@ -454,24 +555,44 @@ def run_cycle() -> None:
     executor = TradeExecutor(settings, client, risk_manager, logger)
     ai_analyzer = OpenRouterAnalyzer(settings, logger)
 
-    logger.info("Iniciando ciclo para %s en %s", settings.trading_symbol, settings.timeframe)
+    target_symbols = list(settings.target_symbols) or [settings.trading_symbol]
+    logger.info(
+        "Iniciando ciclo multi-ticker (%s) en %s. MAX_OPEN=%s",
+        ", ".join(target_symbols),
+        settings.timeframe,
+        settings.max_global_open_positions,
+    )
     write_heartbeat("online", "Ciclo iniciado")
 
     try:
-        raw_frame = client.fetch_ohlcv(limit=200)
-        enriched_frame = compute_indicators(raw_frame)
-        technical_signal = build_technical_signal(enriched_frame, settings)
-
         order_history = load_history(settings.order_history_file)
         open_positions = load_history(settings.open_positions_file)
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
-
-        latest_candle = enriched_frame.iloc[-1].to_dict()
         live_mode = not settings.dry_run
+
+        # 1) Escaneo SECUENCIAL multi-ticker (rate-limit safe gracias a enableRateLimit de ccxt).
+        scan_results: list[dict[str, Any]] = []
+        for symbol in target_symbols:
+            try:
+                scan_results.append(_scan_symbol(symbol, settings, client, order_history))
+            except BinanceClientError as exc:
+                logger.error("Fallo OHLCV para %s: %s", symbol, exc)
+                scan_results.append({
+                    "symbol": symbol,
+                    "frame": None,
+                    "latest_candle": {},
+                    "technical_signal": {"signal": "hold", "scenario": None, "rsi": 0.0, "close": 0.0, "atr_pct": 0.0, "volume_ratio": 0.0},
+                    "candidate": False,
+                    "candidate_reason": f"OHLCV error: {exc}",
+                })
+
+        candles_by_symbol = {s["symbol"]: s["latest_candle"] for s in scan_results if s.get("latest_candle")}
+
+        # 2) Liquidacion de posiciones abiertas con la vela mas reciente de su simbolo.
         open_positions, newly_closed_trades = _settle_open_positions(
             open_positions,
-            latest_candle,
+            candles_by_symbol,
             live_mode=live_mode,
             executor=executor,
             logger=logger,
@@ -480,24 +601,12 @@ def run_cycle() -> None:
             closed_trades.extend(newly_closed_trades)
             persist_history(settings.closed_trades_file, closed_trades)
         persist_history(settings.open_positions_file, open_positions)
-        has_open_position = bool(open_positions)
 
-        candidate, candidate_reason = _is_pre_signal_candidate(settings, technical_signal)
-        if candidate and not has_open_position:
-            ai_signal = _load_recent_ai_signal(settings)
-            if ai_signal is None:
-                ai_signal = ai_analyzer.analyze(enriched_frame)
-                ai_signal.setdefault("consulted", True)
-            else:
-                logger.info(
-                    "Reutilizando se\u00f1al de IA en cach\u00e9 (%ss de antig\u00fcedad).",
-                    ai_signal.get("cached_age_seconds", 0),
-                )
-        else:
-            ai_signal = dict(AI_NOT_CONSULTED)
-            ai_signal["rationale"] = f"Lazy AI: {candidate_reason}."
-            logger.info("Lazy AI activo (%s); no se consulta OpenRouter este ciclo.", candidate_reason)
+        # 3) MUTEX GLOBAL: si hay posicion activa en cualquier ticker, no abrimos otra.
+        global_lock = len(open_positions) >= settings.max_global_open_positions
+        active_symbol = open_positions[0].get("symbol") if open_positions else None
 
+        # 4) Saldo + holdings.
         try:
             balance_usd = client.fetch_balance_usd()
         except BinanceClientError as exc:
@@ -506,15 +615,15 @@ def run_cycle() -> None:
             return
 
         asset_holdings: dict[str, Any] = {}
-        if live_mode and settings.binance_api_key:
+        if live_mode and settings.binance_api_key and active_symbol:
             try:
-                asset_holdings = client.fetch_asset_balance()
+                asset_holdings = client.fetch_asset_balance(symbol=active_symbol)
             except BinanceClientError as exc:
                 logger.error("No se pudo leer holdings: %s", exc)
-                asset_holdings = {"asset": client.base_asset, "free": 0.0, "used": 0.0, "total": 0.0, "error": str(exc)}
+                asset_holdings = {"asset": client.base_asset_for(active_symbol), "free": 0.0, "used": 0.0, "total": 0.0, "error": str(exc)}
 
-        mark_price = float(latest_candle.get("close") or 0.0)
-        equity_usd = _compute_equity(balance_usd, open_positions, mark_price)
+        mark_prices = {sym: float(c.get("close") or 0.0) for sym, c in candles_by_symbol.items()}
+        equity_usd = _compute_equity(balance_usd, open_positions, mark_prices)
         new_hwm, equity_history = _update_high_water_mark(
             equity_history,
             equity_usd,
@@ -524,6 +633,7 @@ def run_cycle() -> None:
 
         risk_snapshot = risk_manager.evaluate(balance_usd, equity_usd=equity_usd, high_water_mark=new_hwm)
 
+        # 5) Kill switch global.
         if risk_snapshot.kill_switch_triggered:
             decision = {
                 "action": "halt",
@@ -531,7 +641,7 @@ def run_cycle() -> None:
                 "drawdown_pct": risk_snapshot.drawdown_pct,
             }
             logger.critical(
-                "Kill Switch activado. Drawdown %.2f%% excede el l\u00edmite %.2f%%.",
+                "Kill Switch activado. Drawdown %.2f%% excede el limite %.2f%%.",
                 risk_snapshot.drawdown_pct * 100,
                 settings.kill_switch_drawdown * 100,
             )
@@ -540,13 +650,18 @@ def run_cycle() -> None:
                 "stopped",
                 f"Kill Switch: drawdown {risk_snapshot.drawdown_pct:.4f} >= {settings.kill_switch_drawdown}",
             )
-            append_history(settings.signal_history_file, _build_signal_event(technical_signal, ai_signal, decision))
+            primary = scan_results[0] if scan_results else {"technical_signal": {"signal": "hold"}, "frame": None}
+            ai_signal_dummy = dict(AI_NOT_CONSULTED)
+            append_history(
+                settings.signal_history_file,
+                _build_signal_event(primary["technical_signal"], ai_signal_dummy, decision),
+            )
             persist_state(
                 settings.state_file,
                 build_state_snapshot(
-                    market=_serialize_market(enriched_frame),
-                    technical_signal=technical_signal,
-                    ai_signal=ai_signal,
+                    market=_serialize_market(primary["frame"]) if primary.get("frame") is not None else [],
+                    technical_signal=primary["technical_signal"],
+                    ai_signal=ai_signal_dummy,
                     risk=asdict(risk_snapshot),
                     portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings, equity_history),
                     decision=decision,
@@ -554,32 +669,74 @@ def run_cycle() -> None:
                     open_positions=open_positions,
                     closed_trades=closed_trades,
                     signal_history=load_history(settings.signal_history_file),
+                    open_position=_summarize_open_position(open_positions),
+                    last_scans=[_build_scan_summary(s, settings, blocked_by_lock=False) for s in scan_results],
+                    target_symbols=target_symbols,
+                    global_lock=global_lock,
+                    active_symbol=active_symbol,
                 ),
             )
             write_heartbeat("offline", "Kill Switch activado")
             return
 
-        guardrails = _build_guardrails(settings, technical_signal, ai_signal, order_history)
+        # 6) Carrera de senales: el primer simbolo que cumpla TODOS los guardarrailes dispara orden.
+        ai_signal: dict[str, Any] = dict(AI_NOT_CONSULTED)
+        chosen_scan: dict[str, Any] | None = None
+        chosen_guardrails: dict[str, Any] | None = None
+        decision: dict[str, Any] = {
+            "action": "hold",
+            "reason": "global_lock" if global_lock else "Sin senal valida en ningun ticker.",
+            "global_lock": global_lock,
+            "active_symbol": active_symbol,
+        }
 
-        if all(
-            [
-                guardrails["executable_signal"],
-                guardrails["ai_confident"],
-                guardrails["volatility_ready"],
-                guardrails["volume_ready"],
-                not guardrails["cooldown_active"],
-                not has_open_position,
-                str(technical_signal["signal"]) == "buy",
-                ai_signal.get("consulted", False),
-            ]
-        ):
+        if not global_lock:
+            for scan in scan_results:
+                technical_signal = scan["technical_signal"]
+                # Pre-gate barato (sin tocar IA).
+                pre_guards = _build_guardrails(settings, technical_signal, AI_NOT_CONSULTED, order_history)
+                if not (pre_guards["executable_signal"] and pre_guards["volatility_ready"] and pre_guards["volume_ready"] and not pre_guards["cooldown_active"]):
+                    continue
+
+                # Consulta IA solo para este candidato; cache valida para todo el ciclo.
+                if not ai_signal.get("consulted"):
+                    cached = _load_recent_ai_signal(settings)
+                    if cached is not None:
+                        ai_signal = cached
+                        logger.info(
+                            "Reutilizando senal de IA en cache (%ss de antiguedad).",
+                            ai_signal.get("cached_age_seconds", 0),
+                        )
+                    else:
+                        ai_signal = ai_analyzer.analyze(scan["frame"])
+                        ai_signal.setdefault("consulted", True)
+
+                guardrails = _build_guardrails(settings, technical_signal, ai_signal, order_history)
+                if all([
+                    guardrails["executable_signal"],
+                    guardrails["ai_confident"],
+                    guardrails["volatility_ready"],
+                    guardrails["volume_ready"],
+                    not guardrails["cooldown_active"],
+                    str(technical_signal["signal"]) == "buy",
+                    ai_signal.get("consulted", False),
+                ]):
+                    chosen_scan = scan
+                    chosen_guardrails = guardrails
+                    break
+
+        if chosen_scan and chosen_guardrails:
+            symbol = chosen_scan["symbol"]
+            technical_signal = chosen_scan["technical_signal"]
             decision = executor.execute(
                 side=str(technical_signal["signal"]),
                 market_price=float(technical_signal["close"]),
                 risk=risk_snapshot,
+                symbol=symbol,
             )
             decision["scenario"] = technical_signal.get("scenario")
             decision["entry_rsi"] = technical_signal.get("rsi")
+            decision["symbol"] = symbol
             append_history(settings.order_history_file, decision)
             order_history = load_history(settings.order_history_file)
 
@@ -589,7 +746,7 @@ def run_cycle() -> None:
                     "stopped",
                     f"Kill Switch ejecucion: {decision.get('reason', 'fallo de exchange')}",
                 )
-                logger.critical("Ejecuci\u00f3n fall\u00f3 en live; bot detenido. %s", decision)
+                logger.critical("Ejecucion fallo en live; bot detenido. %s", decision)
 
             if decision.get("status") in {"simulated", "submitted"}:
                 open_positions.append(
@@ -615,25 +772,39 @@ def run_cycle() -> None:
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)
+                global_lock = True
+                active_symbol = symbol
         else:
+            # No hubo entrada: usamos el primer scan como referencia de la decision.
+            primary_scan = scan_results[0] if scan_results else None
+            primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
+            primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history) if primary_scan else {}
             decision = {
                 "action": "hold",
-                "reason": "No se cumplen los filtros prudentes de entrada.",
-                "position_open": has_open_position,
-                "spot_ready": str(technical_signal["signal"]) == "buy",
+                "reason": "Posicion abierta (mutex global)" if global_lock else "Ningun ticker cumplio los guardarrailes.",
+                "global_lock": global_lock,
+                "active_symbol": active_symbol,
                 "ai_consulted": ai_signal.get("consulted", False),
-                "lazy_gate_reason": candidate_reason,
-                **guardrails,
+                "ai_confidence": ai_signal.get("confidence", 0.0),
+                **primary_guards,
             }
-            logger.info("Sin operaci\u00f3n prudente. T=%s | IA=%s | G=%s", technical_signal, ai_signal, guardrails)
+            logger.info(
+                "Sin operacion en este ciclo. lock=%s active=%s scans=%s",
+                global_lock, active_symbol, [(s["symbol"], s["technical_signal"].get("scenario"), s["candidate_reason"]) for s in scan_results],
+            )
 
-        append_history(settings.signal_history_file, _build_signal_event(technical_signal, ai_signal, decision))
+        # 7) Persistencia final con telemetria multi-ticker.
+        primary_scan = chosen_scan or (scan_results[0] if scan_results else None)
+        primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
+        primary_frame = primary_scan["frame"] if primary_scan else None
+
+        append_history(settings.signal_history_file, _build_signal_event(primary_signal, ai_signal, decision))
 
         persist_state(
             settings.state_file,
             build_state_snapshot(
-                market=_serialize_market(enriched_frame),
-                technical_signal=technical_signal,
+                market=_serialize_market(primary_frame) if primary_frame is not None else [],
+                technical_signal=primary_signal,
                 ai_signal=ai_signal,
                 risk=asdict(risk_snapshot),
                 portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings, equity_history),
@@ -642,6 +813,11 @@ def run_cycle() -> None:
                 open_positions=open_positions,
                 closed_trades=closed_trades,
                 signal_history=load_history(settings.signal_history_file),
+                open_position=_summarize_open_position(open_positions),
+                last_scans=[_build_scan_summary(s, settings, blocked_by_lock=global_lock and s["symbol"] != active_symbol) for s in scan_results],
+                target_symbols=target_symbols,
+                global_lock=global_lock,
+                active_symbol=active_symbol,
             ),
         )
         write_heartbeat("online", "Ciclo completado")

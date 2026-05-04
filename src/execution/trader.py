@@ -41,13 +41,15 @@ class TradeExecutor:
         side: str,
         market_price: float,
         risk: RiskSnapshot,
+        symbol: str | None = None,
     ) -> dict[str, Any]:
+        target_symbol = symbol or self.settings.trading_symbol
         amount = self.risk_manager.compute_order_size(market_price, risk.equity_usd)
         protection_levels = self.risk_manager.build_protection_levels(market_price, side)
 
         order_payload: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": self.settings.trading_symbol,
+            "symbol": target_symbol,
             "side": side,
             "amount": amount,
             "price": round(market_price, 4),
@@ -67,9 +69,9 @@ class TradeExecutor:
             return order_payload
 
         try:
-            exchange_order = self.client.create_market_order(side, amount)
+            exchange_order = self.client.create_market_order(side, amount, symbol=target_symbol)
         except BinanceClientError as exc:
-            self.logger.error("Fallo al enviar orden %s: %s", side, exc)
+            self.logger.error("Fallo al enviar orden %s en %s: %s", side, target_symbol, exc)
             order_payload["status"] = "error"
             order_payload["reason"] = f"create_market_order: {exc}"
             return order_payload
@@ -83,7 +85,7 @@ class TradeExecutor:
             return order_payload
 
         try:
-            asset_balance = self.client.fetch_asset_balance()
+            asset_balance = self.client.fetch_asset_balance(symbol=target_symbol)
         except BinanceClientError as exc:
             self.logger.error("Fallo al reconciliar saldo tras orden: %s", exc)
             order_payload["status"] = "reconcile_failed"
@@ -108,10 +110,11 @@ class TradeExecutor:
 
     def close_position_market(self, position: dict[str, Any]) -> dict[str, Any]:
         side = "sell" if position.get("side") == "buy" else "buy"
+        target_symbol = position.get("symbol") or self.settings.trading_symbol
         amount = float(position.get("amount") or 0.0)
         result: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": self.settings.trading_symbol,
+            "symbol": target_symbol,
             "side": side,
             "intended_amount": amount,
             "mode": "dry_run" if self.settings.dry_run else "live",
@@ -127,7 +130,7 @@ class TradeExecutor:
             return result
 
         try:
-            asset_balance = self.client.fetch_asset_balance()
+            asset_balance = self.client.fetch_asset_balance(symbol=target_symbol)
         except BinanceClientError as exc:
             result["status"] = "error"
             result["reason"] = f"pre_close fetch_asset_balance: {exc}"
@@ -141,7 +144,7 @@ class TradeExecutor:
             return result
 
         try:
-            exchange_order = self.client.create_market_order(side, sellable)
+            exchange_order = self.client.create_market_order(side, sellable, symbol=target_symbol)
         except BinanceClientError as exc:
             self.logger.error("Fallo al cerrar posición: %s", exc)
             result["status"] = "error"
@@ -150,7 +153,7 @@ class TradeExecutor:
 
         filled, average, fee_total = self._extract_fill(exchange_order)
         try:
-            post_balance = self.client.fetch_asset_balance()
+            post_balance = self.client.fetch_asset_balance(symbol=target_symbol)
         except BinanceClientError as exc:
             result["status"] = "reconcile_failed"
             result["reason"] = f"post_close fetch_asset_balance: {exc}"

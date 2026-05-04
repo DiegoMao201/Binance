@@ -18,6 +18,8 @@ class Settings:
     openrouter_api_key: str
     openrouter_model: str
     trading_symbol: str
+    target_symbols: tuple[str, ...]
+    max_global_open_positions: int
     timeframe: str
     dry_run: bool
     initial_capital_usd: float
@@ -59,12 +61,21 @@ def _get_bool(name: str, default: bool) -> bool:
 
 def load_settings() -> Settings:
     logs_dir = Path(os.getenv("LOGS_DIR", str(BASE_DIR / "logs"))).expanduser()
+    primary_symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
+    raw_targets = os.getenv("TARGET_SYMBOLS", primary_symbol)
+    target_symbols = tuple(
+        dict.fromkeys(  # preserva orden y deduplica
+            sym.strip().upper() for sym in raw_targets.split(",") if sym.strip()
+        )
+    ) or (primary_symbol,)
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
-        trading_symbol=os.getenv("TRADING_SYMBOL", "BTC/USDT"),
+        trading_symbol=primary_symbol,
+        target_symbols=target_symbols,
+        max_global_open_positions=int(os.getenv("MAX_GLOBAL_OPEN_POSITIONS", "1")),
         timeframe=os.getenv("TIMEFRAME", "1m"),
         dry_run=_get_bool("DRY_RUN", True),
         initial_capital_usd=float(os.getenv("INITIAL_CAPITAL_USD", "20")),

@@ -253,6 +253,19 @@ export default function DashboardClient({ initialData }) {
   const closedTrades = payload?.closedTrades || state?.closed_trades || [];
   const equityHistory = payload?.equityHistory || [];
   const preFlight = payload?.preFlight || {};
+  const lastScans = state?.last_scans || [];
+  const targetSymbols = state?.target_symbols || [];
+  const globalLock = Boolean(state?.global_lock);
+  const activeSymbol = state?.active_symbol || null;
+  const openPosition = state?.open_position || null;
+  const perSymbolStats = portfolio?.per_symbol_stats || {};
+  const symbolUniverse = useMemo(() => {
+    const all = new Set();
+    targetSymbols.forEach((s) => all.add(s));
+    Object.keys(perSymbolStats).forEach((s) => all.add(s));
+    return Array.from(all);
+  }, [targetSymbols, perSymbolStats]);
+  const [statsFilter, setStatsFilter] = useState("ALL");
 
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
@@ -291,7 +304,8 @@ export default function DashboardClient({ initialData }) {
           <p className="eyebrow">OptiFerre Terminal</p>
           <h1>Control operativo</h1>
         </div>
-        <div className="sidebar-block"><span>Par</span><strong>{status.symbol || "ETH/USDT"}</strong></div>
+        <div className="sidebar-block"><span>Universo</span><strong>{(targetSymbols.length ? targetSymbols : [status.symbol || "ETH/USDT"]).join(" · ")}</strong></div>
+        <div className="sidebar-block"><span>Mutex global</span><strong className={globalLock ? "tone-sell" : "tone-buy"}>{globalLock ? `LOCK · ${activeSymbol}` : "LIBRE"}</strong></div>
         <div className="sidebar-block"><span>Heartbeat</span><strong>{formatDate(status.heartbeat_at)}</strong></div>
         <div className="sidebar-block"><span>Bot</span><strong className={isOnline ? "tone-buy" : "tone-sell"}>{isOnline ? "ONLINE" : "OFFLINE"}</strong></div>
         <div className="sidebar-block"><span>Estado deseado</span><strong>{control.desired_state || "running"}</strong></div>
@@ -344,6 +358,60 @@ export default function DashboardClient({ initialData }) {
           <div className="telemetry-card"><span>RSI</span><strong>{formatNumber(technicalSignal.rsi, 2)}</strong></div>
           <div className="telemetry-card"><span>ATR %</span><strong>{formatPercent(technicalSignal.atr_pct)}</strong></div>
           <div className="telemetry-card"><span>Volumen relativo</span><strong>{formatNumber(technicalSignal.volume_ratio, 2)}x</strong></div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <h3>Scanner multi-moneda</h3>
+            <span>{globalLock ? `Mutex activo · ${activeSymbol}` : `${lastScans.length || targetSymbols.length} tickers vigilados`}</span>
+          </div>
+          {openPosition ? (
+            <div className="narrative-card compact" style={{ marginBottom: "0.75rem" }}>
+              <strong>Posición abierta · {openPosition.symbol} {openPosition.side?.toUpperCase()}</strong>
+              <p>
+                Escenario {openPosition.scenario || "?"} · Entrada {formatNumber(openPosition.entry_price, 4)} · SL {formatNumber(openPosition.stop_loss, 4)} · TP {formatNumber(openPosition.take_profit, 4)}
+              </p>
+              <p>
+                Mark {formatNumber(openPosition.mark_price, 4)} · PnL {formatNumber(openPosition.unrealized_pnl_usdt, 4)} USDT · MAE {formatPercent(openPosition.mae_pct)} · MFE {formatPercent(openPosition.mfe_pct)}
+              </p>
+            </div>
+          ) : null}
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Símbolo</th>
+                  <th>Estado</th>
+                  <th>Escenario</th>
+                  <th>RSI</th>
+                  <th>Precio</th>
+                  <th>ATR %</th>
+                  <th>Vol x</th>
+                  <th>Motivo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lastScans.length === 0 ? (
+                  <tr><td colSpan={8} style={{ opacity: 0.6 }}>Sin escaneos registrados aún.</td></tr>
+                ) : lastScans.map((scan) => {
+                  const isActive = scan.symbol === activeSymbol;
+                  const tone = scan.status === "candidate" ? "tone-buy" : scan.status === "locked" ? "tone-sell" : scan.status === "scenario_only" ? "tone-warning" : "";
+                  return (
+                    <tr key={scan.symbol} style={isActive ? { background: "rgba(244,185,66,0.08)" } : undefined}>
+                      <td><strong>{scan.symbol}</strong>{isActive ? " ★" : ""}</td>
+                      <td className={tone}>{scan.status}</td>
+                      <td>{scan.scenario || "—"}</td>
+                      <td>{formatNumber(scan.rsi, 2)}</td>
+                      <td>{formatNumber(scan.close, 4)}</td>
+                      <td>{formatPercent(scan.atr_pct)}</td>
+                      <td>{formatNumber(scan.volume_ratio, 2)}x</td>
+                      <td style={{ opacity: 0.7 }}>{scan.candidate_reason}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section className="panel chart-panel">
@@ -485,13 +553,27 @@ export default function DashboardClient({ initialData }) {
 
         <section className="details-grid">
           <div className="panel">
-            <div className="panel-header"><h3>Telemetría por escenario</h3><span>Lógica OR (A vs B)</span></div>
+            <div className="panel-header">
+              <h3>Telemetría por escenario</h3>
+              <span>
+                <select
+                  value={statsFilter}
+                  onChange={(e) => setStatsFilter(e.target.value)}
+                  style={{ background: "transparent", color: "inherit", border: "1px solid #2a3744", borderRadius: 4, padding: "2px 6px", font: "inherit" }}
+                >
+                  <option value="ALL">Todos los símbolos</option>
+                  {symbolUniverse.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </span>
+            </div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Escenario</th><th>Trades</th><th>W / L</th><th>Win rate</th><th>PnL USDT</th><th>MAE prom.</th><th>MFE prom.</th></tr></thead>
                 <tbody>
                   {["A", "B"].map((label) => {
-                    const stats = portfolio?.scenario_stats?.[label] || {};
+                    const stats = statsFilter === "ALL"
+                      ? (portfolio?.scenario_stats?.[label] || {})
+                      : (perSymbolStats?.[statsFilter]?.[label] || {});
                     return (
                       <tr key={label}>
                         <td><strong>Escenario {label}</strong> <span className="secondary-text">{label === "A" ? "Pullback" : "Sobreventa extrema"}</span></td>
@@ -512,11 +594,12 @@ export default function DashboardClient({ initialData }) {
             <div className="panel-header"><h3>Posiciones abiertas</h3><span>{openPositions.length} en curso</span></div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Apertura</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>SL</th><th>TP</th><th>MAE %</th><th>MFE %</th><th>PnL no real.</th></tr></thead>
+                <thead><tr><th>Apertura</th><th>Símbolo</th><th>Esc</th><th>Lado</th><th>Entrada</th><th>SL</th><th>TP</th><th>MAE %</th><th>MFE %</th><th>PnL no real.</th></tr></thead>
                 <tbody>
-                  {openPositions.length === 0 ? <tr><td colSpan="9" className="empty">Sin posiciones abiertas.</td></tr> : openPositions.map((p, i) => (
+                  {openPositions.length === 0 ? <tr><td colSpan="10" className="empty">Sin posiciones abiertas.</td></tr> : openPositions.map((p, i) => (
                     <tr key={`${p.opened_at}-${i}`}>
                       <td>{formatDate(p.opened_at)}</td>
+                      <td><strong>{p.symbol || "—"}</strong></td>
                       <td>{p.scenario || "-"}</td>
                       <td className={p.side === "buy" ? "tone-buy" : "tone-sell"}>{p.side}</td>
                       <td>{formatNumber(p.entry_price, 4)}</td>
