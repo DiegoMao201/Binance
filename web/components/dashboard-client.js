@@ -266,6 +266,13 @@ export default function DashboardClient({ initialData }) {
     return Array.from(all);
   }, [targetSymbols, perSymbolStats]);
   const [statsFilter, setStatsFilter] = useState("ALL");
+  const [focusSymbol, setFocusSymbol] = useState("");
+
+  useEffect(() => {
+    const preferredSymbol = activeSymbol || openPosition?.symbol || lastScans[0]?.symbol || targetSymbols[0] || "";
+    if (!preferredSymbol) return;
+    setFocusSymbol((current) => (current && current === preferredSymbol) || current ? current : preferredSymbol);
+  }, [activeSymbol, openPosition, lastScans, targetSymbols]);
 
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
@@ -282,6 +289,10 @@ export default function DashboardClient({ initialData }) {
   const timeline = buildTimeline(signalHistory);
   const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
   const equityCurve = useMemo(() => buildEquityCurve(equityHistory), [equityHistory]);
+  const focusScan = useMemo(() => {
+    if (!lastScans.length) return null;
+    return lastScans.find((scan) => scan.symbol === focusSymbol) || lastScans.find((scan) => scan.symbol === activeSymbol) || lastScans[0];
+  }, [lastScans, focusSymbol, activeSymbol]);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
@@ -353,11 +364,31 @@ export default function DashboardClient({ initialData }) {
           <MetricCard label="Decisión" value={decision.action || decision.side || "hold"} subvalue={decision.reason || decision.status || "n/d"} />
         </section>
 
-        <section className="telemetry-grid">
-          <div className="telemetry-card"><span>AI confidence</span><strong>{formatPercent(ai.confidence)}</strong></div>
-          <div className="telemetry-card"><span>RSI</span><strong>{formatNumber(technicalSignal.rsi, 2)}</strong></div>
-          <div className="telemetry-card"><span>ATR %</span><strong>{formatPercent(technicalSignal.atr_pct)}</strong></div>
-          <div className="telemetry-card"><span>Volumen relativo</span><strong>{formatNumber(technicalSignal.volume_ratio, 2)}x</strong></div>
+        <section className="panel" style={{ marginBottom: "1rem" }}>
+          <div className="panel-header">
+            <h3>Radar enfocado</h3>
+            <span>
+              <select
+                value={focusScan?.symbol || ""}
+                onChange={(e) => setFocusSymbol(e.target.value)}
+                style={{ background: "transparent", color: "inherit", border: "1px solid #2a3744", borderRadius: 4, padding: "2px 6px", font: "inherit" }}
+              >
+                {(targetSymbols.length ? targetSymbols : lastScans.map((scan) => scan.symbol)).map((symbol) => (
+                  <option key={symbol} value={symbol}>{symbol}</option>
+                ))}
+              </select>
+            </span>
+          </div>
+          <section className="telemetry-grid">
+            <div className="telemetry-card"><span>Símbolo</span><strong>{focusScan?.symbol || activeSymbol || technicalSignal.symbol || "sin dato"}</strong></div>
+            <div className="telemetry-card"><span>Estado backend</span><strong className={focusScan?.status === "candidate" ? "tone-buy" : focusScan?.status === "locked" ? "tone-sell" : ""}>{focusScan?.status || "waiting"}</strong></div>
+            <div className="telemetry-card"><span>Escenarios</span><strong>{focusScan?.scenario_a ? "A" : "·"} / {focusScan?.scenario_b ? "B" : "·"}</strong></div>
+            <div className="telemetry-card"><span>RSI</span><strong>{formatNumber(focusScan?.rsi ?? technicalSignal.rsi, 2)}</strong></div>
+            <div className="telemetry-card"><span>ATR %</span><strong>{formatPercent(focusScan?.atr_pct ?? technicalSignal.atr_pct)}</strong></div>
+            <div className="telemetry-card"><span>Volumen relativo</span><strong>{formatNumber(focusScan?.volume_ratio ?? technicalSignal.volume_ratio, 2)}x</strong></div>
+            <div className="telemetry-card"><span>Precio</span><strong>{formatNumber(focusScan?.close ?? technicalSignal.close, 4)}</strong></div>
+            <div className="telemetry-card"><span>AI confidence</span><strong>{formatPercent(ai.confidence)}</strong><span className="metric-subvalue">global del ciclo</span></div>
+          </section>
         </section>
 
         <section className="panel">
