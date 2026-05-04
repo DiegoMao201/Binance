@@ -158,10 +158,9 @@ class BinanceDataClient:
 
     @staticmethod
     def _balance_aliases(asset: str) -> tuple[str, ...]:
-        aliases = [asset]
-        if asset == "USDT":
-            aliases.extend(["USD", "FDUSD", "USDC"])
-        return tuple(dict.fromkeys(aliases))
+        # Stablecoins distintos no son intercambiables al ejecutar pares /USDT;
+        # leer USD/FDUSD/USDC como si fueran USDT provoca rejects en Binance.
+        return (asset,)
 
     def _extract_balance_value(self, balance: dict[str, Any], asset: str, field: str) -> float:
         for candidate in self._balance_aliases(asset):
