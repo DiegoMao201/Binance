@@ -381,26 +381,35 @@ export default function DashboardClient({ initialData }) {
               <thead>
                 <tr>
                   <th>Símbolo</th>
-                  <th>Estado</th>
-                  <th>Escenario</th>
+                  <th>Estado backend</th>
+                  <th>Esc A</th>
+                  <th>Esc B</th>
                   <th>RSI</th>
                   <th>Precio</th>
                   <th>ATR %</th>
                   <th>Vol x</th>
-                  <th>Motivo</th>
+                  <th>Motivo (backend)</th>
                 </tr>
               </thead>
               <tbody>
                 {lastScans.length === 0 ? (
-                  <tr><td colSpan={8} style={{ opacity: 0.6 }}>Sin escaneos registrados aún.</td></tr>
+                  <tr><td colSpan={9} style={{ opacity: 0.6 }}>Sin escaneos registrados aún.</td></tr>
                 ) : lastScans.map((scan) => {
+                  // Estado autoritativo: viene crudo del backend (_build_scan_summary en Python).
+                  // Cero lógica derivada en el cliente. Si el backend dice "waiting", se muestra "waiting".
                   const isActive = scan.symbol === activeSymbol;
-                  const tone = scan.status === "candidate" ? "tone-buy" : scan.status === "locked" ? "tone-sell" : scan.status === "scenario_only" ? "tone-warning" : "";
+                  const status = scan.status || "waiting";
+                  const tone =
+                    status === "candidate" ? "tone-buy" :
+                    status === "locked" ? "tone-sell" :
+                    status === "scenario_only" ? "tone-warning" : "";
+                  const renderBool = (val) => val === true ? <span className="tone-buy">✓</span> : <span style={{ opacity: 0.4 }}>·</span>;
                   return (
                     <tr key={scan.symbol} style={isActive ? { background: "rgba(244,185,66,0.08)" } : undefined}>
                       <td><strong>{scan.symbol}</strong>{isActive ? " ★" : ""}</td>
-                      <td className={tone}>{scan.status}</td>
-                      <td>{scan.scenario || "—"}</td>
+                      <td className={tone}>{status}</td>
+                      <td>{renderBool(scan.scenario_a)}</td>
+                      <td>{renderBool(scan.scenario_b)}</td>
                       <td>{formatNumber(scan.rsi, 2)}</td>
                       <td>{formatNumber(scan.close, 4)}</td>
                       <td>{formatPercent(scan.atr_pct)}</td>
