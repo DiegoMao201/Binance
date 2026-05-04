@@ -88,6 +88,7 @@ class TradeExecutor:
     ) -> dict[str, Any]:
         target_symbol = symbol or self.settings.trading_symbol
         amount = self.risk_manager.compute_order_size(market_price, risk.equity_usd)
+        quote_amount: float | None = None
         if side == "buy" and not self.settings.dry_run:
             amount, balance_reason = self._cap_buy_amount_to_free_quote(amount, market_price, target_symbol)
             if balance_reason is not None:
@@ -106,6 +107,8 @@ class TradeExecutor:
                 }
         try:
             amount = self.client.amount_to_precision(amount, symbol=target_symbol)
+            if side == "buy":
+                quote_amount = self.client.cost_to_precision(amount * market_price, symbol=target_symbol)
             protection_levels = self._format_protection_levels(market_price, side, target_symbol)
         except BinanceClientError as exc:
             return {
@@ -146,7 +149,12 @@ class TradeExecutor:
             return order_payload
 
         try:
-            exchange_order = self.client.create_market_order(side, amount, symbol=target_symbol)
+            exchange_order = self.client.create_market_order(
+                side,
+                amount,
+                symbol=target_symbol,
+                quote_amount=quote_amount,
+            )
         except BinanceClientError as exc:
             self.logger.error("Fallo al enviar orden %s en %s: %s", side, target_symbol, exc)
             order_payload["status"] = "rejected" if self._is_insufficient_balance_error(exc) else "error"

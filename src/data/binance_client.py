@@ -228,8 +228,29 @@ class BinanceDataClient:
         except (ccxt.BaseError, ValueError, TypeError) as exc:
             raise BinanceClientError(f"price_to_precision {target}: {exc}") from exc
 
-    def create_market_order(self, side: str, amount: float, symbol: str | None = None) -> dict[str, Any]:
+    def cost_to_precision(self, cost: float, symbol: str | None = None) -> float:
         target = symbol or self.settings.trading_symbol
+        self._ensure_market_loaded(target)
+        try:
+            formatted = self.private_exchange.cost_to_precision(target, cost)
+            return float(formatted)
+        except (ccxt.BaseError, ValueError, TypeError) as exc:
+            raise BinanceClientError(f"cost_to_precision {target}: {exc}") from exc
+
+    def create_market_order(
+        self,
+        side: str,
+        amount: float,
+        symbol: str | None = None,
+        *,
+        quote_amount: float | None = None,
+    ) -> dict[str, Any]:
+        target = symbol or self.settings.trading_symbol
+        params: dict[str, Any] = {}
+        order_amount = amount
+        if side == "buy" and quote_amount is not None:
+            params["quoteOrderQty"] = quote_amount
+            order_amount = None
         return self._with_retries(
-            lambda: self.private_exchange.create_market_order(target, side, amount)
+            lambda: self.private_exchange.create_market_order(target, side, order_amount, params=params)
         )
