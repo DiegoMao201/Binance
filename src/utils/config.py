@@ -15,6 +15,7 @@ load_dotenv(BASE_DIR / ".env")
 class Settings:
     binance_api_key: str
     binance_api_secret: str
+    binance_proxy_url: str
     openrouter_api_key: str
     openrouter_model: str
     trading_symbol: str
@@ -73,6 +74,7 @@ def load_settings() -> Settings:
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
+        binance_proxy_url=os.getenv("BINANCE_PROXY_URL", "").strip(),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1"),
         trading_symbol=primary_symbol,

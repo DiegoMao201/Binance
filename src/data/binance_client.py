@@ -48,6 +48,11 @@ class BinanceDataClient:
             "timeout": 8000,
             "options": {"defaultType": "spot"},
         }
+        if settings.binance_proxy_url:
+            public_config["proxies"] = {
+                "http": settings.binance_proxy_url,
+                "https": settings.binance_proxy_url,
+            }
         self.public_exchange = ccxt.binance(public_config)
 
         private_config: dict[str, Any] = {
@@ -55,6 +60,11 @@ class BinanceDataClient:
             "timeout": 8000,
             "options": {"defaultType": "spot"},
         }
+        if settings.binance_proxy_url:
+            private_config["proxies"] = {
+                "http": settings.binance_proxy_url,
+                "https": settings.binance_proxy_url,
+            }
         if settings.binance_api_key and settings.binance_api_secret:
             private_config.update(
                 {
