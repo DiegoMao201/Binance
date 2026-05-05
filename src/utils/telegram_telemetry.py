@@ -66,7 +66,6 @@ class TelegramTelemetry:
         payload = {
             "chat_id": self.chat_id,
             "text": self._render_message(level, data)[:4000],
-            "parse_mode": "MarkdownV2",
             "disable_web_page_preview": True,
         }
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
