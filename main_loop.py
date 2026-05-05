@@ -616,6 +616,99 @@ def _set_control_state(settings: Settings, desired_state: str, reason: str) -> N
     persist_state(settings.control_file, payload)
 
 
+def _has_recoverable_live_holdings(settings: Settings, client: BinanceDataClient) -> bool:
+    if settings.dry_run or not settings.binance_api_key:
+        return False
+
+    for symbol in settings.target_symbols:
+        try:
+            holdings = client.fetch_asset_balance(symbol=symbol)
+            mark_price = client.fetch_ticker_price(symbol)
+        except BinanceClientError:
+            continue
+
+        total = float(holdings.get("total") or 0.0)
+        if total * mark_price >= settings.minimum_trade_usdt * 0.5:
+            return True
+
+    return False
+
+
+def _recover_unmanaged_exchange_positions(
+    open_positions: list[dict[str, Any]],
+    settings: Settings,
+    client: BinanceDataClient,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    if settings.dry_run or not settings.binance_api_key:
+        return open_positions
+
+    tracked_symbols = {str(position.get("symbol") or "") for position in open_positions}
+    recovered_positions = list(open_positions)
+
+    for symbol in settings.target_symbols:
+        if symbol in tracked_symbols:
+            continue
+
+        try:
+            holdings = client.fetch_asset_balance(symbol=symbol)
+            mark_price = client.fetch_ticker_price(symbol)
+        except BinanceClientError as exc:
+            logger.warning("No se pudo leer holdings live para %s: %s", symbol, exc)
+            continue
+
+        total = float(holdings.get("total") or 0.0)
+        if total * mark_price < settings.minimum_trade_usdt * 0.5:
+            continue
+
+        try:
+            trades = client.fetch_recent_trades(symbol, limit=20)
+        except BinanceClientError as exc:
+            logger.warning("No se pudo leer trades recientes para %s: %s", symbol, exc)
+            continue
+
+        latest_buy = next((trade for trade in reversed(trades) if str(trade.get("side") or "").lower() == "buy"), None)
+        if latest_buy is None:
+            logger.warning("Holdings detectados en %s pero sin buy reciente para reconstruir posicion.", symbol)
+            continue
+
+        entry_price = float(latest_buy.get("price") or 0.0)
+        if entry_price <= 0:
+            logger.warning("Trade reciente en %s sin precio valido; no se reconstruye posicion.", symbol)
+            continue
+
+        opened_at = latest_buy.get("datetime") or latest_buy.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        amount = round(total, 8)
+        protections = RiskManager(settings).build_protection_levels(entry_price, "buy")
+        recovered = {
+            "opened_at": str(opened_at),
+            "symbol": symbol,
+            "side": "buy",
+            "amount": amount,
+            "entry_price": round(entry_price, 4),
+            "notional_usdt": round(amount * entry_price, 4),
+            "stop_loss": round(protections["stop_loss"], 4),
+            "take_profit": round(protections["take_profit"], 4),
+            "status": "open",
+            "mode": "live",
+            "reconciled_holdings": holdings,
+            "scenario": "recovered_live",
+            "entry_rsi": None,
+            "ai_confidence": None,
+            "signal_price": round(entry_price, 4),
+            "fill_price": round(entry_price, 4),
+            "slippage_pct": 0.0,
+            "mae_pct": 0.0,
+            "mfe_pct": 0.0,
+            "mae_usdt": 0.0,
+            "mfe_usdt": 0.0,
+        }
+        logger.warning("Posicion live recuperada desde exchange para %s: %s", symbol, recovered)
+        recovered_positions.append(recovered)
+
+    return recovered_positions
+
+
 def _clear_stale_preflight_pause_reason(settings: Settings) -> None:
     control = load_state(settings.control_file)
     if control.get("desired_state") != "paused":
@@ -677,6 +770,10 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
         return checks
 
     if not checks["balance_ok"]:
+        if _has_recoverable_live_holdings(settings, client):
+            checks["ok"] = True
+            checks["detail"] = "Pre-flight OK: holdings live detectados; se permite gestion de posicion abierta."
+            return checks
         checks["detail"] = (
             f"Saldo USDT {checks['balance_usdt']} < requerido {checks['minimum_required']}"
         )
@@ -792,6 +889,8 @@ def run_cycle() -> None:
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
         live_mode = not settings.dry_run
+        open_positions = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger)
+        persist_history(settings.open_positions_file, open_positions)
 
         # 1) Escaneo SECUENCIAL multi-ticker (rate-limit safe gracias a enableRateLimit de ccxt).
         scan_results: list[dict[str, Any]] = []

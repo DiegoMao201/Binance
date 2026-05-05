@@ -212,6 +212,9 @@ class BinanceDataClient:
         ticker = self._with_retries(lambda: self.public_exchange.fetch_ticker(target))
         return float(ticker.get("last") or ticker.get("close") or 0.0)
 
+    def fetch_recent_trades(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
+        return self._with_retries(lambda: self.private_exchange.fetch_my_trades(symbol, limit=limit))
+
     def ping(self) -> bool:
         try:
             self._with_retries(lambda: self.public_exchange.fetch_time())
