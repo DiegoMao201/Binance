@@ -18,6 +18,9 @@ class Settings:
     binance_proxy_url: str
     openrouter_api_key: str
     openrouter_model: str
+    telegram_enabled: bool
+    telegram_bot_token: str
+    telegram_chat_id: str
     trading_symbol: str
     target_symbols: tuple[str, ...]
     max_global_open_positions: int
@@ -75,6 +78,9 @@ def load_settings() -> Settings:
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
         binance_proxy_url=os.getenv("BINANCE_PROXY_URL", "").strip(),
+        telegram_enabled=_get_bool("TELEGRAM_ENABLED", False),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1"),
         trading_symbol=primary_symbol,
