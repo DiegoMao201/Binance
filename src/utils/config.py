@@ -34,6 +34,10 @@ class Settings:
     take_profit_pct: float
     max_position_hold_minutes: int
     time_profit_take_pct: float
+    trailing_activation_pct: float
+    trailing_sl_offset_pct: float
+    time_stop_minutes: int
+    time_stop_dead_zone_pct: float
     poll_interval_seconds: int
     log_level: str
     streamlit_port: int
@@ -98,6 +102,10 @@ def load_settings() -> Settings:
         take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.03")),
         max_position_hold_minutes=int(os.getenv("MAX_POSITION_HOLD_MINUTES", "0")),
         time_profit_take_pct=float(os.getenv("TIME_PROFIT_TAKE_PCT", "0.0")),
+        trailing_activation_pct=float(os.getenv("TRAILING_ACTIVATION_PCT", "0.008")),
+        trailing_sl_offset_pct=float(os.getenv("TRAILING_SL_OFFSET_PCT", "0.002")),
+        time_stop_minutes=int(os.getenv("TIME_STOP_MINUTES", "240")),
+        time_stop_dead_zone_pct=float(os.getenv("TIME_STOP_DEAD_ZONE_PCT", "0.003")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         streamlit_port=int(os.getenv("STREAMLIT_PORT", "8501")),

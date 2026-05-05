@@ -323,6 +323,19 @@ def _settle_open_positions(
         amount = float(position.get("amount", 0.0))
         stop_loss = float(position.get("stop_loss", 0.0))
         take_profit = float(position.get("take_profit", 0.0))
+        trailing_activated = bool(position.get("trailing_activated", False))
+
+        # ---- Hold time desde el fill (necesario para trailing/time-stop antes del exit check) ----
+        hold_minutes: float | None = None
+        opened_at_raw = position.get("opened_at")
+        candle_at_raw = latest_candle.get("timestamp")
+        if opened_at_raw and candle_at_raw:
+            try:
+                opened_at = datetime.fromisoformat(str(opened_at_raw).replace("Z", "+00:00"))
+                candle_at = candle_at_raw if isinstance(candle_at_raw, datetime) else datetime.fromisoformat(str(candle_at_raw).replace("Z", "+00:00"))
+                hold_minutes = max(0.0, (candle_at - opened_at).total_seconds() / 60.0)
+            except ValueError:
+                hold_minutes = None
 
         # ---- MAE / MFE telemetry (porcentajes y absolutos en USDT) ----
         if entry_price > 0 and amount > 0:
@@ -379,26 +392,94 @@ def _settle_open_positions(
             if entry_price > 0:
                 unrealized_pct = (mark_price - entry_price) / entry_price if side == "buy" else (entry_price - mark_price) / entry_price
 
-            hold_minutes = None
-            opened_at_raw = position.get("opened_at")
-            candle_at_raw = latest_candle.get("timestamp")
-            if opened_at_raw and candle_at_raw:
-                try:
-                    opened_at = datetime.fromisoformat(str(opened_at_raw).replace("Z", "+00:00"))
-                    candle_at = candle_at_raw if isinstance(candle_at_raw, datetime) else datetime.fromisoformat(str(candle_at_raw).replace("Z", "+00:00"))
-                    hold_minutes = max(0.0, (candle_at - opened_at).total_seconds() / 60.0)
-                except ValueError:
-                    hold_minutes = None
+            position["hold_minutes"] = round(hold_minutes, 1) if hold_minutes is not None else None
 
-            time_exit_enabled = settings.max_position_hold_minutes > 0 and settings.time_profit_take_pct > 0
-            if time_exit_enabled and hold_minutes is not None and hold_minutes >= settings.max_position_hold_minutes and unrealized_pct >= settings.time_profit_take_pct:
+            # ---- Trailing Stop de Activación (Break-Even + Fees) ----
+            # Evaluado DESPUÉS del check de SL/TP del candle actual: el SL nuevo aplica
+            # desde el próximo ciclo, evitando exits espurios por whipsaw intra-vela.
+            # Una vez activado el flag NO se desactiva: solo el cruce del nuevo SL cierra.
+            if (
+                not trailing_activated
+                and entry_price > 0
+                and settings.trailing_activation_pct > 0
+            ):
+                if side == "buy":
+                    favorable_pct_so_far = max(unrealized_pct, (candle_high - entry_price) / entry_price)
+                else:
+                    favorable_pct_so_far = max(unrealized_pct, (entry_price - candle_low) / entry_price)
+
+                if favorable_pct_so_far >= settings.trailing_activation_pct:
+                    if side == "buy":
+                        raw_new_sl = entry_price * (1 + settings.trailing_sl_offset_pct)
+                    else:
+                        raw_new_sl = entry_price * (1 - settings.trailing_sl_offset_pct)
+
+                    # SL virtual: no hay OCO real en el exchange, así que "modificar la orden"
+                    # se reduce a actualizar el nivel local. Envolvemos la formateo en try/except
+                    # para tolerar rechazos del exchange (ccxt.NetworkError/ExchangeError) si en
+                    # el futuro se conecta una orden STOP_LOSS_LIMIT real.
+                    try:
+                        new_sl = executor.client.price_to_precision(float(raw_new_sl), symbol=symbol)
+                    except BinanceClientError as exc:
+                        logger.warning(
+                            "Trailing-stop %s: no se pudo formatear nuevo SL (%s). Reintento próximo ciclo.",
+                            symbol,
+                            exc,
+                        )
+                        new_sl = None
+                    except Exception as exc:  # noqa: BLE001 — robustez ante ccxt.* inesperados
+                        logger.warning(
+                            "Trailing-stop %s: excepción inesperada formateando SL (%s). Se conserva SL previo.",
+                            symbol,
+                            exc,
+                        )
+                        new_sl = None
+
+                    if new_sl is not None:
+                        is_improvement = (
+                            (side == "buy" and (stop_loss <= 0 or new_sl > stop_loss))
+                            or (side == "sell" and (stop_loss <= 0 or new_sl < stop_loss))
+                        )
+                        if is_improvement:
+                            position["initial_stop_loss"] = position.get(
+                                "initial_stop_loss", round(stop_loss, 4)
+                            )
+                            position["stop_loss"] = round(new_sl, 4)
+                            position["trailing_activated"] = True
+                            position["trailing_activated_at"] = datetime.now(timezone.utc).isoformat()
+                            position["trailing_sl"] = round(new_sl, 4)
+                            position["trailing_activation_pct"] = settings.trailing_activation_pct
+                            position["trailing_sl_offset_pct"] = settings.trailing_sl_offset_pct
+                            logger.info(
+                                "Trailing-stop activado %s side=%s entry=%.6f new_SL=%.6f (favorable=%.4f%%)",
+                                symbol,
+                                side,
+                                entry_price,
+                                new_sl,
+                                favorable_pct_so_far * 100,
+                            )
+
+            # ---- Invalidador de Inercia (Time-Stop Bidireccional) ----
+            # Si tras TIME_STOP_MINUTES el setup no produjo movimiento neto suficiente
+            # (|PnL| <= TIME_STOP_DEAD_ZONE_PCT) consideramos invalidada la inercia técnica
+            # y liberamos el Mutex. Si el PnL salió de la zona muerta dejamos correr al SL/TP.
+            time_stop_enabled = (
+                settings.time_stop_minutes > 0
+                and settings.time_stop_dead_zone_pct > 0
+                and hold_minutes is not None
+            )
+            if (
+                time_stop_enabled
+                and hold_minutes >= settings.time_stop_minutes
+                and abs(unrealized_pct) <= settings.time_stop_dead_zone_pct
+            ):
                 exit_price = mark_price
-                exit_reason = "time_profit_take"
-                position["time_exit"] = {
+                exit_reason = "time_stop_invalidator"
+                position["time_stop"] = {
                     "hold_minutes": round(hold_minutes, 1),
-                    "profit_pct": round(unrealized_pct, 6),
-                    "threshold_profit_pct": settings.time_profit_take_pct,
-                    "threshold_hold_minutes": settings.max_position_hold_minutes,
+                    "unrealized_pct": round(unrealized_pct, 6),
+                    "threshold_minutes": settings.time_stop_minutes,
+                    "dead_zone_pct": settings.time_stop_dead_zone_pct,
                 }
             else:
                 remaining_positions.append(position)
