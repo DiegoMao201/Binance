@@ -28,4 +28,5 @@ COPY --from=builder /app/jsconfig.json ./jsconfig.json
 RUN mkdir -p /data/logs
 
 EXPOSE 3000
+HEALTHCHECK --interval=60s --timeout=10s --start-period=45s --retries=3 CMD ["wget", "-qO-", "http://127.0.0.1:3000/api/state"]
 CMD ["npm", "run", "start"]

@@ -38,6 +38,14 @@ El primer comando ejecuta un solo ciclo de prueba. El segundo deja el bot corrie
 
 La guía para separar bot y frontend en Coolify está en `DEPLOY_COOLIFY.md`.
 
+El despliegue recomendado es:
+
+- un servicio `bot` con `Dockerfile.bot`
+- un servicio `frontend` con `web/Dockerfile.frontend`
+- un volumen compartido montado en `/data/logs`
+
+El bot ya incluye healthcheck por heartbeat sobre `logs/status.json`, pensado para reinicio automático en Coolify.
+
 ## Restricciones de seguridad incorporadas
 
 - `DRY_RUN=true` por defecto
