@@ -6,6 +6,7 @@ Usa este documento para dejar el entorno local y Coolify alineados variable por 
 
 - Coolify es la fuente de verdad para producción.
 - El `.env` local debe espejar las mismas claves, pero no debe correr live en paralelo.
+- El estado operativo se considera válido solo si bot, frontend y JSON compartidos cuentan la misma historia.
 
 ## Variables del bot: comparar una por una
 
@@ -89,6 +90,7 @@ En Coolify, `BOT_STATE_DIR` debe ser `/data/logs`.
 8. Verifica que el frontend lea `/data/logs` en Coolify y no una ruta local accidental.
 9. Verifica que no exista un `main_loop.py` live ejecutándose en la Mac.
 10. Después de cualquier cambio en variables de Coolify, redeploy del servicio afectado.
+11. Verifica que `/data/logs/recovery_status.json` exista y refleje el último arranque del bot.
 
 ## Qué revisar dentro de Coolify cuando vuelve el panel
 
@@ -99,6 +101,7 @@ En Coolify, `BOT_STATE_DIR` debe ser `/data/logs`.
 3. Logs recientes sin bucles de crash
 4. Heartbeat actualizando `status.json`
 5. `open_positions.json` consistente con Binance
+6. `recovery_status.json` sin símbolos pendientes inesperados
 
 ### Frontend
 
@@ -128,3 +131,13 @@ En Coolify, `BOT_STATE_DIR` debe ser `/data/logs`.
 - El bot local vuelve a ejecutarse live
 
 Si aparece cualquiera de esas señales, la prioridad es reconciliar estado antes de dejar operar de nuevo.
+
+## Regla de contexto para futuras intervenciones
+
+Cada cambio operativo debe dejar tres rastros explícitos:
+
+1. cambio en código o configuración si aplica
+2. persistencia observable en JSON o logs operativos
+3. documentación actualizada en el repo si cambió el contrato de operación
+
+Si falta uno de esos tres rastros, el contexto queda incompleto y aumenta el riesgo de repetir errores por información vieja.

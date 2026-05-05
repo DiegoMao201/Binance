@@ -95,6 +95,9 @@ Este documento describe el entorno live canónico. El bot local no debe correr e
 - el frontend sigue mostrando el último estado persistido aunque el bot se reinicie
 - el control remoto sigue usando `/data/logs/control.json`
 - no existe otro proceso live local operando en paralelo sobre la misma cuenta
+- cada arranque deja trazabilidad en `/data/logs/recovery_status.json`
+- si Binance conserva una posición live y `open_positions.json` está vacío o viejo, el bot debe reconstruirla antes de seguir operando
+- los errores transitorios de red, timeout o rate limit no deben dejar el control en `stopped`
 
 ## Recovery cuando el panel vuelve pero el frontend está desalineado
 
@@ -126,6 +129,26 @@ Checklist dentro de Coolify:
 4. Confirmar en `/data/logs/equity_history.json` que no exista una muestra espuria de equity cercana al balance libre de USDT solamente.
 5. Si el estado del volumen no coincide con Binance, corregir primero los JSON persistidos y solo después reiniciar el bot.
 6. No arrancar el bot local mientras se hace esta reconciliación en Coolify.
+
+## Contrato de reanudación tras caída de servidor o contenedor
+
+Objetivo: que una posición abierta no quede abandonada por reinicio del host o del proceso.
+
+Secuencia esperada:
+
+1. Coolify reinicia el contenedor del bot.
+2. `main_loop.py` vuelve a cargar `open_positions.json`, `closed_trades.json` y `equity_history.json`.
+3. El arranque ejecuta una reconciliación de holdings live por cada símbolo objetivo.
+4. Si encuentra holdings spot suficientes que no están en `open_positions.json`, reconstruye la posición desde los trades recientes del exchange.
+5. Persiste el resultado en `open_positions.json` y en `/data/logs/recovery_status.json`.
+6. El frontend vuelve a leer esos mismos JSON desde `/data/logs`.
+7. El siguiente ciclo gestiona SL/TP o reconciliación externa de esa posición ya reatada al estado del exchange.
+
+Qué no debe ocurrir:
+
+- reiniciar con una BTC abierta en Binance y `open_positions.json` vacío sin intentar recuperación
+- dejar `control.json` en `stopped` por un timeout transitorio de Binance
+- operar local live mientras Coolify está reanudando la misma cuenta
 
 ## Limpieza segura de logs y artefactos en el servidor
 

@@ -32,6 +32,30 @@ La ejecución local queda solo para:
 
 No se debe ejecutar `main_loop.py` en local mientras el bot live de Coolify esté activo sobre la misma cuenta de Binance.
 
+## Contrato operativo obligatorio
+
+La fuente de verdad operativa no es un comentario suelto ni el estado de una sesión anterior. Es la combinación de:
+
+- `logs/open_positions.json`: posición que el bot cree gestionar
+- `logs/closed_trades.json`: cierres ya liquidados
+- `logs/status.json`: heartbeat y estado deseado
+- `logs/bot_state.json`: snapshot que consume el frontend
+- `logs/recovery_status.json`: último intento de recuperación al arrancar el ciclo
+
+Reglas que no se deben romper:
+
+- Coolify es la fuente de verdad de producción.
+- Local solo puede correr en `DRY_RUN` o con el bot remoto detenido.
+- Si Binance tiene una posición spot abierta, el repo debe reflejarla en `open_positions.json` o reconstruirla desde exchange al arrancar.
+- El frontend no inventa estado: solo presenta lo que lee de los JSON compartidos.
+- Después de cada cambio operativo relevante, hay que dejar documentación y persistencia explícita; nada debe depender de “contexto recordado”.
+
+Documentos que mandan:
+
+- `DEPLOY_COOLIFY.md`: despliegue y recovery en producción
+- `COOLIFY_SYNC_CHECKLIST.md`: sincronización exacta local/Coolify
+- `AI_HANDOFF_PROMPT.md`: contrato de contexto para futuras sesiones
+
 ## Primer arranque local
 
 1. Crear entorno virtual `.venv`
@@ -64,6 +88,18 @@ El despliegue recomendado es:
 - un volumen compartido montado en `/data/logs`
 
 El bot ya incluye healthcheck por heartbeat sobre `logs/status.json`, pensado para reinicio automático en Coolify.
+
+## Garantía de reanudación tras caída
+
+Comportamiento esperado del bot live:
+
+- si el proceso o el servidor cae, Coolify debe volver a levantar el contenedor
+- al arrancar un ciclo, el bot vuelve a leer `open_positions.json`
+- si Binance todavía tiene holdings spot suficientes y el JSON local no trae esa posición, el bot la reconstruye desde `fetch_my_trades` y la persiste otra vez en `open_positions.json`
+- si la posición ya fue cerrada fuera del bot, el ciclo la mueve a `closed_trades.json` con `exit_reason=external_reconcile`
+- si hay un error transitorio de red/rate limit en Binance, el bot pasa a estado degradado y reintenta en el siguiente ciclo en vez de quedar detenido
+
+Eso no significa “riesgo cero”, pero sí deja explícito el contrato de recuperación: una posición abierta no debe quedar en el aire por una caída temporal del proceso si el exchange sigue teniendo el activo y el bot puede volver a leerlo.
 
 ## Restricciones de seguridad incorporadas
 

@@ -639,15 +639,26 @@ def _recover_unmanaged_exchange_positions(
     settings: Settings,
     client: BinanceDataClient,
     logger: logging.Logger,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    recovery_report: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "dry_run" if settings.dry_run else "live",
+        "tracked_symbols": sorted({str(position.get("symbol") or "") for position in open_positions if position.get("symbol")}),
+        "recovered_positions": [],
+        "skipped_symbols": [],
+    }
     if settings.dry_run or not settings.binance_api_key:
-        return open_positions
+        recovery_report["status"] = "skipped"
+        recovery_report["reason"] = "dry_run_or_missing_api_keys"
+        recovery_report["recovered_count"] = 0
+        return open_positions, recovery_report
 
     tracked_symbols = {str(position.get("symbol") or "") for position in open_positions}
     recovered_positions = list(open_positions)
 
     for symbol in settings.target_symbols:
         if symbol in tracked_symbols:
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": "already_tracked"})
             continue
 
         try:
@@ -655,26 +666,31 @@ def _recover_unmanaged_exchange_positions(
             mark_price = client.fetch_ticker_price(symbol)
         except BinanceClientError as exc:
             logger.warning("No se pudo leer holdings live para %s: %s", symbol, exc)
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": f"holdings_unavailable: {exc}"})
             continue
 
         total = float(holdings.get("total") or 0.0)
         if total * mark_price < settings.minimum_trade_usdt * 0.5:
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": "holdings_below_threshold"})
             continue
 
         try:
             trades = client.fetch_recent_trades(symbol, limit=20)
         except BinanceClientError as exc:
             logger.warning("No se pudo leer trades recientes para %s: %s", symbol, exc)
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": f"recent_trades_unavailable: {exc}"})
             continue
 
         latest_buy = next((trade for trade in reversed(trades) if str(trade.get("side") or "").lower() == "buy"), None)
         if latest_buy is None:
             logger.warning("Holdings detectados en %s pero sin buy reciente para reconstruir posicion.", symbol)
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": "no_recent_buy"})
             continue
 
         entry_price = float(latest_buy.get("price") or 0.0)
         if entry_price <= 0:
             logger.warning("Trade reciente en %s sin precio valido; no se reconstruye posicion.", symbol)
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": "invalid_recent_buy_price"})
             continue
 
         opened_at = latest_buy.get("datetime") or latest_buy.get("timestamp") or datetime.now(timezone.utc).isoformat()
@@ -705,8 +721,19 @@ def _recover_unmanaged_exchange_positions(
         }
         logger.warning("Posicion live recuperada desde exchange para %s: %s", symbol, recovered)
         recovered_positions.append(recovered)
+        recovery_report["recovered_positions"].append(
+            {
+                "symbol": symbol,
+                "amount": amount,
+                "entry_price": round(entry_price, 4),
+                "opened_at": str(opened_at),
+                "source": "exchange_recent_buy",
+            }
+        )
 
-    return recovered_positions
+    recovery_report["status"] = "ok"
+    recovery_report["recovered_count"] = len(recovery_report["recovered_positions"])
+    return recovered_positions, recovery_report
 
 
 def _clear_stale_preflight_pause_reason(settings: Settings) -> None:
@@ -881,6 +908,15 @@ def run_cycle() -> None:
         settings.max_global_open_positions,
     )
     write_heartbeat("online", "Ciclo iniciado")
+    recovery_report: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "not_run",
+        "recovered_count": 0,
+        "recovered_positions": [],
+        "tracked_symbols": [],
+        "skipped_symbols": [],
+    }
+    open_positions: list[dict[str, Any]] = []
 
     try:
         previous_state = load_state(settings.state_file)
@@ -889,8 +925,9 @@ def run_cycle() -> None:
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
         live_mode = not settings.dry_run
-        open_positions = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger)
+        open_positions, recovery_report = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger)
         persist_history(settings.open_positions_file, open_positions)
+        persist_state(settings.logs_dir / "recovery_status.json", recovery_report)
 
         # 1) Escaneo SECUENCIAL multi-ticker (rate-limit safe gracias a enableRateLimit de ccxt).
         scan_results: list[dict[str, Any]] = []
@@ -1003,6 +1040,7 @@ def run_cycle() -> None:
                     target_symbols=target_symbols,
                     global_lock=global_lock,
                     active_symbol=active_symbol,
+                    recovery=recovery_report,
                 ),
             )
             write_heartbeat("degraded", f"Saldo no disponible: {exc}")
@@ -1068,6 +1106,7 @@ def run_cycle() -> None:
                     target_symbols=target_symbols,
                     global_lock=global_lock,
                     active_symbol=active_symbol,
+                    recovery=recovery_report,
                 ),
             )
             write_heartbeat("offline", "Kill Switch activado")
@@ -1268,11 +1307,25 @@ def run_cycle() -> None:
                 target_symbols=target_symbols,
                 global_lock=global_lock,
                 active_symbol=active_symbol,
+                recovery=recovery_report,
             ),
         )
         write_heartbeat("online", "Ciclo completado")
 
     except BinanceClientError as exc:
+        error_category = getattr(exc, "category", "exchange_other")
+        transient_categories = {"network_local", "timeout_binance", "rate_limit"}
+        if error_category in transient_categories:
+            write_heartbeat("degraded", f"Binance transitorio ({error_category}): {exc}")
+            logger.exception("Error de Binance recuperable (%s): %s", error_category, exc)
+            _notify_safe(
+                _build_notifier(settings, logger),
+                logger,
+                "sys",
+                {"title": "BINANCE DEGRADADO", "detail": f"{error_category}: {exc}"},
+            )
+            return
+
         write_heartbeat("offline", f"Binance error: {exc}")
         logger.exception("Error de Binance: %s", exc)
         if not settings.dry_run:

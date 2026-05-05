@@ -16,6 +16,8 @@ Debes:
 - evitar que el bot local y el bot remoto queden activos al mismo tiempo sobre la misma cuenta
 - no exponer secretos ni tocar `.env` salvo que se pida explícitamente
 - no activar trading real sin endurecer primero la lógica live
+- tratar la documentación operativa del repo como contrato vivo, no como nota opcional
+- dejar explícitos en código, JSON persistidos y documentación los cambios de comportamiento que afecten recuperación, sincronización o control
 
 ## Resumen ejecutivo del proyecto
 
@@ -38,6 +40,7 @@ Estado operativo real del proyecto:
 - el bot Python live corre en el servidor remoto, no debe duplicarse en local
 - existe soporte para proxy vía `BINANCE_PROXY_URL`
 - existe telemetría Telegram activa vía `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`
+- el bot persiste un resumen de recuperación de arranque en `logs/recovery_status.json`
 
 ## Objetivo estratégico actual
 
@@ -48,6 +51,13 @@ El proyecto debe mantener alineados:
 - la telemetría live
 
 La prioridad ya no es un modo local-first, sino evitar deriva entre local y servidor.
+
+Contrato adicional obligatorio:
+
+- una posición live no debe quedar abandonada tras caída de servidor si Binance sigue mostrando el activo
+- al reiniciar, el bot debe releer JSON persistidos, reconstruir posiciones faltantes desde Binance cuando sea posible y continuar gestionándolas
+- errores transitorios de red/Binance no deben convertirse automáticamente en un `stopped` permanente
+- cualquier mejora operativa debe quedar reflejada en el repo para evitar errores por contexto viejo
 
 ## Workspace real
 
