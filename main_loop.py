@@ -497,6 +497,27 @@ def _set_control_state(settings: Settings, desired_state: str, reason: str) -> N
     persist_state(settings.control_file, payload)
 
 
+def _clear_stale_preflight_pause_reason(settings: Settings) -> None:
+    control = load_state(settings.control_file)
+    if control.get("desired_state") != "paused":
+        return
+    if control.get("updated_by") != "kill_switch":
+        return
+
+    reason = str(control.get("reason") or "")
+    if not reason.startswith("Pre-flight:"):
+        return
+
+    persist_state(
+        settings.control_file,
+        {
+            **control,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "reason": "Pausa remota activa",
+        },
+    )
+
+
 def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logging.Logger) -> dict[str, Any]:
     checks: dict[str, Any] = {
         "dry_run": settings.dry_run,
@@ -1033,6 +1054,7 @@ def main() -> None:
             write_heartbeat("paused", f"Pre-flight: {pre_flight['detail']}")
     else:
         logger.info("Pre-flight OK: %s", pre_flight["detail"])
+        _clear_stale_preflight_pause_reason(settings)
 
     while True:
         control = load_state(settings.control_file)
