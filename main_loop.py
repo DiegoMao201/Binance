@@ -533,8 +533,8 @@ def _reconcile_live_open_positions(
             continue
 
         held_total = float(holdings.get("total") or 0.0)
-        dust_threshold = max(0.001, amount * 0.05)
-        if held_total > dust_threshold:
+        held_ratio = held_total / max(amount, 1e-12)
+        if held_ratio > 0.2:
             position["reconciled_holdings"] = holdings
             remaining_positions.append(position)
             continue
