@@ -28,14 +28,17 @@ function formatDate(value) {
     return "sin dato";
   }
 
-  return new Date(value).toLocaleString("es-ES", {
-    hour12: false,
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "sin dato";
+  }
+
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+  const second = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${day}/${month}, ${hour}:${minute}:${second} UTC`;
 }
 
 
@@ -281,8 +284,10 @@ export default function DashboardClient({ initialData }) {
   const isOnline = useMemo(() => {
     const heartbeat = status?.heartbeat_at;
     if (!heartbeat) return false;
-    return Date.now() - new Date(heartbeat).getTime() < 120000;
-  }, [status]);
+    const referenceTime = payload?.serverTime ? new Date(payload.serverTime).getTime() : Number.NaN;
+    if (Number.isNaN(referenceTime)) return false;
+    return referenceTime - new Date(heartbeat).getTime() < 120000;
+  }, [payload?.serverTime, status?.heartbeat_at]);
 
   const focusScan = useMemo(() => {
     if (!lastScans.length) return null;
