@@ -605,26 +605,48 @@ def _compute_equity(balance_usd: float, open_positions: list[dict[str, Any]], ma
         side = position.get("side")
         symbol = position.get("symbol")
         mark_price = float(mark_prices.get(symbol, entry) or entry)
+        effective_amount = amount
+        if side == "buy" and position.get("mode") == "live":
+            holdings = position.get("reconciled_holdings") or {}
+            held_total = float(holdings.get("total") or 0.0)
+            if holdings:
+                effective_amount = max(0.0, min(amount, held_total))
         if side == "buy":
-            open_value += amount * mark_price
+            open_value += effective_amount * mark_price
         elif side == "sell":
             open_value += amount * entry + (entry - mark_price) * amount
         else:
-            open_value += amount * mark_price
+            open_value += effective_amount * mark_price
     if any(p.get("side") == "buy" for p in open_positions):
         # We already deducted USDT to open the buy, so equity = remaining USDT + asset value
         return float(balance_usd) + open_value
     return float(balance_usd) + open_value
 
 
-def _update_high_water_mark(equity_history: list[dict[str, Any]], equity_usd: float, timestamp: str) -> tuple[float, list[dict[str, Any]]]:
+def _should_reset_high_water_mark(
+    open_positions: list[dict[str, Any]],
+    newly_closed_trades: list[dict[str, Any]],
+) -> bool:
+    if open_positions:
+        return False
+    return any(str(trade.get("exit_reason") or "") == "external_reconcile" for trade in newly_closed_trades)
+
+
+def _update_high_water_mark(
+    equity_history: list[dict[str, Any]],
+    equity_usd: float,
+    timestamp: str,
+    *,
+    reset_hwm: bool = False,
+) -> tuple[float, list[dict[str, Any]]]:
     previous_hwm = 0.0
-    for item in equity_history:
-        try:
-            previous_hwm = max(previous_hwm, float(item.get("high_water_mark", 0.0)))
-        except (TypeError, ValueError):
-            continue
-    new_hwm = max(previous_hwm, equity_usd)
+    if not reset_hwm:
+        for item in equity_history:
+            try:
+                previous_hwm = max(previous_hwm, float(item.get("high_water_mark", 0.0)))
+            except (TypeError, ValueError):
+                continue
+    new_hwm = equity_usd if reset_hwm else max(previous_hwm, equity_usd)
     equity_history.append(
         {
             "timestamp": timestamp,
@@ -1080,16 +1102,21 @@ def run_cycle() -> None:
         if live_mode and settings.binance_api_key and active_symbol:
             try:
                 asset_holdings = client.fetch_asset_balance(symbol=active_symbol)
+                for position in open_positions:
+                    if position.get("symbol") == active_symbol and position.get("mode") == "live":
+                        position["reconciled_holdings"] = asset_holdings
             except BinanceClientError as exc:
                 logger.error("No se pudo leer holdings: %s", exc)
                 asset_holdings = {"asset": client.base_asset_for(active_symbol), "free": 0.0, "used": 0.0, "total": 0.0, "error": str(exc)}
 
         mark_prices = {sym: float(c.get("close") or 0.0) for sym, c in candles_by_symbol.items()}
         equity_usd = _compute_equity(balance_usd, open_positions, mark_prices)
+        reset_hwm = _should_reset_high_water_mark(open_positions, newly_closed_trades)
         new_hwm, equity_history = _update_high_water_mark(
             equity_history,
             equity_usd,
             datetime.now(timezone.utc).isoformat(),
+            reset_hwm=reset_hwm,
         )
         persist_history(settings.equity_history_file, equity_history)
 
