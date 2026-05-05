@@ -96,6 +96,75 @@ Este documento describe el entorno live canónico. El bot local no debe correr e
 - el control remoto sigue usando `/data/logs/control.json`
 - no existe otro proceso live local operando en paralelo sobre la misma cuenta
 
+## Recovery cuando el panel vuelve pero el frontend está desalineado
+
+Síntomas típicos:
+
+- `panel.datovatenexuspro.com` abre, pero `tradingdiegomao.datovatenexuspro.com` muestra estado viejo
+- el frontend responde, pero el heartbeat está congelado
+- la posición BTC del exchange no coincide con `open_positions.json`
+- Telegram deja de avisar aunque el bot parece arriba
+
+Checklist dentro de Coolify:
+
+1. Abrir el servicio del bot y comprobar que el contenedor esté `running` y `healthy`.
+2. Abrir el servicio del frontend y comprobar que el contenedor esté `running`.
+3. Verificar que ambos servicios monten exactamente el mismo volumen en `/data/logs`.
+4. Verificar que el bot tenga `LOGS_DIR=/data/logs`.
+5. Verificar que el frontend tenga `BOT_STATE_DIR=/data/logs`.
+6. Verificar que el bot tenga `BINANCE_PROXY_URL` configurado si la salida a Binance depende del proxy europeo.
+7. Verificar que el bot tenga `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`.
+8. Revisar `status.json` en el volumen y confirmar que `heartbeat_at` avance cada ciclo.
+9. Revisar `bot_state.json` y confirmar que `serverTime`, `status` y `portfolio` no estén congelados.
+10. Revisar `open_positions.json` y compararlo con la posición real en Binance antes de relanzar el bot.
+
+## Revisión específica para retomar la posición BTC sin desincronización
+
+1. Confirmar en Binance si la posición BTC sigue abierta.
+2. Confirmar en `/data/logs/open_positions.json` que exista una única posición BTC abierta.
+3. Confirmar en `/data/logs/closed_trades.json` que no haya cierres falsos `external_reconcile` de esa BTC.
+4. Confirmar en `/data/logs/equity_history.json` que no exista una muestra espuria de equity cercana al balance libre de USDT solamente.
+5. Si el estado del volumen no coincide con Binance, corregir primero los JSON persistidos y solo después reiniciar el bot.
+6. No arrancar el bot local mientras se hace esta reconciliación en Coolify.
+
+## Limpieza segura de logs y artefactos en el servidor
+
+No borres a ciegas todo `/data/logs`.
+
+Limpieza segura:
+
+1. Mantener: `status.json`, `control.json`, `bot_state.json`, `open_positions.json`, `closed_trades.json`, `equity_history.json`, `order_history.json`, `signal_history.json`, `scan_history.json`.
+2. Limpiar solo rotados o snapshots no críticos si ocupan espacio: `bot.log.*`, archivos temporales y dumps manuales.
+3. Antes de limpiar historiales, descargar copia del volumen o exportar los JSON críticos.
+4. Si el problema es tamaño de disco, limpiar primero imágenes Docker antiguas y logs rotados antes que borrar estado operativo.
+
+Comandos orientativos dentro del host si tienes consola:
+
+```bash
+df -h
+docker ps
+docker system df
+docker image prune -af
+find /data/logs -maxdepth 1 -type f -name 'bot.log.*' -delete
+```
+
+No ejecutes limpieza destructiva sobre `open_positions.json`, `closed_trades.json` o `equity_history.json` sin comparar primero contra Binance.
+
+## Checklist de Telegram en Coolify
+
+1. `TELEGRAM_ENABLED=true`
+2. `TELEGRAM_BOT_TOKEN` presente
+3. `TELEGRAM_CHAT_ID` presente
+4. Revisar logs del bot buscando errores `Telegram devolvio` o `No se pudo enviar notificacion Telegram`
+5. Forzar un evento de prueba solo cuando el bot ya esté estable y sincronizado
+
+## Checklist de frontend en Coolify
+
+1. `BOT_STATE_DIR=/data/logs`
+2. El volumen montado debe ser exactamente el mismo que usa el bot
+3. `GET /api/state` debe devolver JSON fresco
+4. El `serverTime` del API puede cambiar aunque los archivos estén congelados; lo autoritativo es el `heartbeat_at` dentro de `status.json`
+
 ## Nota importante
 
 Hoy el `stop loss` y el `take profit` siguen siendo gestionados localmente por el bot, no por órdenes residentes en Binance. Migrar a Coolify elimina la dependencia del portátil, pero no elimina todavía el riesgo de que una caída del contenedor deje una posición abierta sin protección nativa en exchange.
