@@ -3,6 +3,9 @@
 __pycache__/
 .pytest_cache/
 logs/*.log
+logs/*.log.*
+logs/pre_flight.json
+logs/scan_history.json
 logs/bot_state.json
 logs/status.json
 logs/control.json
