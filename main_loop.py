@@ -808,6 +808,39 @@ def _clear_stale_preflight_pause_reason(settings: Settings) -> None:
     )
 
 
+def _clear_stale_kill_switch_stop(settings: Settings) -> None:
+    control = load_state(settings.control_file)
+    if control.get("desired_state") != "stopped":
+        return
+    if control.get("updated_by") != "kill_switch":
+        return
+
+    reason = str(control.get("reason") or "")
+    if not reason.startswith("Kill Switch:"):
+        return
+
+    previous_state = load_state(settings.state_file)
+    previous_risk = previous_state.get("risk") or {}
+    persisted_open_positions = load_history(settings.open_positions_file)
+
+    if previous_risk.get("kill_switch_triggered"):
+        return
+    if float(previous_risk.get("drawdown_pct") or 0.0) >= settings.kill_switch_drawdown:
+        return
+    if previous_state.get("open_positions") or persisted_open_positions:
+        return
+
+    persist_state(
+        settings.control_file,
+        {
+            **control,
+            "desired_state": "running",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "reason": "Recuperado automaticamente tras kill switch persistido sin riesgo activo.",
+        },
+    )
+
+
 def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logging.Logger) -> dict[str, Any]:
     checks: dict[str, Any] = {
         "dry_run": settings.dry_run,
@@ -1424,6 +1457,7 @@ def main() -> None:
     else:
         logger.info("Pre-flight OK: %s", pre_flight["detail"])
         _clear_stale_preflight_pause_reason(settings)
+        _clear_stale_kill_switch_stop(settings)
         _notify_safe(
             notifier,
             logger,
