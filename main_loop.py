@@ -504,6 +504,70 @@ def _build_portfolio_summary(
     }
 
 
+def _reconcile_live_open_positions(
+    open_positions: list[dict[str, Any]],
+    candles_by_symbol: dict[str, dict[str, Any]],
+    *,
+    client: BinanceDataClient,
+    logger: logging.Logger,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    remaining_positions: list[dict[str, Any]] = []
+    externally_closed: list[dict[str, Any]] = []
+
+    for position in open_positions:
+        if position.get("mode") != "live" or position.get("side") != "buy":
+            remaining_positions.append(position)
+            continue
+
+        symbol = str(position.get("symbol") or "")
+        amount = float(position.get("amount") or 0.0)
+        if not symbol or amount <= 0:
+            remaining_positions.append(position)
+            continue
+
+        try:
+            holdings = client.fetch_asset_balance(symbol=symbol)
+        except BinanceClientError as exc:
+            logger.warning("No se pudo reconciliar holdings para %s: %s", symbol, exc)
+            remaining_positions.append(position)
+            continue
+
+        held_total = float(holdings.get("total") or 0.0)
+        dust_threshold = max(0.001, amount * 0.05)
+        if held_total > dust_threshold:
+            position["reconciled_holdings"] = holdings
+            remaining_positions.append(position)
+            continue
+
+        candle = candles_by_symbol.get(symbol) or {}
+        exit_price = float(candle.get("close") or position.get("fill_price") or position.get("entry_price") or 0.0)
+        entry_price = float(position.get("entry_price") or 0.0)
+        pnl_usdt = (exit_price - entry_price) * amount
+        logger.warning(
+            "Posicion %s reconciliada como cerrada fuera del bot. holdings_total=%.8f amount=%.8f",
+            symbol,
+            held_total,
+            amount,
+        )
+        externally_closed.append(
+            {
+                **position,
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "exit_price": round(exit_price, 4),
+                "exit_reason": "external_reconcile",
+                "pnl_usdt": round(pnl_usdt, 4),
+                "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
+                "status": "closed",
+                "live_close": {
+                    "status": "reconciled_external",
+                    "post_close_holdings": holdings,
+                },
+            }
+        )
+
+    return remaining_positions, externally_closed
+
+
 def _compute_equity(balance_usd: float, open_positions: list[dict[str, Any]], mark_prices: dict[str, float]) -> float:
     open_value = 0.0
     for position in open_positions:
@@ -757,6 +821,15 @@ def run_cycle() -> None:
             executor=executor,
             logger=logger,
         )
+        if live_mode and open_positions:
+            open_positions, externally_closed_trades = _reconcile_live_open_positions(
+                open_positions,
+                candles_by_symbol,
+                client=client,
+                logger=logger,
+            )
+            if externally_closed_trades:
+                newly_closed_trades.extend(externally_closed_trades)
         if newly_closed_trades:
             closed_trades.extend(newly_closed_trades)
             persist_history(settings.closed_trades_file, closed_trades)
