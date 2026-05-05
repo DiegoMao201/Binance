@@ -4,15 +4,16 @@ Usa este documento como contexto base para continuar el desarrollo de este proye
 
 ## Rol esperado de la otra IA
 
-Actúa como arquitecto y desarrollador principal de una plataforma de trading algorítmico local-first para Binance llamada OptiFerre-Trader.
+Actúa como arquitecto y desarrollador principal de una plataforma de trading algorítmico para Binance llamada OptiFerre-Trader, cuyo entorno live canónico corre en Coolify.
 
 Debes:
 - preservar el enfoque de protección de capital
 - respetar la arquitectura modular actual
 - evitar cambios destructivos o amplios sin necesidad
 - priorizar mejoras verificables e iterativas
-- mantener compatibilidad con la operación local en Mac
-- asumir que el panel Next.js local es el centro de control maestro
+- mantener compatibilidad con depuración local en Mac sin desplazar el entorno live remoto
+- asumir que Coolify es el entorno autoritativo de producción
+- evitar que el bot local y el bot remoto queden activos al mismo tiempo sobre la misma cuenta
 - no exponer secretos ni tocar `.env` salvo que se pida explícitamente
 - no activar trading real sin endurecer primero la lógica live
 
@@ -29,22 +30,24 @@ Características actuales:
 - guarda su estado en archivos JSON bajo `logs/`
 - el frontend lee esos archivos y presenta un panel narrativo de control
 - el frontend permite prender, pausar o detener el bot vía `control.json`
-- el bot corre localmente en el Mac del usuario y esa modalidad es actualmente la preferida
+- el entorno live principal corre en Coolify con proxy europeo y frontend publicado
 
 Estado operativo real del proyecto:
-- el frontend local funciona en `http://localhost:3000`
-- el bot Python local funciona desde el Mac del usuario
-- Binance responde correctamente desde la IP residencial del usuario
-- Coolify se intentó pero quedó descartado como camino principal porque la IP/región del servidor devolvía `451 restricted location`
+- el frontend productivo funciona en `https://tradingdiegomao.datovatenexuspro.com/`
+- el panel operativo de Coolify vive en `https://panel.datovatenexuspro.com/`
+- el bot Python live corre en el servidor remoto, no debe duplicarse en local
+- existe soporte para proxy vía `BINANCE_PROXY_URL`
+- existe telemetría Telegram activa vía `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`
 
 ## Objetivo estratégico actual
 
-El proyecto no debe enfocarse ahora en despliegue remoto. Debe enfocarse en:
-- operación local estable
-- observabilidad clara del bot
-- reducción de coste de IA
-- validación prolongada en simulación
-- evolución posterior hacia spot live real, pero solo cuando el control de posiciones sea robusto
+El proyecto debe mantener alineados:
+- el repo local
+- la configuración de Coolify
+- el frontend publicado
+- la telemetría live
+
+La prioridad ya no es un modo local-first, sino evitar deriva entre local y servidor.
 
 ## Workspace real
 
@@ -333,18 +336,18 @@ Validado:
 - Binance responde desde la IP local del usuario
 
 ### Estado de Binance e infraestructura
-- desde el servidor remoto usado en Coolify, Binance respondía `451 restricted location`
-- desde la IP residencial del usuario sí funcionó
-- por eso el proyecto se movió a estrategia local-first
+- el entorno live usa Coolify
+- la conectividad a Binance del servidor depende del proxy configurado en Coolify
+- cualquier cambio local debe preservar compatibilidad con ese despliegue remoto
 
 ## Infraestructura y despliegue
 
 ### Local actual
-Es la infraestructura preferida ahora mismo.
+Es un entorno auxiliar de depuración y contingencia.
 
 Componentes:
-- proceso Python del bot en la Mac
-- frontend Next.js local en puerto `3000`
+- ejecución puntual en Mac solo para debug o `DRY_RUN`
+- frontend Next.js local en puerto `3000` solo como espejo auxiliar
 - archivos compartidos en `logs/`
 
 ### Coolify
@@ -360,13 +363,15 @@ Había además:
 - `DEPLOY_COOLIFY.md`
 
 Estado actual de Coolify:
-- no es el camino principal ahora mismo
-- tuvo problemas de espacio en disco y luego de restricción geográfica de Binance
-- puede mantenerse la documentación, pero no debe asumirse como entorno operativo actual
+- es el camino principal de producción
+- aloja el bot live y el frontend publicado
+- debe tratarse como fuente de verdad para configuración y operación
 
 ## Configuración importante actual
 
 Archivo `.env` local del usuario contiene credenciales reales. No debe exponerse.
+
+El `.env` local debe mantenerse compatible con las variables usadas en Coolify, aunque no se ejecuten todas localmente al mismo tiempo.
 
 Variables principales:
 - `BINANCE_API_KEY`

@@ -15,6 +15,8 @@ Mover el bot y el dashboard fuera del portátil para que:
 - el dashboard lea el mismo estado persistido por el bot
 - Coolify pueda reiniciar servicios caídos con healthchecks reales
 
+Este documento describe el entorno live canónico. El bot local no debe correr en paralelo con este despliegue cuando ambos apunten a la misma cuenta de Binance.
+
 ## Servicio bot
 
 - tipo: `Dockerfile`
@@ -28,8 +30,12 @@ Mover el bot y el dashboard fuera del portátil para que:
 
 - `BINANCE_API_KEY`
 - `BINANCE_API_SECRET`
+- `BINANCE_PROXY_URL`
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_MODEL=openai/gpt-4.1`
+- `TELEGRAM_ENABLED=true`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 - `LOGS_DIR=/data/logs`
 - `DRY_RUN=true` para el primer despliegue; luego pasar a `false`
 - `TARGET_SYMBOLS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,AVAX/USDT,LINK/USDT,ADA/USDT`
@@ -88,6 +94,7 @@ Mover el bot y el dashboard fuera del portátil para que:
 - si el bot deja de escribir heartbeat por más de 180 segundos, el healthcheck falla
 - el frontend sigue mostrando el último estado persistido aunque el bot se reinicie
 - el control remoto sigue usando `/data/logs/control.json`
+- no existe otro proceso live local operando en paralelo sobre la misma cuenta
 
 ## Nota importante
 

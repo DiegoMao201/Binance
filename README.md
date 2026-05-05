@@ -1,6 +1,6 @@
 # OptiFerre-Trader
 
-Plataforma de trading algorítmico para Binance con análisis técnico, apoyo de IA y modo seguro por defecto.
+Plataforma de trading algorítmico para Binance con análisis técnico, apoyo de IA y despliegue live principal en Coolify.
 
 ## Estado inicial
 
@@ -15,14 +15,31 @@ Proyecto base creado con arquitectura modular:
 - `logs`: salida persistente de logs
 - `config`: configuraciones auxiliares
 
-## Primer arranque
+## Operación actual
+
+El entorno live canónico es Coolify.
+
+- `bot`: servicio Python continuo en Coolify
+- `frontend`: servicio Next.js publicado en Coolify
+- volumen compartido: `/data/logs`
+- panel productivo: `https://tradingdiegomao.datovatenexuspro.com/`
+
+La ejecución local queda solo para:
+
+- depuración puntual
+- validación en `DRY_RUN`
+- recuperación manual si el servidor remoto no está disponible
+
+No se debe ejecutar `main_loop.py` en local mientras el bot live de Coolify esté activo sobre la misma cuenta de Binance.
+
+## Primer arranque local
 
 1. Crear entorno virtual `.venv`
 2. Instalar dependencias desde `requirements.txt`
 3. Completar el archivo `.env` con claves reales
 4. Ejecutar el panel Streamlit y el bucle principal
 
-## Comandos de uso
+## Comandos de uso local
 
 ```bash
 cd "/Users/diegogarcia/Aplicaciones IA/Binance trading"
@@ -34,9 +51,11 @@ cd web && npm run start
 
 El primer comando ejecuta un solo ciclo de prueba. El segundo deja el bot corriendo cada 60 segundos. Los dos últimos preparan y levantan el dashboard Next.js en `http://localhost:3000`.
 
-## Despliegue
+Antes de usar el segundo comando en local, asegúrate de que el bot live de Coolify esté detenido o que `DRY_RUN=true` localmente.
 
-La guía para separar bot y frontend en Coolify está en `DEPLOY_COOLIFY.md`.
+## Despliegue canónico
+
+La guía operativa principal está en `DEPLOY_COOLIFY.md`.
 
 El despliegue recomendado es:
 
@@ -56,7 +75,8 @@ El bot ya incluye healthcheck por heartbeat sobre `logs/status.json`, pensado pa
 
 ## Visibilidad operativa
 
-- El panel local en `http://localhost:3000` sigue siendo el control maestro para prender, pausar y detener el bot.
+- El panel canónico es `https://tradingdiegomao.datovatenexuspro.com/`.
+- El panel local en `http://localhost:3000` se considera auxiliar y no debe gobernar el entorno live remoto salvo mantenimiento explícito.
 - El dashboard ya muestra `PnL realizado`, `PnL flotante` y una tabla de `Resultado por operación` para las operaciones simuladas que cierren por take profit o stop loss.
 
 ## Nota
