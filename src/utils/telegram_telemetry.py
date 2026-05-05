@@ -9,6 +9,19 @@ from typing import Any
 import aiohttp
 
 
+MARKDOWN_V2_RESERVED_CHARS = r"_*[]()~`>#+-=|{}.!"
+
+
+def escape_markdown_v2(text: str) -> str:
+    escaped = []
+    for char in text:
+        if char in MARKDOWN_V2_RESERVED_CHARS:
+            escaped.append("\\" + char)
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
 class TelegramTelemetry:
     def __init__(
         self,
@@ -83,43 +96,43 @@ class TelegramTelemetry:
         return self._render_sys(data)
 
     def _render_trade(self, data: dict[str, Any]) -> str:
-        side = str(data.get("side") or data.get("direction") or "LONG").upper()
-        symbol = str(data.get("symbol") or "N/D")
-        entry = self._fmt_price(data.get("entry") or data.get("entry_price") or data.get("fill_price"))
-        stop_loss = self._fmt_price(data.get("stop_loss") or data.get("sl"))
-        pnl = self._fmt_signed(data.get("pnl_usdt"), suffix=" USDT")
+        side = escape_markdown_v2(str(data.get("side") or data.get("direction") or "LONG").upper())
+        symbol = escape_markdown_v2(str(data.get("symbol") or "N/D"))
+        entry = escape_markdown_v2(self._fmt_price(data.get("entry") or data.get("entry_price") or data.get("fill_price")))
+        stop_loss = escape_markdown_v2(self._fmt_price(data.get("stop_loss") or data.get("sl")))
+        pnl = escape_markdown_v2(self._fmt_signed(data.get("pnl_usdt"), suffix=" USDT"))
         return "\n".join(
             [
-                self._escape(f"🟢 {side} {symbol}"),
-                self._escape(f"In: {entry} | SL: {stop_loss}"),
-                self._escape(f"PNL: {pnl}"),
+                f"🟢 {side} {symbol}",
+                f"In: {entry} | SL: {stop_loss}",
+                f"PNL: {pnl}",
             ]
         )
 
     def _render_critical(self, data: dict[str, Any]) -> str:
-        title = str(data.get("title") or data.get("event") or "CRÍTICO")
-        detail = str(data.get("detail") or data.get("message") or "Sin detalle")
-        status = str(data.get("status") or "APAGADO").upper()
+        title = escape_markdown_v2(str(data.get("title") or data.get("event") or "CRÍTICO"))
+        detail = escape_markdown_v2(str(data.get("detail") or data.get("message") or "Sin detalle"))
+        status = escape_markdown_v2(str(data.get("status") or "APAGADO").upper())
         return "\n".join(
             [
-                self._escape(f"🔴 CRÍTICO: {title}"),
-                self._escape(detail),
-                self._escape(f"Estado: {status}"),
+                f"🔴 CRÍTICO: {title}",
+                detail,
+                f"Estado: {status}",
             ]
         )
 
     def _render_sys(self, data: dict[str, Any]) -> str:
-        title = str(data.get("title") or data.get("event") or "ALERTA RED")
+        title = escape_markdown_v2(str(data.get("title") or data.get("event") or "ALERTA RED"))
         cycle_seconds = data.get("cycle_seconds") or data.get("cycle")
-        detail = str(data.get("detail") or data.get("message") or "")
-        cycle_text = self._fmt_cycle(cycle_seconds)
+        detail = escape_markdown_v2(str(data.get("detail") or data.get("message") or ""))
+        cycle_text = escape_markdown_v2(self._fmt_cycle(cycle_seconds))
         summary = f"Ciclo: {cycle_text}"
         if detail:
             summary = f"{summary} ({detail})"
         return "\n".join(
             [
-                self._escape(f"🟡 {title}"),
-                self._escape(summary),
+                f"🟡 {title}",
+                summary,
             ]
         )
 
@@ -142,12 +155,3 @@ class TelegramTelemetry:
             return f"{float(value):.1f}s"
         except (TypeError, ValueError):
             return "n/d"
-
-    def _escape(self, text: str) -> str:
-        escaped = []
-        for char in text:
-            if char in r"_[]()~`>#+-=|{}.!":
-                escaped.append("\\" + char)
-            else:
-                escaped.append(char)
-        return "".join(escaped)
