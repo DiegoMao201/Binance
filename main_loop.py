@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import asdict
@@ -14,8 +15,8 @@ from src.data.binance_client import BinanceClientError, BinanceDataClient
 from src.execution.trader import TradeExecutor
 from src.safety.risk_manager import RiskManager, RiskSnapshot
 from src.utils.config import Settings, load_settings
-from src.utils.notifications import TelegramNotifier
 from src.utils.logger import setup_logger
+from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.state_store import append_history, build_state_snapshot, load_history, load_state, persist_history, persist_state
 
 
@@ -28,43 +29,57 @@ AI_NOT_CONSULTED = {
 }
 
 
-def _build_notifier(settings: Settings) -> TelegramNotifier:
-    return TelegramNotifier(
+def _build_notifier(settings: Settings, logger: logging.Logger) -> TelegramTelemetry:
+    return TelegramTelemetry(
         enabled=settings.telegram_enabled,
+        logger=logger,
         bot_token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,
     )
 
 
-def _notify_safe(notifier: TelegramNotifier, logger: logging.Logger, message: str) -> None:
+def _notify_safe(notifier: TelegramTelemetry, logger: logging.Logger, level: str, data: dict[str, Any]) -> None:
+    if not notifier.configured:
+        return
+
     try:
-        notifier.send(message)
+        loop = asyncio.get_running_loop()
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, RuntimeError):
+            notifier.send_alert_nowait(level, data)
+            return
+        logger.warning("No se pudo programar notificacion Telegram: %s", exc)
+        return
+
+    task = loop.create_task(notifier.send_alert(level, data))
+    task.add_done_callback(lambda scheduled: _log_async_notification_failure(scheduled, logger))
+
+
+def _log_async_notification_failure(task: asyncio.Task[None], logger: logging.Logger) -> None:
+    try:
+        task.result()
     except Exception as exc:  # noqa: BLE001
         logger.warning("No se pudo enviar notificacion Telegram: %s", exc)
 
 
-def _format_trade_open_message(decision: dict[str, Any]) -> str:
-    return (
-        "TRADE OPEN\n"
-        f"Par: {decision.get('symbol', 'n/d')}\n"
-        f"Lado: {str(decision.get('side', 'n/d')).upper()}\n"
-        f"Monto: {float(decision.get('notional_usdt', 0.0)):.2f} USDT\n"
-        f"Entrada: {float(decision.get('fill_price') or decision.get('price') or 0.0):.4f}\n"
-        f"SL: {float(decision.get('stop_loss', 0.0)):.4f}\n"
-        f"TP: {float(decision.get('take_profit', 0.0)):.4f}\n"
-        f"Escenario: {decision.get('scenario', 'n/d')}"
-    )
+def _format_trade_open_message(decision: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": decision.get("symbol", "n/d"),
+        "side": str(decision.get("side", "LONG")).upper(),
+        "entry_price": decision.get("fill_price") or decision.get("price") or 0.0,
+        "stop_loss": decision.get("stop_loss", 0.0),
+        "pnl_usdt": decision.get("pnl_usdt", 0.0),
+    }
 
 
-def _format_trade_close_message(closed_trade: dict[str, Any]) -> str:
-    return (
-        "TRADE CLOSE\n"
-        f"Par: {closed_trade.get('symbol', 'n/d')}\n"
-        f"Salida: {closed_trade.get('exit_reason', 'n/d')}\n"
-        f"PnL: {float(closed_trade.get('pnl_usdt', 0.0)):.4f} USDT\n"
-        f"PnL %: {float(closed_trade.get('pnl_pct', 0.0)) * 100:.2f}%\n"
-        f"Precio cierre: {float(closed_trade.get('exit_price', 0.0)):.4f}"
-    )
+def _format_trade_close_message(closed_trade: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": closed_trade.get("symbol", "n/d"),
+        "side": "CLOSE",
+        "entry": closed_trade.get("entry_price") or closed_trade.get("fill_price") or closed_trade.get("exit_price"),
+        "stop_loss": closed_trade.get("stop_loss"),
+        "pnl_usdt": closed_trade.get("pnl_usdt", 0.0),
+    }
 
 
 def write_heartbeat(status: str, detail: str | None = None) -> None:
@@ -691,7 +706,7 @@ def _scan_symbol(
 def run_cycle() -> None:
     settings = load_settings()
     logger = setup_logger(settings)
-    notifier = _build_notifier(settings)
+    notifier = _build_notifier(settings, logger)
     client = BinanceDataClient(settings)
     risk_manager = RiskManager(settings)
     executor = TradeExecutor(settings, client, risk_manager, logger)
@@ -747,7 +762,7 @@ def run_cycle() -> None:
             persist_history(settings.closed_trades_file, closed_trades)
             if live_mode:
                 for closed_trade in newly_closed_trades:
-                    _notify_safe(notifier, logger, _format_trade_close_message(closed_trade))
+                    _notify_safe(notifier, logger, "trade", _format_trade_close_message(closed_trade))
         persist_history(settings.open_positions_file, open_positions)
 
         # 3) MUTEX GLOBAL: si hay posicion activa en cualquier ticker, no abrimos otra.
@@ -887,12 +902,12 @@ def run_cycle() -> None:
             _notify_safe(
                 notifier,
                 logger,
-                (
-                    "KILL SWITCH\n"
-                    f"Drawdown: {risk_snapshot.drawdown_pct * 100:.2f}%\n"
-                    f"Equity: {risk_snapshot.equity_usd:.2f} USDT\n"
-                    f"HWM: {risk_snapshot.high_water_mark:.2f} USDT"
-                ),
+                "critical",
+                {
+                    "title": "Drawdown",
+                    "detail": f"Max DD cruzo {risk_snapshot.drawdown_pct * 100:.2f}%",
+                    "status": "apagado",
+                },
             )
             return
 
@@ -969,11 +984,12 @@ def run_cycle() -> None:
                 _notify_safe(
                     notifier,
                     logger,
-                    (
-                        "BOT STOP\n"
-                        f"Motivo: {decision.get('reason', 'fallo de exchange')}\n"
-                        f"Par: {decision.get('symbol', 'n/d')}"
-                    ),
+                    "critical",
+                    {
+                        "title": "API Reject",
+                        "detail": f"{decision.get('reason', 'fallo de exchange')} | {decision.get('symbol', 'n/d')}",
+                        "status": "apagado",
+                    },
                 )
 
             if decision.get("status") in {"simulated", "submitted"}:
@@ -1006,7 +1022,7 @@ def run_cycle() -> None:
                 global_lock = True
                 active_symbol = symbol
                 if live_mode and decision.get("status") == "submitted":
-                    _notify_safe(notifier, logger, _format_trade_open_message(decision))
+                    _notify_safe(notifier, logger, "trade", _format_trade_open_message(decision))
         else:
             # No hubo entrada: usamos el primer scan como referencia de la decision.
             primary_scan = scan_results[0] if scan_results else None
@@ -1089,21 +1105,21 @@ def run_cycle() -> None:
         logger.exception("Error de Binance: %s", exc)
         if not settings.dry_run:
             _set_control_state(settings, "stopped", f"Kill Switch infra: {exc}")
-            _notify_safe(_build_notifier(settings), logger, f"BOT STOP\nBinance error\n{exc}")
+            _notify_safe(_build_notifier(settings, logger), logger, "critical", {"title": "API Reject", "detail": str(exc), "status": "apagado"})
     except RequestException as exc:
         write_heartbeat("offline", f"Error de red: {exc}")
         logger.exception("Error de red en OpenRouter o Binance: %s", exc)
-        _notify_safe(_build_notifier(settings), logger, f"BOT NET ERROR\n{exc}")
+        _notify_safe(_build_notifier(settings, logger), logger, "sys", {"title": "ALERTA RED", "detail": str(exc)})
     except Exception as exc:  # noqa: BLE001
         write_heartbeat("offline", f"Fallo inesperado: {exc}")
         logger.exception("Fallo inesperado en el ciclo principal: %s", exc)
-        _notify_safe(_build_notifier(settings), logger, f"BOT ERROR\n{exc}")
+        _notify_safe(_build_notifier(settings, logger), logger, "critical", {"title": "Loss of Containment", "detail": str(exc), "status": "apagado"})
 
 
 def main() -> None:
     settings = load_settings()
     logger = setup_logger(settings)
-    notifier = _build_notifier(settings)
+    notifier = _build_notifier(settings, logger)
     ensure_control_file()
     logger.info("OptiFerre-Trader iniciado. DRY_RUN=%s", settings.dry_run)
 
@@ -1117,23 +1133,24 @@ def main() -> None:
         if _is_degradable_preflight_failure(pre_flight):
             logger.error("Pre-flight degradado: %s. El bot seguira en modo observacional.", pre_flight["detail"])
             write_heartbeat("degraded", f"Pre-flight degradado: {pre_flight['detail']}")
-            _notify_safe(notifier, logger, f"BOT WARN\nPre-flight degradado\n{pre_flight['detail']}")
+            _notify_safe(notifier, logger, "sys", {"title": "ALERTA RED", "detail": pre_flight["detail"]})
         else:
             logger.critical("Pre-flight fall\u00f3: %s. Forzando pausa.", pre_flight["detail"])
             _set_control_state(settings, "paused", f"Pre-flight: {pre_flight['detail']}")
             write_heartbeat("paused", f"Pre-flight: {pre_flight['detail']}")
-            _notify_safe(notifier, logger, f"BOT BLOCKED\nPre-flight fallo\n{pre_flight['detail']}")
+            _notify_safe(notifier, logger, "critical", {"title": "Pre-flight", "detail": pre_flight["detail"], "status": "apagado"})
     else:
         logger.info("Pre-flight OK: %s", pre_flight["detail"])
         _clear_stale_preflight_pause_reason(settings)
         _notify_safe(
             notifier,
             logger,
-            (
-                "BOT READY\n"
-                f"Pre-flight: {pre_flight['detail']}\n"
-                f"Balance: {float(pre_flight.get('balance_usdt', 0.0)):.2f} USDT"
-            ),
+            "sys",
+            {
+                "title": "BOT READY",
+                "cycle_seconds": 0.0,
+                "detail": f"Balance {float(pre_flight.get('balance_usdt', 0.0)):.2f} USDT",
+            },
         )
 
     while True:
