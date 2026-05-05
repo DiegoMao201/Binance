@@ -297,6 +297,7 @@ def _settle_open_positions(
     open_positions: list[dict[str, Any]],
     candles_by_symbol: dict[str, dict[str, Any]],
     *,
+    settings: Settings,
     live_mode: bool,
     executor: TradeExecutor,
     logger: logging.Logger,
@@ -367,13 +368,41 @@ def _settle_open_positions(
 
         if exit_price is None:
             mark_price = candle_close
-            position["unrealized_pnl_usdt"] = round(
+            unrealized_pnl_usdt = round(
                 (mark_price - entry_price) * amount if side == "buy" else (entry_price - mark_price) * amount,
                 4,
             )
+            position["unrealized_pnl_usdt"] = unrealized_pnl_usdt
             position["mark_price"] = round(mark_price, 4)
-            remaining_positions.append(position)
-            continue
+
+            unrealized_pct = 0.0
+            if entry_price > 0:
+                unrealized_pct = (mark_price - entry_price) / entry_price if side == "buy" else (entry_price - mark_price) / entry_price
+
+            hold_minutes = None
+            opened_at_raw = position.get("opened_at")
+            candle_at_raw = latest_candle.get("timestamp")
+            if opened_at_raw and candle_at_raw:
+                try:
+                    opened_at = datetime.fromisoformat(str(opened_at_raw).replace("Z", "+00:00"))
+                    candle_at = candle_at_raw if isinstance(candle_at_raw, datetime) else datetime.fromisoformat(str(candle_at_raw).replace("Z", "+00:00"))
+                    hold_minutes = max(0.0, (candle_at - opened_at).total_seconds() / 60.0)
+                except ValueError:
+                    hold_minutes = None
+
+            time_exit_enabled = settings.max_position_hold_minutes > 0 and settings.time_profit_take_pct > 0
+            if time_exit_enabled and hold_minutes is not None and hold_minutes >= settings.max_position_hold_minutes and unrealized_pct >= settings.time_profit_take_pct:
+                exit_price = mark_price
+                exit_reason = "time_profit_take"
+                position["time_exit"] = {
+                    "hold_minutes": round(hold_minutes, 1),
+                    "profit_pct": round(unrealized_pct, 6),
+                    "threshold_profit_pct": settings.time_profit_take_pct,
+                    "threshold_hold_minutes": settings.max_position_hold_minutes,
+                }
+            else:
+                remaining_positions.append(position)
+                continue
 
         live_payload: dict[str, Any] = {}
         if live_mode and position.get("mode") == "live":
@@ -953,6 +982,7 @@ def run_cycle() -> None:
         open_positions, newly_closed_trades = _settle_open_positions(
             open_positions,
             candles_by_symbol,
+            settings=settings,
             live_mode=live_mode,
             executor=executor,
             logger=logger,

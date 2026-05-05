@@ -32,6 +32,8 @@ class Settings:
     kill_switch_drawdown: float
     stop_loss_pct: float
     take_profit_pct: float
+    max_position_hold_minutes: int
+    time_profit_take_pct: float
     poll_interval_seconds: int
     log_level: str
     streamlit_port: int
@@ -94,6 +96,8 @@ def load_settings() -> Settings:
         kill_switch_drawdown=float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.05")),
         stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "0.02")),
         take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.03")),
+        max_position_hold_minutes=int(os.getenv("MAX_POSITION_HOLD_MINUTES", "0")),
+        time_profit_take_pct=float(os.getenv("TIME_PROFIT_TAKE_PCT", "0.0")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         streamlit_port=int(os.getenv("STREAMLIT_PORT", "8501")),

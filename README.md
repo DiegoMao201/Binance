@@ -101,6 +101,15 @@ Comportamiento esperado del bot live:
 
 Eso no significa “riesgo cero”, pero sí deja explícito el contrato de recuperación: una posición abierta no debe quedar en el aire por una caída temporal del proceso si el exchange sigue teniendo el activo y el bot puede volver a leerlo.
 
+## Salida opcional por tiempo en ganancia
+
+También existe una salida opcional, desactivada por defecto, para operaciones que se quedan demasiado tiempo abiertas sin llegar al `take_profit` duro:
+
+- `MAX_POSITION_HOLD_MINUTES`: tiempo mínimo de permanencia para evaluar cierre por tiempo
+- `TIME_PROFIT_TAKE_PCT`: beneficio mínimo requerido para cerrar por tiempo
+
+Si ambos valores son mayores que `0`, el bot puede cerrar una operación con `exit_reason=time_profit_take` cuando ya excedió el tiempo configurado y sigue en ganancia suficiente.
+
 ## Restricciones de seguridad incorporadas
 
 - `DRY_RUN=true` por defecto
