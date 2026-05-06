@@ -14,5 +14,18 @@ logs/signal_history.json
 logs/open_positions.json
 logs/closed_trades.json
 logs/equity_history.json
+logs/recovery_status.json
+# Snapshots traidos manualmente desde produccion no deben commitarse
+/bot.log
+/bot_state.json
+/status.json
+/open_positions.json
+/closed_trades.json
+/scan_history.json
+/recovery_status.json
+/equity_history.json
+/order_history.json
+/signal_history.json
+/pre_flight.json
 web/node_modules/
 web/.next/
