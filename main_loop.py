@@ -1035,6 +1035,22 @@ def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+def _describe_global_lock(open_positions: list[dict[str, Any]]) -> str:
+    if not open_positions:
+        return "mutex global inactivo"
+
+    position = open_positions[0]
+    symbol = position.get("symbol") or "n/d"
+    side = str(position.get("side") or "n/d").upper()
+    entry_price = float(position.get("entry_price") or 0.0)
+    mark_price = float(position.get("mark_price") or 0.0)
+    unrealized_pnl = float(position.get("unrealized_pnl_usdt") or 0.0)
+    return (
+        f"mutex global activo por {symbol} {side} | "
+        f"entry={entry_price:.4f} mark={mark_price:.4f} pnl={unrealized_pnl:.4f} USDT"
+    )
+
+
 def _scan_symbol(
     symbol: str,
     settings: Settings,
@@ -1410,9 +1426,11 @@ def run_cycle() -> None:
             primary_scan = scan_results[0] if scan_results else None
             primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
             primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history) if primary_scan else {}
+            lock_detail = _describe_global_lock(open_positions) if global_lock else "guardarrailes sin match"
             decision = {
                 "action": "hold",
                 "reason": "Posicion abierta (mutex global)" if global_lock else "Ningun ticker cumplio los guardarrailes.",
+                "detail": lock_detail,
                 "global_lock": global_lock,
                 "active_symbol": active_symbol,
                 "ai_consulted": ai_signal.get("consulted", False),
@@ -1420,8 +1438,11 @@ def run_cycle() -> None:
                 **primary_guards,
             }
             logger.info(
-                "Sin operacion en este ciclo. lock=%s active=%s scans=%s",
-                global_lock, active_symbol, [(s["symbol"], s["technical_signal"].get("scenario"), s["candidate_reason"]) for s in scan_results],
+                "Sin operacion en este ciclo. lock=%s active=%s detail=%s scans=%s",
+                global_lock,
+                active_symbol,
+                lock_detail,
+                [(s["symbol"], s["technical_signal"].get("scenario"), s["candidate_reason"]) for s in scan_results],
             )
 
         scan_summaries = [
@@ -1481,7 +1502,8 @@ def run_cycle() -> None:
                 recovery=recovery_report,
             ),
         )
-        write_heartbeat("online", "Ciclo completado")
+        heartbeat_detail = decision.get("detail") or decision.get("reason") or "Ciclo completado"
+        write_heartbeat("online", str(heartbeat_detail))
 
     except BinanceClientError as exc:
         error_category = getattr(exc, "category", "exchange_other")
