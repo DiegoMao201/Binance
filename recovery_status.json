@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-05-06T20:02:30.250790+00:00",
+  "mode": "live",
+  "tracked_symbols": [],
+  "recovered_positions": [],
+  "skipped_symbols": [
+    {
+      "symbol": "BTC/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "ETH/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "SOL/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "BNB/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "XRP/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "AVAX/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "LINK/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    },
+    {
+      "symbol": "ADA/USDT",
+      "reason": "holdings_unavailable: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}"
+    }
+  ],
+  "status": "ok",
+  "recovered_count": 0
+}

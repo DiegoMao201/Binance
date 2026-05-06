@@ -1,0 +1,9 @@
+{
+  "status": "degraded",
+  "detail": "Saldo no disponible: binance {\"code\":-2015,\"msg\":\"Invalid API-key, IP, or permissions for action.\"}",
+  "heartbeat_at": "2026-05-06T20:02:44.333255+00:00",
+  "symbol": "ETH/USDT",
+  "timeframe": "5m",
+  "dry_run": false,
+  "desired_state": "running"
+}

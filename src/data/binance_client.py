@@ -21,6 +21,14 @@ class BinanceClientError(Exception):
 def classify_binance_error(exc: Exception | str) -> str:
     message = str(exc).lower()
 
+    if "-2015" in message or "invalid api-key" in message or "invalid api key" in message:
+        return "auth_invalid"
+    if "-2014" in message or "api-key format invalid" in message:
+        return "auth_invalid"
+    if "-2008" in message or "invalid api-key id" in message:
+        return "auth_invalid"
+    if "signature for this request is not valid" in message or "-1022" in message:
+        return "auth_invalid"
     if "429" in message or "too many requests" in message or "rate limit" in message:
         return "rate_limit"
     if "timed out" in message or "timeout" in message or "requesttimeout" in message:
@@ -221,6 +229,40 @@ class BinanceDataClient:
             return True
         except BinanceClientError:
             return False
+
+    def detect_egress_ip(self, timeout: float = 5.0) -> dict[str, Any]:
+        """Best-effort: returns the public IP that Binance sees from this process.
+
+        Uses the configured proxy when present so the result matches what Binance
+        whitelists. Failures are reported in the dict and never raise.
+        """
+        import requests  # local import to avoid hard dep at module load
+
+        proxies: dict[str, str] | None = None
+        if self.settings.binance_proxy_url:
+            proxies = {
+                "http": self.settings.binance_proxy_url,
+                "https": self.settings.binance_proxy_url,
+            }
+
+        result: dict[str, Any] = {
+            "proxy_url_configured": bool(self.settings.binance_proxy_url),
+            "egress_ip": None,
+            "source": None,
+            "error": None,
+        }
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+            try:
+                response = requests.get(url, proxies=proxies, timeout=timeout)
+                response.raise_for_status()
+                ip = response.text.strip()
+                if ip:
+                    result["egress_ip"] = ip
+                    result["source"] = url
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = f"{url}: {exc}"
+        return result
 
     def amount_to_precision(self, amount: float, symbol: str | None = None) -> float:
         target = symbol or self.settings.trading_symbol

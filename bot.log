@@ -1,0 +1,10 @@
+2026-05-06 15:02:30 | INFO | optiferre | Iniciando ciclo multi-ticker (BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT, AVAX/USDT, LINK/USDT, ADA/USDT) en 5m. MAX_OPEN=1
+2026-05-06 15:02:30 | WARNING | optiferre | No se pudo leer holdings live para BTC/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:30 | WARNING | optiferre | No se pudo leer holdings live para ETH/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:31 | WARNING | optiferre | No se pudo leer holdings live para SOL/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:31 | WARNING | optiferre | No se pudo leer holdings live para BNB/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:31 | WARNING | optiferre | No se pudo leer holdings live para XRP/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:32 | WARNING | optiferre | No se pudo leer holdings live para AVAX/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:32 | WARNING | optiferre | No se pudo leer holdings live para LINK/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:32 | WARNING | optiferre | No se pudo leer holdings live para ADA/USDT: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}
+2026-05-06 15:02:44 | ERROR | optiferre | No se pudo obtener saldo: binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}

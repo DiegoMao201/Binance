@@ -62,6 +62,32 @@ def _log_async_notification_failure(task: asyncio.Task[None], logger: logging.Lo
         logger.warning("No se pudo enviar notificacion Telegram: %s", exc)
 
 
+_AUTH_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
+
+
+def _maybe_notify_auth_invalid(settings: Settings, logger: logging.Logger, detail: str) -> None:
+    """Send a critical Telegram alert about Binance auth failure, rate-limited
+    to once every 30 minutes to avoid spam while the operator fixes whitelist."""
+    now = time.time()
+    if now - _AUTH_ALERT_STATE["last_sent"] < 1800:
+        return
+    _AUTH_ALERT_STATE["last_sent"] = now
+    notifier = _build_notifier(settings, logger)
+    _notify_safe(
+        notifier,
+        logger,
+        "critical",
+        {
+            "title": "BINANCE AUTH INVALIDA",
+            "detail": (
+                f"{detail} | Revisa: 1) IP egress en whitelist Binance, "
+                "2) permisos Spot Trading, 3) BINANCE_PROXY_URL en Coolify."
+            ),
+            "status": "degraded",
+        },
+    )
+
+
 def _format_trade_open_message(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "symbol": decision.get("symbol", "n/d"),
@@ -941,6 +967,16 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
         checks["detail"] = f"control_file: {exc}"
         return checks
 
+    egress = client.detect_egress_ip()
+    checks["egress"] = egress
+    logger.info(
+        "Egress check: ip=%s proxy_configured=%s source=%s error=%s",
+        egress.get("egress_ip"),
+        egress.get("proxy_url_configured"),
+        egress.get("source"),
+        egress.get("error"),
+    )
+
     if settings.dry_run:
         checks["binance_reachable"] = client.ping()
         checks["balance_ok"] = True
@@ -958,7 +994,19 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
         checks["balance_usdt"] = round(balance, 4)
         checks["balance_ok"] = balance >= checks["minimum_required"]
     except BinanceClientError as exc:
-        checks["detail"] = f"binance: {exc}"
+        category = getattr(exc, "category", "exchange_other")
+        checks["error_class"] = category
+        if category == "auth_invalid":
+            ip_seen = egress.get("egress_ip") or "desconocido"
+            checks["detail"] = (
+                f"AUTH INVALIDA Binance (-2015). IP egress vista: {ip_seen}. "
+                f"Proxy configurado: {egress.get('proxy_url_configured')}. "
+                "Acci\u00f3n: a\u00f1ade esa IP al whitelist de la API key en Binance, "
+                "verifica permisos de Spot Trading y que BINANCE_PROXY_URL en Coolify "
+                "siga apuntando al proxy correcto."
+            )
+        else:
+            checks["detail"] = f"binance: {exc}"
         return checks
 
     if not checks["balance_ok"]:
@@ -980,6 +1028,8 @@ def _is_degradable_preflight_failure(pre_flight: dict[str, Any]) -> bool:
     detail = str(pre_flight.get("detail") or "")
     if pre_flight.get("ok"):
         return False
+    if pre_flight.get("error_class") == "auth_invalid":
+        return True
     return detail.startswith("binance:")
 
 
@@ -1166,6 +1216,15 @@ def run_cycle() -> None:
         except BinanceClientError as exc:
             logger.error("No se pudo obtener saldo: %s", exc)
             balance_error_class = getattr(exc, "category", "exchange_other")
+            if balance_error_class == "auth_invalid":
+                heartbeat_detail = (
+                    f"AUTH INVALIDA Binance (-2015): {exc}. "
+                    "Acci\u00f3n: revisa whitelist IP, permisos Spot Trading "
+                    "y BINANCE_PROXY_URL en Coolify."
+                )
+                _maybe_notify_auth_invalid(settings, logger, str(exc))
+            else:
+                heartbeat_detail = f"Saldo no disponible: {exc}"
             degraded_scans = [
                 _build_scan_summary(s, settings, blocked_by_lock=global_lock and s["symbol"] != active_symbol)
                 for s in scan_results
@@ -1225,7 +1284,7 @@ def run_cycle() -> None:
                     recovery=recovery_report,
                 ),
             )
-            write_heartbeat("degraded", f"Saldo no disponible: {exc}")
+            write_heartbeat("degraded", heartbeat_detail)
             return
 
         asset_holdings: dict[str, Any] = {}
