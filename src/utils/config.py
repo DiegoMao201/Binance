@@ -16,6 +16,7 @@ class Settings:
     binance_api_key: str
     binance_api_secret: str
     binance_proxy_url: str
+    binance_whitelist_ips: tuple[str, ...]
     openrouter_api_key: str
     openrouter_model: str
     telegram_enabled: bool
@@ -75,15 +76,20 @@ def load_settings() -> Settings:
     logs_dir = Path(os.getenv("LOGS_DIR", str(BASE_DIR / "logs"))).expanduser()
     primary_symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
     raw_targets = os.getenv("TARGET_SYMBOLS", primary_symbol)
+    raw_whitelist_ips = os.getenv("BINANCE_WHITELIST_IPS", "")
     target_symbols = tuple(
         dict.fromkeys(  # preserva orden y deduplica
             sym.strip().upper() for sym in raw_targets.split(",") if sym.strip()
         )
     ) or (primary_symbol,)
+    whitelist_ips = tuple(
+        dict.fromkeys(ip.strip() for ip in raw_whitelist_ips.split(",") if ip.strip())
+    )
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
         binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
         binance_proxy_url=os.getenv("BINANCE_PROXY_URL", "").strip(),
+        binance_whitelist_ips=whitelist_ips,
         telegram_enabled=_get_bool("TELEGRAM_ENABLED", False),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),

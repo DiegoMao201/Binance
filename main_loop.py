@@ -969,10 +969,16 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
 
     egress = client.detect_egress_ip()
     checks["egress"] = egress
+    egress_ip = str(egress.get("egress_ip") or "").strip()
+    whitelist_match = (not settings.binance_whitelist_ips) or (egress_ip in settings.binance_whitelist_ips)
+    checks["whitelist_match"] = whitelist_match
+    checks["whitelist_expected"] = list(settings.binance_whitelist_ips)
     logger.info(
-        "Egress check: ip=%s proxy_configured=%s source=%s error=%s",
-        egress.get("egress_ip"),
+        "Egress check: ip=%s proxy_configured=%s whitelist_match=%s expected=%s source=%s error=%s",
+        egress_ip,
         egress.get("proxy_url_configured"),
+        whitelist_match,
+        ",".join(settings.binance_whitelist_ips) if settings.binance_whitelist_ips else "n/a",
         egress.get("source"),
         egress.get("error"),
     )
@@ -997,14 +1003,22 @@ def pre_flight_check(settings: Settings, client: BinanceDataClient, logger: logg
         category = getattr(exc, "category", "exchange_other")
         checks["error_class"] = category
         if category == "auth_invalid":
-            ip_seen = egress.get("egress_ip") or "desconocido"
-            checks["detail"] = (
-                f"AUTH INVALIDA Binance (-2015). IP egress vista: {ip_seen}. "
-                f"Proxy configurado: {egress.get('proxy_url_configured')}. "
-                "Acci\u00f3n: a\u00f1ade esa IP al whitelist de la API key en Binance, "
-                "verifica permisos de Spot Trading y que BINANCE_PROXY_URL en Coolify "
-                "siga apuntando al proxy correcto."
-            )
+            ip_seen = egress_ip or "desconocido"
+            if settings.binance_whitelist_ips and egress_ip and not whitelist_match:
+                checks["detail"] = (
+                    f"AUTH INVALIDA Binance (-2015). IP egress vista: {ip_seen}, "
+                    f"pero whitelist esperada: {', '.join(settings.binance_whitelist_ips)}. "
+                    "Diagnostico: el proxy esta configurado pero la salida efectiva no coincide con la whitelist. "
+                    "Accion: corrige el routing del proxy o agrega la IP egress real a Binance."
+                )
+            else:
+                checks["detail"] = (
+                    f"AUTH INVALIDA Binance (-2015). IP egress vista: {ip_seen}. "
+                    f"Proxy configurado: {egress.get('proxy_url_configured')}. "
+                    "Accion: a\u00f1ade esa IP al whitelist de la API key en Binance, "
+                    "verifica permisos de Spot Trading y que BINANCE_PROXY_URL en Coolify "
+                    "siga apuntando al proxy correcto."
+                )
         else:
             checks["detail"] = f"binance: {exc}"
         return checks
