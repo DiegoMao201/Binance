@@ -976,13 +976,25 @@ def _clear_stale_kill_switch_stop(settings: Settings) -> None:
     previous_state = load_state(settings.state_file)
     previous_risk = previous_state.get("risk") or {}
     persisted_open_positions = load_history(settings.open_positions_file)
+    persisted_drawdown = float(previous_risk.get("drawdown_pct") or 0.0)
 
-    if previous_risk.get("kill_switch_triggered"):
-        return
-    if float(previous_risk.get("drawdown_pct") or 0.0) >= settings.kill_switch_drawdown:
+    if persisted_drawdown >= settings.kill_switch_drawdown:
         return
     if previous_state.get("open_positions") or persisted_open_positions:
         return
+
+    if previous_state:
+        sanitized_risk = {
+            **previous_risk,
+            "kill_switch_triggered": False,
+        }
+        persist_state(
+            settings.state_file,
+            {
+                **previous_state,
+                "risk": sanitized_risk,
+            },
+        )
 
     persist_state(
         settings.control_file,

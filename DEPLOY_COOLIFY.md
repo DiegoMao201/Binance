@@ -46,7 +46,7 @@ Este documento describe el entorno live canónico. El bot local no debe correr e
 - `POLL_INTERVAL_SECONDS=60`
 - `INITIAL_CAPITAL_USD=20`
 - `MINIMUM_TRADE_USDT=10.1`
-- `POSITION_SIZE_PCT=0.95`
+- `POSITION_SIZE_PCT=0.60`
 - `MAX_RISK_PER_TRADE=1.0`
 - `AI_CONFIDENCE_THRESHOLD=0.65`
 - `TECHNICAL_CONFIDENCE_THRESHOLD=0.0`
@@ -57,11 +57,23 @@ Este documento describe el entorno live canónico. El bot local no debe correr e
 - `SCENARIO_A_RSI_MAX=45`
 - `SCENARIO_B_RSI_MAX=32`
 - `TRADE_COOLDOWN_MINUTES=10`
-- `KILL_SWITCH_DRAWDOWN=0.05`
+- `KILL_SWITCH_DRAWDOWN=0.07`
 - `STOP_LOSS_PCT=0.01`
 - `TAKE_PROFIT_PCT=0.02`
 - `BOT_HEALTH_MAX_AGE_SECONDS=180`
 - `LOG_LEVEL=INFO`
+
+### Ajuste live recomendado tras el incidente del 2026-05-07
+
+El halt observado en producción fue legítimo: el bot quedó con `drawdown_pct` de `0.05475` contra un `KILL_SWITCH_DRAWDOWN=0.05` mientras seguía usando `POSITION_SIZE_PCT=0.95`.
+
+Para no maquillar pérdidas ni ampliar el riesgo de forma agresiva, el ajuste recomendado es:
+
+- bajar `POSITION_SIZE_PCT` a `0.60`
+- subir `KILL_SWITCH_DRAWDOWN` solo a `0.07`
+- mantener `STOP_LOSS_PCT=0.01` y `TAKE_PROFIT_PCT=0.02`
+
+Esto desbloquea el arranque sin saltar directamente a `0.10` de drawdown y, sobre todo, reduce la exposición por operación para poder llegar a una muestra más útil sin que dos o tres eventos mediocres apaguen el bot.
 
 ## Servicio frontend
 

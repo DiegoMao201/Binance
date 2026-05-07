@@ -115,8 +115,25 @@ Si ambos valores son mayores que `0`, el bot puede cerrar una operación con `ex
 - `DRY_RUN=true` por defecto
 - `OPENROUTER_MODEL=openai/gpt-4.1` por defecto para priorizar calidad analítica y salida JSON estable
 - capital inicial limitado a 20 USD
-- máximo 10% del balance por operación
-- kill switch al 5% de pérdida acumulada
+- sizing live recomendado de 60% del balance por operación mientras se construye muestra estadística
+- kill switch live recomendado al 7% de pérdida acumulada
+
+## Incidente 2026-05-07
+
+El stop de producción del 2026-05-07 no fue un falso positivo del kill switch. El estado live reportó:
+
+- `equity_usd=37.8726`
+- `high_water_mark=40.0662`
+- `drawdown_pct=0.05475`
+- `control.desired_state=stopped`
+
+Conclusión operativa:
+
+- no conviene subir el kill switch directo a 10%
+- tampoco conviene mantener `POSITION_SIZE_PCT=0.95` si el objetivo es llegar a una muestra de 50 trades sin cortar la curva por ruido de corto plazo
+- el ajuste mínimo recomendado es `POSITION_SIZE_PCT=0.60` y `KILL_SWITCH_DRAWDOWN=0.07`
+
+Ese ajuste no “cura” la estrategia por sí solo; corrige la desproporción entre exposición por trade y drawdown máximo permitido para que la muestra sea estadísticamente usable.
 
 ## Visibilidad operativa
 
