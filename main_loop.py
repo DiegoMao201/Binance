@@ -27,6 +27,10 @@ AI_NOT_CONSULTED = {
     "rationale": "IA no consultada: sin pre-se\u00f1al t\u00e9cnica candidata.",
     "model": "lazy_gate",
     "consulted": False,
+    "approved": False,
+    "direction_alignment": "misaligned",
+    "setup_quality": "low",
+    "risk_flags": ["not_consulted"],
 }
 
 ALGO_VERSION = "v2.0_tiered"
@@ -222,6 +226,11 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     same_direction = signal == ai_signal.get("signal") if signal == "buy" else True
     ai_confidence = float(ai_signal.get("confidence", 0.0))
     ai_confident = ai_confidence >= settings.ai_confidence_threshold
+    ai_approved = bool(ai_signal.get("approved", False))
+    ai_alignment = ai_signal.get("direction_alignment") == "aligned"
+    ai_setup_ready = str(ai_signal.get("setup_quality", "low")).lower() == "high"
+    risk_flags = ai_signal.get("risk_flags") or []
+    ai_risk_clear = isinstance(risk_flags, list) and len(risk_flags) == 0
     # Volatilidad: solo exigimos piso de ATR (regla del usuario), techo opcional.
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
@@ -235,6 +244,10 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
         "scenario_b": bool(technical_signal.get("scenario_b")),
         "same_direction": same_direction,
         "ai_confident": ai_confident,
+        "ai_approved": ai_approved,
+        "ai_alignment": ai_alignment,
+        "ai_setup_ready": ai_setup_ready,
+        "ai_risk_clear": ai_risk_clear,
         "ai_confidence": ai_confidence,
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
@@ -1487,6 +1500,11 @@ def run_cycle() -> None:
                 if all([
                     guardrails["executable_signal"],
                     guardrails["ai_confident"],
+                    guardrails["same_direction"],
+                    guardrails["ai_approved"],
+                    guardrails["ai_alignment"],
+                    guardrails["ai_setup_ready"],
+                    guardrails["ai_risk_clear"],
                     guardrails["volatility_ready"],
                     guardrails["volume_ready"],
                     not guardrails["cooldown_active"],

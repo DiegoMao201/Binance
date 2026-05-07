@@ -118,6 +118,19 @@ Si ambos valores son mayores que `0`, el bot puede cerrar una operación con `ex
 - sizing live recomendado de 60% del balance por operación mientras se construye muestra estadística
 - kill switch live recomendado al 7% de pérdida acumulada
 
+## Filtro de IA para nuevas entradas
+
+Las nuevas entradas deben pasar una aprobación explícita de la IA antes de abrir compra:
+
+- `signal=buy`
+- `approved=true`
+- `direction_alignment=aligned`
+- `setup_quality=high`
+- `risk_flags=[]`
+- `confidence >= AI_CONFIDENCE_THRESHOLD`
+
+Si cualquiera de esos puntos falla, el bot se queda en `hold`. Este ajuste solo endurece entradas futuras; no modifica la gestión de posiciones ya abiertas ni el motor de cierres.
+
 ## Incidente 2026-05-07
 
 El stop de producción del 2026-05-07 no fue un falso positivo del kill switch. El estado live reportó:
