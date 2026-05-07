@@ -5,8 +5,9 @@ import logging
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
+import ccxt
 from requests import RequestException
 
 from src.analysis.ai_client import OpenRouterAnalyzer
@@ -27,6 +28,9 @@ AI_NOT_CONSULTED = {
     "model": "lazy_gate",
     "consulted": False,
 }
+
+ALGO_VERSION = "v2.0_tiered"
+LEGACY_HOT_SWAP_VERSION = "legacy_hot_swap"
 
 
 def _build_notifier(settings: Settings, logger: logging.Logger) -> TelegramTelemetry:
@@ -319,7 +323,7 @@ def _degraded_risk_snapshot(
     )
 
 
-def _settle_open_positions(
+async def _settle_open_positions(
     open_positions: list[dict[str, Any]],
     candles_by_symbol: dict[str, dict[str, Any]],
     *,
@@ -327,11 +331,28 @@ def _settle_open_positions(
     live_mode: bool,
     executor: TradeExecutor,
     logger: logging.Logger,
+    persist_open_positions: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    trailing_tiers: tuple[tuple[int, float, float], ...] = (
+        (1, 0.008, 0.004),
+        (2, 0.010, 0.006),
+        (3, 0.014, 0.008),
+        (4, 0.018, 0.010),
+    )
+
+    def _resolve_trailing_tier(mfe_pct: float) -> tuple[int, float | None]:
+        target_tier = 0
+        target_offset = None
+        for tier_id, trigger_pct, offset_pct in trailing_tiers:
+            if mfe_pct >= trigger_pct:
+                target_tier = tier_id
+                target_offset = offset_pct
+        return target_tier, target_offset
+
     remaining_positions: list[dict[str, Any]] = []
     closed_trades: list[dict[str, Any]] = []
 
-    for position in open_positions:
+    for position_index, position in enumerate(open_positions):
         symbol = position.get("symbol")
         latest_candle = candles_by_symbol.get(symbol) if symbol else None
         if not latest_candle:
@@ -349,7 +370,12 @@ def _settle_open_positions(
         amount = float(position.get("amount", 0.0))
         stop_loss = float(position.get("stop_loss", 0.0))
         take_profit = float(position.get("take_profit", 0.0))
-        trailing_activated = bool(position.get("trailing_activated", False))
+        trailing_tier = int(
+            position.get(
+                "trailing_tier",
+                1 if bool(position.get("trailing_activated", False)) else 0,
+            ) or 0
+        )
 
         # ---- Hold time desde el fill (necesario para trailing/time-stop antes del exit check) ----
         hold_minutes: float | None = None
@@ -420,69 +446,82 @@ def _settle_open_positions(
 
             position["hold_minutes"] = round(hold_minutes, 1) if hold_minutes is not None else None
 
-            # ---- Trailing Stop de Activación (Break-Even + Fees) ----
-            # Evaluado DESPUÉS del check de SL/TP del candle actual: el SL nuevo aplica
-            # desde el próximo ciclo, evitando exits espurios por whipsaw intra-vela.
-            # Una vez activado el flag NO se desactiva: solo el cruce del nuevo SL cierra.
-            if (
-                not trailing_activated
-                and entry_price > 0
-                and settings.trailing_activation_pct > 0
-            ):
-                if side == "buy":
-                    favorable_pct_so_far = max(unrealized_pct, (candle_high - entry_price) / entry_price)
-                else:
-                    favorable_pct_so_far = max(unrealized_pct, (entry_price - candle_low) / entry_price)
+            # ---- Tiered Trailing Stop (persistido por niveles) ----
+            # El bot solo toca Binance al cruzar un tier superior de MFE. Esto evita churn
+            # intra-tier y mantiene el presupuesto de rate limit bajo control.
+            mfe_pct = float(position.get("mfe_pct", 0.0) or 0.0)
+            new_tier, new_sl_offset_pct = _resolve_trailing_tier(mfe_pct)
+            if new_tier > trailing_tier and new_sl_offset_pct is not None and entry_price > 0:
+                raw_new_sl = entry_price * (1 + new_sl_offset_pct) if side == "buy" else entry_price * (1 - new_sl_offset_pct)
+                try:
+                    new_sl = await asyncio.to_thread(
+                        executor.client.price_to_precision,
+                        float(raw_new_sl),
+                        symbol=symbol,
+                    )
+                except BinanceClientError as exc:
+                    logger.warning(
+                        "Tiered trailing %s: no se pudo formatear SL tier=%s (%s). Reintento próximo tick.",
+                        symbol,
+                        new_tier,
+                        exc,
+                    )
+                    new_sl = None
 
-                if favorable_pct_so_far >= settings.trailing_activation_pct:
-                    if side == "buy":
-                        raw_new_sl = entry_price * (1 + settings.trailing_sl_offset_pct)
-                    else:
-                        raw_new_sl = entry_price * (1 - settings.trailing_sl_offset_pct)
-
-                    # SL virtual: no hay OCO real en el exchange, así que "modificar la orden"
-                    # se reduce a actualizar el nivel local. Envolvemos la formateo en try/except
-                    # para tolerar rechazos del exchange (ccxt.NetworkError/ExchangeError) si en
-                    # el futuro se conecta una orden STOP_LOSS_LIMIT real.
+                is_improvement = bool(
+                    new_sl is not None
+                    and (
+                        (side == "buy" and (stop_loss <= 0 or new_sl > stop_loss))
+                        or (side == "sell" and (stop_loss <= 0 or new_sl < stop_loss))
+                    )
+                )
+                if is_improvement:
                     try:
-                        new_sl = executor.client.price_to_precision(float(raw_new_sl), symbol=symbol)
+                        replace_result = await executor.replace_stop_loss_async(
+                            position=position,
+                            new_stop_loss=float(new_sl),
+                            take_profit=float(take_profit),
+                            trailing_tier=new_tier,
+                        )
+                    except (ccxt.NetworkError, ccxt.ExchangeError) as exc:
+                        logger.warning(
+                            "Tiered trailing %s: Binance rechazo tier=%s new_SL=%.6f (%s). Estado no actualizado.",
+                            symbol,
+                            new_tier,
+                            new_sl,
+                            exc,
+                        )
                     except BinanceClientError as exc:
                         logger.warning(
-                            "Trailing-stop %s: no se pudo formatear nuevo SL (%s). Reintento próximo ciclo.",
+                            "Tiered trailing %s: error controlado tier=%s (%s). Estado no actualizado.",
                             symbol,
+                            new_tier,
                             exc,
                         )
-                        new_sl = None
-                    except Exception as exc:  # noqa: BLE001 — robustez ante ccxt.* inesperados
-                        logger.warning(
-                            "Trailing-stop %s: excepción inesperada formateando SL (%s). Se conserva SL previo.",
-                            symbol,
-                            exc,
-                        )
-                        new_sl = None
-
-                    if new_sl is not None:
-                        is_improvement = (
-                            (side == "buy" and (stop_loss <= 0 or new_sl > stop_loss))
-                            or (side == "sell" and (stop_loss <= 0 or new_sl < stop_loss))
-                        )
-                        if is_improvement:
-                            position["initial_stop_loss"] = position.get(
-                                "initial_stop_loss", round(stop_loss, 4)
-                            )
-                            position["stop_loss"] = round(new_sl, 4)
-                            position["trailing_activated"] = True
-                            position["trailing_activated_at"] = datetime.now(timezone.utc).isoformat()
-                            position["trailing_sl"] = round(new_sl, 4)
-                            position["trailing_activation_pct"] = settings.trailing_activation_pct
-                            position["trailing_sl_offset_pct"] = settings.trailing_sl_offset_pct
+                    else:
+                        if replace_result.get("status") in {"submitted", "simulated"}:
+                            position["initial_stop_loss"] = position.get("initial_stop_loss", round(stop_loss, 4))
+                            position["stop_loss"] = round(float(new_sl), 4)
+                            position["trailing_tier"] = new_tier
+                            position["trailing_tier_updated_at"] = datetime.now(timezone.utc).isoformat()
+                            position["trailing_sl"] = round(float(new_sl), 4)
+                            position["trailing_mfe_pct"] = round(mfe_pct, 6)
+                            position["protection_order"] = replace_result.get("protection_order")
+                            position.pop("trailing_activated", None)
+                            position.pop("trailing_activated_at", None)
+                            position.pop("trailing_activation_pct", None)
+                            position.pop("trailing_sl_offset_pct", None)
+                            if persist_open_positions is not None:
+                                await persist_open_positions(
+                                    open_positions[:position_index] + [position] + open_positions[position_index + 1 :]
+                                )
                             logger.info(
-                                "Trailing-stop activado %s side=%s entry=%.6f new_SL=%.6f (favorable=%.4f%%)",
+                                "Tiered trailing confirmado %s side=%s tier=%s mfe=%.4f%% new_SL=%.6f",
                                 symbol,
                                 side,
-                                entry_price,
+                                new_tier,
+                                mfe_pct * 100,
                                 new_sl,
-                                favorable_pct_so_far * 100,
                             )
 
             # ---- Invalidador de Inercia (Time-Stop Bidireccional) ----
@@ -513,7 +552,7 @@ def _settle_open_positions(
 
         live_payload: dict[str, Any] = {}
         if live_mode and position.get("mode") == "live":
-            close_result = executor.close_position_market(position)
+            close_result = await asyncio.to_thread(executor.close_position_market, position)
             live_payload = close_result
             if close_result.get("status") != "submitted":
                 logger.error("No se pudo cerrar posicion live: %s", close_result)
@@ -532,6 +571,7 @@ def _settle_open_positions(
                 "pnl_usdt": round(pnl_usdt, 4),
                 "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
                 "status": "closed",
+                "algo_version": position.get("algo_version") or LEGACY_HOT_SWAP_VERSION,
                 "live_close": live_payload or None,
             }
         )
@@ -547,12 +587,16 @@ def _build_portfolio_summary(
     asset_holdings: dict[str, Any] | None = None,
     equity_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    realized_pnl = round(sum(float(item.get("pnl_usdt", 0.0)) for item in closed_trades), 4)
+    filtered_closed_trades = [
+        item for item in closed_trades if str(item.get("algo_version") or "") == ALGO_VERSION
+    ]
+
+    realized_pnl = round(sum(float(item.get("pnl_usdt", 0.0)) for item in filtered_closed_trades), 4)
     unrealized_pnl = round(sum(float(item.get("unrealized_pnl_usdt", 0.0)) for item in open_positions), 4)
     simulated_equity = round(settings.initial_capital_usd + realized_pnl + unrealized_pnl, 4)
-    wins = sum(1 for item in closed_trades if float(item.get("pnl_usdt", 0.0)) > 0)
-    losses = sum(1 for item in closed_trades if float(item.get("pnl_usdt", 0.0)) < 0)
-    total_closed = len(closed_trades)
+    wins = sum(1 for item in filtered_closed_trades if float(item.get("pnl_usdt", 0.0)) > 0)
+    losses = sum(1 for item in filtered_closed_trades if float(item.get("pnl_usdt", 0.0)) < 0)
+    total_closed = len(filtered_closed_trades)
     win_rate = round((wins / total_closed) * 100.0, 2) if total_closed else 0.0
     accumulated_pnl_pct = 0.0
     if settings.initial_capital_usd > 0:
@@ -578,15 +622,15 @@ def _build_portfolio_summary(
         }
 
     scenario_stats: dict[str, dict[str, Any]] = {
-        label: _bucket_stats([t for t in closed_trades if t.get("scenario") == label])
+        label: _bucket_stats([t for t in filtered_closed_trades if t.get("scenario") == label])
         for label in ("A", "B")
     }
 
     # --- Telemetria por simbolo ---
-    symbols_in_history = sorted({t.get("symbol") for t in closed_trades if t.get("symbol")})
+    symbols_in_history = sorted({t.get("symbol") for t in filtered_closed_trades if t.get("symbol")})
     per_symbol_stats: dict[str, dict[str, Any]] = {}
     for sym in symbols_in_history:
-        sym_trades = [t for t in closed_trades if t.get("symbol") == sym]
+        sym_trades = [t for t in filtered_closed_trades if t.get("symbol") == sym]
         per_symbol_stats[sym] = {
             "global": _bucket_stats(sym_trades),
             "A": _bucket_stats([t for t in sym_trades if t.get("scenario") == "A"]),
@@ -619,7 +663,9 @@ def _build_portfolio_summary(
 
     return {
         "mode": "dry_run" if settings.dry_run else "live",
+        "algo_version": ALGO_VERSION,
         "open_positions": len(open_positions),
+        "closed_trades_all": len(closed_trades),
         "closed_trades": total_closed,
         "wins": wins,
         "losses": losses,
@@ -872,6 +918,7 @@ def _recover_unmanaged_exchange_positions(
             "signal_price": round(entry_price, 4),
             "fill_price": round(entry_price, 4),
             "slippage_pct": 0.0,
+            "trailing_tier": 0,
             "mae_pct": 0.0,
             "mfe_pct": 0.0,
             "mae_usdt": 0.0,
@@ -1096,6 +1143,8 @@ def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, 
         "signal_price": p.get("signal_price"),
         "fill_price": p.get("fill_price"),
         "slippage_pct": p.get("slippage_pct"),
+        "trailing_tier": p.get("trailing_tier", 0),
+        "algo_version": p.get("algo_version"),
     }
 
 
@@ -1195,13 +1244,19 @@ def run_cycle() -> None:
         candles_by_symbol = {s["symbol"]: s["latest_candle"] for s in scan_results if s.get("latest_candle")}
 
         # 2) Liquidacion de posiciones abiertas con la vela mas reciente de su simbolo.
-        open_positions, newly_closed_trades = _settle_open_positions(
-            open_positions,
-            candles_by_symbol,
-            settings=settings,
-            live_mode=live_mode,
-            executor=executor,
-            logger=logger,
+        async def _persist_open_positions_async(snapshot: list[dict[str, Any]]) -> None:
+            await asyncio.to_thread(persist_history, settings.open_positions_file, snapshot)
+
+        open_positions, newly_closed_trades = asyncio.run(
+            _settle_open_positions(
+                open_positions,
+                candles_by_symbol,
+                settings=settings,
+                live_mode=live_mode,
+                executor=executor,
+                logger=logger,
+                persist_open_positions=_persist_open_positions_async,
+            )
         )
         if live_mode and open_positions:
             open_positions, externally_closed_trades = _reconcile_live_open_positions(
@@ -1483,6 +1538,8 @@ def run_cycle() -> None:
                         "signal_price": decision.get("signal_price"),
                         "fill_price": decision.get("fill_price") or decision.get("price"),
                         "slippage_pct": decision.get("slippage_pct", 0.0),
+                        "trailing_tier": 0,
+                        "algo_version": ALGO_VERSION,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "mae_usdt": 0.0,

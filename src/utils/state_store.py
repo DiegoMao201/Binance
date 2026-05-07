@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,13 @@ def build_state_snapshot(**kwargs: Any) -> dict[str, Any]:
 
 def persist_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(state, indent=2, ensure_ascii=False)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -34,13 +41,25 @@ def append_history(path: Path, item: dict[str, Any], limit: int = 500) -> None:
     history.append(item)
     trimmed = history[-limit:]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(trimmed, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(trimmed, indent=2, ensure_ascii=False)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
 
 
 def persist_history(path: Path, history: list[dict[str, Any]], limit: int = 500) -> None:
     trimmed = history[-limit:]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(trimmed, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = json.dumps(trimmed, indent=2, ensure_ascii=False)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
 
 
 def load_history(path: Path) -> list[dict[str, Any]]:

@@ -307,3 +307,82 @@ class BinanceDataClient:
         return self._with_retries(
             lambda: self.private_exchange.create_market_order(target, side, amount)
         )
+
+    def cancel_order_list(
+        self,
+        *,
+        symbol: str,
+        order_list_id: str | int | None = None,
+        list_client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        target = symbol or self.settings.trading_symbol
+        self._ensure_market_loaded(target)
+        market = self.private_exchange.market(target)
+        params: dict[str, Any] = {"symbol": market["id"]}
+        if order_list_id is not None:
+            params["orderListId"] = order_list_id
+        if list_client_order_id:
+            params["listClientOrderId"] = list_client_order_id
+
+        method_candidates = (
+            "privateDeleteOrderList",
+            "private_delete_order_list",
+            "sapiDeleteOrderList",
+            "sapi_delete_order_list",
+        )
+        for method_name in method_candidates:
+            method = getattr(self.private_exchange, method_name, None)
+            if callable(method):
+                return self._with_retries(lambda: method(params))
+
+        return self._with_retries(
+            lambda: self.private_exchange.request("orderList", "private", "DELETE", params)
+        )
+
+    def create_protection_oco_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        take_profit_price: float,
+        stop_loss_price: float,
+    ) -> dict[str, Any]:
+        target = symbol or self.settings.trading_symbol
+        self._ensure_market_loaded(target)
+        market = self.private_exchange.market(target)
+
+        quantity_precise = self.amount_to_precision(quantity, symbol=target)
+        take_profit_precise = self.price_to_precision(take_profit_price, symbol=target)
+        stop_trigger_precise = self.price_to_precision(stop_loss_price, symbol=target)
+        stop_limit_raw = stop_loss_price * (0.999 if side.lower() == "sell" else 1.001)
+        stop_limit_precise = self.price_to_precision(stop_limit_raw, symbol=target)
+
+        params: dict[str, Any] = {
+            "symbol": market["id"],
+            "side": side.upper(),
+            "quantity": self.private_exchange.amount_to_precision(target, quantity_precise),
+            "price": self.private_exchange.price_to_precision(target, take_profit_precise),
+            "stopPrice": self.private_exchange.price_to_precision(target, stop_trigger_precise),
+            "stopLimitPrice": self.private_exchange.price_to_precision(target, stop_limit_precise),
+            "stopLimitTimeInForce": "GTC",
+        }
+
+        method_candidates = (
+            "privatePostOrderListOco",
+            "private_post_order_list_oco",
+            "sapiPostOrderListOco",
+            "sapi_post_order_list_oco",
+            "privatePostOrderOco",
+            "private_post_order_oco",
+            "sapiPostOrderOco",
+            "sapi_post_order_oco",
+        )
+        for method_name in method_candidates:
+            method = getattr(self.private_exchange, method_name, None)
+            if callable(method):
+                return self._with_retries(lambda: method(params))
+
+        return self._with_retries(
+            lambda: self.private_exchange.request("orderList/oco", "private", "POST", params)
+        )

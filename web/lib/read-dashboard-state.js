@@ -11,7 +11,8 @@ async function readJson(fileName, fallback) {
     const fullPath = path.join(LOGS, fileName);
     const content = await fs.readFile(fullPath, "utf8");
     return JSON.parse(content);
-  } catch {
+  } catch (error) {
+    console.error(`[dashboard-state] fallback for ${fileName}:`, error?.message || error);
     return fallback;
   }
 }

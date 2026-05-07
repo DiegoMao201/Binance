@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -279,4 +280,80 @@ class TradeExecutor:
         result["avg_price"] = round(average, 4)
         result["fee_quote"] = round(fee_total, 6)
         result["post_close_holdings"] = post_balance
+        return result
+
+    async def replace_stop_loss_async(
+        self,
+        *,
+        position: dict[str, Any],
+        new_stop_loss: float,
+        take_profit: float,
+        trailing_tier: int,
+    ) -> dict[str, Any]:
+        """Replace or create the protection OCO without blocking the event loop.
+
+        The trading loop stays responsive because every ccxt network call runs inside
+        `asyncio.to_thread`. The caller is responsible for invoking this only when a new
+        trailing tier is crossed, which rate-limits OCO churn to one request per tier.
+        """
+
+        target_symbol = str(position.get("symbol") or self.settings.trading_symbol)
+        target_side = str(position.get("side") or "buy").lower()
+        amount = float(position.get("amount") or 0.0)
+        protection_order = position.get("protection_order") or {}
+
+        result: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": target_symbol,
+            "status": "rejected",
+            "trailing_tier": trailing_tier,
+            "new_stop_loss": round(new_stop_loss, 8),
+            "take_profit": round(take_profit, 8),
+            "mode": "dry_run" if self.settings.dry_run else "live",
+        }
+
+        if target_side != "buy":
+            result["reason"] = "replace_stop_loss_async solo soporta posiciones spot long."
+            return result
+
+        if amount <= 0:
+            result["reason"] = "Posicion sin cantidad operable para OCO."
+            return result
+
+        if self.settings.dry_run:
+            result["status"] = "simulated"
+            result["protection_order"] = {
+                "type": "oco",
+                "stop_loss": round(new_stop_loss, 8),
+                "take_profit": round(take_profit, 8),
+            }
+            return result
+
+        if protection_order.get("orderListId") is not None or protection_order.get("listClientOrderId"):
+            cancel_payload = await asyncio.to_thread(
+                self.client.cancel_order_list,
+                symbol=target_symbol,
+                order_list_id=protection_order.get("orderListId"),
+                list_client_order_id=protection_order.get("listClientOrderId"),
+            )
+            result["cancel_payload"] = cancel_payload
+
+        holdings = await asyncio.to_thread(self.client.fetch_asset_balance, symbol=target_symbol)
+        sellable_amount = min(amount, float(holdings.get("total") or 0.0))
+        if sellable_amount <= 0:
+            result["reason"] = "Holdings insuficientes para recrear OCO."
+            result["reconciled_holdings"] = holdings
+            return result
+
+        oco_payload = await asyncio.to_thread(
+            self.client.create_protection_oco_order,
+            symbol=target_symbol,
+            side="sell",
+            quantity=sellable_amount,
+            take_profit_price=take_profit,
+            stop_loss_price=new_stop_loss,
+        )
+        result["status"] = "submitted"
+        result["reconciled_holdings"] = holdings
+        result["protection_order"] = oco_payload
         return result
