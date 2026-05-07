@@ -1725,9 +1725,10 @@ def main() -> None:
             continue
 
         if desired_state == "stopped":
-            logger.warning("Bot detenido por control remoto. Finalizando proceso.")
+            logger.warning("Bot detenido por control remoto. Queda en espera hasta nueva orden.")
             write_heartbeat("offline", control.get("reason", "Detenci\u00f3n remota"))
-            break
+            time.sleep(max(5, settings.poll_interval_seconds))
+            continue
 
         cycle_start = time.monotonic()
         run_cycle()
