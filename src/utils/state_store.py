@@ -14,6 +14,17 @@ def build_state_snapshot(**kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _quarantine_corrupted_json(path: Path) -> None:
+    if not path.exists():
+        return
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    quarantine_path = path.with_name(f"{path.stem}.corrupt.{suffix}{path.suffix}")
+    try:
+        os.replace(path, quarantine_path)
+    except OSError:
+        return
+
+
 def persist_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state, indent=2, ensure_ascii=False)
@@ -28,13 +39,21 @@ def persist_state(path: Path, state: dict[str, Any]) -> None:
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _quarantine_corrupted_json(path)
+        return {}
 
 
 def append_history(path: Path, item: dict[str, Any], limit: int = 500) -> None:
     history: list[dict[str, Any]]
     if path.exists():
-        history = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            history = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            _quarantine_corrupted_json(path)
+            history = []
     else:
         history = []
 
@@ -65,4 +84,8 @@ def persist_history(path: Path, history: list[dict[str, Any]], limit: int = 500)
 def load_history(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _quarantine_corrupted_json(path)
+        return []
