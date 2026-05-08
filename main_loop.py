@@ -310,6 +310,8 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "rejection_reason": rejection_reason,
         "ia_consulted": bool(scan.get("ia_consulted")),
         "ia_confidence": float(scan.get("ia_confidence") or 0.0),
+        "ai_signal": scan.get("ia_signal"),
+        "guardrails": scan.get("guardrails"),
         "blocked_by_lock": blocked_by_lock,
         "candle_timestamp": str(candle.get("timestamp")) if candle else None,
     }
@@ -1119,28 +1121,64 @@ def _is_degradable_preflight_failure(pre_flight: dict[str, Any]) -> bool:
     return detail.startswith("binance:")
 
 
-def _load_recent_ai_signal(settings) -> dict[str, Any] | None:
-    previous_state = load_state(settings.state_file)
-    previous_ai_signal = previous_state.get("ai_signal")
-    updated_at = previous_state.get("updated_at")
-    if not previous_ai_signal or not updated_at:
-        return None
-    if not previous_ai_signal.get("consulted", True):
-        return None
+def _load_ai_signals_by_symbol(settings) -> dict[str, dict[str, Any]]:
+    """Carga el cache de senales IA por simbolo persistido en el state previo.
 
+    Mantiene compatibilidad: si el state legacy solo trae `ai_signal` global, se
+    indexa bajo el simbolo de la lectura previa cuando esta disponible para
+    evitar perder informacion util tras el upgrade del motor.
+    """
+    previous_state = load_state(settings.state_file)
+    raw = previous_state.get("ai_signals_by_symbol") or {}
+    out: dict[str, dict[str, Any]] = {}
+    if isinstance(raw, dict):
+        for sym, sig in raw.items():
+            if isinstance(sig, dict) and sym:
+                out[str(sym)] = dict(sig)
+
+    # Fallback legacy: aprovechar `ai_signal` global si trae symbol embebido.
+    legacy = previous_state.get("ai_signal")
+    if isinstance(legacy, dict) and legacy.get("consulted"):
+        legacy_symbol = legacy.get("symbol") or (
+            previous_state.get("technical_signal", {}) or {}
+        ).get("symbol")
+        if legacy_symbol and str(legacy_symbol) not in out:
+            entry = dict(legacy)
+            entry.setdefault("cached_at", previous_state.get("updated_at"))
+            entry["symbol"] = str(legacy_symbol)
+            out[str(legacy_symbol)] = entry
+    return out
+
+
+def _get_cached_ai_signal_for_symbol(
+    cache: dict[str, dict[str, Any]],
+    symbol: str,
+    max_age_seconds: int,
+) -> dict[str, Any] | None:
+    """Devuelve la senal IA cacheada para `symbol` si sigue dentro del TTL.
+
+    El cache es por simbolo: una lectura de BTC NO contamina ETH, SOL, etc.
+    """
+    entry = cache.get(symbol)
+    if not entry:
+        return None
+    if not entry.get("consulted", True):
+        return None
+    cached_at = entry.get("cached_at")
+    if not cached_at:
+        return None
     try:
-        previous_updated_at = datetime.fromisoformat(updated_at)
+        cached_ts = datetime.fromisoformat(str(cached_at))
     except ValueError:
         return None
-
-    age_seconds = (datetime.now(timezone.utc) - previous_updated_at).total_seconds()
-    if age_seconds > settings.ai_min_interval_seconds:
+    age_seconds = (datetime.now(timezone.utc) - cached_ts).total_seconds()
+    if age_seconds > max_age_seconds:
         return None
-
-    cached_ai_signal = dict(previous_ai_signal)
-    cached_ai_signal["cached"] = True
-    cached_ai_signal["cached_age_seconds"] = round(age_seconds, 1)
-    return cached_ai_signal
+    out = dict(entry)
+    out["cached"] = True
+    out["cached_age_seconds"] = round(age_seconds, 1)
+    out["symbol"] = symbol
+    return out
 
 
 def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1462,11 +1500,23 @@ def run_cycle() -> None:
             )
             return
 
-        # 6) Carrera de senales: el primer simbolo que cumpla TODOS los guardarrailes dispara orden.
+        # 6) Carrera de senales multi-mercado.
+        # Regla profesional: la IA evalua CADA candidato que paso las guardias
+        # tecnicas, con cache por simbolo (una lectura de BTC no se reutiliza
+        # para ETH). El primer simbolo que cumpla TODOS los guardarrailes
+        # dispara la orden; si ninguno cumple, la telemetria refleja al mejor
+        # candidato (mayor conviccion IA) para que el dashboard explique el
+        # rechazo del ticker realmente evaluado y no de uno arbitrario.
+        ai_signals_by_symbol: dict[str, dict[str, Any]] = _load_ai_signals_by_symbol(settings)
+        per_symbol_ai: dict[str, dict[str, Any]] = {}
+        per_symbol_guardrails: dict[str, dict[str, Any]] = {}
         ai_signal: dict[str, Any] = dict(AI_NOT_CONSULTED)
         ai_consulted_symbol: str | None = None
         chosen_scan: dict[str, Any] | None = None
         chosen_guardrails: dict[str, Any] | None = None
+        best_candidate_scan: dict[str, Any] | None = None
+        best_candidate_guards: dict[str, Any] | None = None
+        best_candidate_ai: dict[str, Any] | None = None
         decision: dict[str, Any] = {
             "action": "hold",
             "reason": "global_lock" if global_lock else "Sin senal valida en ningun ticker.",
@@ -1477,43 +1527,83 @@ def run_cycle() -> None:
         if not global_lock:
             for scan in scan_results:
                 technical_signal = scan["technical_signal"]
-                # Pre-gate barato (sin tocar IA).
+                symbol = scan["symbol"]
+                # Pre-gate barato por simbolo (sin gastar tokens IA).
                 pre_guards = _build_guardrails(settings, technical_signal, AI_NOT_CONSULTED, order_history)
-                if not (pre_guards["executable_signal"] and pre_guards["volatility_ready"] and pre_guards["volume_ready"] and not pre_guards["cooldown_active"]):
+                if not (
+                    pre_guards["executable_signal"]
+                    and pre_guards["volatility_ready"]
+                    and pre_guards["volume_ready"]
+                    and not pre_guards["cooldown_active"]
+                ):
                     continue
 
-                # Consulta IA solo para este candidato; cache valida para todo el ciclo.
-                if not ai_signal.get("consulted"):
-                    cached = _load_recent_ai_signal(settings)
-                    if cached is not None:
-                        ai_signal = cached
-                        logger.info(
-                            "Reutilizando senal de IA en cache (%ss de antiguedad).",
-                            ai_signal.get("cached_age_seconds", 0),
-                        )
-                    else:
-                        ai_signal = ai_analyzer.analyze(scan["frame"], symbol=scan["symbol"])
-                        ai_signal.setdefault("consulted", True)
-                    ai_consulted_symbol = scan["symbol"]
+                # Consulta IA por simbolo, con cache por simbolo.
+                cached_signal = _get_cached_ai_signal_for_symbol(
+                    ai_signals_by_symbol, symbol, settings.ai_min_interval_seconds
+                )
+                if cached_signal is not None:
+                    symbol_ai_signal = cached_signal
+                    logger.info(
+                        "IA cache hit para %s (%ss de antiguedad).",
+                        symbol,
+                        symbol_ai_signal.get("cached_age_seconds", 0),
+                    )
+                else:
+                    symbol_ai_signal = ai_analyzer.analyze(scan["frame"], symbol=symbol)
+                    symbol_ai_signal.setdefault("consulted", True)
+                    symbol_ai_signal["symbol"] = symbol
+                    symbol_ai_signal["cached"] = False
+                    symbol_ai_signal["cached_age_seconds"] = 0.0
+                    symbol_ai_signal["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    ai_signals_by_symbol[symbol] = dict(symbol_ai_signal)
+                    logger.info(
+                        "IA evaluada en vivo para %s. signal=%s confidence=%.3f approved=%s setup=%s flags=%s",
+                        symbol,
+                        symbol_ai_signal.get("signal"),
+                        float(symbol_ai_signal.get("confidence", 0.0)),
+                        symbol_ai_signal.get("approved"),
+                        symbol_ai_signal.get("setup_quality"),
+                        symbol_ai_signal.get("risk_flags"),
+                    )
 
-                guardrails = _build_guardrails(settings, technical_signal, ai_signal, order_history)
+                per_symbol_ai[symbol] = symbol_ai_signal
+                symbol_guardrails = _build_guardrails(
+                    settings, technical_signal, symbol_ai_signal, order_history
+                )
+                per_symbol_guardrails[symbol] = symbol_guardrails
+
+                # Mejor candidato por conviccion (telemetria honesta del rechazo).
+                current_best_conf = float((best_candidate_ai or {}).get("confidence", -1.0))
+                if best_candidate_scan is None or float(symbol_ai_signal.get("confidence", 0.0)) > current_best_conf:
+                    best_candidate_scan = scan
+                    best_candidate_guards = symbol_guardrails
+                    best_candidate_ai = symbol_ai_signal
+
                 if all([
-                    guardrails["executable_signal"],
-                    guardrails["ai_confident"],
-                    guardrails["same_direction"],
-                    guardrails["ai_approved"],
-                    guardrails["ai_alignment"],
-                    guardrails["ai_setup_ready"],
-                    guardrails["ai_risk_clear"],
-                    guardrails["volatility_ready"],
-                    guardrails["volume_ready"],
-                    not guardrails["cooldown_active"],
+                    symbol_guardrails["executable_signal"],
+                    symbol_guardrails["ai_confident"],
+                    symbol_guardrails["same_direction"],
+                    symbol_guardrails["ai_approved"],
+                    symbol_guardrails["ai_alignment"],
+                    symbol_guardrails["ai_setup_ready"],
+                    symbol_guardrails["ai_risk_clear"],
+                    symbol_guardrails["volatility_ready"],
+                    symbol_guardrails["volume_ready"],
+                    not symbol_guardrails["cooldown_active"],
                     str(technical_signal["signal"]) == "buy",
-                    ai_signal.get("consulted", False),
+                    symbol_ai_signal.get("consulted", False),
                 ]):
                     chosen_scan = scan
-                    chosen_guardrails = guardrails
+                    chosen_guardrails = symbol_guardrails
+                    ai_signal = symbol_ai_signal
+                    ai_consulted_symbol = symbol
                     break
+
+        # Si no se eligio ninguno, expone telemetria del mejor candidato evaluado.
+        if chosen_scan is None and best_candidate_scan is not None:
+            ai_signal = best_candidate_ai or ai_signal
+            ai_consulted_symbol = best_candidate_scan["symbol"]
 
         if chosen_scan and chosen_guardrails:
             symbol = chosen_scan["symbol"]
@@ -1582,10 +1672,17 @@ def run_cycle() -> None:
                 if live_mode and decision.get("status") == "submitted":
                     _notify_safe(notifier, logger, "trade", _format_trade_open_message(decision))
         else:
-            # No hubo entrada: usamos el primer scan como referencia de la decision.
-            primary_scan = scan_results[0] if scan_results else None
+            # No hubo entrada: usamos el MEJOR candidato evaluado por IA como
+            # referencia honesta del rechazo. Si no hubo ningun candidato, caemos
+            # al primer scan para no dejar el dashboard vacio.
+            primary_scan = best_candidate_scan or (scan_results[0] if scan_results else None)
             primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
-            primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history) if primary_scan else {}
+            if best_candidate_scan is not None and best_candidate_guards is not None:
+                primary_guards = best_candidate_guards
+            elif primary_scan is not None:
+                primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history)
+            else:
+                primary_guards = {}
             lock_detail = _describe_global_lock(open_positions) if global_lock else "guardarrailes sin match"
             decision = {
                 "action": "hold",
@@ -1593,24 +1690,37 @@ def run_cycle() -> None:
                 "detail": lock_detail,
                 "global_lock": global_lock,
                 "active_symbol": active_symbol,
+                "symbol": primary_scan["symbol"] if primary_scan else None,
                 "ai_consulted": ai_signal.get("consulted", False),
+                "ai_consulted_symbol": ai_consulted_symbol,
                 "ai_confidence": ai_signal.get("confidence", 0.0),
                 **primary_guards,
             }
             logger.info(
-                "Sin operacion en este ciclo. lock=%s active=%s detail=%s scans=%s",
+                "Sin operacion en este ciclo. lock=%s active=%s focus=%s detail=%s scans=%s",
                 global_lock,
                 active_symbol,
+                ai_consulted_symbol,
                 lock_detail,
-                [(s["symbol"], s["technical_signal"].get("scenario"), s["candidate_reason"]) for s in scan_results],
+                [
+                    (
+                        s["symbol"],
+                        s["technical_signal"].get("scenario"),
+                        s["candidate_reason"],
+                        round(float(per_symbol_ai.get(s["symbol"], {}).get("confidence", 0.0)), 3),
+                    )
+                    for s in scan_results
+                ],
             )
 
         scan_summaries = [
             _build_scan_summary(
                 {
                     **scan,
-                    "ia_consulted": ai_consulted_symbol == scan["symbol"] and ai_signal.get("consulted", False),
-                    "ia_confidence": ai_signal.get("confidence", 0.0) if ai_consulted_symbol == scan["symbol"] else 0.0,
+                    "ia_consulted": scan["symbol"] in per_symbol_ai,
+                    "ia_confidence": float(per_symbol_ai.get(scan["symbol"], {}).get("confidence", 0.0)),
+                    "ia_signal": per_symbol_ai.get(scan["symbol"]),
+                    "guardrails": per_symbol_guardrails.get(scan["symbol"]),
                 },
                 settings,
                 blocked_by_lock=global_lock and scan["symbol"] != active_symbol,
@@ -1619,7 +1729,7 @@ def run_cycle() -> None:
         ]
 
         # 7) Persistencia final con telemetria multi-ticker.
-        primary_scan = chosen_scan or (scan_results[0] if scan_results else None)
+        primary_scan = chosen_scan or best_candidate_scan or (scan_results[0] if scan_results else None)
         primary_signal = primary_scan["technical_signal"] if primary_scan else {"signal": "hold"}
         primary_frame = primary_scan["frame"] if primary_scan else None
         if primary_scan is not None and primary_scan.get("symbol"):
@@ -1647,6 +1757,7 @@ def run_cycle() -> None:
                 market=_serialize_market(primary_frame) if primary_frame is not None else [],
                 technical_signal=primary_signal,
                 ai_signal=ai_signal,
+                ai_signals_by_symbol=ai_signals_by_symbol,
                 risk=asdict(risk_snapshot),
                 portfolio=_build_portfolio_summary(settings, risk_snapshot, open_positions, closed_trades, asset_holdings, equity_history),
                 decision=decision,

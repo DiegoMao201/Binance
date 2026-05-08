@@ -118,20 +118,26 @@ function buildChartData(payload, focusSymbol) {
 }
 
 
-function buildDecisionSummary(decision, technicalSignal) {
+function buildDecisionSummary(decision, technicalSignal, guardrails, focusScan) {
   const action = decision?.action || decision?.side || "hold";
   if (action === "buy") return `El bot disparo entrada por Escenario ${decision?.scenario || technicalSignal?.scenario || "?"}.`;
   if (action === "sell") return "El bot ve una salida defendible y ya consiguio validacion minima de tecnica, IA y riesgo.";
   if (decision?.reason?.includes("Kill Switch")) return "El bot se bloqueo para proteger capital porque la perdida acumulada supero el limite permitido.";
 
+  const g = guardrails || decision || {};
+  const prefix = focusScan?.symbol ? `${focusScan.symbol}: ` : "";
   const blockers = [];
-  if (decision?.executable_signal === false) blockers.push("no se cumple Escenario A ni B");
-  if (decision?.ai_confident === false) blockers.push(`la confianza de la IA esta por debajo del umbral (${formatPercent(decision?.ai_confidence)})`);
-  if (decision?.volatility_ready === false) blockers.push("la volatilidad util no alcanza el rango deseado");
-  if (decision?.volume_ready === false) blockers.push("el volumen no respalda la entrada");
-  if (decision?.cooldown_active) blockers.push("el bot sigue en cooldown");
-  if (!blockers.length) return "El bot esta observando y espera una ventaja mas clara antes de exponer capital.";
-  return `El bot no entra porque ${blockers.join(", ")}.`;
+  if (g.executable_signal === false) blockers.push("no se cumple Escenario A ni B");
+  if (g.ai_confident === false) blockers.push(`la confianza de la IA esta por debajo del umbral (${formatPercent(g.ai_confidence)})`);
+  if (g.ai_approved === false) blockers.push("la IA no aprobaria la entrada");
+  if (g.ai_alignment === false) blockers.push("IA no esta alineada con la tecnica");
+  if (g.ai_setup_ready === false) blockers.push("calidad de setup insuficiente para IA");
+  if (g.ai_risk_clear === false) blockers.push("IA marca banderas de riesgo");
+  if (g.volatility_ready === false) blockers.push("la volatilidad util no alcanza el rango deseado");
+  if (g.volume_ready === false) blockers.push("el volumen no respalda la entrada");
+  if (g.cooldown_active) blockers.push("el bot sigue en cooldown");
+  if (!blockers.length) return `${prefix}El bot esta observando y espera una ventaja mas clara antes de exponer capital.`;
+  return `${prefix}El bot no entra porque ${blockers.join(", ")}.`;
 }
 
 
@@ -295,9 +301,11 @@ export default function DashboardClient({ initialData }) {
   }, [lastScans, focusSymbol, activeSymbol]);
   const chartData = useMemo(() => buildChartData(payload, focusScan?.symbol), [payload, focusScan]);
   const latestSignal = signalHistory.length ? signalHistory[signalHistory.length - 1] : null;
-  const decisionSummary = buildDecisionSummary(decision, technicalSignal);
-  const aiSummary = buildAiSummary(ai);
-  const modelHealth = buildModelHealth(ai, isOnline);
+  const focusGuardrails = focusScan?.guardrails || decision;
+  const focusAi = focusScan?.ai_signal || ai;
+  const decisionSummary = buildDecisionSummary(decision, technicalSignal, focusGuardrails, focusScan);
+  const aiSummary = buildAiSummary(focusAi);
+  const modelHealth = buildModelHealth(focusAi, isOnline);
   const alerts = buildAlerts({ status, control, risk, decision, ai, isOnline });
   const timeline = buildTimeline(signalHistory);
   const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
@@ -505,9 +513,11 @@ export default function DashboardClient({ initialData }) {
               <strong>{decision.action === "hold" ? "En observación" : `Acción ${decision.action}`}</strong>
               <p>{decisionSummary}</p>
               <ul className="fact-list">
-                <li>Precio observado: {formatNumber(technicalSignal.close, 4)}</li>
-                <li>RSI actual: {formatNumber(technicalSignal.rsi, 2)}</li>
-                <li>Volumen relativo: {formatNumber(technicalSignal.volume_ratio, 2)}x</li>
+                <li>Símbolo evaluado: {focusScan?.symbol || technicalSignal.symbol || activeSymbol || "n/d"}</li>
+                <li>Precio observado: {formatNumber(focusScan?.close ?? technicalSignal.close, 4)}</li>
+                <li>RSI actual: {formatNumber(focusScan?.rsi ?? technicalSignal.rsi, 2)}</li>
+                <li>Volumen relativo: {formatNumber(focusScan?.volume_ratio ?? technicalSignal.volume_ratio, 2)}x</li>
+                <li>IA consultada: {focusScan?.ia_consulted ? `sí (${formatPercent(focusScan?.ia_confidence)})` : "no en este ciclo"}</li>
                 <li>Posiciones abiertas: {openPositions.length}</li>
                 <li>Heartbeat: {formatDate(status.heartbeat_at)}</li>
               </ul>
@@ -526,15 +536,19 @@ export default function DashboardClient({ initialData }) {
 
         <section className="details-grid">
           <div className="panel">
-            <div className="panel-header"><h3>Guardrails (Logica OR)</h3><span>Semaforos de entrada</span></div>
+            <div className="panel-header"><h3>Guardrails (Logica OR)</h3><span>{focusScan?.symbol ? `Semaforos · ${focusScan.symbol}` : "Semaforos de entrada"}</span></div>
             <div className="pill-grid">
-              <StatusPill label={`Escenario A ${decision.scenario_a ? "OK" : "NO"}`} active={Boolean(decision.scenario_a)} />
-              <StatusPill label={`Escenario B ${decision.scenario_b ? "OK" : "NO"}`} active={Boolean(decision.scenario_b)} />
-              <StatusPill label={`IA >= 0.65 ${decision.ai_confident ? "OK" : "NO"}`} active={Boolean(decision.ai_confident)} />
-              <StatusPill label={`Volatilidad ${decision.volatility_ready ? "OK" : "NO"}`} active={Boolean(decision.volatility_ready)} />
-              <StatusPill label={`Volumen ${decision.volume_ready ? "OK" : "NO"}`} active={Boolean(decision.volume_ready)} />
-              <StatusPill label={`Cooldown ${decision.cooldown_active ? "ACTIVO" : "LIBRE"}`} active={!decision.cooldown_active} />
-              <StatusPill label={`Trigger ${decision.executable_signal ? "OK" : "NO"}`} active={Boolean(decision.executable_signal)} />
+              <StatusPill label={`Escenario A ${focusGuardrails.scenario_a ? "OK" : "NO"}`} active={Boolean(focusGuardrails.scenario_a)} />
+              <StatusPill label={`Escenario B ${focusGuardrails.scenario_b ? "OK" : "NO"}`} active={Boolean(focusGuardrails.scenario_b)} />
+              <StatusPill label={`IA confianza ${focusGuardrails.ai_confident ? "OK" : "NO"}`} active={Boolean(focusGuardrails.ai_confident)} />
+              <StatusPill label={`IA approved ${focusGuardrails.ai_approved ? "OK" : "NO"}`} active={Boolean(focusGuardrails.ai_approved)} />
+              <StatusPill label={`IA alignment ${focusGuardrails.ai_alignment ? "OK" : "NO"}`} active={Boolean(focusGuardrails.ai_alignment)} />
+              <StatusPill label={`IA setup ${focusGuardrails.ai_setup_ready ? "OK" : "NO"}`} active={Boolean(focusGuardrails.ai_setup_ready)} />
+              <StatusPill label={`IA risk ${focusGuardrails.ai_risk_clear ? "OK" : "NO"}`} active={Boolean(focusGuardrails.ai_risk_clear)} />
+              <StatusPill label={`Volatilidad ${focusGuardrails.volatility_ready ? "OK" : "NO"}`} active={Boolean(focusGuardrails.volatility_ready)} />
+              <StatusPill label={`Volumen ${focusGuardrails.volume_ready ? "OK" : "NO"}`} active={Boolean(focusGuardrails.volume_ready)} />
+              <StatusPill label={`Cooldown ${focusGuardrails.cooldown_active ? "ACTIVO" : "LIBRE"}`} active={!focusGuardrails.cooldown_active} />
+              <StatusPill label={`Trigger ${focusGuardrails.executable_signal ? "OK" : "NO"}`} active={Boolean(focusGuardrails.executable_signal)} />
             </div>
           </div>
           <div className="panel">
