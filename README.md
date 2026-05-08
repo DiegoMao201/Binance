@@ -125,9 +125,14 @@ Las nuevas entradas deben pasar una aprobación explícita de la IA antes de abr
 - `signal=buy`
 - `approved=true`
 - `direction_alignment=aligned`
-- `setup_quality=high`
-- `risk_flags=[]`
 - `confidence >= AI_CONFIDENCE_THRESHOLD`
+
+Compuerta vigente por escenario:
+
+- Escenario `A`: la IA puede aprobar con `setup_quality=medium` o `high` si mantiene aprobación explícita, alineación y confianza suficiente. Los `risk_flags` siguen registrándose en telemetría, pero ya no bloquean por sí solos este escenario si la IA aprueba el setup.
+- Escenario `B`: se mantiene la política estricta, exigiendo `setup_quality=high` y `risk_flags=[]` además del resto de condiciones.
+
+Además, la petición a OpenRouter ya no evalúa OHLCV “a ciegas”: ahora recibe el contexto del setup técnico candidato (`scenario`, `candidate_signal`, `atr_pct`, `volume_ratio`, etc.) para que actúe como filtro de confirmación, no como generador de ideas desde cero.
 
 Si cualquiera de esos puntos falla, el bot se queda en `hold`. Este ajuste solo endurece entradas futuras; no modifica la gestión de posiciones ya abiertas ni el motor de cierres.
 

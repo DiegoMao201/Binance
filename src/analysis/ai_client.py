@@ -15,7 +15,12 @@ class OpenRouterAnalyzer:
         self.settings = settings
         self.logger = logger
 
-    def _build_payload(self, frame: pd.DataFrame, symbol: str | None = None) -> dict[str, Any]:
+    def _build_payload(
+        self,
+        frame: pd.DataFrame,
+        symbol: str | None = None,
+        technical_signal: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         sample = frame.tail(50)[
             [
                 "timestamp",
@@ -33,10 +38,25 @@ class OpenRouterAnalyzer:
         ].copy()
         sample["timestamp"] = sample["timestamp"].astype(str)
 
+        candidate_context = {
+            "candidate_signal": (technical_signal or {}).get("signal", "hold"),
+            "scenario": (technical_signal or {}).get("scenario"),
+            "scenario_a": bool((technical_signal or {}).get("scenario_a", False)),
+            "scenario_b": bool((technical_signal or {}).get("scenario_b", False)),
+            "rsi": (technical_signal or {}).get("rsi"),
+            "close": (technical_signal or {}).get("close"),
+            "ema_slow": (technical_signal or {}).get("ema_slow"),
+            "atr_pct": (technical_signal or {}).get("atr_pct"),
+            "volume_ratio": (technical_signal or {}).get("volume_ratio"),
+            "green_candle": (technical_signal or {}).get("green_candle"),
+            "bullish_cross": (technical_signal or {}).get("bullish_cross"),
+            "ema_slow_slope": (technical_signal or {}).get("ema_slow_slope"),
+        }
+
         prompt = {
             "symbol": symbol or self.settings.trading_symbol,
             "timeframe": self.settings.timeframe,
-            "objetivo": "Emitir una opinión técnica prudente para scalping conservador.",
+            "objetivo": "Validar o rechazar una entrada long ya prefiltrada por el motor técnico para scalping conservador.",
             "instrucciones": [
                 "Responde solo JSON válido.",
                 "Campos requeridos: signal, confidence, rationale, approved, direction_alignment, setup_quality, risk_flags.",
@@ -46,14 +66,22 @@ class OpenRouterAnalyzer:
                 "direction_alignment debe ser aligned o misaligned respecto a la señal técnica candidata.",
                 "setup_quality debe ser low, medium o high.",
                 "risk_flags debe ser una lista corta de riesgos concretos; usa [] si no ves ninguno.",
-                "Si hay cualquier duda relevante, responde hold y approved=false.",
+                "Estás revisando una candidata ya filtrada por reglas técnicas; no estás generando una idea desde cero.",
+                "Si el escenario es A y la tendencia/pullback siguen razonables, setup_quality=medium puede seguir siendo aprobable.",
+                "Usa hold y approved=false cuando veas desalineación clara, estructura débil o riesgo concreto; evita rechazar por inercia.",
                 "Evita señales agresivas si los datos no son concluyentes.",
             ],
+            "candidate_context": candidate_context,
             "ohlcv": sample.to_dict(orient="records"),
         }
         return prompt
 
-    def analyze(self, frame: pd.DataFrame, symbol: str | None = None) -> dict[str, Any]:
+    def analyze(
+        self,
+        frame: pd.DataFrame,
+        symbol: str | None = None,
+        technical_signal: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.settings.openrouter_api_key:
             self.logger.warning("No hay API key de OpenRouter; se usará señal hold por seguridad.")
             return {
@@ -67,7 +95,7 @@ class OpenRouterAnalyzer:
                 "risk_flags": ["openrouter_not_configured"],
             }
 
-        payload = self._build_payload(frame, symbol=symbol)
+        payload = self._build_payload(frame, symbol=symbol, technical_signal=technical_signal)
         try:
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",

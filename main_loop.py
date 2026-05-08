@@ -228,9 +228,18 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     ai_confident = ai_confidence >= settings.ai_confidence_threshold
     ai_approved = bool(ai_signal.get("approved", False))
     ai_alignment = ai_signal.get("direction_alignment") == "aligned"
-    ai_setup_ready = str(ai_signal.get("setup_quality", "low")).lower() == "high"
+    setup_quality = str(ai_signal.get("setup_quality", "low")).lower()
+    ai_setup_ready = setup_quality in {"medium", "high"} if scenario == "A" else setup_quality == "high"
     risk_flags = ai_signal.get("risk_flags") or []
     ai_risk_clear = isinstance(risk_flags, list) and len(risk_flags) == 0
+    ai_gate_ready = all([
+        ai_confident,
+        same_direction,
+        ai_approved,
+        ai_alignment,
+        ai_setup_ready,
+        scenario == "A" or ai_risk_clear,
+    ])
     # Volatilidad: solo exigimos piso de ATR (regla del usuario), techo opcional.
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
@@ -248,6 +257,7 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
         "ai_alignment": ai_alignment,
         "ai_setup_ready": ai_setup_ready,
         "ai_risk_clear": ai_risk_clear,
+        "ai_gate_ready": ai_gate_ready,
         "ai_confidence": ai_confidence,
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
@@ -1550,7 +1560,11 @@ def run_cycle() -> None:
                         symbol_ai_signal.get("cached_age_seconds", 0),
                     )
                 else:
-                    symbol_ai_signal = ai_analyzer.analyze(scan["frame"], symbol=symbol)
+                    symbol_ai_signal = ai_analyzer.analyze(
+                        scan["frame"],
+                        symbol=symbol,
+                        technical_signal=technical_signal,
+                    )
                     symbol_ai_signal.setdefault("consulted", True)
                     symbol_ai_signal["symbol"] = symbol
                     symbol_ai_signal["cached"] = False
@@ -1582,12 +1596,7 @@ def run_cycle() -> None:
 
                 if all([
                     symbol_guardrails["executable_signal"],
-                    symbol_guardrails["ai_confident"],
-                    symbol_guardrails["same_direction"],
-                    symbol_guardrails["ai_approved"],
-                    symbol_guardrails["ai_alignment"],
-                    symbol_guardrails["ai_setup_ready"],
-                    symbol_guardrails["ai_risk_clear"],
+                    symbol_guardrails["ai_gate_ready"],
                     symbol_guardrails["volatility_ready"],
                     symbol_guardrails["volume_ready"],
                     not symbol_guardrails["cooldown_active"],
