@@ -358,11 +358,18 @@ async def _settle_open_positions(
     logger: logging.Logger,
     persist_open_positions: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    # Tiered trailing stop:
+    # (tier_id, MFE trigger %, nuevo SL como offset desde entry %).
+    # Tier 1 = "break-even +" inmediato: en cuanto el trade alcanza +0.5% de MFE
+    # movemos el SL a entry +0.2% para asegurar que NUNCA una operacion
+    # ya positiva regrese a perdida (regla operativa del usuario).
+    # Los tiers superiores siguen escalando como antes.
     trailing_tiers: tuple[tuple[int, float, float], ...] = (
-        (1, 0.008, 0.004),
-        (2, 0.010, 0.006),
-        (3, 0.014, 0.008),
-        (4, 0.018, 0.010),
+        (1, 0.005, 0.002),
+        (2, 0.008, 0.004),
+        (3, 0.010, 0.006),
+        (4, 0.014, 0.008),
+        (5, 0.018, 0.010),
     )
 
     def _resolve_trailing_tier(mfe_pct: float) -> tuple[int, float | None]:

@@ -151,8 +151,8 @@ function buildAiSummary(ai) {
 function buildModelHealth(ai, isOnline) {
   if (!isOnline) return { tone: "sell", title: "Salud degradada", detail: "No hay heartbeat reciente del bot; la lectura del modelo no es confiable." };
   const confidence = Number(ai?.confidence || 0);
-  if (confidence >= 0.88) return { tone: "buy", title: "Modelo fuerte", detail: "La IA ya entra en el rango exigido por el bot para operar." };
-  if (confidence >= 0.7) return { tone: "warn", title: "Modelo prudente", detail: "La IA responde bien, pero todavía no ve una ventaja estadística suficiente." };
+  if (confidence >= 0.65) return { tone: "buy", title: "Modelo fuerte", detail: "La IA ya entra en el rango exigido por el bot para operar." };
+  if (confidence >= 0.5) return { tone: "warn", title: "Modelo prudente", detail: "La IA responde bien, pero todavía no ve una ventaja estadística suficiente." };
   return { tone: "sell", title: "Modelo débil", detail: "La lectura del modelo es demasiado tibia; lo correcto es no tocar mercado." };
 }
 
@@ -163,7 +163,7 @@ function buildAlerts({ status, control, risk, decision, ai, isOnline }) {
   if (control?.desired_state === "paused") alerts.push({ tone: "warn", title: "Bot en pausa", detail: "El proceso sigue vivo, pero no abrirá nuevas operaciones hasta que lo reanudes." });
   if (control?.desired_state === "stopped") alerts.push({ tone: "sell", title: "Bot detenido", detail: "El proceso fue marcado para detenerse; Coolify tendrá que relanzarlo." });
   if (risk?.kill_switch_triggered) alerts.push({ tone: "sell", title: "Kill switch activo", detail: "La protección de capital se disparó y el bot dejó de operar." });
-  if ((decision?.action === "buy" || decision?.action === "sell") && Number(ai?.confidence || 0) >= 0.88) alerts.push({ tone: "buy", title: "Entrada operable", detail: "El bot detectó una oportunidad compatible con sus filtros estrictos." });
+  if ((decision?.action === "buy" || decision?.action === "sell") && Number(ai?.confidence || 0) >= 0.65) alerts.push({ tone: "buy", title: "Entrada operable", detail: "El bot detectó una oportunidad compatible con sus filtros estrictos." });
   if (!alerts.length) alerts.push({ tone: "neutral", title: "Monitoreo normal", detail: status?.detail || "El bot está filtrando oportunidades y protegiendo capital." });
   return alerts;
 }
@@ -414,7 +414,13 @@ export default function DashboardClient({ initialData }) {
             <div className="telemetry-card"><span>ATR %</span><strong>{formatPercent(focusScan?.atr_pct ?? technicalSignal.atr_pct)}</strong></div>
             <div className="telemetry-card"><span>Volumen relativo</span><strong>{formatNumber(focusScan?.volume_ratio ?? technicalSignal.volume_ratio, 2)}x</strong></div>
             <div className="telemetry-card"><span>Precio</span><strong>{formatNumber(focusScan?.close ?? technicalSignal.close, 4)}</strong></div>
-            <div className="telemetry-card"><span>AI confidence</span><strong>{formatPercent(ai.confidence)}</strong><span className="metric-subvalue">global del ciclo</span></div>
+            <div className="telemetry-card">
+              <span>AI confidence</span>
+              <strong>{formatPercent(focusAi?.confidence)}</strong>
+              <span className="metric-subvalue">
+                {focusScan?.symbol || "símbolo"} · {focusAi?.cached ? `cache ${formatNumber(focusAi.cached_age_seconds, 0)}s` : focusAi?.consulted ? "evaluación fresca" : "no consultada"}
+              </span>
+            </div>
           </section>
         </section>
 

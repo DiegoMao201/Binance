@@ -136,6 +136,27 @@ Además, la petición a OpenRouter ya no evalúa OHLCV “a ciegas”: ahora rec
 
 Si cualquiera de esos puntos falla, el bot se queda en `hold`. Este ajuste solo endurece entradas futuras; no modifica la gestión de posiciones ya abiertas ni el motor de cierres.
 
+## Tiered Trailing Stop (regla "no devolver ganancia")
+
+El bot eleva el SL en escalones a medida que el trade gana MFE. La idea operativa
+es simple: **una operación que ya estuvo en positivo no puede regresar a perder
+todo el capital**. La tabla activa es:
+
+| Tier | Trigger MFE | Nuevo SL (offset desde entry) |
+|------|-------------|-------------------------------|
+| 1    | +0.50%      | entry + 0.20% (break-even +)  |
+| 2    | +0.80%      | entry + 0.40%                 |
+| 3    | +1.00%      | entry + 0.60%                 |
+| 4    | +1.40%      | entry + 0.80%                 |
+| 5    | +1.80%      | entry + 1.00%                 |
+
+El tier 1 es el "seguro de ganancia": en cuanto el MFE cruza 0.5%, el SL salta
+a entry +0.2% asegurando que un retroceso solo cierre la operación con
+beneficio neto (cubre fees + slippage típicos). Los tiers superiores son
+escalones acumulativos: el bot solo emite OCO nuevo en Binance al cruzar un
+tier superior, evitando churn intra-tier y manteniendo bajo control el
+presupuesto de rate-limit. El SL nunca baja, solo sube.
+
 ## Incidente 2026-05-07
 
 El stop de producción del 2026-05-07 no fue un falso positivo del kill switch. El estado live reportó:
