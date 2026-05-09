@@ -71,6 +71,33 @@ def _log_async_notification_failure(task: asyncio.Task[None], logger: logging.Lo
 
 
 _AUTH_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
+_BALANCE_BACKOFF_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
+
+
+def _maybe_notify_balance_backoff(settings: Settings, logger: logging.Logger, failures: int) -> None:
+    """Avisa por Telegram cuando el bot entra en backoff por saldo insuficiente.
+
+    Rate-limit 30 min para no spammear si el operador esta dormido o el saldo
+    sigue bajo durante un rato largo.
+    """
+    now = time.time()
+    if now - _BALANCE_BACKOFF_ALERT_STATE["last_sent"] < 1800:
+        return
+    _BALANCE_BACKOFF_ALERT_STATE["last_sent"] = now
+    notifier = _build_notifier(settings, logger)
+    _notify_safe(
+        notifier,
+        logger,
+        "warning",
+        {
+            "title": "BACKOFF SALDO INSUFICIENTE",
+            "detail": (
+                f"{failures} ordenes rechazadas en 15 min por insufficient_balance. "
+                "Bot en pausa local. Verifica USDT libre o desactiva activos no liquidos."
+            ),
+            "status": "degraded",
+        },
+    )
 
 
 def _maybe_notify_auth_invalid(settings: Settings, logger: logging.Logger, detail: str) -> None:
@@ -348,6 +375,28 @@ def _build_guardrails(
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
     volume_ready = float(technical_signal.get("volume_ratio", 0.0)) >= settings.min_volume_ratio
+
+    # ---- FASE 2: Filtros de regimen + score multifactor ----
+    # No queremos comprar en mercados bajistas (trending_down) ni en chop muerto.
+    # En range exigimos un score minimo mas alto porque la edge es menor.
+    regime = str(technical_signal.get("regime", "range")).lower()
+    setup_score = float(technical_signal.get("setup_score", 0.0))
+
+    if regime == "trending_down":
+        regime_ready = False
+        regime_min_score = 1.01  # bloqueado
+    elif regime == "chop":
+        regime_ready = False
+        regime_min_score = 1.01
+    elif regime == "trending_up":
+        regime_ready = True
+        regime_min_score = 0.40  # con tendencia a favor, bajo el listón
+    else:  # range
+        regime_ready = True
+        regime_min_score = 0.55  # en rango, exijo setup mas claro
+
+    score_ready = setup_score >= regime_min_score
+
     cooldown_active = _is_in_cooldown(order_history, settings.trade_cooldown_minutes)
     symbol_cooldown_active = _is_symbol_in_cooldown(order_history, symbol) if symbol else False
     insufficient_backoff_active, insufficient_failures = _insufficient_balance_backoff_active(order_history)
@@ -367,6 +416,11 @@ def _build_guardrails(
         "ai_confidence": ai_confidence,
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
+        "regime": regime,
+        "regime_ready": regime_ready,
+        "setup_score": setup_score,
+        "score_ready": score_ready,
+        "regime_min_score": regime_min_score,
         "cooldown_active": cooldown_active or symbol_cooldown_active or insufficient_backoff_active,
         "global_cooldown_active": cooldown_active,
         "symbol_cooldown_active": symbol_cooldown_active,
@@ -470,12 +524,14 @@ async def _settle_open_positions(
     logger: logging.Logger,
     persist_open_positions: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    # Tiered trailing stop:
-    # (tier_id, MFE trigger %, nuevo SL como offset desde entry %).
-    # Tier 1 = "break-even +" inmediato: en cuanto el trade alcanza +0.5% de MFE
-    # movemos el SL a entry +0.2% para asegurar que NUNCA una operacion
-    # ya positiva regrese a perdida (regla operativa del usuario).
-    # Los tiers superiores siguen escalando como antes.
+    # ---- Trailing stop: dos modos ----
+    # Modo legacy (fallback): triggers/offsets fijos por tier.
+    # Modo ATR (cuando la posicion tiene atr_pct grabado al abrir):
+    #   trigger del tier N = N * 1.0 * ATR%   (1ATR, 2ATR, 3ATR...)
+    #   offset del SL nuevo = entry + (trigger - 0.5*ATR%)  -> bloquea en BE+
+    # Esto adapta el trailing a la volatilidad real del par. Un BTC con
+    # ATR=0.15% no necesita esperar +0.5% para mover SL; un SOL con ATR=1%
+    # tampoco quiere break-even en +0.2%.
     trailing_tiers: tuple[tuple[int, float, float], ...] = (
         (1, 0.005, 0.002),
         (2, 0.008, 0.004),
@@ -484,7 +540,28 @@ async def _settle_open_positions(
         (5, 0.018, 0.010),
     )
 
-    def _resolve_trailing_tier(mfe_pct: float) -> tuple[int, float | None]:
+    def _resolve_trailing_tier(mfe_pct: float, atr_pct: float | None = None) -> tuple[int, float | None]:
+        # Modo ATR: tiers escalan con la volatilidad realizada.
+        if atr_pct is not None and atr_pct > 0:
+            # Cap de ATR a 0.015 (1.5%) para no exigir movimientos imposibles
+            # en pares calientes; floor 0.002 (0.2%) para no hacer micro-trailing.
+            effective_atr = min(0.015, max(0.002, float(atr_pct)))
+            atr_tiers = [
+                (1, 1.0 * effective_atr, 0.3 * effective_atr),  # +1 ATR -> SL en +0.3 ATR
+                (2, 1.5 * effective_atr, 0.7 * effective_atr),  # +1.5 ATR -> SL en +0.7 ATR
+                (3, 2.0 * effective_atr, 1.0 * effective_atr),  # +2 ATR -> SL en +1 ATR
+                (4, 2.8 * effective_atr, 1.5 * effective_atr),
+                (5, 3.5 * effective_atr, 2.0 * effective_atr),
+            ]
+            target_tier = 0
+            target_offset: float | None = None
+            for tier_id, trigger_pct, offset_pct in atr_tiers:
+                if mfe_pct >= trigger_pct:
+                    target_tier = tier_id
+                    target_offset = offset_pct
+            return target_tier, target_offset
+
+        # Fallback legacy si no tenemos ATR.
         target_tier = 0
         target_offset = None
         for tier_id, trigger_pct, offset_pct in trailing_tiers:
@@ -617,7 +694,9 @@ async def _settle_open_positions(
             # El bot solo toca Binance al cruzar un tier superior de MFE. Esto evita churn
             # intra-tier y mantiene el presupuesto de rate limit bajo control.
             mfe_pct = float(position.get("mfe_pct", 0.0) or 0.0)
-            new_tier, new_sl_offset_pct = _resolve_trailing_tier(mfe_pct)
+            entry_atr_pct = position.get("entry_atr_pct")
+            entry_atr_pct = float(entry_atr_pct) if entry_atr_pct is not None else None
+            new_tier, new_sl_offset_pct = _resolve_trailing_tier(mfe_pct, atr_pct=entry_atr_pct)
             if new_tier > trailing_tier and new_sl_offset_pct is not None and entry_price > 0:
                 raw_new_sl = entry_price * (1 + new_sl_offset_pct) if side == "buy" else entry_price * (1 - new_sl_offset_pct)
                 try:
@@ -1763,6 +1842,13 @@ def run_cycle() -> None:
         }
 
         if not global_lock:
+            # Detecta backoff por insuficiente UNA vez por ciclo (con order_history actual)
+            # y notifica si esta activo, para evitar que el operador descubra el problema
+            # solo mirando logs.
+            backoff_active, backoff_failures = _insufficient_balance_backoff_active(order_history)
+            if backoff_active:
+                _maybe_notify_balance_backoff(settings, logger, backoff_failures)
+
             for scan in scan_results:
                 technical_signal = scan["technical_signal"]
                 symbol = scan["symbol"]
@@ -1772,6 +1858,7 @@ def run_cycle() -> None:
                     pre_guards["executable_signal"]
                     and pre_guards["volatility_ready"]
                     and pre_guards["volume_ready"]
+                    and pre_guards.get("regime_ready", True)
                     and not pre_guards["cooldown_active"]
                 ):
                     continue
@@ -1827,6 +1914,8 @@ def run_cycle() -> None:
                     symbol_guardrails["ai_gate_ready"],
                     symbol_guardrails["volatility_ready"],
                     symbol_guardrails["volume_ready"],
+                    symbol_guardrails.get("regime_ready", True),
+                    symbol_guardrails.get("score_ready", True),
                     not symbol_guardrails["cooldown_active"],
                     str(technical_signal["signal"]) == "buy",
                     symbol_ai_signal.get("consulted", False),
@@ -1845,16 +1934,29 @@ def run_cycle() -> None:
         if chosen_scan and chosen_guardrails:
             symbol = chosen_scan["symbol"]
             technical_signal = chosen_scan["technical_signal"]
+            # ---- Conviction multiplier (sizing por calidad del setup) ----
+            # Combina conviccion de la IA y score tecnico multifactor.
+            # Mapea [0,1] -> [0.5, 1.0] para no apostar full size en setups borderline.
+            conv_inputs = [
+                float(ai_signal.get("confidence", 0.0) or 0.0),
+                float(technical_signal.get("setup_score", 0.0) or 0.0),
+            ]
+            avg_conv = sum(conv_inputs) / len(conv_inputs) if conv_inputs else 0.0
+            conviction_multiplier = round(0.5 + 0.5 * max(0.0, min(1.0, avg_conv)), 4)
             decision = executor.execute(
                 side=str(technical_signal["signal"]),
                 market_price=float(technical_signal["close"]),
                 risk=risk_snapshot,
                 symbol=symbol,
                 atr_pct=float(technical_signal.get("atr_pct", 0.0)) or None,
+                conviction_multiplier=conviction_multiplier,
             )
             decision["scenario"] = technical_signal.get("scenario")
             decision["entry_rsi"] = technical_signal.get("rsi")
             decision["symbol"] = symbol
+            decision["regime"] = technical_signal.get("regime")
+            decision["setup_score"] = technical_signal.get("setup_score")
+            decision["conviction_multiplier"] = conviction_multiplier
             append_history(settings.order_history_file, decision)
             order_history = load_history(settings.order_history_file)
 
@@ -1902,6 +2004,13 @@ def run_cycle() -> None:
                         "mfe_pct": 0.0,
                         "mae_usdt": 0.0,
                         "mfe_usdt": 0.0,
+                        # Metadata de calidad para trailing/exit adaptativos.
+                        "entry_atr_pct": float(technical_signal.get("atr_pct", 0.0) or 0.0),
+                        "entry_regime": technical_signal.get("regime"),
+                        "entry_setup_score": technical_signal.get("setup_score"),
+                        "conviction_multiplier": decision.get("conviction_multiplier"),
+                        "sl_pct_used": decision.get("sl_pct_used"),
+                        "tp_pct_used": decision.get("tp_pct_used"),
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)

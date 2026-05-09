@@ -10,6 +10,10 @@ def compute_indicators(frame: pd.DataFrame) -> pd.DataFrame:
 
     data["ema_fast"] = data["close"].ewm(span=9, adjust=False).mean()
     data["ema_slow"] = data["close"].ewm(span=20, adjust=False).mean()
+    # Medias largas para deteccion de regimen (trend / range / chop).
+    # No se usan como gate clasico; alimentan el clasificador de regimen.
+    data["ema_50"] = data["close"].ewm(span=50, adjust=False).mean()
+    data["ema_200"] = data["close"].ewm(span=200, adjust=False).mean()
 
     delta = data["close"].diff()
     gains = delta.clip(lower=0).rolling(window=14).mean()
@@ -34,8 +38,100 @@ def compute_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     data["volume_mean_20"] = data["volume"].rolling(window=20).mean()
     data["volume_ratio"] = (data["volume"] / data["volume_mean_20"]).fillna(0)
     data["ema_slow_slope"] = data["ema_slow"].diff().fillna(0)
+    # Slope porcentual de EMA50 sobre 5 velas: input crudo para regimen.
+    data["ema_50_slope_pct"] = (data["ema_50"].diff(5) / data["close"]).fillna(0)
 
     return data.dropna().reset_index(drop=True)
+
+
+def _classify_regime(latest: pd.Series, bb_width_pct: float) -> str:
+    """Clasifica el regimen del mercado.
+
+    - trending_up:   precio > EMA200, EMA50 sobre EMA200, slope EMA50 > 0
+    - trending_down: precio < EMA200 y EMA50 < EMA200
+    - range:         precio cerca de EMA200 (+/-2%) y BB width > 1.5%
+    - chop:          baja volatilidad (BB width < 0.5%), evitar entradas
+    """
+    close = float(latest["close"])
+    ema_50 = float(latest.get("ema_50", close))
+    ema_200 = float(latest.get("ema_200", close))
+    slope_pct = float(latest.get("ema_50_slope_pct", 0.0))
+
+    if bb_width_pct < 0.005:
+        return "chop"
+
+    above_long_ma = close > ema_200 and ema_50 > ema_200
+    below_long_ma = close < ema_200 and ema_50 < ema_200
+    distance_pct = abs(close - ema_200) / ema_200 if ema_200 > 0 else 0.0
+
+    if above_long_ma and slope_pct > 0.0005:
+        return "trending_up"
+    if below_long_ma and slope_pct < -0.0005:
+        return "trending_down"
+    if distance_pct < 0.02:
+        return "range"
+    return "range"
+
+
+def _compute_setup_score(
+    *,
+    rsi: float,
+    rsi_slope: float,
+    volume_ratio: float,
+    volume_acceleration: float,
+    bb_position_pct: float,
+    candle_body_pct: float,
+    consecutive_green: int,
+    ema_slow_slope: float,
+    scenario: str | None,
+) -> float:
+    """Score 0-1 de calidad del setup, combinando 6 factores ortogonales.
+
+    Filosofia: cada factor aporta hasta ~16% del score. Un setup ideal cumple
+    casi todo (rebote desde sobreventa con volumen creciente, vela fuerte
+    verde y RSI subiendo).
+    """
+    if scenario not in {"A", "B"}:
+        return 0.0
+
+    # 1. RSI sweet spot por escenario (16%)
+    if scenario == "A":
+        # Pullback ideal: RSI 30-45
+        rsi_score = max(0.0, 1.0 - abs(rsi - 38) / 25)
+    else:
+        # Sobreventa extrema: cuanto mas bajo, mejor (cap en 18)
+        rsi_score = max(0.0, min(1.0, (32 - rsi) / 14))
+
+    # 2. RSI slope subiendo = recuperacion confirmada (16%)
+    rsi_slope_score = max(0.0, min(1.0, rsi_slope / 8.0))
+
+    # 3. Volume ratio sobre el promedio (16%)
+    volume_score = max(0.0, min(1.0, (volume_ratio - 1.0) / 1.5))
+
+    # 4. Volume acceleration: ultima vela vs ultimas 3 (16%)
+    accel_score = max(0.0, min(1.0, (volume_acceleration - 1.0) / 1.5))
+
+    # 5. BB position: cerca del lower es ideal para reversion (16%)
+    bb_score = max(0.0, 1.0 - bb_position_pct) if bb_position_pct < 0.5 else 0.0
+
+    # 6. Vela fuerte verde + momentum (20%)
+    body_score = candle_body_pct
+    momentum_bonus = min(0.3, consecutive_green * 0.1) if consecutive_green > 0 else 0.0
+    candle_score = min(1.0, body_score + momentum_bonus)
+
+    # Penalty si la EMA20 va plana o cayendo (mercado sin sustento)
+    slope_factor = 1.0 if ema_slow_slope >= 0 else 0.85
+
+    raw = (
+        rsi_score * 0.16
+        + rsi_slope_score * 0.16
+        + volume_score * 0.16
+        + accel_score * 0.16
+        + bb_score * 0.16
+        + candle_score * 0.20
+    )
+    return round(min(1.0, max(0.0, raw * slope_factor)), 4)
+
 
 
 def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None) -> dict[str, object]:
@@ -105,6 +201,21 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
         scenario = None
 
     confidence = abs(latest["ema_fast"] - latest["ema_slow"]) / latest["close"]
+
+    bb_width_pct_value = round(float(latest["bb_width_pct"]), 4)
+    regime = _classify_regime(latest, bb_width_pct_value)
+    setup_score = _compute_setup_score(
+        rsi=rsi,
+        rsi_slope=rsi_slope,
+        volume_ratio=float(latest["volume_ratio"]),
+        volume_acceleration=volume_acceleration,
+        bb_position_pct=bb_position_pct,
+        candle_body_pct=candle_body_pct,
+        consecutive_green=consecutive_green,
+        ema_slow_slope=float(latest["ema_slow_slope"]),
+        scenario=scenario,
+    )
+
     return {
         "signal": signal,
         "scenario": scenario,
@@ -117,7 +228,12 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
         "high": round(float(latest["high"]), 4),
         "low": round(float(latest["low"]), 4),
         "ema_slow": round(ema_slow, 4),
-        "bb_width_pct": round(float(latest["bb_width_pct"]), 4),
+        "ema_50": round(float(latest.get("ema_50", ema_slow)), 4),
+        "ema_200": round(float(latest.get("ema_200", ema_slow)), 4),
+        "ema_50_slope_pct": round(float(latest.get("ema_50_slope_pct", 0.0)), 6),
+        "regime": regime,
+        "setup_score": setup_score,
+        "bb_width_pct": bb_width_pct_value,
         "bb_position_pct": bb_position_pct,
         "atr_pct": round(float(latest["atr_pct"]), 4),
         "volume_ratio": round(float(latest["volume_ratio"]), 4),

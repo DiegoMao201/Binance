@@ -61,7 +61,13 @@ class RiskManager:
             kill_switch_triggered=drawdown >= self.settings.kill_switch_drawdown,
         )
 
-    def compute_trade_notional(self, equity_usd: float, *, free_quote_usd: float | None = None) -> float:
+    def compute_trade_notional(
+        self,
+        equity_usd: float,
+        *,
+        free_quote_usd: float | None = None,
+        conviction_multiplier: float | None = None,
+    ) -> float:
         """Calcula el notional objetivo de la orden.
 
         Si se proporciona ``free_quote_usd`` (saldo libre real en la moneda
@@ -69,21 +75,43 @@ class RiskManager:
         Esto evita el patron de produccion (audit 2026-05-04) en el que el bot
         calculaba sizing contra equity total ($40) pero Binance solo permitia
         gastar el USDT libre ($20), generando 10 rejected en cadena.
+
+        ``conviction_multiplier`` (0.5-1.0, opcional) escala el tamano por
+        calidad del setup: setups borderline van con la mitad del capital,
+        setups premium con full size. Permite "aumentar agresividad sin
+        aumentar riesgo absoluto".
         """
         minimum_viable = self.settings.minimum_trade_usdt
         if equity_usd < minimum_viable and (free_quote_usd is None or free_quote_usd < minimum_viable):
             return 0.0
+
         target = equity_usd * self.position_size_pct * self.notional_buffer
+
+        if conviction_multiplier is not None:
+            mult = max(0.5, min(1.0, float(conviction_multiplier)))
+            target *= mult
+
         if free_quote_usd is not None and free_quote_usd > 0:
-            # 0.97 = colchon para fees + precision rounding del exchange.
             spendable = free_quote_usd * 0.97
             target = min(target, spendable)
+
         if target < minimum_viable:
             return 0.0
         return round(max(target, minimum_viable), 4)
 
-    def compute_order_size(self, price: float, equity_usd: float, *, free_quote_usd: float | None = None) -> float:
-        trade_capital = self.compute_trade_notional(equity_usd, free_quote_usd=free_quote_usd)
+    def compute_order_size(
+        self,
+        price: float,
+        equity_usd: float,
+        *,
+        free_quote_usd: float | None = None,
+        conviction_multiplier: float | None = None,
+    ) -> float:
+        trade_capital = self.compute_trade_notional(
+            equity_usd,
+            free_quote_usd=free_quote_usd,
+            conviction_multiplier=conviction_multiplier,
+        )
         if price <= 0:
             return 0.0
         return round(trade_capital / price, 6)

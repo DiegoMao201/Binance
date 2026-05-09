@@ -99,6 +99,7 @@ class TradeExecutor:
         symbol: str | None = None,
         *,
         atr_pct: float | None = None,
+        conviction_multiplier: float | None = None,
     ) -> dict[str, Any]:
         target_symbol = symbol or self.settings.trading_symbol
         free_quote_usd: float | None = None
@@ -112,6 +113,7 @@ class TradeExecutor:
             market_price,
             risk.equity_usd,
             free_quote_usd=free_quote_usd,
+            conviction_multiplier=conviction_multiplier,
         )
         quote_amount: float | None = None
         if side == "buy" and not self.settings.dry_run:
