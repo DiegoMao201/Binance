@@ -567,7 +567,70 @@ async def _settle_open_positions(
                 and settings.time_stop_dead_zone_pct > 0
                 and hold_minutes is not None
             )
+            hard_timeout_enabled = settings.smart_hard_timeout_minutes > 0 and hold_minutes is not None
+            stagnation_enabled = (
+                settings.smart_stagnation_minutes > 0
+                and settings.smart_stagnation_max_mfe_pct > 0
+                and settings.smart_stagnation_loss_cut_pct > 0
+                and hold_minutes is not None
+            )
+
+            # 1) Hard timeout inteligente:
+            # si una posicion lleva demasiado tiempo sin asegurar tier 1,
+            # cerramos por mercado para reciclar capital y evitar "muertes lentas".
             if (
+                hard_timeout_enabled
+                and hold_minutes >= settings.smart_hard_timeout_minutes
+                and trailing_tier < 1
+            ):
+                exit_price = mark_price
+                exit_reason = "smart_hard_timeout"
+                position["smart_exit"] = {
+                    "rule": "hard_timeout",
+                    "hold_minutes": round(hold_minutes, 1),
+                    "threshold_minutes": settings.smart_hard_timeout_minutes,
+                    "trailing_tier": trailing_tier,
+                    "mfe_pct": round(mfe_pct, 6),
+                    "unrealized_pct": round(unrealized_pct, 6),
+                }
+                logger.info(
+                    "Smart exit hard-timeout %s side=%s hold=%.1fmin tier=%s mfe=%.3f%% pnl=%.3f%%",
+                    symbol,
+                    side,
+                    hold_minutes,
+                    trailing_tier,
+                    mfe_pct * 100,
+                    unrealized_pct * 100,
+                )
+            # 2) Stagnation loss-cut:
+            # si tras X minutos el trade nunca mostró tracción suficiente (MFE bajo)
+            # y además ya está en pérdida material, salimos antes del SL completo.
+            elif (
+                stagnation_enabled
+                and hold_minutes >= settings.smart_stagnation_minutes
+                and mfe_pct <= settings.smart_stagnation_max_mfe_pct
+                and unrealized_pct <= -settings.smart_stagnation_loss_cut_pct
+            ):
+                exit_price = mark_price
+                exit_reason = "smart_stagnation_loss_cut"
+                position["smart_exit"] = {
+                    "rule": "stagnation_loss_cut",
+                    "hold_minutes": round(hold_minutes, 1),
+                    "threshold_minutes": settings.smart_stagnation_minutes,
+                    "max_mfe_pct": settings.smart_stagnation_max_mfe_pct,
+                    "loss_cut_pct": settings.smart_stagnation_loss_cut_pct,
+                    "mfe_pct": round(mfe_pct, 6),
+                    "unrealized_pct": round(unrealized_pct, 6),
+                }
+                logger.info(
+                    "Smart exit stagnation %s side=%s hold=%.1fmin mfe=%.3f%% pnl=%.3f%%",
+                    symbol,
+                    side,
+                    hold_minutes,
+                    mfe_pct * 100,
+                    unrealized_pct * 100,
+                )
+            elif (
                 time_stop_enabled
                 and hold_minutes >= settings.time_stop_minutes
                 and abs(unrealized_pct) <= settings.time_stop_dead_zone_pct

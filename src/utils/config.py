@@ -39,6 +39,10 @@ class Settings:
     trailing_sl_offset_pct: float
     time_stop_minutes: int
     time_stop_dead_zone_pct: float
+    smart_hard_timeout_minutes: int
+    smart_stagnation_minutes: int
+    smart_stagnation_max_mfe_pct: float
+    smart_stagnation_loss_cut_pct: float
     poll_interval_seconds: int
     log_level: str
     streamlit_port: int
@@ -112,6 +116,10 @@ def load_settings() -> Settings:
         trailing_sl_offset_pct=float(os.getenv("TRAILING_SL_OFFSET_PCT", "0.002")),
         time_stop_minutes=int(os.getenv("TIME_STOP_MINUTES", "240")),
         time_stop_dead_zone_pct=float(os.getenv("TIME_STOP_DEAD_ZONE_PCT", "0.003")),
+        smart_hard_timeout_minutes=int(os.getenv("SMART_HARD_TIMEOUT_MINUTES", "360")),
+        smart_stagnation_minutes=int(os.getenv("SMART_STAGNATION_MINUTES", "120")),
+        smart_stagnation_max_mfe_pct=float(os.getenv("SMART_STAGNATION_MAX_MFE_PCT", "0.004")),
+        smart_stagnation_loss_cut_pct=float(os.getenv("SMART_STAGNATION_LOSS_CUT_PCT", "0.0045")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         streamlit_port=int(os.getenv("STREAMLIT_PORT", "8501")),
