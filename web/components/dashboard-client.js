@@ -219,6 +219,27 @@ const TRAILING_TIERS = [
 ];
 
 
+function buildTrailingTierSchedule(entryAtrPct) {
+  const atr = Number(entryAtrPct || 0);
+  if (!(atr > 0)) {
+    return { mode: "legacy", effectiveAtr: null, tiers: TRAILING_TIERS };
+  }
+
+  const effectiveAtr = Math.min(0.015, Math.max(0.002, atr));
+  return {
+    mode: "atr_dynamic",
+    effectiveAtr,
+    tiers: [
+      { tier: 1, trigger: 1.0 * effectiveAtr, offset: 0.3 * effectiveAtr, label: "ATR Tier 1" },
+      { tier: 2, trigger: 1.5 * effectiveAtr, offset: 0.7 * effectiveAtr, label: "ATR Tier 2" },
+      { tier: 3, trigger: 2.0 * effectiveAtr, offset: 1.0 * effectiveAtr, label: "ATR Tier 3" },
+      { tier: 4, trigger: 2.8 * effectiveAtr, offset: 1.5 * effectiveAtr, label: "ATR Tier 4" },
+      { tier: 5, trigger: 3.5 * effectiveAtr, offset: 2.0 * effectiveAtr, label: "ATR Tier 5" },
+    ],
+  };
+}
+
+
 function resolveTierFromMfe(mfePct) {
   let tier = 0;
   for (const candidate of TRAILING_TIERS) {
@@ -316,10 +337,12 @@ function buildLivePositionView(openPosition, openPositions) {
   const achievedTier = resolveTierFromMfe(mfePct);
   const initialSL = Number(fullPos.initial_stop_loss || sl);
   const slLockedAboveEntry = sl > entry && entry > 0;
+  const entryAtrPct = Number(fullPos.entry_atr_pct || summary.entry_atr_pct || 0);
+  const tierSchedule = buildTrailingTierSchedule(entryAtrPct);
 
-  const currentTier = TRAILING_TIERS.find((t) => t.tier === tier);
-  const currentAchievedTier = TRAILING_TIERS.find((t) => t.tier === achievedTier);
-  const nextTier = TRAILING_TIERS.find((t) => t.tier === achievedTier + 1);
+  const currentTier = tierSchedule.tiers.find((t) => t.tier === tier);
+  const currentAchievedTier = tierSchedule.tiers.find((t) => t.tier === achievedTier);
+  const nextTier = tierSchedule.tiers.find((t) => t.tier === achievedTier + 1);
   const distanceToNextTier = nextTier ? nextTier.trigger - mfePct : 0;
 
   return {
@@ -340,6 +363,8 @@ function buildLivePositionView(openPosition, openPositions) {
     nextTier,
     distanceToNextTier,
     initialSL,
+    entryAtrPct,
+    tierSchedule,
     slLockedAboveEntry,
     tierSyncPending: achievedTier > tier,
     holdMinutes: Number(fullPos.hold_minutes || 0),
@@ -424,6 +449,7 @@ export default function DashboardClient({ initialData }) {
   const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
   const equityCurve = useMemo(() => buildEquityCurve(equityHistory), [equityHistory]);
   const livePos = useMemo(() => buildLivePositionView(openPosition, openPositions), [openPosition, openPositions]);
+  const displayTierSchedule = useMemo(() => buildTrailingTierSchedule(livePos?.entryAtrPct || 0), [livePos?.entryAtrPct]);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
@@ -638,15 +664,36 @@ export default function DashboardClient({ initialData }) {
                 </span>
               ) : null}
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {TRAILING_TIERS.map((t) => (
+                {(livePos.tierSchedule?.tiers || TRAILING_TIERS).map((t) => (
                   <span key={t.tier} className={`status-pill ${livePos.achievedTier >= t.tier ? "active" : "inactive"}`}>
-                    T{t.tier} · ≥{formatPercent(t.trigger)} → SL +{formatPercent(t.offset)}
+                    T{t.tier} · trigger {formatPercent(t.trigger)} | SL +{formatPercent(t.offset)}
                   </span>
                 ))}
               </div>
             </div>
           </section>
         ) : null}
+
+        <section className="panel">
+          <div className="panel-header">
+            <h3>Tiers de trailing activos</h3>
+            <span>
+              {displayTierSchedule.mode === "atr_dynamic"
+                ? `ATR dinámico (ATR efectivo ${formatPercent(displayTierSchedule.effectiveAtr)})`
+                : "Legacy fijo (.5% -> +0.2%)"}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {displayTierSchedule.tiers.map((t) => (
+              <span key={`cfg-tier-${t.tier}`} className="status-pill active">
+                T{t.tier} · trigger {formatPercent(t.trigger)} | SL +{formatPercent(t.offset)}
+              </span>
+            ))}
+          </div>
+          <p className="secondary-text" style={{ marginTop: 10 }}>
+            Si no hay `entry_atr_pct` en la posición, el frontend y backend muestran el esquema legacy: Tier 1 en +0.5% mueve SL a +0.2%.
+          </p>
+        </section>
 
         <section className="panel">
           <div className="panel-header">
