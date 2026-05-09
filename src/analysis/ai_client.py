@@ -38,23 +38,37 @@ class OpenRouterAnalyzer:
         ].copy()
         sample["timestamp"] = sample["timestamp"].astype(str)
 
+        ts = technical_signal or {}
         candidate_context = {
-            "candidate_signal": (technical_signal or {}).get("signal", "hold"),
-            "scenario": (technical_signal or {}).get("scenario"),
-            "scenario_a": bool((technical_signal or {}).get("scenario_a", False)),
-            "scenario_b": bool((technical_signal or {}).get("scenario_b", False)),
-            "rsi": (technical_signal or {}).get("rsi"),
-            "close": (technical_signal or {}).get("close"),
-            "ema_slow": (technical_signal or {}).get("ema_slow"),
-            "atr_pct": (technical_signal or {}).get("atr_pct"),
-            "volume_ratio": (technical_signal or {}).get("volume_ratio"),
-            "green_candle": (technical_signal or {}).get("green_candle"),
-            "bullish_cross": (technical_signal or {}).get("bullish_cross"),
-            "ema_slow_slope": (technical_signal or {}).get("ema_slow_slope"),
-            "orderbook_imbalance": (technical_signal or {}).get("orderbook_imbalance"),
-            "spread_pct": (technical_signal or {}).get("spread_pct"),
-            "macro_trend": (technical_signal or {}).get("macro_trend"),
-            "macro_slope_pct": (technical_signal or {}).get("macro_slope_pct"),
+            # --- Señal base ---
+            "candidate_signal": ts.get("signal", "hold"),
+            "scenario": ts.get("scenario"),
+            "scenario_a": bool(ts.get("scenario_a", False)),
+            "scenario_b": bool(ts.get("scenario_b", False)),
+            # --- Momentum técnico ---
+            "rsi": ts.get("rsi"),
+            "rsi_slope": ts.get("rsi_slope"),          # >0 = RSI recuperándose, señal real
+            "close": ts.get("close"),
+            "ema_slow": ts.get("ema_slow"),
+            "ema_slow_slope": ts.get("ema_slow_slope"),
+            "bullish_cross": ts.get("bullish_cross"),
+            # --- Fuerza de vela ---
+            "green_candle": ts.get("green_candle"),
+            "candle_body_pct": ts.get("candle_body_pct"),  # >0.6 = vela de convicción
+            "consecutive_green": ts.get("consecutive_green"),  # buildup de momentum
+            # --- Volatilidad y posición ---
+            "atr_pct": ts.get("atr_pct"),
+            "bb_width_pct": ts.get("bb_width_pct"),
+            "bb_position_pct": ts.get("bb_position_pct"),  # 0=BB lower, 1=BB upper; <0.3 es zona de valor
+            # --- Volumen ---
+            "volume_ratio": ts.get("volume_ratio"),
+            "volume_acceleration": ts.get("volume_acceleration"),  # >1.2 = aceleración real vs últimas 3
+            # --- Orderbook (spot público) ---
+            "orderbook_imbalance": ts.get("orderbook_imbalance"),
+            "spread_pct": ts.get("spread_pct"),
+            # --- Régimen macro 15m ---
+            "macro_trend": ts.get("macro_trend"),
+            "macro_slope_pct": ts.get("macro_slope_pct"),
         }
 
         prompt = {
@@ -65,17 +79,36 @@ class OpenRouterAnalyzer:
                 "Responde solo JSON válido.",
                 "Campos requeridos: signal, confidence, rationale, approved, direction_alignment, setup_quality, risk_flags.",
                 "signal debe ser buy, sell o hold.",
-                "confidence debe ir de 0 a 1.",
-                "approved debe ser true solo si aceptarías la entrada con criterio profesional y conservador.",
+                "confidence debe ir de 0 a 1 (usa el rango completo con convicción: no escales artificialmente hacia 0.5).",
+                "approved debe ser true cuando el setup es técnicamente sólido; aprueba con convicción cuando corresponde.",
                 "direction_alignment debe ser aligned o misaligned respecto a la señal técnica candidata.",
-                "setup_quality debe ser low, medium o high.",
-                "risk_flags debe ser una lista corta de riesgos concretos; usa [] si no ves ninguno.",
-                "Estás revisando una candidata ya filtrada por reglas técnicas; no estás generando una idea desde cero.",
-                "Si el escenario es A y la tendencia/pullback siguen razonables, setup_quality=medium puede seguir siendo aprobable.",
-                "Usa hold y approved=false cuando veas desalineación clara, estructura débil o riesgo concreto; evita rechazar por inercia.",
-                "Considera el orderbook_imbalance: > 0.55 favorece compras, < 0.45 favorece ventas; si va en contra de la señal técnica añade un risk_flag concreto.",
-                "Considera el macro_trend (15m): bullish refuerza compras, bearish + slope negativo es señal de cautela; neutral no bloquea por sí solo.",
-                "Evita señales agresivas si los datos no son concluyentes.",
+                "setup_quality debe ser low, medium o high. Sé preciso: high solo cuando múltiples factores convergen.",
+                "risk_flags debe ser una lista concreta de riesgos reales; usa [] si no ves ninguno. No inventes flags genéricos.",
+                "Esta candidata ya pasó los filtros técnicos; tu trabajo es confirmar timing y calidad, no filtrar por defecto.",
+                # Fuerza de vela
+                "candle_body_pct > 0.6 indica vela de convicción real (poco shadow = intención limpia). < 0.3 indica doji/incertidumbre.",
+                "consecutive_green >= 2 + volume_acceleration > 1.2 = momentum construyéndose; es factor positivo para buy.",
+                # RSI y momentum
+                "rsi_slope > 0 después de zona de sobreventa es el patrón clave de rebote; refuerza fuertemente la señal.",
+                "rsi_slope < -2 en zona media indica momentum que se debilita; añade risk_flag 'rsi_momentum_fading'.",
+                # Posición en BB
+                "bb_position_pct < 0.25 = precio cerca del soporte BB inferior = zona de valor óptima para long.",
+                "bb_position_pct > 0.75 = precio extendido; para escenario A es aceptable si tendencia es fuerte; para B es señal de extensión peligrosa.",
+                # Volumen
+                "volume_ratio > 1.5 con vela verde = compra institucional, no retail; es confirmación fuerte.",
+                "volume_acceleration < 0.7 = volumen secándose; el movimiento puede no tener seguimiento.",
+                # Orderbook
+                "orderbook_imbalance > 0.55 con señal buy = confirmación de presión compradora real en el libro.",
+                "orderbook_imbalance < 0.45 contra señal buy = desalineación estructural; añade risk_flag 'orderbook_vs_signal'.",
+                "spread_pct > 0.15 = mercado ilíquido; eleva el riesgo de slippage; menciona si es relevante.",
+                # Macro 15m
+                "macro_trend=bullish + slope positivo: entorno favorable, el setup tiene viento a favor. Sube confidence.",
+                "macro_trend=bearish + slope_pct < -0.002: tendencia bajista confirmada en 15m. Solo aprueba si escenario B tiene señales de agotamiento vendedor muy claras.",
+                "macro_trend=neutral: no bloquea ni refuerza; deja que los factores locales decidan.",
+                # Síntesis
+                "Setup perfecto (confidence >= 0.80): escenario A + macro bullish + candle_body_pct > 0.55 + volume_acceleration > 1.1 + rsi_slope > 0 + orderbook_imbalance > 0.52.",
+                "Setup sólido (confidence 0.65-0.79): 3-4 de esos factores convergentes sin contradicciones fuertes.",
+                "Setup débil (confidence < 0.55): múltiples factores contradictorios o datos inconclusos; approved=false.",
             ],
             "candidate_context": candidate_context,
             "ohlcv": sample.to_dict(orient="records"),
@@ -114,7 +147,15 @@ class OpenRouterAnalyzer:
                     "messages": [
                         {
                             "role": "system",
-                            "content": "Eres un analista cuant conservador. Prioriza preservación de capital.",
+                            "content": (
+                                "Eres un trader cuantitativo experto con 30 años de experiencia en mercados financieros: "
+                                "hedge fund macro, scalping institucional y gestión de riesgo avanzada. "
+                                "Tu criterio es preciso y basado en convergencia de señales, no en sesgo conservador genérico. "
+                                "Cuando el setup es sólido, apruebas con convicción alta y confidence real. "
+                                "Cuando hay debilidades estructurales, las identificas con precisión quirúrgica. "
+                                "Nunca rechazas por inercia ni apruebas por cortesía. "
+                                "Maximizas la tasa de éxito identificando el timing de máxima probabilidad dentro de setups ya filtrados técnicamente."
+                            ),
                         },
                         {
                             "role": "user",

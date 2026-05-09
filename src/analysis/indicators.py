@@ -57,6 +57,36 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
     overbought = bool(rsi > 70)
     green_candle = bool(close > open_price)
 
+    # --- Fuerza de vela: body / range (0=doji, 1=vela perfecta sin mecha) ---
+    candle_range = float(latest["high"]) - float(latest["low"])
+    candle_body = abs(close - open_price)
+    candle_body_pct = round(candle_body / candle_range, 4) if candle_range > 0 else 0.0
+
+    # --- Momentum: cuantas velas verdes consecutivas al cierre de la ultima ---
+    consecutive_green = 0
+    for i in range(len(frame) - 1, max(len(frame) - 10, -1), -1):
+        row = frame.iloc[i]
+        if float(row["close"]) > float(row["open"]):
+            consecutive_green += 1
+        else:
+            break
+
+    # --- Aceleracion de volumen: ultima vela vs promedio de las 3 anteriores ---
+    last3_vol_mean = float(frame["volume"].iloc[-4:-1].mean()) if len(frame) >= 4 else float(frame["volume"].iloc[-1])
+    volume_acceleration = round(float(latest["volume"]) / last3_vol_mean, 4) if last3_vol_mean > 0 else 1.0
+
+    # --- Pendiente del RSI en las ultimas 3 velas (sube = recuperacion real) ---
+    if len(frame) >= 3:
+        rsi_slope = round(float(frame["rsi"].iloc[-1]) - float(frame["rsi"].iloc[-3]), 2)
+    else:
+        rsi_slope = 0.0
+
+    # --- Posicion del precio dentro de las Bandas de Bollinger (0=BB lower, 1=BB upper) ---
+    bb_upper = float(latest["bb_upper"])
+    bb_lower = float(latest["bb_lower"])
+    bb_range = bb_upper - bb_lower
+    bb_position_pct = round((close - bb_lower) / bb_range, 4) if bb_range > 0 else 0.5
+
     # Logica OR
     scenario_a = bool(rsi <= rsi_max_a and close > ema_slow)            # Pullback con tendencia
     scenario_b = bool(rsi <= rsi_max_b and green_candle)                # Sobreventa extrema con freno
@@ -88,9 +118,14 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
         "low": round(float(latest["low"]), 4),
         "ema_slow": round(ema_slow, 4),
         "bb_width_pct": round(float(latest["bb_width_pct"]), 4),
+        "bb_position_pct": bb_position_pct,
         "atr_pct": round(float(latest["atr_pct"]), 4),
         "volume_ratio": round(float(latest["volume_ratio"]), 4),
+        "volume_acceleration": volume_acceleration,
         "ema_slow_slope": round(float(latest["ema_slow_slope"]), 6),
+        "candle_body_pct": candle_body_pct,
+        "consecutive_green": consecutive_green,
+        "rsi_slope": rsi_slope,
         "bullish_cross": bullish_cross,
         "bearish_cross": bearish_cross,
         "green_candle": green_candle,
