@@ -66,6 +66,11 @@ class OpenRouterAnalyzer:
             # --- Orderbook (spot público) ---
             "orderbook_imbalance": ts.get("orderbook_imbalance"),
             "spread_pct": ts.get("spread_pct"),
+            "trade_flow_score": ts.get("trade_flow_score"),
+            "trade_flow_ratio": ts.get("trade_flow_ratio"),
+            "tape_momentum_pct": ts.get("tape_momentum_pct"),
+            "quote_volume_24h": ts.get("quote_volume_24h"),
+            "price_change_pct_24h": ts.get("price_change_pct_24h"),
             # --- Régimen macro 15m ---
             "macro_trend": ts.get("macro_trend"),
             "macro_slope_pct": ts.get("macro_slope_pct"),
@@ -101,6 +106,8 @@ class OpenRouterAnalyzer:
                 "orderbook_imbalance > 0.55 con señal buy = confirmación de presión compradora real en el libro.",
                 "orderbook_imbalance < 0.45 contra señal buy = desalineación estructural; añade risk_flag 'orderbook_vs_signal'.",
                 "spread_pct > 0.15 = mercado ilíquido; eleva el riesgo de slippage; menciona si es relevante.",
+                "trade_flow_score > 0.55 y tape_momentum_pct > 0 fortalecen setups de scalping (continuidad de micro-momentum).",
+                "trade_flow_score < 0.45 sugiere tape débil o vendedor; evita aprobar buy salvo reversión excepcional.",
                 # Macro 15m
                 "macro_trend=bullish + slope positivo: entorno favorable, el setup tiene viento a favor. Sube confidence.",
                 "macro_trend=bearish + slope_pct < -0.002: tendencia bajista confirmada en 15m. Solo aprueba si escenario B tiene señales de agotamiento vendedor muy claras.",

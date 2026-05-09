@@ -60,6 +60,10 @@ class Settings:
     min_atr_pct: float
     max_atr_pct: float
     min_volume_ratio: float
+    max_spread_pct: float
+    min_orderbook_imbalance: float
+    min_trade_flow_score: float
+    guardrail_relaxation: float
     trade_cooldown_minutes: int
     ai_min_interval_seconds: int
     position_size_pct: float
@@ -148,6 +152,10 @@ def load_settings() -> Settings:
         min_atr_pct=float(os.getenv("MIN_ATR_PCT", "0.0015")),
         max_atr_pct=float(os.getenv("MAX_ATR_PCT", "0.018")),
         min_volume_ratio=float(os.getenv("MIN_VOLUME_RATIO", "1.10")),
+        max_spread_pct=float(os.getenv("MAX_SPREAD_PCT", "0.0015")),
+        min_orderbook_imbalance=float(os.getenv("MIN_ORDERBOOK_IMBALANCE", "0.48")),
+        min_trade_flow_score=float(os.getenv("MIN_TRADE_FLOW_SCORE", "0.50")),
+        guardrail_relaxation=float(os.getenv("GUARDRAIL_RELAXATION", "0.08")),
         trade_cooldown_minutes=int(os.getenv("TRADE_COOLDOWN_MINUTES", "10")),
         ai_min_interval_seconds=int(os.getenv("AI_MIN_INTERVAL_SECONDS", "300")),
         position_size_pct=float(os.getenv("POSITION_SIZE_PCT", "0.95")),

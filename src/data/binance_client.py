@@ -318,6 +318,104 @@ class BinanceDataClient:
             "trend": trend,
         }
 
+    def fetch_ticker_snapshot(self, symbol: str | None = None) -> dict[str, Any]:
+        """Resumen de microestructura y liquidez intradia desde ticker publico.
+
+        Nunca lanza: ante error devuelve {"error": str}.
+        """
+        target = symbol or self.settings.trading_symbol
+        try:
+            ticker = self._with_retries(lambda: self.public_exchange.fetch_ticker(target))
+        except BinanceClientError as exc:
+            return {"error": str(exc)}
+
+        bid = float(ticker.get("bid") or 0.0)
+        ask = float(ticker.get("ask") or 0.0)
+        last = float(ticker.get("last") or ticker.get("close") or 0.0)
+        mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else last
+        spread_pct = ((ask - bid) / mid) if mid > 0 and ask >= bid and bid > 0 else 0.0
+
+        return {
+            "last": round(last, 8),
+            "bid": round(bid, 8),
+            "ask": round(ask, 8),
+            "mid": round(mid, 8),
+            "spread_pct": round(spread_pct, 6),
+            "price_change_pct_24h": round(float(ticker.get("percentage") or 0.0) / 100.0, 6),
+            "base_volume_24h": round(float(ticker.get("baseVolume") or 0.0), 4),
+            "quote_volume_24h": round(float(ticker.get("quoteVolume") or 0.0), 4),
+            "vwap_24h": round(float(ticker.get("vwap") or 0.0), 8),
+        }
+
+    def fetch_trade_flow_snapshot(self, symbol: str | None = None, limit: int = 80) -> dict[str, Any]:
+        """Lee el tape publico reciente y estima sesgo comprador/vendedor.
+
+        Metricas:
+            - buy_ratio: fraccion de volumen clasificado como comprador
+            - momentum_pct: drift de precio en la ventana
+            - flow_score: score [0,1] que combina buy_ratio + momentum
+        Nunca lanza: ante error devuelve {"error": str}.
+        """
+        target = symbol or self.settings.trading_symbol
+        try:
+            trades = self._with_retries(lambda: self.public_exchange.fetch_trades(target, limit=limit))
+        except BinanceClientError as exc:
+            return {"error": str(exc)}
+
+        if not trades:
+            return {"error": "sin trades"}
+
+        buy_volume = 0.0
+        sell_volume = 0.0
+        first_price = 0.0
+        last_price = 0.0
+        prev_price = None
+
+        for idx, trade in enumerate(trades):
+            try:
+                price = float(trade.get("price") or 0.0)
+                amount = float(trade.get("amount") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0 or amount <= 0:
+                continue
+
+            if idx == 0:
+                first_price = price
+            last_price = price
+
+            side = str(trade.get("side") or "").lower()
+            if side not in {"buy", "sell"}:
+                if prev_price is None or price >= prev_price:
+                    side = "buy"
+                else:
+                    side = "sell"
+            if side == "buy":
+                buy_volume += amount
+            else:
+                sell_volume += amount
+            prev_price = price
+
+        total_volume = buy_volume + sell_volume
+        if total_volume <= 0:
+            return {"error": "volumen de tape invalido"}
+
+        buy_ratio = buy_volume / total_volume
+        momentum_pct = ((last_price - first_price) / first_price) if first_price > 0 else 0.0
+        # Normaliza momentum entre 0 y 1 alrededor de +/-0.30% en la ventana.
+        momentum_norm = max(0.0, min(1.0, (momentum_pct + 0.003) / 0.006))
+        flow_score = (buy_ratio * 0.65) + (momentum_norm * 0.35)
+
+        return {
+            "sample_size": len(trades),
+            "buy_ratio": round(buy_ratio, 4),
+            "sell_ratio": round(1.0 - buy_ratio, 4),
+            "buy_volume": round(buy_volume, 4),
+            "sell_volume": round(sell_volume, 4),
+            "momentum_pct": round(momentum_pct, 6),
+            "flow_score": round(max(0.0, min(1.0, flow_score)), 4),
+        }
+
     def ping(self) -> bool:
         try:
             self._with_retries(lambda: self.public_exchange.fetch_time())

@@ -326,9 +326,25 @@ def _build_guardrails(
 ) -> dict[str, Any]:
     signal = technical_signal["signal"]
     scenario = technical_signal.get("scenario")
+    setup_score = float(technical_signal.get("setup_score", 0.0))
+    spread_pct = float(technical_signal.get("spread_pct", 0.0) or 0.0)
+    orderbook_imbalance = float(technical_signal.get("orderbook_imbalance", 0.5) or 0.5)
+    trade_flow_score = float(technical_signal.get("trade_flow_score", 0.5) or 0.5)
+    macro_trend = str(technical_signal.get("macro_trend", "neutral")).lower()
+
+    strong_micro = (
+        spread_pct > 0
+        and spread_pct <= settings.max_spread_pct
+        and orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.52)
+        and trade_flow_score >= max(settings.min_trade_flow_score, 0.55)
+    )
+
     same_direction = signal == ai_signal.get("signal") if signal == "buy" else True
     ai_confidence = float(ai_signal.get("confidence", 0.0))
-    ai_confident = ai_confidence >= settings.ai_confidence_threshold
+    ai_conf_threshold = settings.ai_confidence_threshold
+    if strong_micro:
+        ai_conf_threshold = max(0.52, ai_conf_threshold - 0.05)
+    ai_confident = ai_confidence >= ai_conf_threshold
     ai_approved = bool(ai_signal.get("approved", False))
     ai_alignment = ai_signal.get("direction_alignment") == "aligned"
     setup_quality = str(ai_signal.get("setup_quality", "low")).lower()
@@ -356,10 +372,12 @@ def _build_guardrails(
         high_ready = setup_quality == "high" and len(critical_flags_present) == 0
         medium_ready = (
             setup_quality == "medium"
-            and ai_confidence >= max(settings.ai_confidence_threshold, 0.66)
+            and ai_confidence >= max(ai_conf_threshold, 0.62)
             and len(critical_flags_present) == 0
             and non_critical_flags_count <= 1
         )
+        if strong_micro and setup_quality == "medium" and len(critical_flags_present) == 0:
+            medium_ready = True
         ai_setup_ready = high_ready or medium_ready
         ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
 
@@ -376,26 +394,47 @@ def _build_guardrails(
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
     volume_ready = float(technical_signal.get("volume_ratio", 0.0)) >= settings.min_volume_ratio
 
-    # ---- FASE 2: Filtros de regimen + score multifactor ----
-    # No queremos comprar en mercados bajistas (trending_down) ni en chop muerto.
-    # En range exigimos un score minimo mas alto porque la edge es menor.
+    # ---- FASE 3: Filtros de regimen + score + microestructura ----
+    # Objetivo scalping activo: operar mas cuando hay liquidez/flow real,
+    # sin abrir entradas de baja calidad.
     regime = str(technical_signal.get("regime", "range")).lower()
-    setup_score = float(technical_signal.get("setup_score", 0.0))
+    score_relax = max(0.0, min(0.20, settings.guardrail_relaxation))
+
+    effective_setup_score = setup_score
+    if strong_micro:
+        effective_setup_score += 0.08
+    elif spread_pct > settings.max_spread_pct and spread_pct > 0:
+        effective_setup_score -= 0.08
+    if macro_trend == "bullish":
+        effective_setup_score += 0.04
+    elif macro_trend == "bearish":
+        effective_setup_score -= 0.04
+    effective_setup_score = max(0.0, min(1.0, effective_setup_score))
+
+    micro_ready = spread_pct <= settings.max_spread_pct if spread_pct > 0 else True
+    flow_ready = trade_flow_score >= settings.min_trade_flow_score
 
     if regime == "trending_down":
-        regime_ready = False
-        regime_min_score = 1.01  # bloqueado
+        # Permitimos contrarian SOLO para escenario B con confirmacion micro fuerte.
+        regime_ready = bool(
+            scenario == "B"
+            and orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.56)
+            and flow_ready
+            and macro_trend != "bearish"
+        )
+        regime_min_score = max(0.55, 0.62 - score_relax)
     elif regime == "chop":
-        regime_ready = False
-        regime_min_score = 1.01
+        # En chop solo entramos si el spread es sano y el tape acompana.
+        regime_ready = bool(micro_ready and flow_ready and orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.54))
+        regime_min_score = max(0.50, 0.58 - score_relax)
     elif regime == "trending_up":
         regime_ready = True
-        regime_min_score = 0.40  # con tendencia a favor, bajo el listón
+        regime_min_score = max(0.30, 0.40 - score_relax)
     else:  # range
         regime_ready = True
-        regime_min_score = 0.55  # en rango, exijo setup mas claro
+        regime_min_score = max(0.38, 0.50 - score_relax)
 
-    score_ready = setup_score >= regime_min_score
+    score_ready = effective_setup_score >= regime_min_score
 
     cooldown_active = _is_in_cooldown(order_history, settings.trade_cooldown_minutes)
     symbol_cooldown_active = _is_symbol_in_cooldown(order_history, symbol) if symbol else False
@@ -414,11 +453,19 @@ def _build_guardrails(
         "ai_risk_clear": ai_risk_clear,
         "ai_gate_ready": ai_gate_ready,
         "ai_confidence": ai_confidence,
+        "ai_conf_threshold": round(ai_conf_threshold, 4),
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
+        "micro_ready": micro_ready,
+        "flow_ready": flow_ready,
+        "spread_pct": spread_pct,
+        "orderbook_imbalance": orderbook_imbalance,
+        "trade_flow_score": trade_flow_score,
+        "macro_trend": macro_trend,
         "regime": regime,
         "regime_ready": regime_ready,
         "setup_score": setup_score,
+        "effective_setup_score": round(effective_setup_score, 4),
         "score_ready": score_ready,
         "regime_min_score": regime_min_score,
         "cooldown_active": cooldown_active or symbol_cooldown_active or insufficient_backoff_active,
@@ -1541,18 +1588,32 @@ def _scan_symbol(
     candidate, candidate_reason = _is_pre_signal_candidate(settings, technical_signal)
     orderbook: dict[str, Any] = {}
     macro_regime: dict[str, Any] = {}
+    ticker_snapshot: dict[str, Any] = {}
+    trade_flow: dict[str, Any] = {}
     # Solo gastamos llamadas extra a Binance cuando el simbolo es candidato real:
     # asi mantenemos rate-limit bajo control y damos contexto rico a la IA solo
     # cuando vale la pena.
     if candidate:
         orderbook = client.fetch_orderbook_snapshot(symbol=symbol, depth=20)
         macro_regime = client.fetch_macro_regime(symbol=symbol, timeframe="15m", limit=100)
+        ticker_snapshot = client.fetch_ticker_snapshot(symbol=symbol)
+        trade_flow = client.fetch_trade_flow_snapshot(symbol=symbol, limit=80)
         if orderbook and "imbalance" in orderbook:
             technical_signal["orderbook_imbalance"] = orderbook["imbalance"]
             technical_signal["spread_pct"] = orderbook.get("spread_pct")
         if macro_regime and "trend" in macro_regime:
             technical_signal["macro_trend"] = macro_regime["trend"]
             technical_signal["macro_slope_pct"] = macro_regime.get("slope_pct")
+        if ticker_snapshot:
+            if technical_signal.get("spread_pct") is None and ticker_snapshot.get("spread_pct") is not None:
+                technical_signal["spread_pct"] = ticker_snapshot.get("spread_pct")
+            technical_signal["price_change_pct_24h"] = ticker_snapshot.get("price_change_pct_24h")
+            technical_signal["quote_volume_24h"] = ticker_snapshot.get("quote_volume_24h")
+            technical_signal["vwap_24h"] = ticker_snapshot.get("vwap_24h")
+        if trade_flow and "flow_score" in trade_flow:
+            technical_signal["trade_flow_ratio"] = trade_flow.get("buy_ratio")
+            technical_signal["trade_flow_score"] = trade_flow.get("flow_score")
+            technical_signal["tape_momentum_pct"] = trade_flow.get("momentum_pct")
     return {
         "symbol": symbol,
         "frame": enriched_frame,
@@ -1562,6 +1623,8 @@ def _scan_symbol(
         "candidate_reason": candidate_reason,
         "orderbook": orderbook,
         "macro_regime": macro_regime,
+        "ticker_snapshot": ticker_snapshot,
+        "trade_flow": trade_flow,
     }
 
 
@@ -1858,7 +1921,6 @@ def run_cycle() -> None:
                     pre_guards["executable_signal"]
                     and pre_guards["volatility_ready"]
                     and pre_guards["volume_ready"]
-                    and pre_guards.get("regime_ready", True)
                     and not pre_guards["cooldown_active"]
                 ):
                     continue
