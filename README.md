@@ -130,7 +130,7 @@ Las nuevas entradas deben pasar una aprobación explícita de la IA antes de abr
 Compuerta vigente por escenario:
 
 - Escenario `A`: la IA puede aprobar con `setup_quality=medium` o `high` si mantiene aprobación explícita, alineación y confianza suficiente. Los `risk_flags` siguen registrándose en telemetría, pero ya no bloquean por sí solos este escenario si la IA aprueba el setup.
-- Escenario `B`: se mantiene la política estricta, exigiendo `setup_quality=high` y `risk_flags=[]` además del resto de condiciones.
+- Escenario `B`: compuerta adaptativa para evitar sobrebloqueo. Se aprueba con `setup_quality=high`, o con `setup_quality=medium` cuando la convicción es alta (`confidence >= max(AI_CONFIDENCE_THRESHOLD, 0.66)`) y no hay `risk_flags` críticos. Se tolera como máximo 1 `risk_flag` no crítico.
 
 Además, la petición a OpenRouter ya no evalúa OHLCV “a ciegas”: ahora recibe el contexto del setup técnico candidato (`scenario`, `candidate_signal`, `atr_pct`, `volume_ratio`, etc.) para que actúe como filtro de confirmación, no como generador de ideas desde cero.
 

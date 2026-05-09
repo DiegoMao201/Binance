@@ -229,9 +229,37 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     ai_approved = bool(ai_signal.get("approved", False))
     ai_alignment = ai_signal.get("direction_alignment") == "aligned"
     setup_quality = str(ai_signal.get("setup_quality", "low")).lower()
-    ai_setup_ready = setup_quality in {"medium", "high"} if scenario == "A" else setup_quality == "high"
-    risk_flags = ai_signal.get("risk_flags") or []
-    ai_risk_clear = isinstance(risk_flags, list) and len(risk_flags) == 0
+    risk_flags_raw = ai_signal.get("risk_flags") or []
+    risk_flags = risk_flags_raw if isinstance(risk_flags_raw, list) else [str(risk_flags_raw)]
+
+    critical_risk_flags = {
+        "openrouter_timeout",
+        "orderbook_vs_signal",
+        "macro_bearish_pressure",
+        "momentum_breakdown",
+        "illiquid_spread",
+    }
+    critical_flags_present = [f for f in risk_flags if str(f).lower() in critical_risk_flags]
+    non_critical_flags_count = max(0, len(risk_flags) - len(critical_flags_present))
+
+    # Gate adaptativo:
+    # - Escenario A: medium/high permitido; risk flags no bloquean por si solos.
+    # - Escenario B: permite medium si la conviccion es alta y no hay flags criticos.
+    #   Asi evitamos bloquear entradas validas por rigidez binaria.
+    if scenario == "A":
+        ai_setup_ready = setup_quality in {"medium", "high"}
+        ai_risk_clear = len(critical_flags_present) == 0
+    else:
+        high_ready = setup_quality == "high" and len(critical_flags_present) == 0
+        medium_ready = (
+            setup_quality == "medium"
+            and ai_confidence >= max(settings.ai_confidence_threshold, 0.66)
+            and len(critical_flags_present) == 0
+            and non_critical_flags_count <= 1
+        )
+        ai_setup_ready = high_ready or medium_ready
+        ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
+
     ai_gate_ready = all([
         ai_confident,
         same_direction,

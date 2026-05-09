@@ -136,7 +136,7 @@ def load_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         streamlit_port=int(os.getenv("STREAMLIT_PORT", "8501")),
         minimum_trade_usdt=float(os.getenv("MINIMUM_TRADE_USDT", "10.1")),
-        ai_confidence_threshold=float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.88")),
+        ai_confidence_threshold=float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.62")),
         technical_confidence_threshold=float(os.getenv("TECHNICAL_CONFIDENCE_THRESHOLD", "0.0008")),
         min_bb_width_pct=float(os.getenv("MIN_BB_WIDTH_PCT", "0.004")),
         min_atr_pct=float(os.getenv("MIN_ATR_PCT", "0.0015")),
