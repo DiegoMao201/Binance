@@ -223,6 +223,101 @@ class BinanceDataClient:
     def fetch_recent_trades(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
         return self._with_retries(lambda: self.private_exchange.fetch_my_trades(symbol, limit=limit))
 
+    def fetch_orderbook_snapshot(self, symbol: str | None = None, depth: int = 20) -> dict[str, Any]:
+        """Lee el orderbook spot publico y resume metricas utiles para scalping.
+
+        Devuelve un dict con:
+            - bid, ask, mid, spread_pct
+            - bid_volume, ask_volume (suma de los primeros `depth` niveles)
+            - imbalance: bid_volume / (bid_volume + ask_volume) en [0,1]
+                         > 0.55 = presion compradora; < 0.45 = presion vendedora.
+            - top_bid_size, top_ask_size
+        Nunca lanza: ante error devuelve {"error": str}.
+        """
+        target = symbol or self.settings.trading_symbol
+        try:
+            book = self._with_retries(
+                lambda: self.public_exchange.fetch_order_book(target, limit=depth)
+            )
+        except BinanceClientError as exc:
+            return {"error": str(exc)}
+
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        if not bids or not asks:
+            return {"error": "orderbook vacio"}
+
+        top_bid_price, top_bid_size = float(bids[0][0]), float(bids[0][1])
+        top_ask_price, top_ask_size = float(asks[0][0]), float(asks[0][1])
+        bid_volume = sum(float(level[1]) for level in bids[:depth])
+        ask_volume = sum(float(level[1]) for level in asks[:depth])
+        total_volume = bid_volume + ask_volume
+        imbalance = bid_volume / total_volume if total_volume > 0 else 0.5
+        mid = (top_bid_price + top_ask_price) / 2.0
+        spread_pct = (top_ask_price - top_bid_price) / mid if mid > 0 else 0.0
+
+        return {
+            "bid": round(top_bid_price, 8),
+            "ask": round(top_ask_price, 8),
+            "mid": round(mid, 8),
+            "spread_pct": round(spread_pct, 6),
+            "bid_volume": round(bid_volume, 4),
+            "ask_volume": round(ask_volume, 4),
+            "imbalance": round(imbalance, 4),
+            "top_bid_size": round(top_bid_size, 4),
+            "top_ask_size": round(top_ask_size, 4),
+            "depth_levels": depth,
+        }
+
+    def fetch_macro_regime(self, symbol: str | None = None, timeframe: str = "15m", limit: int = 100) -> dict[str, Any]:
+        """Lee OHLCV de timeframe superior y resume el regimen de tendencia.
+
+        Usa EMA20/EMA50 sobre la temporalidad mayor. Devuelve:
+            - timeframe
+            - close, ema20, ema50
+            - trend: 'bullish' | 'bearish' | 'neutral'
+            - slope_pct: pendiente normalizada de la EMA50 (proxy de fuerza)
+            - close_above_ema50: bool
+        Nunca lanza: ante error devuelve {"error": str}.
+        """
+        target = symbol or self.settings.trading_symbol
+        try:
+            candles = self._with_retries(
+                lambda: self.public_exchange.fetch_ohlcv(target, timeframe=timeframe, limit=limit)
+            )
+        except BinanceClientError as exc:
+            return {"timeframe": timeframe, "error": str(exc)}
+
+        if not candles or len(candles) < 50:
+            return {"timeframe": timeframe, "error": "datos insuficientes"}
+
+        frame = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        ema20 = frame["close"].ewm(span=20, adjust=False).mean()
+        ema50 = frame["close"].ewm(span=50, adjust=False).mean()
+        close = float(frame["close"].iloc[-1])
+        e20 = float(ema20.iloc[-1])
+        e50 = float(ema50.iloc[-1])
+        e50_prev = float(ema50.iloc[-6]) if len(ema50) >= 6 else float(ema50.iloc[0])
+        slope_pct = (e50 - e50_prev) / e50_prev if e50_prev > 0 else 0.0
+        close_above_ema50 = close > e50
+
+        if e20 > e50 and close_above_ema50 and slope_pct > 0:
+            trend = "bullish"
+        elif e20 < e50 and not close_above_ema50 and slope_pct < 0:
+            trend = "bearish"
+        else:
+            trend = "neutral"
+
+        return {
+            "timeframe": timeframe,
+            "close": round(close, 8),
+            "ema20": round(e20, 8),
+            "ema50": round(e50, 8),
+            "slope_pct": round(slope_pct, 6),
+            "close_above_ema50": close_above_ema50,
+            "trend": trend,
+        }
+
     def ping(self) -> bool:
         try:
             self._with_retries(lambda: self.public_exchange.fetch_time())

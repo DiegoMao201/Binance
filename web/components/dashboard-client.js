@@ -180,6 +180,18 @@ function buildTimeline(signalHistory) {
 }
 
 
+// Tabla de tiers para mostrar el progreso break-even en vivo. Debe coincidir
+// con `trailing_tiers` en main_loop.py para que la barra refleje exactamente
+// lo que el backend va a ejecutar.
+const TRAILING_TIERS = [
+  { tier: 1, trigger: 0.005, offset: 0.002, label: "Break-even +0.2%" },
+  { tier: 2, trigger: 0.008, offset: 0.004, label: "Lock +0.4%" },
+  { tier: 3, trigger: 0.010, offset: 0.006, label: "Lock +0.6%" },
+  { tier: 4, trigger: 0.014, offset: 0.008, label: "Lock +0.8%" },
+  { tier: 5, trigger: 0.018, offset: 0.010, label: "Lock +1.0%" },
+];
+
+
 function buildExecutionAudit(orders, openPositions, closedTrades) {
   const latestOrder = orders.length ? orders[orders.length - 1] : null;
   const latestOpenPosition = openPositions.length ? openPositions[openPositions.length - 1] : null;
@@ -232,6 +244,64 @@ function MetricCard({ label, value, tone = "neutral", subvalue }) {
 
 function StatusPill({ label, active }) {
   return <span className={`status-pill ${active ? "active" : "inactive"}`}>{label}</span>;
+}
+
+
+function ProgressBar({ value, max = 1, tone = "buy", height = 8, label }) {
+  const pct = Math.max(0, Math.min(1, max > 0 ? value / max : 0));
+  const fillColor = tone === "buy" ? "#12d98b" : tone === "warn" ? "#f4b942" : tone === "sell" ? "#eb4b61" : "#57c1ff";
+  return (
+    <div style={{ width: "100%" }}>
+      {label ? <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>{label}</div> : null}
+      <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 6, height, overflow: "hidden" }}>
+        <div style={{ background: fillColor, width: `${pct * 100}%`, height: "100%", transition: "width 0.5s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+
+function buildLivePositionView(openPosition, openPositions) {
+  // Si tenemos una position completa en openPositions (incluye trailing_tier) la
+  // preferimos sobre el snapshot summary (open_position).
+  const summary = openPosition || null;
+  if (!summary) return null;
+  const fullPos = openPositions?.find((p) => p.symbol === summary.symbol) || summary;
+  const entry = Number(fullPos.entry_price || summary.entry_price || 0);
+  const mark = Number(fullPos.mark_price || summary.mark_price || entry);
+  const sl = Number(fullPos.stop_loss || summary.stop_loss || 0);
+  const tp = Number(fullPos.take_profit || summary.take_profit || 0);
+  const mfePct = Number(fullPos.mfe_pct || summary.mfe_pct || 0);
+  const maePct = Number(fullPos.mae_pct || summary.mae_pct || 0);
+  const unrealizedPct = entry > 0 ? (mark - entry) / entry : 0;
+  const tier = Number(fullPos.trailing_tier || summary.trailing_tier || 0);
+  const initialSL = Number(fullPos.initial_stop_loss || sl);
+  const slLockedAboveEntry = sl > entry && entry > 0;
+
+  const currentTier = TRAILING_TIERS.find((t) => t.tier === tier);
+  const nextTier = TRAILING_TIERS.find((t) => t.tier === tier + 1);
+  const distanceToNextTier = nextTier ? nextTier.trigger - mfePct : 0;
+
+  return {
+    symbol: fullPos.symbol,
+    side: fullPos.side,
+    entry,
+    mark,
+    sl,
+    tp,
+    mfePct,
+    maePct,
+    unrealizedPct,
+    unrealizedUsdt: Number(fullPos.unrealized_pnl_usdt || summary.unrealized_pnl_usdt || 0),
+    tier,
+    currentTier,
+    nextTier,
+    distanceToNextTier,
+    initialSL,
+    slLockedAboveEntry,
+    holdMinutes: Number(fullPos.hold_minutes || 0),
+    scenario: fullPos.scenario || summary.scenario,
+  };
 }
 
 
@@ -310,6 +380,7 @@ export default function DashboardClient({ initialData }) {
   const timeline = buildTimeline(signalHistory);
   const executionAudit = buildExecutionAudit(orders, openPositions, closedTrades);
   const equityCurve = useMemo(() => buildEquityCurve(equityHistory), [equityHistory]);
+  const livePos = useMemo(() => buildLivePositionView(openPosition, openPositions), [openPosition, openPositions]);
 
   async function sendControl(desiredState) {
     setControlBusy(true);
@@ -484,6 +555,133 @@ export default function DashboardClient({ initialData }) {
                 })}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        {livePos ? (
+          <section className="panel">
+            <div className="panel-header">
+              <h3>Posición viva · {livePos.symbol}</h3>
+              <span>{livePos.slLockedAboveEntry ? "GANANCIA ASEGURADA" : "PROTECCIÓN INICIAL"} · Tier {livePos.tier}</span>
+            </div>
+            <section className="telemetry-grid">
+              <div className="telemetry-card"><span>Lado · Esc</span><strong>{livePos.side?.toUpperCase()} · {livePos.scenario || "?"}</strong></div>
+              <div className="telemetry-card"><span>Entrada</span><strong>{formatNumber(livePos.entry, 4)}</strong></div>
+              <div className="telemetry-card"><span>Mark</span><strong>{formatNumber(livePos.mark, 4)}</strong></div>
+              <div className="telemetry-card">
+                <span>PnL no realizado</span>
+                <strong className={livePos.unrealizedUsdt >= 0 ? "tone-buy" : "tone-sell"}>{formatNumber(livePos.unrealizedUsdt, 4)} USDT</strong>
+                <span className="metric-subvalue">{formatPercent(livePos.unrealizedPct)}</span>
+              </div>
+              <div className="telemetry-card"><span>Stop Loss</span><strong className={livePos.slLockedAboveEntry ? "tone-buy" : "tone-sell"}>{formatNumber(livePos.sl, 4)}</strong><span className="metric-subvalue">{livePos.slLockedAboveEntry ? "por encima de entry" : "inicial"}</span></div>
+              <div className="telemetry-card"><span>Take Profit</span><strong>{formatNumber(livePos.tp, 4)}</strong></div>
+              <div className="telemetry-card"><span>MFE alcanzado</span><strong className="tone-buy">{formatPercent(livePos.mfePct)}</strong></div>
+              <div className="telemetry-card"><span>MAE</span><strong className="tone-sell">{formatPercent(livePos.maePct)}</strong></div>
+              <div className="telemetry-card"><span>Hold</span><strong>{formatNumber(livePos.holdMinutes, 0)} min</strong></div>
+            </section>
+            <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
+              <ProgressBar
+                value={livePos.mfePct}
+                max={Math.max(0.02, (livePos.nextTier?.trigger ?? livePos.currentTier?.trigger ?? 0.02))}
+                tone="buy"
+                label={`MFE ${formatPercent(livePos.mfePct)} · ${livePos.nextTier ? `próximo tier en +${formatPercent(livePos.distanceToNextTier)}` : "tier máximo alcanzado"}`}
+              />
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {TRAILING_TIERS.map((t) => (
+                  <span key={t.tier} className={`status-pill ${livePos.tier >= t.tier ? "active" : "inactive"}`}>
+                    T{t.tier} · ≥{formatPercent(t.trigger)} → SL +{formatPercent(t.offset)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="panel">
+          <div className="panel-header">
+            <h3>Mesa de IA · todos los símbolos</h3>
+            <span>{lastScans.filter((s) => s.ia_consulted).length} consultados · {lastScans.length} vigilados</span>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Símbolo</th><th>Estado</th><th>Esc</th><th>IA Signal</th><th>Confidence</th><th>Approved</th><th>Setup</th><th>Risk flags</th><th>Cache</th></tr></thead>
+              <tbody>
+                {lastScans.length === 0 ? (
+                  <tr><td colSpan="9" className="empty">Sin escaneos.</td></tr>
+                ) : lastScans.map((scan) => {
+                  const ai = scan.ai_signal || {};
+                  const consulted = scan.ia_consulted;
+                  const conf = Number(ai.confidence || 0);
+                  const confTone = conf >= 0.65 ? "tone-buy" : conf >= 0.5 ? "" : "tone-sell";
+                  const flags = Array.isArray(ai.risk_flags) ? ai.risk_flags : [];
+                  return (
+                    <tr key={`mesa-${scan.symbol}`}>
+                      <td><strong>{scan.symbol}</strong></td>
+                      <td className={scan.status === "candidate" ? "tone-buy" : scan.status === "locked" ? "tone-sell" : ""}>{scan.status}</td>
+                      <td>{scan.scenario || "·"}</td>
+                      <td className={ai.signal === "buy" ? "tone-buy" : ai.signal === "sell" ? "tone-sell" : ""}>{consulted ? (ai.signal || "—") : "—"}</td>
+                      <td className={confTone}>{consulted ? formatPercent(conf) : "—"}</td>
+                      <td>{consulted ? (ai.approved ? <span className="tone-buy">✓</span> : <span className="tone-sell">✗</span>) : "—"}</td>
+                      <td>{consulted ? (ai.setup_quality || "low") : "—"}</td>
+                      <td style={{ opacity: 0.85 }}>{flags.length === 0 ? (consulted ? "—" : "") : flags.join(", ")}</td>
+                      <td style={{ opacity: 0.7 }}>{consulted ? (ai.cached ? `${formatNumber(ai.cached_age_seconds, 0)}s` : "fresca") : "no consultada"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="details-grid">
+          <div className="panel">
+            <div className="panel-header"><h3>Profundidad orderbook · {focusScan?.symbol || "—"}</h3><span>Top 20 niveles spot</span></div>
+            {focusScan?.orderbook && focusScan.orderbook.imbalance !== undefined ? (
+              <>
+                <section className="telemetry-grid">
+                  <div className="telemetry-card"><span>Bid</span><strong className="tone-buy">{formatNumber(focusScan.orderbook.bid, 4)}</strong></div>
+                  <div className="telemetry-card"><span>Ask</span><strong className="tone-sell">{formatNumber(focusScan.orderbook.ask, 4)}</strong></div>
+                  <div className="telemetry-card"><span>Spread</span><strong>{formatPercent(focusScan.orderbook.spread_pct)}</strong></div>
+                  <div className="telemetry-card">
+                    <span>Imbalance</span>
+                    <strong className={focusScan.orderbook.imbalance > 0.55 ? "tone-buy" : focusScan.orderbook.imbalance < 0.45 ? "tone-sell" : ""}>
+                      {formatPercent(focusScan.orderbook.imbalance)}
+                    </strong>
+                    <span className="metric-subvalue">{focusScan.orderbook.imbalance > 0.55 ? "presión compradora" : focusScan.orderbook.imbalance < 0.45 ? "presión vendedora" : "neutro"}</span>
+                  </div>
+                </section>
+                <div style={{ marginTop: 12 }}>
+                  <ProgressBar
+                    value={Number(focusScan.orderbook.bid_volume || 0)}
+                    max={Number(focusScan.orderbook.bid_volume || 0) + Number(focusScan.orderbook.ask_volume || 0)}
+                    tone="buy"
+                    label={`Bid volume ${formatNumber(focusScan.orderbook.bid_volume, 2)} vs Ask volume ${formatNumber(focusScan.orderbook.ask_volume, 2)}`}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="secondary-text">Orderbook se lee solo cuando el símbolo es candidato real (ahorro de rate-limit). {focusScan?.orderbook?.error ? `Error: ${focusScan.orderbook.error}` : ""}</p>
+            )}
+          </div>
+          <div className="panel">
+            <div className="panel-header"><h3>Régimen macro 15m · {focusScan?.symbol || "—"}</h3><span>EMA20/EMA50 + slope</span></div>
+            {focusScan?.macro_regime && focusScan.macro_regime.trend ? (
+              <section className="telemetry-grid">
+                <div className="telemetry-card">
+                  <span>Tendencia</span>
+                  <strong className={focusScan.macro_regime.trend === "bullish" ? "tone-buy" : focusScan.macro_regime.trend === "bearish" ? "tone-sell" : ""}>
+                    {focusScan.macro_regime.trend.toUpperCase()}
+                  </strong>
+                </div>
+                <div className="telemetry-card"><span>Slope EMA50</span><strong className={Number(focusScan.macro_regime.slope_pct) >= 0 ? "tone-buy" : "tone-sell"}>{formatPercent(focusScan.macro_regime.slope_pct)}</strong></div>
+                <div className="telemetry-card"><span>Close vs EMA50</span><strong className={focusScan.macro_regime.close_above_ema50 ? "tone-buy" : "tone-sell"}>{focusScan.macro_regime.close_above_ema50 ? "ARRIBA" : "ABAJO"}</strong></div>
+                <div className="telemetry-card"><span>EMA20</span><strong>{formatNumber(focusScan.macro_regime.ema20, 4)}</strong></div>
+                <div className="telemetry-card"><span>EMA50</span><strong>{formatNumber(focusScan.macro_regime.ema50, 4)}</strong></div>
+                <div className="telemetry-card"><span>Close 15m</span><strong>{formatNumber(focusScan.macro_regime.close, 4)}</strong></div>
+              </section>
+            ) : (
+              <p className="secondary-text">Régimen macro se lee solo cuando el símbolo es candidato real. {focusScan?.macro_regime?.error ? `Error: ${focusScan.macro_regime.error}` : ""}</p>
+            )}
           </div>
         </section>
 

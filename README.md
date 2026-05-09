@@ -157,6 +157,42 @@ escalones acumulativos: el bot solo emite OCO nuevo en Binance al cruzar un
 tier superior, evitando churn intra-tier y manteniendo bajo control el
 presupuesto de rate-limit. El SL nunca baja, solo sube.
 
+## Contexto extendido para la IA (orderbook + macro)
+
+Cuando un símbolo pasa el pre-gate técnico, antes de consultar a OpenRouter
+el bot enriquece el `candidate_context` con dos lecturas extra de Binance
+spot público:
+
+- **`orderbook_imbalance`**: snapshot del top 20 niveles del libro
+  (`fetch_order_book`). Se calcula `bid_volume / (bid_volume + ask_volume)`.
+  Valores `> 0.55` indican presión compradora real; `< 0.45`, vendedora.
+  También se reporta `spread_pct` para detectar mercados ilíquidos.
+- **`macro_trend`** (15m): EMA20/EMA50 sobre la temporalidad superior.
+  Devuelve `bullish`, `bearish` o `neutral` y la `slope_pct` de la EMA50
+  como proxy de fuerza. La IA usa esto para descartar long en tendencias
+  bajistas confirmadas en 15m sin matar pullbacks legítimos.
+
+Estas llamadas se ejecutan **solo cuando el símbolo es candidato real**
+(escenario A/B + volumen + ATR válido), por lo que el costo de rate-limit
+se mantiene acotado: una sola consulta a `/api/v3/depth` y `/api/v3/klines`
+por candidato por ciclo.
+
+## Centro de mando (frontend)
+
+El dashboard de Next.js (`web/`) ya incluye:
+
+- **Mesa de IA**: tabla con TODOS los símbolos vigilados mostrando signal,
+  confidence, approved, setup_quality, risk_flags y edad de cache. Permite
+  ver de un vistazo qué piensa la IA de cada mercado.
+- **Posición viva**: cuando hay una operación abierta, muestra entrada,
+  mark, SL/TP, MFE/MAE, PnL no realizado, hold time, tier de trailing
+  activo, distancia al próximo tier y un strip de pills indicando qué
+  tiers se han desbloqueado.
+- **Profundidad orderbook + Régimen macro**: paneles dedicados al símbolo
+  en foco con bid/ask, spread, imbalance bar y tendencia 15m con slope.
+- **Radar enfocado**: la card de AI confidence ahora es por símbolo (no
+  global), con etiqueta de cache vs evaluación fresca.
+
 ## Incidente 2026-05-07
 
 El stop de producción del 2026-05-07 no fue un falso positivo del kill switch. El estado live reportó:

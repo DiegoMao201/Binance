@@ -324,6 +324,8 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "guardrails": scan.get("guardrails"),
         "blocked_by_lock": blocked_by_lock,
         "candle_timestamp": str(candle.get("timestamp")) if candle else None,
+        "orderbook": scan.get("orderbook") or {},
+        "macro_regime": scan.get("macro_regime") or {},
     }
 
 
@@ -1255,6 +1257,20 @@ def _scan_symbol(
     enriched_frame = compute_indicators(raw_frame)
     technical_signal = build_technical_signal(enriched_frame, settings)
     candidate, candidate_reason = _is_pre_signal_candidate(settings, technical_signal)
+    orderbook: dict[str, Any] = {}
+    macro_regime: dict[str, Any] = {}
+    # Solo gastamos llamadas extra a Binance cuando el simbolo es candidato real:
+    # asi mantenemos rate-limit bajo control y damos contexto rico a la IA solo
+    # cuando vale la pena.
+    if candidate:
+        orderbook = client.fetch_orderbook_snapshot(symbol=symbol, depth=20)
+        macro_regime = client.fetch_macro_regime(symbol=symbol, timeframe="15m", limit=100)
+        if orderbook and "imbalance" in orderbook:
+            technical_signal["orderbook_imbalance"] = orderbook["imbalance"]
+            technical_signal["spread_pct"] = orderbook.get("spread_pct")
+        if macro_regime and "trend" in macro_regime:
+            technical_signal["macro_trend"] = macro_regime["trend"]
+            technical_signal["macro_slope_pct"] = macro_regime.get("slope_pct")
     return {
         "symbol": symbol,
         "frame": enriched_frame,
@@ -1262,6 +1278,8 @@ def _scan_symbol(
         "technical_signal": technical_signal,
         "candidate": candidate,
         "candidate_reason": candidate_reason,
+        "orderbook": orderbook,
+        "macro_regime": macro_regime,
     }
 
 

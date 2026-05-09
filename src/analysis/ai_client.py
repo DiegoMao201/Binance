@@ -51,6 +51,10 @@ class OpenRouterAnalyzer:
             "green_candle": (technical_signal or {}).get("green_candle"),
             "bullish_cross": (technical_signal or {}).get("bullish_cross"),
             "ema_slow_slope": (technical_signal or {}).get("ema_slow_slope"),
+            "orderbook_imbalance": (technical_signal or {}).get("orderbook_imbalance"),
+            "spread_pct": (technical_signal or {}).get("spread_pct"),
+            "macro_trend": (technical_signal or {}).get("macro_trend"),
+            "macro_slope_pct": (technical_signal or {}).get("macro_slope_pct"),
         }
 
         prompt = {
@@ -69,6 +73,8 @@ class OpenRouterAnalyzer:
                 "Estás revisando una candidata ya filtrada por reglas técnicas; no estás generando una idea desde cero.",
                 "Si el escenario es A y la tendencia/pullback siguen razonables, setup_quality=medium puede seguir siendo aprobable.",
                 "Usa hold y approved=false cuando veas desalineación clara, estructura débil o riesgo concreto; evita rechazar por inercia.",
+                "Considera el orderbook_imbalance: > 0.55 favorece compras, < 0.45 favorece ventas; si va en contra de la señal técnica añade un risk_flag concreto.",
+                "Considera el macro_trend (15m): bullish refuerza compras, bearish + slope negativo es señal de cautela; neutral no bloquea por sí solo.",
                 "Evita señales agresivas si los datos no son concluyentes.",
             ],
             "candidate_context": candidate_context,
