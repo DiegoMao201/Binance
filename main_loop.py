@@ -196,31 +196,107 @@ def _build_scan_history_event(
     }
 
 
-def _is_in_cooldown(order_history: list[dict[str, Any]], cooldown_minutes: int) -> bool:
-    if not order_history:
-        return False
+# Estados de orden que cuentan como "intento real" para efectos de cooldown / backoff.
+# Antes solo se contaba `submitted` => el bot reintentaba el mismo simbolo cada minuto
+# tras un rejected/error (loop ETH x4 en 6 min visto en audit 2026-05-04).
+_ATTEMPT_STATUSES = {"submitted", "simulated", "rejected", "error", "reconcile_failed"}
+_FAILURE_STATUSES = {"rejected", "error", "reconcile_failed"}
+_INSUFFICIENT_BALANCE_FRAGMENTS = ("insufficient balance", "saldo libre insuficiente")
+# Ventana corta per-symbol: tras CUALQUIER intento (exitoso o fallido) en X minutos
+# evitamos disparar otro contra el mismo par y quemar fees / generar log noise.
+_PER_SYMBOL_COOLDOWN_MINUTES = 3
+# Backoff fuerte: si hay >=3 fallos por saldo insuficiente en los ultimos 15 min,
+# bloqueamos el ciclo completo hasta que la condicion expire.
+_INSUFFICIENT_BALANCE_BACKOFF_MINUTES = 15
+_INSUFFICIENT_BALANCE_THRESHOLD = 3
 
-    latest = next(
-        (order for order in reversed(order_history) if str(order.get("status", "")).lower() == "submitted"),
-        None,
-    )
-    if not latest:
-        return False
 
-    timestamp = latest.get("timestamp")
-    if not timestamp:
-        return False
-
+def _parse_order_ts(order: dict[str, Any]) -> datetime | None:
+    raw = order.get("timestamp")
+    if not raw:
+        return None
     try:
-        latest_at = datetime.fromisoformat(timestamp)
+        return datetime.fromisoformat(str(raw))
     except ValueError:
+        return None
+
+
+def _is_insufficient_balance_order(order: dict[str, Any]) -> bool:
+    if str(order.get("status", "")).lower() != "rejected":
+        return False
+    reason = str(order.get("reason", "")).lower()
+    return any(fragment in reason for fragment in _INSUFFICIENT_BALANCE_FRAGMENTS)
+
+
+def _is_in_cooldown(order_history: list[dict[str, Any]], cooldown_minutes: int) -> bool:
+    """Cooldown global: cualquier intento reciente (exitoso o fallido) cuenta.
+
+    Un rejected/error TAMBIEN consume cuota; no queremos martillar al exchange
+    cada minuto cuando hubo un fallo. Esto colapsa el rejection-storm pattern
+    visto en produccion.
+    """
+    if not order_history or cooldown_minutes <= 0:
         return False
 
-    age_seconds = (datetime.now(timezone.utc) - latest_at).total_seconds()
-    return age_seconds < cooldown_minutes * 60
+    now = datetime.now(timezone.utc)
+    window = cooldown_minutes * 60
+    for order in reversed(order_history):
+        if str(order.get("status", "")).lower() not in _ATTEMPT_STATUSES:
+            continue
+        ts = _parse_order_ts(order)
+        if not ts:
+            continue
+        if (now - ts).total_seconds() < window:
+            return True
+        # Si el intento mas reciente ya esta fuera de la ventana, no hace falta seguir.
+        return False
+    return False
 
 
-def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_history: list[dict[str, Any]]) -> dict[str, Any]:
+def _is_symbol_in_cooldown(order_history: list[dict[str, Any]], symbol: str, minutes: int = _PER_SYMBOL_COOLDOWN_MINUTES) -> bool:
+    """Cooldown per-symbol: evita reintentos consecutivos sobre el mismo par."""
+    if not order_history or not symbol or minutes <= 0:
+        return False
+    now = datetime.now(timezone.utc)
+    window = minutes * 60
+    for order in reversed(order_history):
+        if str(order.get("symbol", "")).upper() != str(symbol).upper():
+            continue
+        if str(order.get("status", "")).lower() not in _ATTEMPT_STATUSES:
+            continue
+        ts = _parse_order_ts(order)
+        if not ts:
+            continue
+        return (now - ts).total_seconds() < window
+    return False
+
+
+def _insufficient_balance_backoff_active(order_history: list[dict[str, Any]]) -> tuple[bool, int]:
+    """Devuelve (activo, conteo_de_fallos) si hubo demasiados rechazos por saldo."""
+    if not order_history:
+        return False, 0
+    now = datetime.now(timezone.utc)
+    window = _INSUFFICIENT_BALANCE_BACKOFF_MINUTES * 60
+    failures = 0
+    for order in reversed(order_history):
+        ts = _parse_order_ts(order)
+        if not ts:
+            continue
+        if (now - ts).total_seconds() > window:
+            break
+        if _is_insufficient_balance_order(order):
+            failures += 1
+    return failures >= _INSUFFICIENT_BALANCE_THRESHOLD, failures
+
+
+def _build_guardrails(
+    settings,
+    technical_signal: dict,
+    ai_signal: dict,
+    order_history: list[dict[str, Any]],
+    *,
+    symbol: str | None = None,
+) -> dict[str, Any]:
     signal = technical_signal["signal"]
     scenario = technical_signal.get("scenario")
     same_direction = signal == ai_signal.get("signal") if signal == "buy" else True
@@ -273,6 +349,8 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
     volume_ready = float(technical_signal.get("volume_ratio", 0.0)) >= settings.min_volume_ratio
     cooldown_active = _is_in_cooldown(order_history, settings.trade_cooldown_minutes)
+    symbol_cooldown_active = _is_symbol_in_cooldown(order_history, symbol) if symbol else False
+    insufficient_backoff_active, insufficient_failures = _insufficient_balance_backoff_active(order_history)
     executable_signal = signal == "buy" and scenario in {"A", "B"}
 
     return {
@@ -289,7 +367,11 @@ def _build_guardrails(settings, technical_signal: dict, ai_signal: dict, order_h
         "ai_confidence": ai_confidence,
         "volatility_ready": volatility_ready,
         "volume_ready": volume_ready,
-        "cooldown_active": cooldown_active,
+        "cooldown_active": cooldown_active or symbol_cooldown_active or insufficient_backoff_active,
+        "global_cooldown_active": cooldown_active,
+        "symbol_cooldown_active": symbol_cooldown_active,
+        "insufficient_balance_backoff_active": insufficient_backoff_active,
+        "insufficient_balance_failures": insufficient_failures,
         "executable_signal": executable_signal,
     }
 
@@ -1685,7 +1767,7 @@ def run_cycle() -> None:
                 technical_signal = scan["technical_signal"]
                 symbol = scan["symbol"]
                 # Pre-gate barato por simbolo (sin gastar tokens IA).
-                pre_guards = _build_guardrails(settings, technical_signal, AI_NOT_CONSULTED, order_history)
+                pre_guards = _build_guardrails(settings, technical_signal, AI_NOT_CONSULTED, order_history, symbol=symbol)
                 if not (
                     pre_guards["executable_signal"]
                     and pre_guards["volatility_ready"]
@@ -1729,7 +1811,7 @@ def run_cycle() -> None:
 
                 per_symbol_ai[symbol] = symbol_ai_signal
                 symbol_guardrails = _build_guardrails(
-                    settings, technical_signal, symbol_ai_signal, order_history
+                    settings, technical_signal, symbol_ai_signal, order_history, symbol=symbol
                 )
                 per_symbol_guardrails[symbol] = symbol_guardrails
 
@@ -1768,6 +1850,7 @@ def run_cycle() -> None:
                 market_price=float(technical_signal["close"]),
                 risk=risk_snapshot,
                 symbol=symbol,
+                atr_pct=float(technical_signal.get("atr_pct", 0.0)) or None,
             )
             decision["scenario"] = technical_signal.get("scenario")
             decision["entry_rsi"] = technical_signal.get("rsi")
@@ -1835,7 +1918,7 @@ def run_cycle() -> None:
             if best_candidate_scan is not None and best_candidate_guards is not None:
                 primary_guards = best_candidate_guards
             elif primary_scan is not None:
-                primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history)
+                primary_guards = _build_guardrails(settings, primary_signal, ai_signal, order_history, symbol=primary_scan.get("symbol"))
             else:
                 primary_guards = {}
             lock_detail = _describe_global_lock(open_positions) if global_lock else "guardarrailes sin match"

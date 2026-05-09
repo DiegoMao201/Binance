@@ -75,11 +75,20 @@ class TradeExecutor:
             )
         return capped_amount, quote_budget, None
 
-    def _format_protection_levels(self, price: float, side: str, symbol: str) -> dict[str, float]:
-        raw_levels = self.risk_manager.build_protection_levels(price, side)
+    def _format_protection_levels(
+        self,
+        price: float,
+        side: str,
+        symbol: str,
+        *,
+        atr_pct: float | None = None,
+    ) -> dict[str, float]:
+        raw_levels = self.risk_manager.build_protection_levels(price, side, atr_pct=atr_pct)
         return {
             "stop_loss": self.client.price_to_precision(float(raw_levels["stop_loss"]), symbol=symbol),
             "take_profit": self.client.price_to_precision(float(raw_levels["take_profit"]), symbol=symbol),
+            "sl_pct_used": float(raw_levels.get("sl_pct_used", 0.0)),
+            "tp_pct_used": float(raw_levels.get("tp_pct_used", 0.0)),
         }
 
     def execute(
@@ -88,9 +97,22 @@ class TradeExecutor:
         market_price: float,
         risk: RiskSnapshot,
         symbol: str | None = None,
+        *,
+        atr_pct: float | None = None,
     ) -> dict[str, Any]:
         target_symbol = symbol or self.settings.trading_symbol
-        amount = self.risk_manager.compute_order_size(market_price, risk.equity_usd)
+        free_quote_usd: float | None = None
+        if side == "buy" and not self.settings.dry_run:
+            try:
+                quote_balance = self.client.fetch_asset_balance(asset=self.client.quote_asset_for(target_symbol))
+                free_quote_usd = float(quote_balance.get("free", 0.0) or 0.0)
+            except BinanceClientError:
+                free_quote_usd = None
+        amount = self.risk_manager.compute_order_size(
+            market_price,
+            risk.equity_usd,
+            free_quote_usd=free_quote_usd,
+        )
         quote_amount: float | None = None
         if side == "buy" and not self.settings.dry_run:
             amount, quote_budget, balance_reason = self._cap_buy_amount_to_free_quote(amount, market_price, target_symbol)
@@ -113,7 +135,7 @@ class TradeExecutor:
             amount = self.client.amount_to_precision(amount, symbol=target_symbol)
             if side == "buy" and quote_amount is None:
                 quote_amount = self.client.cost_to_precision(amount * market_price, symbol=target_symbol)
-            protection_levels = self._format_protection_levels(market_price, side, target_symbol)
+            protection_levels = self._format_protection_levels(market_price, side, target_symbol, atr_pct=atr_pct)
         except BinanceClientError as exc:
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -199,7 +221,7 @@ class TradeExecutor:
         order_payload["notional_usdt"] = round(filled * average, 4)
         # Recompute SL/TP against the real average fill using exchange-native price precision.
         try:
-            order_payload.update(self._format_protection_levels(average, side, target_symbol))
+            order_payload.update(self._format_protection_levels(average, side, target_symbol, atr_pct=atr_pct))
         except BinanceClientError as exc:
             order_payload["status"] = "reconcile_failed"
             order_payload["reason"] = f"precision_formatting protections: {exc}"

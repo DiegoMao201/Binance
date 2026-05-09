@@ -61,29 +61,75 @@ class RiskManager:
             kill_switch_triggered=drawdown >= self.settings.kill_switch_drawdown,
         )
 
-    def compute_trade_notional(self, equity_usd: float) -> float:
+    def compute_trade_notional(self, equity_usd: float, *, free_quote_usd: float | None = None) -> float:
+        """Calcula el notional objetivo de la orden.
+
+        Si se proporciona ``free_quote_usd`` (saldo libre real en la moneda
+        cotizada), usamos ``min(equity * pct, free_quote * 0.95)`` como base.
+        Esto evita el patron de produccion (audit 2026-05-04) en el que el bot
+        calculaba sizing contra equity total ($40) pero Binance solo permitia
+        gastar el USDT libre ($20), generando 10 rejected en cadena.
+        """
         minimum_viable = self.settings.minimum_trade_usdt
-        if equity_usd < minimum_viable:
+        if equity_usd < minimum_viable and (free_quote_usd is None or free_quote_usd < minimum_viable):
             return 0.0
-        # Usa el porcentaje configurado del equity, con buffer para fees.
         target = equity_usd * self.position_size_pct * self.notional_buffer
+        if free_quote_usd is not None and free_quote_usd > 0:
+            # 0.97 = colchon para fees + precision rounding del exchange.
+            spendable = free_quote_usd * 0.97
+            target = min(target, spendable)
+        if target < minimum_viable:
+            return 0.0
         return round(max(target, minimum_viable), 4)
 
-    def compute_order_size(self, price: float, equity_usd: float) -> float:
-        trade_capital = self.compute_trade_notional(equity_usd)
+    def compute_order_size(self, price: float, equity_usd: float, *, free_quote_usd: float | None = None) -> float:
+        trade_capital = self.compute_trade_notional(equity_usd, free_quote_usd=free_quote_usd)
         if price <= 0:
             return 0.0
         return round(trade_capital / price, 6)
 
-    def build_protection_levels(self, price: float, side: str) -> dict[str, float]:
-        if side == "buy":
-            stop_loss = price * (1 - self.settings.stop_loss_pct)
-            take_profit = price * (1 + self.settings.take_profit_pct)
+    def build_protection_levels(
+        self,
+        price: float,
+        side: str,
+        *,
+        atr_pct: float | None = None,
+    ) -> dict[str, float]:
+        """SL/TP base + adaptacion por volatilidad real (ATR).
+
+        - Sin ATR: usa los porcentajes fijos del settings (comportamiento legacy).
+        - Con ATR: SL = max(stop_loss_pct, 1.5 * ATR%) y TP = max(take_profit_pct,
+          2.5 * ATR%). Esto garantiza que en mercados volatiles el TP no quede
+          inalcanzable (caso SOL 2026-05-04 que hizo MFE +0.56% pero TP estaba
+          en +3% y nunca se gatillo) y que en mercados muy quietos no nos coma
+          el ruido el SL.
+        - Cap de seguridad: SL nunca supera 4% (controla riesgo asimetrico).
+        """
+        sl_pct_base = float(self.settings.stop_loss_pct)
+        tp_pct_base = float(self.settings.take_profit_pct)
+
+        if atr_pct is not None and atr_pct > 0:
+            atr = float(atr_pct)
+            sl_pct = max(sl_pct_base, 1.5 * atr)
+            tp_pct = max(tp_pct_base, 2.5 * atr)
+            # Hard caps anti-runaway: nunca arriesgar mas del 4% por trade.
+            sl_pct = min(sl_pct, 0.04)
+            # TP cap en 6%: capturas reales a corto plazo, no esperamos lunas.
+            tp_pct = min(tp_pct, 0.06)
         else:
-            stop_loss = price * (1 + self.settings.stop_loss_pct)
-            take_profit = price * (1 - self.settings.take_profit_pct)
+            sl_pct = sl_pct_base
+            tp_pct = tp_pct_base
+
+        if side == "buy":
+            stop_loss = price * (1 - sl_pct)
+            take_profit = price * (1 + tp_pct)
+        else:
+            stop_loss = price * (1 + sl_pct)
+            take_profit = price * (1 - tp_pct)
 
         return {
-            "stop_loss": round(stop_loss, 4),
-            "take_profit": round(take_profit, 4),
+            "stop_loss": round(stop_loss, 6),
+            "take_profit": round(take_profit, 6),
+            "sl_pct_used": round(sl_pct, 6),
+            "tp_pct_used": round(tp_pct, 6),
         }
