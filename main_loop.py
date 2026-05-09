@@ -383,6 +383,29 @@ async def _settle_open_positions(
                 target_offset = offset_pct
         return target_tier, target_offset
 
+    def _resolve_dynamic_stagnation_thresholds(hold_minutes: float | None) -> tuple[float, float, int]:
+        base_mfe_cap = settings.smart_stagnation_max_mfe_pct
+        base_loss_cut = settings.smart_stagnation_loss_cut_pct
+        if hold_minutes is None:
+            return base_mfe_cap, base_loss_cut, 0
+
+        if (
+            settings.smart_degradation_step_minutes <= 0
+            or hold_minutes < settings.smart_degradation_start_minutes
+        ):
+            return base_mfe_cap, base_loss_cut, 0
+
+        steps = int((hold_minutes - settings.smart_degradation_start_minutes) // settings.smart_degradation_step_minutes) + 1
+        dynamic_mfe_cap = min(
+            settings.smart_degradation_max_mfe_cap_pct,
+            base_mfe_cap + (steps * settings.smart_degradation_mfe_cap_step_pct),
+        )
+        dynamic_loss_cut = max(
+            settings.smart_degradation_min_loss_cut_pct,
+            base_loss_cut - (steps * settings.smart_degradation_loss_cut_step_pct),
+        )
+        return dynamic_mfe_cap, dynamic_loss_cut, steps
+
     remaining_positions: list[dict[str, Any]] = []
     closed_trades: list[dict[str, Any]] = []
 
@@ -574,6 +597,7 @@ async def _settle_open_positions(
                 and settings.smart_stagnation_loss_cut_pct > 0
                 and hold_minutes is not None
             )
+            dynamic_mfe_cap, dynamic_loss_cut, degradation_steps = _resolve_dynamic_stagnation_thresholds(hold_minutes)
 
             # 1) Hard timeout inteligente:
             # si una posicion lleva demasiado tiempo sin asegurar tier 1,
@@ -608,8 +632,8 @@ async def _settle_open_positions(
             elif (
                 stagnation_enabled
                 and hold_minutes >= settings.smart_stagnation_minutes
-                and mfe_pct <= settings.smart_stagnation_max_mfe_pct
-                and unrealized_pct <= -settings.smart_stagnation_loss_cut_pct
+                and mfe_pct <= dynamic_mfe_cap
+                and unrealized_pct <= -dynamic_loss_cut
             ):
                 exit_price = mark_price
                 exit_reason = "smart_stagnation_loss_cut"
@@ -617,18 +641,24 @@ async def _settle_open_positions(
                     "rule": "stagnation_loss_cut",
                     "hold_minutes": round(hold_minutes, 1),
                     "threshold_minutes": settings.smart_stagnation_minutes,
-                    "max_mfe_pct": settings.smart_stagnation_max_mfe_pct,
-                    "loss_cut_pct": settings.smart_stagnation_loss_cut_pct,
+                    "max_mfe_pct": dynamic_mfe_cap,
+                    "loss_cut_pct": dynamic_loss_cut,
+                    "base_max_mfe_pct": settings.smart_stagnation_max_mfe_pct,
+                    "base_loss_cut_pct": settings.smart_stagnation_loss_cut_pct,
+                    "degradation_steps": degradation_steps,
                     "mfe_pct": round(mfe_pct, 6),
                     "unrealized_pct": round(unrealized_pct, 6),
                 }
                 logger.info(
-                    "Smart exit stagnation %s side=%s hold=%.1fmin mfe=%.3f%% pnl=%.3f%%",
+                    "Smart exit stagnation %s side=%s hold=%.1fmin mfe=%.3f%% pnl=%.3f%% (cap=%.3f%% cut=%.3f%% steps=%s)",
                     symbol,
                     side,
                     hold_minutes,
                     mfe_pct * 100,
                     unrealized_pct * 100,
+                    dynamic_mfe_cap * 100,
+                    dynamic_loss_cut * 100,
+                    degradation_steps,
                 )
             elif (
                 time_stop_enabled
