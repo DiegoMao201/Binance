@@ -169,6 +169,33 @@ function buildAlerts({ status, control, risk, decision, ai, isOnline }) {
 }
 
 
+function buildScanBlockTelemetry(scan) {
+  const guardrails = scan?.guardrails || {};
+  const ai = scan?.ai_signal || {};
+  const consulted = Boolean(scan?.ia_consulted);
+  const flags = Array.isArray(ai.risk_flags) ? ai.risk_flags : [];
+
+  if (scan?.status === "locked") return { tone: "tone-sell", text: "mutex global activo" };
+  if (scan?.status === "waiting") return { tone: "", text: scan?.candidate_reason || scan?.rejection_reason || "sin escenario A/B" };
+  if (scan?.status === "scenario_only") return { tone: "", text: scan?.candidate_reason || "falta volumen o ATR para ser candidato" };
+  if (!consulted) return { tone: "", text: "pendiente de evaluación IA" };
+
+  const blockers = [];
+  if (guardrails.executable_signal === false) blockers.push("señal no ejecutable");
+  if (guardrails.ai_confident === false) blockers.push(`confianza baja (${formatPercent(guardrails.ai_confidence)})`);
+  if (guardrails.ai_approved === false) blockers.push("IA no aprueba");
+  if (guardrails.ai_alignment === false) blockers.push("IA desalineada");
+  if (guardrails.ai_setup_ready === false) blockers.push("setup insuficiente");
+  if (guardrails.ai_risk_clear === false) blockers.push(flags.length ? `flags: ${flags.join(", ")}` : "riesgo IA");
+  if (guardrails.volume_ready === false) blockers.push(`volumen bajo (${formatNumber(scan?.volume_ratio, 2)}x)`);
+  if (guardrails.volatility_ready === false) blockers.push(`ATR fuera de rango (${formatPercent(scan?.atr_pct)})`);
+  if (guardrails.cooldown_active) blockers.push("cooldown activo");
+
+  if (!blockers.length && guardrails.ai_gate_ready) return { tone: "tone-buy", text: "sin bloqueo: listo para ejecutar" };
+  return { tone: blockers.length ? "tone-sell" : "", text: blockers.join(" | ") || "esperando confirmación" };
+}
+
+
 function buildTimeline(signalHistory) {
   return [...signalHistory].slice(-8).reverse().map((item) => ({
     ...item,
@@ -628,16 +655,17 @@ export default function DashboardClient({ initialData }) {
           </div>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Símbolo</th><th>Estado</th><th>Esc</th><th>IA Signal</th><th>Confidence</th><th>Approved</th><th>Setup</th><th>Risk flags</th><th>Cache</th></tr></thead>
+              <thead><tr><th>Símbolo</th><th>Estado</th><th>Esc</th><th>IA Signal</th><th>Confidence</th><th>Approved</th><th>Setup</th><th>Risk flags</th><th>Bloqueo</th><th>Cache</th></tr></thead>
               <tbody>
                 {lastScans.length === 0 ? (
-                  <tr><td colSpan="9" className="empty">Sin escaneos.</td></tr>
+                  <tr><td colSpan="10" className="empty">Sin escaneos.</td></tr>
                 ) : lastScans.map((scan) => {
                   const ai = scan.ai_signal || {};
                   const consulted = scan.ia_consulted;
                   const conf = Number(ai.confidence || 0);
                   const confTone = conf >= 0.65 ? "tone-buy" : conf >= 0.5 ? "" : "tone-sell";
                   const flags = Array.isArray(ai.risk_flags) ? ai.risk_flags : [];
+                  const block = buildScanBlockTelemetry(scan);
                   return (
                     <tr key={`mesa-${scan.symbol}`}>
                       <td><strong>{scan.symbol}</strong></td>
@@ -648,6 +676,7 @@ export default function DashboardClient({ initialData }) {
                       <td>{consulted ? (ai.approved ? <span className="tone-buy">✓</span> : <span className="tone-sell">✗</span>) : "—"}</td>
                       <td>{consulted ? (ai.setup_quality || "low") : "—"}</td>
                       <td style={{ opacity: 0.85 }}>{flags.length === 0 ? (consulted ? "—" : "") : flags.join(", ")}</td>
+                      <td className={block.tone} style={{ minWidth: 260, opacity: 0.92 }}>{block.text}</td>
                       <td style={{ opacity: 0.7 }}>{consulted ? (ai.cached ? `${formatNumber(ai.cached_age_seconds, 0)}s` : "fresca") : "no consultada"}</td>
                     </tr>
                   );
