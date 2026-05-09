@@ -135,74 +135,113 @@ class OpenRouterAnalyzer:
             }
 
         payload = self._build_payload(frame, symbol=symbol, technical_signal=technical_signal)
-        try:
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.settings.openrouter_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Eres un trader cuantitativo experto con 30 años de experiencia en mercados financieros: "
-                                "hedge fund macro, scalping institucional y gestión de riesgo avanzada. "
-                                "Tu criterio es preciso y basado en convergencia de señales, no en sesgo conservador genérico. "
-                                "Cuando el setup es sólido, apruebas con convicción alta y confidence real. "
-                                "Cuando hay debilidades estructurales, las identificas con precisión quirúrgica. "
-                                "Nunca rechazas por inercia ni apruebas por cortesía. "
-                                "Maximizas la tasa de éxito identificando el timing de máxima probabilidad dentro de setups ya filtrados técnicamente."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": json.dumps(payload, ensure_ascii=False),
-                        },
-                    ],
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"},
-                },
-                timeout=4.0,
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-        except (requests.Timeout, TimeoutError) as exc:
-            self.logger.error("Timeout OpenRouter para %s: %s", symbol or self.settings.trading_symbol, exc)
-            return {
-                "signal": "hold",
-                "confidence": 0.0,
-                "rationale": "OpenRouter timeout; trade abortado por seguridad.",
-                "model": self.settings.openrouter_model,
-                "consulted": True,
-                "timed_out": True,
-                "timeout_seconds": 4.0,
-                "approved": False,
-                "direction_alignment": "misaligned",
-                "setup_quality": "low",
-                "risk_flags": ["openrouter_timeout"],
-            }
-        parsed.setdefault("signal", "hold")
-        parsed.setdefault("confidence", 0.0)
-        parsed.setdefault("rationale", "Sin explicación.")
-        parsed.setdefault("model", self.settings.openrouter_model)
-        parsed.setdefault("timed_out", False)
-        parsed.setdefault("approved", False)
-        parsed.setdefault("direction_alignment", "misaligned")
-        parsed.setdefault("setup_quality", "low")
-        parsed.setdefault("risk_flags", [])
-        try:
-            parsed["confidence"] = float(parsed["confidence"])
-        except (TypeError, ValueError):
-            parsed["confidence"] = 0.0
-        parsed["approved"] = bool(parsed.get("approved", False))
-        if parsed.get("direction_alignment") not in {"aligned", "misaligned"}:
-            parsed["direction_alignment"] = "misaligned"
-        if parsed.get("setup_quality") not in {"low", "medium", "high"}:
-            parsed["setup_quality"] = "low"
-        if not isinstance(parsed.get("risk_flags"), list):
-            parsed["risk_flags"] = [str(parsed.get("risk_flags"))]
-        return parsed
+        models_to_try: list[str] = [self.settings.openrouter_model]
+        for candidate in self.settings.openrouter_fallback_models:
+            if candidate and candidate not in models_to_try:
+                models_to_try.append(candidate)
+
+        def _normalize(parsed: dict[str, Any], model_name: str) -> dict[str, Any]:
+            parsed.setdefault("signal", "hold")
+            parsed.setdefault("confidence", 0.0)
+            parsed.setdefault("rationale", "Sin explicación.")
+            parsed.setdefault("model", model_name)
+            parsed.setdefault("timed_out", False)
+            parsed.setdefault("approved", False)
+            parsed.setdefault("direction_alignment", "misaligned")
+            parsed.setdefault("setup_quality", "low")
+            parsed.setdefault("risk_flags", [])
+            try:
+                parsed["confidence"] = float(parsed["confidence"])
+            except (TypeError, ValueError):
+                parsed["confidence"] = 0.0
+            parsed["approved"] = bool(parsed.get("approved", False))
+            if parsed.get("direction_alignment") not in {"aligned", "misaligned"}:
+                parsed["direction_alignment"] = "misaligned"
+            if parsed.get("setup_quality") not in {"low", "medium", "high"}:
+                parsed["setup_quality"] = "low"
+            if not isinstance(parsed.get("risk_flags"), list):
+                parsed["risk_flags"] = [str(parsed.get("risk_flags"))]
+            return parsed
+
+        last_error = "unknown_error"
+        for model_name in models_to_try:
+            try:
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_name,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Eres un trader cuantitativo experto con 30 años de experiencia en mercados financieros: "
+                                    "hedge fund macro, scalping institucional y gestión de riesgo avanzada. "
+                                    "Tu criterio es preciso y basado en convergencia de señales, no en sesgo conservador genérico. "
+                                    "Cuando el setup es sólido, apruebas con convicción alta y confidence real. "
+                                    "Cuando hay debilidades estructurales, las identificas con precisión quirúrgica. "
+                                    "Nunca rechazas por inercia ni apruebas por cortesía. "
+                                    "Maximizas la tasa de éxito identificando el timing de máxima probabilidad dentro de setups ya filtrados técnicamente."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": json.dumps(payload, ensure_ascii=False),
+                            },
+                        ],
+                        "temperature": 0.1,
+                        "response_format": {"type": "json_object"},
+                    },
+                    timeout=4.0,
+                )
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                if model_name != self.settings.openrouter_model:
+                    parsed["fallback_used"] = True
+                    parsed["fallback_from"] = self.settings.openrouter_model
+                self.logger.info(
+                    "OpenRouter OK para %s con modelo=%s fallback=%s",
+                    symbol or self.settings.trading_symbol,
+                    model_name,
+                    model_name != self.settings.openrouter_model,
+                )
+                return _normalize(parsed, model_name)
+            except (requests.Timeout, TimeoutError) as exc:
+                last_error = f"timeout:{exc}"
+                self.logger.warning(
+                    "Timeout OpenRouter para %s con modelo=%s. Probando fallback si existe.",
+                    symbol or self.settings.trading_symbol,
+                    model_name,
+                )
+            except (requests.RequestException, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                last_error = f"model_error:{exc}"
+                self.logger.warning(
+                    "OpenRouter fallo para %s con modelo=%s (%s). Probando fallback si existe.",
+                    symbol or self.settings.trading_symbol,
+                    model_name,
+                    exc,
+                )
+
+        self.logger.error(
+            "OpenRouter sin respuesta valida para %s tras modelos=%s (%s)",
+            symbol or self.settings.trading_symbol,
+            models_to_try,
+            last_error,
+        )
+        return {
+            "signal": "hold",
+            "confidence": 0.0,
+            "rationale": "OpenRouter fallo en todos los modelos configurados; trade abortado por seguridad.",
+            "model": self.settings.openrouter_model,
+            "consulted": True,
+            "timed_out": True,
+            "timeout_seconds": 4.0,
+            "approved": False,
+            "direction_alignment": "misaligned",
+            "setup_quality": "low",
+            "risk_flags": ["openrouter_unavailable"],
+        }

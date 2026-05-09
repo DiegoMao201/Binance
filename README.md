@@ -113,7 +113,8 @@ Si ambos valores son mayores que `0`, el bot puede cerrar una operación con `ex
 ## Restricciones de seguridad incorporadas
 
 - `DRY_RUN=true` por defecto
-- `OPENROUTER_MODEL=openai/gpt-4.1` por defecto para priorizar calidad analítica y salida JSON estable
+- `OPENROUTER_MODEL=openai/gpt-4.1-mini` por defecto para priorizar relación costo/calidad con salida JSON estable
+- `OPENROUTER_FALLBACK_MODELS=google/gemini-2.5-flash,anthropic/claude-3.5-haiku` para continuidad automática si el modelo principal falla por timeout/error
 - capital inicial limitado a 20 USD
 - sizing live recomendado de 60% del balance por operación mientras se construye muestra estadística
 - kill switch live recomendado al 7% de pérdida acumulada

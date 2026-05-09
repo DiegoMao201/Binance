@@ -19,6 +19,7 @@ class Settings:
     binance_whitelist_ips: tuple[str, ...]
     openrouter_api_key: str
     openrouter_model: str
+    openrouter_fallback_models: tuple[str, ...]
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
@@ -87,6 +88,7 @@ def load_settings() -> Settings:
     primary_symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
     raw_targets = os.getenv("TARGET_SYMBOLS", primary_symbol)
     raw_whitelist_ips = os.getenv("BINANCE_WHITELIST_IPS", "")
+    raw_fallback_models = os.getenv("OPENROUTER_FALLBACK_MODELS", "google/gemini-2.5-flash,anthropic/claude-3.5-haiku")
     target_symbols = tuple(
         dict.fromkeys(  # preserva orden y deduplica
             sym.strip().upper() for sym in raw_targets.split(",") if sym.strip()
@@ -94,6 +96,9 @@ def load_settings() -> Settings:
     ) or (primary_symbol,)
     whitelist_ips = tuple(
         dict.fromkeys(ip.strip() for ip in raw_whitelist_ips.split(",") if ip.strip())
+    )
+    fallback_models = tuple(
+        dict.fromkeys(model.strip() for model in raw_fallback_models.split(",") if model.strip())
     )
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
@@ -104,7 +109,8 @@ def load_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-        openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
+        openrouter_fallback_models=fallback_models,
         trading_symbol=primary_symbol,
         target_symbols=target_symbols,
         max_global_open_positions=int(os.getenv("MAX_GLOBAL_OPEN_POSITIONS", "1")),
