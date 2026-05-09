@@ -192,6 +192,17 @@ const TRAILING_TIERS = [
 ];
 
 
+function resolveTierFromMfe(mfePct) {
+  let tier = 0;
+  for (const candidate of TRAILING_TIERS) {
+    if (Number(mfePct || 0) >= candidate.trigger) {
+      tier = candidate.tier;
+    }
+  }
+  return tier;
+}
+
+
 function buildExecutionAudit(orders, openPositions, closedTrades) {
   const latestOrder = orders.length ? orders[orders.length - 1] : null;
   const latestOpenPosition = openPositions.length ? openPositions[openPositions.length - 1] : null;
@@ -275,11 +286,13 @@ function buildLivePositionView(openPosition, openPositions) {
   const maePct = Number(fullPos.mae_pct || summary.mae_pct || 0);
   const unrealizedPct = entry > 0 ? (mark - entry) / entry : 0;
   const tier = Number(fullPos.trailing_tier || summary.trailing_tier || 0);
+  const achievedTier = resolveTierFromMfe(mfePct);
   const initialSL = Number(fullPos.initial_stop_loss || sl);
   const slLockedAboveEntry = sl > entry && entry > 0;
 
   const currentTier = TRAILING_TIERS.find((t) => t.tier === tier);
-  const nextTier = TRAILING_TIERS.find((t) => t.tier === tier + 1);
+  const currentAchievedTier = TRAILING_TIERS.find((t) => t.tier === achievedTier);
+  const nextTier = TRAILING_TIERS.find((t) => t.tier === achievedTier + 1);
   const distanceToNextTier = nextTier ? nextTier.trigger - mfePct : 0;
 
   return {
@@ -294,11 +307,14 @@ function buildLivePositionView(openPosition, openPositions) {
     unrealizedPct,
     unrealizedUsdt: Number(fullPos.unrealized_pnl_usdt || summary.unrealized_pnl_usdt || 0),
     tier,
+    achievedTier,
     currentTier,
+    currentAchievedTier,
     nextTier,
     distanceToNextTier,
     initialSL,
     slLockedAboveEntry,
+    tierSyncPending: achievedTier > tier,
     holdMinutes: Number(fullPos.hold_minutes || 0),
     scenario: fullPos.scenario || summary.scenario,
   };
@@ -562,7 +578,10 @@ export default function DashboardClient({ initialData }) {
           <section className="panel">
             <div className="panel-header">
               <h3>Posición viva · {livePos.symbol}</h3>
-              <span>{livePos.slLockedAboveEntry ? "GANANCIA ASEGURADA" : "PROTECCIÓN INICIAL"} · Tier {livePos.tier}</span>
+              <span>
+                {livePos.slLockedAboveEntry ? "GANANCIA ASEGURADA" : "PROTECCIÓN INICIAL"} · Tier confirmado {livePos.tier}
+                {livePos.tierSyncPending ? ` · MFE ya alcanzó Tier ${livePos.achievedTier}` : ""}
+              </span>
             </div>
             <section className="telemetry-grid">
               <div className="telemetry-card"><span>Lado · Esc</span><strong>{livePos.side?.toUpperCase()} · {livePos.scenario || "?"}</strong></div>
@@ -582,13 +601,18 @@ export default function DashboardClient({ initialData }) {
             <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
               <ProgressBar
                 value={livePos.mfePct}
-                max={Math.max(0.02, (livePos.nextTier?.trigger ?? livePos.currentTier?.trigger ?? 0.02))}
+                max={Math.max(0.02, (livePos.nextTier?.trigger ?? livePos.currentAchievedTier?.trigger ?? 0.02))}
                 tone="buy"
                 label={`MFE ${formatPercent(livePos.mfePct)} · ${livePos.nextTier ? `próximo tier en +${formatPercent(livePos.distanceToNextTier)}` : "tier máximo alcanzado"}`}
               />
+              {livePos.tierSyncPending ? (
+                <span className="metric-subvalue">
+                  El precio ya alcanzó Tier {livePos.achievedTier}, pero la protección persistida aún refleja Tier {livePos.tier}.
+                </span>
+              ) : null}
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {TRAILING_TIERS.map((t) => (
-                  <span key={t.tier} className={`status-pill ${livePos.tier >= t.tier ? "active" : "inactive"}`}>
+                  <span key={t.tier} className={`status-pill ${livePos.achievedTier >= t.tier ? "active" : "inactive"}`}>
                     T{t.tier} · ≥{formatPercent(t.trigger)} → SL +{formatPercent(t.offset)}
                   </span>
                 ))}
