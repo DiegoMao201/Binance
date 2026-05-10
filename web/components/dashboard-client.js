@@ -2,6 +2,972 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+const Plot = dynamic(() => import("react-plotly.js"), {
+  ssr: false,
+  loading: () => (
+    <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#6b8299", fontSize: 12 }}>
+      Cargando gráfico…
+    </div>
+  ),
+});
+
+// ── Paleta de colores ──────────────────────────────────────────────
+const G = "#12d98b"; // green  buy
+const R = "#eb4b61"; // red    sell
+const Y = "#f4b942"; // yellow warn
+const B = "#57c1ff"; // blue   info
+const P = "#a78bfa"; // purple scenario D
+const BG   = "#080e16";
+const CARD = "rgba(10,18,28,0.96)";
+const BORD = "#1a2b3c";
+const TEXT = "#dce7f5";
+const MUTE = "#6b8299";
+
+// ── Formatters ────────────────────────────────────────────────────
+const n = (v, d = 2) => Number(v || 0).toFixed(d);
+const pct = (v, d = 2) => `${(Number(v || 0) * 100).toFixed(d)}%`;
+const tone = (v) => (Number(v || 0) >= 0 ? G : R);
+
+function fmtDate(v) {
+  if (!v) return "--";
+  const d = new Date(v);
+  if (isNaN(d)) return "--";
+  return d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }) + " UTC";
+}
+
+// ── Primitivos de UI ──────────────────────────────────────────────
+
+/** Badge de escenario A/B/C/D */
+function ScenBadge({ sc, size = 22 }) {
+  if (!sc) return <span style={{ color: MUTE, fontSize: 11 }}>–</span>;
+  const col = sc === "A" ? G : sc === "B" ? B : sc === "C" ? Y : sc === "D" ? P : MUTE;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      width: size, height: size, borderRadius: 6,
+      background: `${col}22`, border: `1px solid ${col}55`,
+      color: col, fontWeight: 700, fontSize: size * 0.55, flexShrink: 0,
+    }}>{sc}</span>
+  );
+}
+
+/** Badge de señal BUY / HOLD / SELL */
+function SignalBadge({ signal, approved }) {
+  const col = signal === "buy" && approved ? G : signal === "buy" ? Y : signal === "sell" ? R : MUTE;
+  const label = signal === "buy" ? (approved ? "▲ BUY" : "▲ PENDING") : signal === "sell" ? "▼ SELL" : "● HOLD";
+  return (
+    <span style={{
+      display: "inline-flex", gap: 5, alignItems: "center",
+      padding: "4px 12px", borderRadius: 999,
+      background: `${col}18`, border: `1px solid ${col}44`,
+      color: col, fontWeight: 700, fontSize: 13, whiteSpace: "nowrap",
+    }}>{label}</span>
+  );
+}
+
+/** Barra de progreso horizontal */
+function Bar({ value, max = 1, color = G, height = 6, label }) {
+  const p = Math.max(0, Math.min(1, max > 0 ? value / max : 0)) * 100;
+  return (
+    <div>
+      {label && <div style={{ fontSize: 10, color: MUTE, marginBottom: 2 }}>{label}</div>}
+      <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 4, height, overflow: "hidden" }}>
+        <div style={{ background: color, width: `${p}%`, height: "100%", transition: "width 0.4s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+/** Barra RSI con zonas de color */
+function RsiBar({ value }) {
+  const v = Number(value || 50);
+  const col = v <= 36 ? B : v >= 70 ? R : v >= 52 ? Y : G;
+  return (
+    <div style={{ position: "relative", height: 16 }}>
+      <div style={{ position: "absolute", left: 0,   width: "36%", height: "100%", background: "#57c1ff11" }} />
+      <div style={{ position: "absolute", left: "36%", width: "34%", height: "100%", background: "#12d98b0a" }} />
+      <div style={{ position: "absolute", left: "70%", width: "30%", height: "100%", background: "#eb4b6111" }} />
+      <div style={{ position: "absolute", left: `${v}%`, top: 0, width: 3, height: "100%", background: col, transform: "translateX(-50%)", borderRadius: 2, transition: "left 0.4s ease" }} />
+      <div style={{ position: "absolute", right: 0, top: 0, fontSize: 10, color: col, fontWeight: 700, lineHeight: "16px" }}>{n(v, 1)}</div>
+    </div>
+  );
+}
+
+/** Gauge de confianza IA (arco SVG semicircular) */
+function ConfGauge({ value, approved }) {
+  const p = Math.max(0, Math.min(1, Number(value || 0)));
+  const col = approved && p >= 0.55 ? G : p >= 0.50 ? Y : R;
+  const r = 42, cx = 60, cy = 56;
+  const circ = Math.PI * r;
+  const offset = circ * (1 - p);
+  const pathD = `M ${cx - r},${cy} A ${r},${r} 0 0,1 ${cx + r},${cy}`;
+  return (
+    <svg width={120} height={72} viewBox="0 0 120 72" style={{ display: "block", margin: "0 auto" }}>
+      <path d={pathD} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={10} strokeLinecap="round" />
+      <path d={pathD} fill="none" stroke={col} strokeWidth={10} strokeLinecap="round"
+        strokeDasharray={circ} strokeDashoffset={offset}
+        style={{ transition: "stroke-dashoffset 0.6s ease, stroke 0.4s ease" }} />
+      <text x={cx} y={cy - 4} textAnchor="middle" fill={col} fontSize={22} fontWeight={700} fontFamily="monospace">
+        {Math.round(p * 100)}%
+      </text>
+      <text x={cx} y={cy + 10} textAnchor="middle" fill={MUTE} fontSize={9} fontFamily="sans-serif">CONFIDENCE IA</text>
+    </svg>
+  );
+}
+
+/** Sparkline SVG simple */
+function Spark({ values = [], color = G, height = 32 }) {
+  if (!values.length) return null;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const w = 200;
+  const pts = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = height - ((v - min) / range) * (height - 4) - 2;
+    return `${x},${y}`;
+  }).join(" ");
+  const lastY = height - ((values[values.length - 1] - min) / range) * (height - 4) - 2;
+  const id = `sg${color.replace("#", "")}`;
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} style={{ width: "100%", height }} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={id} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <polygon points={`0,${height} ${pts} ${w},${height}`} fill={`url(#${id})`} />
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} />
+      <circle cx={w} cy={lastY} r={3} fill={color} />
+    </svg>
+  );
+}
+
+// ── Card contenedor estándar ───────────────────────────────────────
+function Card({ title, right, children, style = {} }) {
+  return (
+    <div style={{ background: CARD, border: `1px solid ${BORD}`, borderRadius: 16, padding: 20, display: "flex", flexDirection: "column", gap: 12, ...style }}>
+      {(title || right) && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          {title && <div style={{ color: MUTE, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>{title}</div>}
+          {right}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+// ── Trailing tier data ────────────────────────────────────────────
+const TIERS = [
+  { tier: 1, trigger: 0.005, label: "BE+" },
+  { tier: 2, trigger: 0.008, label: "+0.4%" },
+  { tier: 3, trigger: 0.010, label: "+0.6%" },
+  { tier: 4, trigger: 0.014, label: "+0.8%" },
+  { tier: 5, trigger: 0.018, label: "+1.0%" },
+];
+
+function buildPos(openPosition, openPositions) {
+  if (!openPosition) return null;
+  const full = openPositions?.find((p) => p.symbol === openPosition.symbol) || openPosition;
+  const entry = Number(full.entry_price || openPosition.entry_price || 0);
+  const mark  = Number(full.mark_price  || openPosition.mark_price  || entry);
+  const sl    = Number(full.stop_loss   || openPosition.stop_loss   || 0);
+  const tp    = Number(full.take_profit || openPosition.take_profit || 0);
+  const mfe   = Number(full.mfe_pct     || openPosition.mfe_pct     || 0);
+  const mae   = Number(full.mae_pct     || openPosition.mae_pct     || 0);
+  const pnl   = Number(full.unrealized_pnl_usdt || openPosition.unrealized_pnl_usdt || 0);
+  const pnlP  = entry > 0 ? (mark - entry) / entry : 0;
+  const tier  = Number(full.trailing_tier || openPosition.trailing_tier || 0);
+  return {
+    symbol: full.symbol, side: full.side, scenario: full.scenario,
+    entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier,
+    holdM: Number(full.hold_minutes || 0),
+  };
+}
+
+// ── Panel: Posición viva ──────────────────────────────────────────
+function PositionPanel({ openPosition, openPositions }) {
+  const pos = buildPos(openPosition, openPositions);
+  if (!pos) {
+    return (
+      <Card title="Posición">
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "28px 0", opacity: 0.35 }}>
+          <div style={{ fontSize: 36 }}>◌</div>
+          <div style={{ fontSize: 12, color: MUTE }}>Sin posición abierta</div>
+          <div style={{ fontSize: 11, color: MUTE }}>Escaneando mercado…</div>
+        </div>
+      </Card>
+    );
+  }
+  const pnlCol = pos.pnl >= 0 ? G : R;
+  const slRisk  = pos.sl > 0 && pos.entry > 0 ? Math.abs(pos.sl - pos.entry) / pos.entry : 0;
+  const tpRange = pos.tp > 0 && pos.entry > 0 ? Math.abs(pos.tp - pos.entry) / pos.entry : 0;
+  return (
+    <Card title="Posición activa" right={<ScenBadge sc={pos.scenario} />}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 20, fontWeight: 700 }}>{pos.symbol}</span>
+        <span style={{ fontSize: 11, background: "rgba(18,217,139,0.15)", color: G, borderRadius: 4, padding: "2px 6px", fontWeight: 700 }}>LONG</span>
+        <span style={{ fontSize: 11, color: MUTE }}>{Math.round(pos.holdM)}min</span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Entrada</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: "monospace" }}>{n(pos.entry, 4)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Mark</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: "monospace", color: pos.mark >= pos.entry ? G : R }}>{n(pos.mark, 4)}</div>
+        </div>
+      </div>
+
+      <div style={{ background: `${pnlCol}10`, borderRadius: 10, padding: "10px 14px", border: `1px solid ${pnlCol}25` }}>
+        <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>P&L Flotante</div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: pnlCol, fontFamily: "monospace" }}>
+          {pos.pnl >= 0 ? "+" : ""}{n(pos.pnl, 4)} USDT
+        </div>
+        <div style={{ fontSize: 12, color: pnlCol, opacity: 0.8 }}>{pos.pnlP >= 0 ? "+" : ""}{pct(pos.pnlP)}</div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 9, color: R, textTransform: "uppercase" }}>Stop Loss</div>
+          <div style={{ fontSize: 13, fontFamily: "monospace", color: R }}>{n(pos.sl, 4)}</div>
+          <div style={{ fontSize: 10, color: MUTE }}>−{pct(slRisk)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: G, textTransform: "uppercase" }}>Take Profit</div>
+          <div style={{ fontSize: 13, fontFamily: "monospace", color: G }}>{n(pos.tp, 4)}</div>
+          <div style={{ fontSize: 10, color: MUTE }}>+{pct(tpRange)}</div>
+        </div>
+      </div>
+
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE, marginBottom: 3 }}>
+          <span>MFE {pct(pos.mfe)}</span><span>MAE {pct(pos.mae)}</span>
+        </div>
+        <Bar value={pos.mfe} max={Math.max(pos.mfe || 0.001, tpRange || 0.02)} color={G} height={5} />
+      </div>
+
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE, marginBottom: 5 }}>
+          <span>Trailing Tier {pos.tier > 0 ? pos.tier : "–"}</span>
+          <span style={{ color: pos.tier > 0 ? G : MUTE }}>{pos.tier > 0 ? "✓ SL protegido" : "esperando +0.5%"}</span>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {TIERS.map((t) => (
+            <div key={t.tier} style={{
+              flex: 1, height: 5, borderRadius: 4,
+              background: pos.tier >= t.tier ? (t.tier <= 2 ? Y : G) : "rgba(255,255,255,0.07)",
+              transition: "background 0.3s ease",
+            }} title={t.label} />
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ── Panel: Centro de decisión IA ──────────────────────────────────
+function AiPanel({ ai, scan, decision }) {
+  const conf     = Number(ai?.confidence || 0);
+  const approved = Boolean(ai?.approved);
+  const flags    = Array.isArray(ai?.risk_flags) ? ai.risk_flags : [];
+  const setup    = ai?.setup_quality || "low";
+  const setupCol = setup === "high" ? G : setup === "medium" ? Y : R;
+  const scenario = scan?.scenario || decision?.scenario;
+  const cached   = ai?.cached;
+  return (
+    <Card
+      title="Motor IA"
+      right={<span style={{ fontSize: 10, color: MUTE }}>{cached ? `cache ${Math.round(ai?.cached_age_seconds || 0)}s` : ai?.consulted ? "● fresca" : "○ no consultada"}</span>}
+    >
+      <ConfGauge value={conf} approved={approved} />
+
+      <div style={{ display: "flex", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+        <SignalBadge signal={ai?.signal} approved={approved} />
+        <ScenBadge sc={scenario} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px" }}>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Setup</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: setupCol, textTransform: "uppercase" }}>{setup}</div>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "8px 10px" }}>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Aprobado</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: approved ? G : R }}>{approved ? "SÍ" : "NO"}</div>
+        </div>
+      </div>
+
+      {ai?.direction_alignment && (
+        <div style={{ fontSize: 12, color: ai.direction_alignment === "aligned" ? G : R }}>
+          {ai.direction_alignment === "aligned" ? "↑ Alineado con técnica" : "↕ Desalineado con técnica"}
+        </div>
+      )}
+
+      {flags.length > 0 && (
+        <div>
+          <div style={{ fontSize: 9, color: MUTE, marginBottom: 4, textTransform: "uppercase" }}>Risk Flags</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {flags.map((f, i) => (
+              <span key={i} style={{ fontSize: 10, background: "rgba(235,75,97,0.12)", border: `1px solid rgba(235,75,97,0.25)`, color: R, borderRadius: 4, padding: "2px 6px" }}>{f}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {ai?.rationale && (
+        <div style={{ fontSize: 11, color: MUTE, lineHeight: 1.5, borderTop: `1px solid ${BORD}`, paddingTop: 8 }}>
+          {String(ai.rationale).slice(0, 200)}{String(ai.rationale).length > 200 ? "…" : ""}
+        </div>
+      )}
+
+      <div style={{ fontSize: 10, color: MUTE, borderTop: `1px solid ${BORD}`, paddingTop: 8 }}>
+        Modelo: {ai?.model || "OpenRouter"}
+      </div>
+    </Card>
+  );
+}
+
+// ── Panel: Pulso de mercado ───────────────────────────────────────
+function MarketPanel({ scan, technicalSignal, targetSymbols, onSymbol }) {
+  const ts   = scan || {};
+  const rsi  = Number(ts.rsi  ?? technicalSignal?.rsi  ?? 50);
+  const vol  = Number(ts.volume_ratio ?? technicalSignal?.volume_ratio ?? 0);
+  const atr  = Number(ts.atr_pct ?? technicalSignal?.atr_pct ?? 0);
+  const flow = Number(ts.trade_flow_score || 0);
+  const ob   = Number(ts.orderbook_imbalance || 0.5);
+  const spread = Number(ts.spread_pct || 0);
+  const macro = ts.macro_regime || {};
+  const macroTrend = String(ts.macro_trend || macro.trend || "neutral").toLowerCase();
+  const macroCol = macroTrend === "bullish" ? G : macroTrend === "bearish" ? R : MUTE;
+
+  return (
+    <Card
+      title="Pulso de mercado"
+      right={
+        <select onChange={(e) => onSymbol(e.target.value)} value={ts.symbol || ""}
+          style={{ background: "rgba(255,255,255,0.05)", color: TEXT, border: `1px solid ${BORD}`, borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>
+          {targetSymbols.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      }
+    >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span style={{ fontSize: 22, fontWeight: 700, fontFamily: "monospace" }}>{n(ts.close || technicalSignal?.close, 4)}</span>
+        <ScenBadge sc={ts.scenario} />
+        <span style={{ fontSize: 11, color: MUTE }}>{ts.regime || "–"}</span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+            <span style={{ color: MUTE }}>RSI</span>
+            <span style={{ color: rsi <= 36 ? B : rsi >= 70 ? R : rsi >= 52 ? Y : G, fontWeight: 600 }}>{n(rsi, 1)}</span>
+          </div>
+          <RsiBar value={rsi} />
+        </div>
+
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+            <span style={{ color: MUTE }}>Volumen relativo</span>
+            <span style={{ color: vol >= 1.2 ? G : vol < 0.5 ? R : MUTE, fontWeight: 600 }}>{n(vol, 2)}x</span>
+          </div>
+          <Bar value={vol} max={3} color={vol >= 1.0 ? G : Y} height={6} />
+        </div>
+
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+            <span style={{ color: MUTE }}>ATR</span>
+            <span style={{ fontWeight: 600 }}>{pct(atr)}</span>
+          </div>
+          <Bar value={atr} max={0.04} color={B} height={5} />
+        </div>
+
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+            <span style={{ color: MUTE }}>Trade Flow Score</span>
+            <span style={{ color: flow >= 0.55 ? G : flow < 0.44 ? R : Y, fontWeight: 600 }}>{Math.round(flow * 100)}%</span>
+          </div>
+          <Bar value={flow} max={1} color={flow >= 0.55 ? G : flow < 0.44 ? R : Y} height={6} />
+        </div>
+
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+            <span style={{ color: MUTE }}>Orderbook Imbalance</span>
+            <span style={{ color: ob >= 0.55 ? G : ob < 0.45 ? R : MUTE, fontWeight: 600 }}>{Math.round(ob * 100)}%</span>
+          </div>
+          {/* Barra bipolar centrada en 50% */}
+          <div style={{ position: "relative", height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(255,255,255,0.2)" }} />
+            <div style={{
+              position: "absolute",
+              left:  ob >= 0.5 ? "50%" : `${ob * 100}%`,
+              width: `${Math.abs(ob - 0.5) * 100}%`,
+              height: "100%",
+              background: ob >= 0.5 ? G : R,
+              transition: "all 0.4s ease",
+            }} />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, paddingTop: 4 }}>
+          <div>
+            <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Macro (15m)</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: macroCol, textTransform: "uppercase" }}>{macroTrend}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Spread</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: spread > 0.002 ? R : MUTE }}>{spread > 0 ? pct(spread) : "--"}</div>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ── Equity Curve ──────────────────────────────────────────────────
+function EquityPanel({ equityHistory }) {
+  const pts = Array.isArray(equityHistory) ? equityHistory.slice(-100) : [];
+  const vals = pts.map((p) => Number(p.equity_usdt || 0));
+  const hwms = pts.map((p) => Number(p.high_water_mark || 0));
+  const lastVal = vals[vals.length - 1] || 0;
+  const firstVal = vals[0] || lastVal;
+  const lineCol = lastVal >= firstVal ? G : R;
+  const maxHwm = hwms.length ? Math.max(...hwms.filter(Boolean)) : 0;
+
+  const data = [
+    {
+      type: "scatter", mode: "lines", name: "Equity",
+      x: pts.map((p) => p.timestamp), y: vals,
+      line: { color: lineCol, width: 2 },
+      fill: "tozeroy", fillcolor: `${lineCol}14`,
+    },
+    {
+      type: "scatter", mode: "lines", name: "HWM",
+      x: pts.map((p) => p.timestamp), y: hwms,
+      line: { color: Y, width: 1.5, dash: "dot" },
+    },
+  ];
+  const layout = {
+    paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+    margin: { t: 10, r: 20, b: 30, l: 55 },
+    showlegend: true,
+    legend: { orientation: "h", x: 0, y: 1.12, font: { size: 10, color: MUTE } },
+    xaxis: { color: MUTE, tickfont: { size: 9, color: MUTE }, gridcolor: "rgba(255,255,255,0.04)", zeroline: false },
+    yaxis: { color: MUTE, tickfont: { size: 9, color: MUTE }, gridcolor: "rgba(255,255,255,0.04)", zeroline: false },
+    font: { family: "IBM Plex Mono, monospace", color: TEXT },
+    height: 190,
+  };
+
+  return (
+    <Card
+      title="Equity Curve"
+      right={
+        <div style={{ display: "flex", gap: 16, fontSize: 12 }}>
+          <span style={{ color: MUTE }}>Actual: <strong style={{ color: lineCol, fontFamily: "monospace" }}>{n(lastVal)} USDT</strong></span>
+          <span style={{ color: MUTE }}>HWM: <strong style={{ color: Y, fontFamily: "monospace" }}>{n(maxHwm)} USDT</strong></span>
+        </div>
+      }
+    >
+      {typeof window !== "undefined" && pts.length > 0 ? (
+        <Plot data={data} layout={layout} config={{ displayModeBar: false, responsive: true }} style={{ width: "100%" }} />
+      ) : (
+        <div style={{ height: 190, display: "flex", alignItems: "center", justifyContent: "center", color: MUTE, fontSize: 12 }}>
+          Sin datos de equity aún.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Scanner Matrix ────────────────────────────────────────────────
+function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
+  const symbols = targetSymbols.length ? targetSymbols : lastScans.map((s) => s.symbol);
+  const scanMap = Object.fromEntries(lastScans.map((s) => [s.symbol, s]));
+
+  return (
+    <Card title={`Scanner · ${symbols.length} símbolos`}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 4, fontSize: 10, color: MUTE }}>
+        {["A", "B", "C", "D"].map((sc) => (
+          <span key={sc} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <ScenBadge sc={sc} size={18} />
+            {sc === "A" ? "Pullback" : sc === "B" ? "Sobreventa" : sc === "C" ? "Continuación" : "EMA Cross"}
+          </span>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: MUTE, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {["Símbolo", "Esc", "Estado", "RSI", "Vol×", "ATR%", "Flow", "OB%", "IA conf", "Motivo / Bloqueo"].map((h) => (
+                <th key={h} style={{ textAlign: h === "Símbolo" || h === "Motivo / Bloqueo" ? "left" : "center", padding: "6px 8px", borderBottom: `1px solid ${BORD}`, whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {symbols.map((sym) => {
+              const sc  = scanMap[sym] || {};
+              const rsi = Number(sc.rsi || 0);
+              const vol = Number(sc.volume_ratio || 0);
+              const atr = Number(sc.atr_pct || 0);
+              const flow = Number(sc.trade_flow_score || 0);
+              const ob  = Number(sc.orderbook_imbalance || 0);
+              const conf = Number(sc.ia_confidence || 0);
+              const isCandidate = sc.status === "candidate";
+              const isActive    = sym === focusSymbol;
+              const leftBol = isCandidate ? G : sc.scenario ? Y : "transparent";
+              const rsiCol  = rsi <= 36 ? B : rsi >= 70 ? R : rsi >= 52 ? Y : G;
+
+              return (
+                <tr key={sym} onClick={() => onSymbol(sym)}
+                  style={{ cursor: "pointer", background: isActive ? "rgba(87,193,255,0.06)" : "transparent", borderLeft: `3px solid ${leftBol}`, transition: "background 0.2s" }}>
+                  <td style={{ padding: "8px 8px", fontWeight: 700 }}>{sym}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}><ScenBadge sc={sc.scenario} /></td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>
+                    <span style={{ fontSize: 10, borderRadius: 4, padding: "2px 6px", background: isCandidate ? "rgba(18,217,139,0.15)" : "rgba(255,255,255,0.05)", color: isCandidate ? G : MUTE }}>
+                      {sc.status || "waiting"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", color: rsiCol, fontFamily: "monospace", fontWeight: 600 }}>{n(rsi, 1)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", color: vol >= 1 ? G : vol < 0.5 ? R : MUTE, fontFamily: "monospace" }}>{n(vol, 2)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: MUTE }}>{pct(atr)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: flow >= 0.55 ? G : flow < 0.44 ? R : Y }}>{Math.round(flow * 100)}%</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: ob >= 0.55 ? G : ob < 0.45 ? R : MUTE }}>{Math.round(ob * 100)}%</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>
+                    {sc.ia_consulted ? (
+                      <span style={{ color: conf >= 0.55 ? G : conf >= 0.45 ? Y : R, fontFamily: "monospace", fontWeight: 700 }}>{Math.round(conf * 100)}%</span>
+                    ) : (
+                      <span style={{ color: MUTE, fontSize: 10 }}>–</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "8px 8px", color: MUTE, fontSize: 11, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {sc.rejection_reason || sc.candidate_reason || "–"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+// ── Historial de trades ───────────────────────────────────────────
+function TradeHistoryPanel({ closedTrades }) {
+  const trades = [...(closedTrades || [])].reverse().slice(0, 10);
+  return (
+    <Card title={`Historial · ${closedTrades?.length || 0} trades`}>
+      {trades.length === 0 ? (
+        <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "20px 0" }}>Sin trades cerrados aún.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {trades.map((t, i) => {
+            const pnl = Number(t.pnl_usdt || t.realized_pnl_usdt || 0);
+            const pc = pnl >= 0 ? G : R;
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 10px", borderRadius: 8, background: `${pc}0a`, border: `1px solid ${pc}20` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <ScenBadge sc={t.scenario} size={18} />
+                  <span style={{ fontWeight: 600, fontSize: 12 }}>{t.symbol}</span>
+                  <span style={{ fontSize: 10, color: MUTE }}>{t.exit_reason}</span>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: pc, fontWeight: 700, fontFamily: "monospace", fontSize: 12 }}>{pnl >= 0 ? "+" : ""}{n(pnl, 4)} USDT</div>
+                  <div style={{ fontSize: 10, color: MUTE }}>{fmtDate(t.exit_time || t.closed_at)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Analytics ─────────────────────────────────────────────────────
+function AnalyticsPanel({ portfolio, equityHistory, closedTrades }) {
+  const trades  = closedTrades || [];
+  const winners = trades.filter((t) => Number(t.pnl_usdt || 0) > 0);
+  const losers  = trades.filter((t) => Number(t.pnl_usdt || 0) < 0);
+  const avgWin  = winners.length ? winners.reduce((s, t) => s + Number(t.pnl_usdt || 0), 0) / winners.length : 0;
+  const avgLoss = losers.length  ? Math.abs(losers.reduce((s, t) => s + Number(t.pnl_usdt || 0), 0) / losers.length) : 0;
+  const rr      = avgLoss > 0 ? avgWin / avgLoss : 0;
+  const winPct  = trades.length ? (winners.length / trades.length) * 100 : 0;
+  const sparkVals = equityHistory.slice(-30).map((p) => Number(p.equity_usdt || 0));
+  const pnlTotal  = Number(portfolio?.realized_pnl_usdt || 0);
+
+  const r = 36, cx = 50, cy = 50;
+  const circ = 2 * Math.PI * r;
+  const dashOffset = circ * (1 - winPct / 100);
+
+  return (
+    <Card title="Analytics">
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 16, alignItems: "center" }}>
+        <div>
+          <svg width={100} height={100} viewBox="0 0 100 100">
+            <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={8} />
+            <circle cx={cx} cy={cy} r={r} fill="none" stroke={winPct >= 50 ? G : R} strokeWidth={8}
+              strokeDasharray={circ} strokeDashoffset={dashOffset}
+              strokeLinecap="round" transform="rotate(-90, 50, 50)"
+              style={{ transition: "stroke-dashoffset 0.6s ease" }} />
+            <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle" fill={TEXT} fontSize={16} fontWeight={700}>{Math.round(winPct)}%</text>
+            <text x={cx} y={cy + 16} textAnchor="middle" fill={MUTE} fontSize={8}>WIN RATE</text>
+          </svg>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+            <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "5px 8px" }}>
+              <div style={{ fontSize: 9, color: MUTE }}>TOTAL</div>
+              <div style={{ fontWeight: 700 }}>{trades.length}</div>
+            </div>
+            <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "5px 8px" }}>
+              <div style={{ fontSize: 9, color: MUTE }}>R:R</div>
+              <div style={{ fontWeight: 700, color: rr >= 1 ? G : R }}>{n(rr, 2)}</div>
+            </div>
+            <div style={{ background: "rgba(18,217,139,0.08)", borderRadius: 8, padding: "5px 8px" }}>
+              <div style={{ fontSize: 9, color: MUTE }}>AVG WIN</div>
+              <div style={{ fontWeight: 700, color: G, fontFamily: "monospace", fontSize: 11 }}>+{n(avgWin, 4)}</div>
+            </div>
+            <div style={{ background: "rgba(235,75,97,0.08)", borderRadius: 8, padding: "5px 8px" }}>
+              <div style={{ fontSize: 9, color: MUTE }}>AVG LOSS</div>
+              <div style={{ fontWeight: 700, color: R, fontFamily: "monospace", fontSize: 11 }}>−{n(avgLoss, 4)}</div>
+            </div>
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE, marginBottom: 3 }}>
+              <span>PnL total</span>
+              <span style={{ color: tone(pnlTotal), fontFamily: "monospace", fontWeight: 700 }}>
+                {pnlTotal >= 0 ? "+" : ""}{n(pnlTotal)} USDT
+              </span>
+            </div>
+            <Spark values={sparkVals} color={pnlTotal >= 0 ? G : R} height={30} />
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ── Timeline de señales ───────────────────────────────────────────
+function SignalTimeline({ signalHistory }) {
+  const items = [...(signalHistory || [])].slice(-8).reverse();
+  return (
+    <Card title="Timeline de señales">
+      {items.length === 0 ? (
+        <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "16px 0" }}>Sin historial de señales.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((item, i) => {
+            const act = item.decision_action;
+            const isBuy = act === "buy";
+            const ac = isBuy ? G : act === "sell" ? R : MUTE;
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ width: 26, height: 26, borderRadius: 8, background: `${ac}18`, border: `1px solid ${ac}33`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 11, color: ac, fontWeight: 700 }}>
+                  {isBuy ? "▲" : act === "sell" ? "▼" : "●"}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{item.symbol || "–"}</span>
+                    <span style={{ fontSize: 10, color: MUTE, flexShrink: 0 }}>{fmtDate(item.timestamp)}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: MUTE }}>
+                    T:{item.technical_signal} · IA:{item.ai_signal} {Math.round((item.ai_confidence || 0) * 100)}%
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Guardrails detallados ─────────────────────────────────────────
+function GuardrailsPanel({ guardrails, scan }) {
+  const g = guardrails || {};
+  const checks = [
+    { label: "Señal ejecutable", ok: g.executable_signal },
+    { label: "Escenario A",      ok: g.scenario_a },
+    { label: "Escenario B",      ok: g.scenario_b },
+    { label: "Escenario C",      ok: g.scenario_c },
+    { label: "Escenario D",      ok: g.scenario_d },
+    { label: "IA confianza",     ok: g.ai_confident,   sub: g.ai_confidence ? `${pct(g.ai_confidence)}` : undefined },
+    { label: "IA aprobada",      ok: g.ai_approved },
+    { label: "IA alineada",      ok: g.ai_alignment },
+    { label: "Setup ready",      ok: g.ai_setup_ready },
+    { label: "Risk clear",       ok: g.ai_risk_clear },
+    { label: "Volatilidad",      ok: g.volatility_ready },
+    { label: "Volumen",          ok: g.volume_ready },
+    { label: "Micro spread",     ok: g.micro_ready },
+    { label: "Flow score",       ok: g.flow_ready },
+    { label: "Regime ready",     ok: g.regime_ready },
+    { label: "Score ok",         ok: g.score_ready,    sub: g.setup_score != null ? `score ${n(g.effective_setup_score, 2)} / min ${n(g.regime_min_score, 2)}` : undefined },
+    { label: "Cooldown libre",   ok: !g.cooldown_active },
+  ];
+  return (
+    <Card title={`Guardrails · ${scan?.symbol || "–"}`} right={<span style={{ fontSize: 10, color: g.ai_gate_ready ? G : MUTE }}>{g.ai_gate_ready ? "✓ GATE ABIERTO" : "● observando"}</span>}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {checks.map(({ label, ok, sub }) => (
+          <div key={label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+            <span style={{ color: ok ? G : "rgba(255,255,255,0.2)", fontSize: 13 }}>{ok ? "✓" : "○"}</span>
+            <span style={{ color: ok ? TEXT : MUTE }}>{label}</span>
+            {sub && <span style={{ color: MUTE, fontSize: 10 }}>({sub})</span>}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ── Header terminal ───────────────────────────────────────────────
+function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, controlBusy, sendControl }) {
+  const pnl = Number(portfolio?.realized_pnl_usdt || 0);
+  const dd  = Number(portfolio?.max_drawdown_pct  || 0);
+  return (
+    <header style={{
+      background: "rgba(6,12,20,0.98)", borderBottom: `1px solid ${BORD}`,
+      padding: "10px 24px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
+      position: "sticky", top: 0, zIndex: 100, backdropFilter: "blur(12px)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+          background: isOnline ? G : R,
+          boxShadow: isOnline ? `0 0 8px ${G}` : "none",
+          animation: isOnline ? "pulse 2s infinite" : "none",
+        }} />
+        <span style={{ fontWeight: 700, fontSize: 14, color: TEXT }}>OptiFerre Terminal</span>
+        <span style={{ fontSize: 11, color: MUTE, borderLeft: `1px solid ${BORD}`, paddingLeft: 10 }}>
+          {status?.symbol || "ETH/USDT"} · {status?.timeframe || "5m"} · {isOnline ? "LIVE" : "OFFLINE"}
+        </span>
+      </div>
+
+      <div style={{ flex: 1 }} />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 20, fontSize: 12 }}>
+        <div><span style={{ color: MUTE }}>Balance </span><strong style={{ fontFamily: "monospace" }}>{n(risk?.balance_usd)} USDT</strong></div>
+        <div><span style={{ color: MUTE }}>PnL </span><strong style={{ fontFamily: "monospace", color: tone(pnl) }}>{pnl >= 0 ? "+" : ""}{n(pnl)} USDT</strong></div>
+        <div><span style={{ color: MUTE }}>DD </span><strong style={{ fontFamily: "monospace", color: dd >= 0.03 ? R : MUTE }}>{pct(dd)}</strong></div>
+        <span style={{ fontSize: 11, color: MUTE }}>{fmtDate(payload?.serverTime)}</span>
+      </div>
+
+      <div style={{ display: "flex", gap: 6 }}>
+        {["running", "paused", "stopped"].map((s) => {
+          const active = control?.desired_state === s;
+          const col = s === "running" ? G : s === "paused" ? Y : R;
+          return (
+            <button key={s} disabled={controlBusy} onClick={() => sendControl(s)} style={{
+              padding: "5px 12px", borderRadius: 8, border: `1px solid ${active ? col + "66" : BORD}`,
+              cursor: controlBusy ? "not-allowed" : "pointer",
+              background: active ? `${col}18` : "rgba(255,255,255,0.03)",
+              color: active ? col : MUTE, fontSize: 11, fontWeight: 600, transition: "all 0.2s",
+            }}>
+              {s === "running" ? "▶ Activo" : s === "paused" ? "⏸ Pausar" : "⏹ Detener"}
+            </button>
+          );
+        })}
+        <Link href="/matriz" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${BORD}`, fontSize: 11, color: MUTE, textDecoration: "none", background: "rgba(255,255,255,0.03)" }}>
+          Matriz →
+        </Link>
+      </div>
+    </header>
+  );
+}
+
+// ── KPI Strip ─────────────────────────────────────────────────────
+function KpiStrip({ risk, portfolio, lastScans, control, preFlight, isOnline }) {
+  const pnl    = Number(portfolio?.realized_pnl_usdt || 0);
+  const equity = Number(risk?.equity_usd || 0);
+  const winRate = Number(portfolio?.win_rate_pct || 0);
+  const dd     = Number(portfolio?.max_drawdown_pct || 0);
+  const candidates = lastScans.filter((s) => s.status === "candidate").length;
+  const total  = (portfolio?.wins || 0) + (portfolio?.losses || 0);
+
+  const kpis = [
+    { label: "Equity USDT",     value: `${n(equity)} $`,    color: TEXT },
+    { label: "PnL realizado",   value: `${pnl >= 0 ? "+" : ""}${n(pnl)} $`,  color: tone(pnl) },
+    { label: "Win Rate",        value: `${n(winRate)}%`,     color: winRate >= 50 ? G : R, sub: `${portfolio?.wins || 0}W / ${portfolio?.losses || 0}L` },
+    { label: "Max Drawdown",    value: pct(dd),              color: dd >= 0.03 ? R : dd >= 0.015 ? Y : G },
+    { label: "Total trades",    value: String(total),        color: MUTE },
+    { label: "Candidatas",      value: String(candidates),   color: candidates > 0 ? G : MUTE },
+    { label: "Pre-flight",      value: preFlight?.ok ? "VERDE" : "BLOQUEADO", color: preFlight?.ok ? G : R },
+    { label: "Estado",          value: (control?.desired_state || "running").toUpperCase(), color: control?.desired_state === "running" ? G : R },
+  ];
+
+  return (
+    <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+      {kpis.map((k, i) => (
+        <div key={i} style={{ background: CARD, border: `1px solid ${BORD}`, borderRadius: 12, padding: "10px 16px", flexShrink: 0, minWidth: 110 }}>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em" }}>{k.label}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, fontFamily: "monospace", color: k.color, marginTop: 2 }}>{k.value}</div>
+          {k.sub && <div style={{ fontSize: 10, color: MUTE }}>{k.sub}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── COMPONENTE PRINCIPAL ──────────────────────────────────────────
+export default function DashboardClient({ initialData }) {
+  const [payload, setPayload]       = useState(initialData);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res  = await fetch("/api/state", { cache: "no-store" });
+      const next = await res.json();
+      setPayload(next);
+      setLastRefresh(new Date());
+    } catch {
+      /* silent */
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  // ── Extraer estado ──────────────────────────────────────────────
+  const state          = payload?.state        || {};
+  const status         = payload?.status       || {};
+  const control        = payload?.control      || {};
+  const risk           = state?.risk           || {};
+  const portfolio      = state?.portfolio      || {};
+  const decision       = state?.decision       || {};
+  const ai             = state?.ai_signal      || {};
+  const technicalSignal = state?.technical_signal || {};
+  const signalHistory  = payload?.signalHistory || [];
+  const openPositions  = payload?.openPositions || state?.open_positions || [];
+  const closedTrades   = payload?.closedTrades  || state?.closed_trades  || [];
+  const equityHistory  = payload?.equityHistory || [];
+  const lastScans      = state?.last_scans      || [];
+  const targetSymbols  = state?.target_symbols  || [];
+  const preFlight      = payload?.preFlight     || {};
+  const openPosition   = state?.open_position   || null;
+
+  const [focusSymbol, setFocusSymbol] = useState("");
+  const activeSymbol = state?.active_symbol || null;
+
+  useEffect(() => {
+    const pref = activeSymbol || openPosition?.symbol || lastScans[0]?.symbol || targetSymbols[0] || "";
+    if (pref && !focusSymbol) setFocusSymbol(pref);
+  }, [activeSymbol, openPosition, lastScans, targetSymbols]);
+
+  const isOnline = useMemo(() => {
+    const hb  = status?.heartbeat_at;
+    if (!hb) return false;
+    const ref = payload?.serverTime ? new Date(payload.serverTime).getTime() : NaN;
+    if (isNaN(ref)) return false;
+    return ref - new Date(hb).getTime() < 120000;
+  }, [payload?.serverTime, status?.heartbeat_at]);
+
+  const focusScan = useMemo(() => {
+    if (!lastScans.length) return null;
+    return lastScans.find((s) => s.symbol === focusSymbol) || lastScans.find((s) => s.symbol === activeSymbol) || lastScans[0];
+  }, [lastScans, focusSymbol, activeSymbol]);
+
+  const focusAi         = focusScan?.ai_signal || ai;
+  const focusGuardrails = focusScan?.guardrails || decision;
+
+  async function sendControl(desiredState) {
+    setControlBusy(true);
+    try {
+      await fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ desiredState, reason: `Cambio a ${desiredState} desde terminal.` }),
+      });
+      await refresh();
+    } finally {
+      setControlBusy(false);
+    }
+  }
+
+  const body = {
+    padding: "14px 20px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+    maxWidth: 1800,
+    margin: "0 auto",
+    width: "100%",
+  };
+
+  const killActive = Boolean(risk?.kill_switch_triggered);
+  const botStopped = control?.desired_state === "stopped";
+  const showAlert  = killActive || !isOnline || botStopped;
+
+  return (
+    <div style={{ minHeight: "100vh", background: BG, color: TEXT, fontFamily: "'IBM Plex Sans','Segoe UI',sans-serif" }}>
+      <TerminalHeader
+        status={status} isOnline={isOnline} control={control} risk={risk}
+        portfolio={portfolio} payload={payload} controlBusy={controlBusy} sendControl={sendControl}
+      />
+
+      <div style={body}>
+        {/* KPI strip */}
+        <KpiStrip risk={risk} portfolio={portfolio} lastScans={lastScans} control={control} preFlight={preFlight} isOnline={isOnline} />
+
+        {/* Alert banner */}
+        {showAlert && (
+          <div style={{ background: "rgba(235,75,97,0.12)", border: `1px solid rgba(235,75,97,0.35)`, borderRadius: 12, padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 18 }}>⚠</span>
+            <span style={{ fontSize: 13, color: R, fontWeight: 600 }}>
+              {killActive ? "Kill Switch activo" : !isOnline ? "Bot offline · sin heartbeat reciente" : "Bot detenido"} · {status?.detail || "Verificar Coolify"}
+            </span>
+          </div>
+        )}
+
+        {/* Tres paneles principales */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+          <PositionPanel openPosition={openPosition} openPositions={openPositions} />
+          <AiPanel ai={focusAi} scan={focusScan} decision={decision} />
+          <MarketPanel
+            scan={focusScan} technicalSignal={technicalSignal}
+            targetSymbols={targetSymbols.length ? targetSymbols : lastScans.map((s) => s.symbol)}
+            onSymbol={setFocusSymbol}
+          />
+        </div>
+
+        {/* Equity curve */}
+        <EquityPanel equityHistory={equityHistory} />
+
+        {/* Scanner completo */}
+        <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} />
+
+        {/* Fila inferior: trades + analytics + timeline */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+          <TradeHistoryPanel closedTrades={closedTrades} />
+          <AnalyticsPanel portfolio={portfolio} equityHistory={equityHistory} closedTrades={closedTrades} />
+          <SignalTimeline signalHistory={signalHistory} />
+        </div>
+
+        {/* Guardrails detallados */}
+        <GuardrailsPanel guardrails={focusGuardrails} scan={focusScan} />
+
+        {/* Footer */}
+        <div style={{ fontSize: 10, color: MUTE, textAlign: "center", paddingBottom: 12 }}>
+          OptiFerre Terminal v2.0 · Refresh automático 5s · Último: {lastRefresh ? lastRefresh.toLocaleTimeString() : "–"}
+          &nbsp;·&nbsp;
+          <Link href="/matriz" style={{ color: MUTE, textDecoration: "underline" }}>Ver Matriz completa</Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 

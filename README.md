@@ -132,7 +132,8 @@ Compuerta vigente por escenario:
 
 - Escenario `A`: la IA puede aprobar con `setup_quality=medium` o `high` si mantiene aprobación explícita, alineación y confianza suficiente. Los `risk_flags` siguen registrándose en telemetría, pero ya no bloquean por sí solos este escenario si la IA aprueba el setup.
 - Escenario `B`: compuerta adaptativa para evitar sobrebloqueo. Se aprueba con `setup_quality=high`, o con `setup_quality=medium` cuando la convicción es alta (`confidence >= max(AI_CONFIDENCE_THRESHOLD, 0.66)`) y no hay `risk_flags` críticos. Se tolera como máximo 1 `risk_flag` no crítico.
-- Escenario `C`: continuación de tendencia para scalping. Solo aplica cuando hay momentum sano (`green_candle`, `rsi_slope > 0`, `volume_acceleration >= 1.0`) y exige `setup_quality=high` o `medium` con confianza robusta y confirmación microestructural.
+- Escenario `C`: continuación de tendencia. RSI por encima del umbral A (dinámico, por defecto 52) hasta 70, vela verde, EMA slow slope positivo y algo de aceleración de volumen (`volume_acceleration ≥ 1.0` o `volume_ratio ≥ 0.75`). Admite `setup_quality=medium` con confirmación microestructural.
+- Escenario `D` *(nuevo)*: cruce alcista de EMA rápida (9) sobre EMA lenta (20) con volumen. Captura el momento exacto del giro de tendencia antes de que el RSI suba. Condiciones: `bullish_cross=True`, RSI 40–65, `volume_ratio ≥ 0.65`, EMA slow slope ≥ 0. Prioridad mayor que C pero menor que A/B.
 
 Además, la petición a OpenRouter ya no evalúa OHLCV “a ciegas”: ahora recibe el contexto del setup técnico candidato (`scenario`, `candidate_signal`, `atr_pct`, `volume_ratio`, etc.) para que actúe como filtro de confirmación, no como generador de ideas desde cero.
 

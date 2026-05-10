@@ -91,19 +91,22 @@ def _compute_setup_score(
     casi todo (rebote desde sobreventa con volumen creciente, vela fuerte
     verde y RSI subiendo).
     """
-    if scenario not in {"A", "B", "C"}:
+    if scenario not in {"A", "B", "C", "D"}:
         return 0.0
 
     # 1. RSI sweet spot por escenario (16%)
     if scenario == "A":
-        # Pullback ideal: RSI 30-45
-        rsi_score = max(0.0, 1.0 - abs(rsi - 38) / 25)
+        # Pullback ideal: RSI 28-52 (zona de recuperacion en tendencia)
+        rsi_score = max(0.0, 1.0 - abs(rsi - 42) / 28)
     elif scenario == "B":
         # Sobreventa extrema: cuanto mas bajo, mejor (cap en 18)
-        rsi_score = max(0.0, min(1.0, (32 - rsi) / 14))
+        rsi_score = max(0.0, min(1.0, (36 - rsi) / 18))
+    elif scenario == "D":
+        # EMA cross: momentum construyendose, zona 48-58
+        rsi_score = max(0.0, 1.0 - abs(rsi - 53) / 13)
     else:
         # Continuacion de tendencia: zona de momentum sano, sin sobre-extenderse.
-        rsi_score = max(0.0, 1.0 - abs(rsi - 58) / 16)
+        rsi_score = max(0.0, 1.0 - abs(rsi - 60) / 14)
 
     # 2. RSI slope subiendo = recuperacion confirmada (16%)
     rsi_slope_score = max(0.0, min(1.0, rsi_slope / 8.0))
@@ -117,8 +120,11 @@ def _compute_setup_score(
     # 5. BB position (16%):
     # - A/B: reversion, mejor cerca de BB lower.
     # - C: continuacion, mejor en la mitad-superior sin estar totalmente extendido.
+    # - D: cross, zona media (precio saliendo de lower a mid)
     if scenario in {"A", "B"}:
         bb_score = max(0.0, 1.0 - bb_position_pct) if bb_position_pct < 0.5 else 0.0
+    elif scenario == "D":
+        bb_score = max(0.0, 1.0 - abs(bb_position_pct - 0.50) / 0.50)
     else:
         bb_score = max(0.0, 1.0 - abs(bb_position_pct - 0.65) / 0.35)
 
@@ -197,12 +203,22 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
     # Continuacion de tendencia con momentum sano (evita depender solo de RSI bajo).
     ema_slow_slope = float(latest["ema_slow_slope"])
 
+    # Escenario C: continuacion de momentum (RSI por encima del umbral A, no sobreextendido)
     scenario_c = bool(
         close > ema_slow
         and green_candle
         and ema_slow_slope > 0
-        and 52 <= rsi <= 68
-        and (volume_acceleration >= 1.05 or float(latest["volume_ratio"]) >= 0.90)
+        and rsi_max_a < rsi <= 70
+        and (volume_acceleration >= 1.0 or float(latest["volume_ratio"]) >= 0.75)
+    )
+
+    # Escenario D: cruce alcista de EMA rapida sobre EMA lenta con volumen
+    # Captura el momento exacto del giro de tendencia antes de que el RSI suba.
+    scenario_d = bool(
+        bullish_cross
+        and 40 <= rsi <= 65
+        and float(latest["volume_ratio"]) >= 0.65
+        and ema_slow_slope >= 0
     )
 
     if scenario_a:
@@ -211,6 +227,10 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
     elif scenario_b:
         signal = "buy"
         scenario = "B"
+    elif scenario_d:
+        # EMA cross tiene prioridad sobre C (senyal tecnica mas fuerte y mas rara)
+        signal = "buy"
+        scenario = "D"
     elif scenario_c:
         signal = "buy"
         scenario = "C"
@@ -243,6 +263,7 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
         "scenario_a": scenario_a,
         "scenario_b": scenario_b,
         "scenario_c": scenario_c,
+        "scenario_d": scenario_d,
         "confidence": round(float(confidence), 4),
         "rsi": round(rsi, 2),
         "close": round(close, 4),
