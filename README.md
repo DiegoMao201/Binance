@@ -132,6 +132,7 @@ Compuerta vigente por escenario:
 
 - Escenario `A`: la IA puede aprobar con `setup_quality=medium` o `high` si mantiene aprobación explícita, alineación y confianza suficiente. Los `risk_flags` siguen registrándose en telemetría, pero ya no bloquean por sí solos este escenario si la IA aprueba el setup.
 - Escenario `B`: compuerta adaptativa para evitar sobrebloqueo. Se aprueba con `setup_quality=high`, o con `setup_quality=medium` cuando la convicción es alta (`confidence >= max(AI_CONFIDENCE_THRESHOLD, 0.66)`) y no hay `risk_flags` críticos. Se tolera como máximo 1 `risk_flag` no crítico.
+- Escenario `C`: continuación de tendencia para scalping. Solo aplica cuando hay momentum sano (`green_candle`, `rsi_slope > 0`, `volume_acceleration >= 1.0`) y exige `setup_quality=high` o `medium` con confianza robusta y confirmación microestructural.
 
 Además, la petición a OpenRouter ya no evalúa OHLCV “a ciegas”: ahora recibe el contexto del setup técnico candidato (`scenario`, `candidate_signal`, `atr_pct`, `volume_ratio`, etc.) para que actúe como filtro de confirmación, no como generador de ideas desde cero.
 
@@ -174,7 +175,7 @@ spot público:
   bajistas confirmadas en 15m sin matar pullbacks legítimos.
 
 Estas llamadas se ejecutan **solo cuando el símbolo es candidato real**
-(escenario A/B + volumen + ATR válido), por lo que el costo de rate-limit
+(escenario A/B/C + volumen + ATR válido), por lo que el costo de rate-limit
 se mantiene acotado: una sola consulta a `/api/v3/depth` y `/api/v3/klines`
 por candidato por ciclo.
 

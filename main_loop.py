@@ -364,10 +364,21 @@ def _build_guardrails(
     # Gate adaptativo:
     # - Escenario A: medium/high permitido; risk flags no bloquean por si solos.
     # - Escenario B: permite medium si la conviccion es alta y no hay flags criticos.
-    #   Asi evitamos bloquear entradas validas por rigidez binaria.
+    # - Escenario C: continuacion de tendencia, exige alineacion IA + micro o calidad alta.
     if scenario == "A":
         ai_setup_ready = setup_quality in {"medium", "high"}
         ai_risk_clear = len(critical_flags_present) == 0
+    elif scenario == "C":
+        ai_setup_ready = bool(
+            setup_quality == "high"
+            or (
+                setup_quality == "medium"
+                and ai_confidence >= max(ai_conf_threshold, 0.60)
+                and len(critical_flags_present) == 0
+                and (strong_micro or orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.52))
+            )
+        )
+        ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
     else:
         high_ready = setup_quality == "high" and len(critical_flags_present) == 0
         medium_ready = (
@@ -429,7 +440,11 @@ def _build_guardrails(
         regime_min_score = max(0.50, 0.58 - score_relax)
     elif regime == "trending_up":
         regime_ready = True
-        regime_min_score = max(0.30, 0.40 - score_relax)
+        # En tendencia alcista dejamos pasar un poco mas a C, pero no abrimos compuertas.
+        if scenario == "C":
+            regime_min_score = max(0.34, 0.44 - score_relax)
+        else:
+            regime_min_score = max(0.30, 0.40 - score_relax)
     else:  # range
         regime_ready = True
         regime_min_score = max(0.38, 0.50 - score_relax)
@@ -439,12 +454,13 @@ def _build_guardrails(
     cooldown_active = _is_in_cooldown(order_history, settings.trade_cooldown_minutes)
     symbol_cooldown_active = _is_symbol_in_cooldown(order_history, symbol) if symbol else False
     insufficient_backoff_active, insufficient_failures = _insufficient_balance_backoff_active(order_history)
-    executable_signal = signal == "buy" and scenario in {"A", "B"}
+    executable_signal = signal == "buy" and scenario in {"A", "B", "C"}
 
     return {
         "scenario": scenario,
         "scenario_a": bool(technical_signal.get("scenario_a")),
         "scenario_b": bool(technical_signal.get("scenario_b")),
+        "scenario_c": bool(technical_signal.get("scenario_c")),
         "same_direction": same_direction,
         "ai_confident": ai_confident,
         "ai_approved": ai_approved,
@@ -480,14 +496,22 @@ def _build_guardrails(
 def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any]) -> tuple[bool, str]:
 
     scenario = technical_signal.get("scenario")
-    if scenario not in {"A", "B"}:
-        return False, "sin escenario A ni B"
+    if scenario not in {"A", "B", "C"}:
+        return False, "sin escenario A/B/C"
     volume_ratio = float(technical_signal.get("volume_ratio", 0.0))
     if volume_ratio < settings.min_volume_ratio:
         return False, "volumen insuficiente"
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     if not (settings.min_atr_pct <= atr_pct <= settings.max_atr_pct):
         return False, "volatilidad fuera de rango"
+    # Escenario C (continuacion) exige algo mas de traccion para no comprar ruido en 1m.
+    if scenario == "C":
+        if not bool(technical_signal.get("green_candle")):
+            return False, "escenario C sin vela verde"
+        if float(technical_signal.get("rsi_slope", 0.0)) <= 0.0:
+            return False, "escenario C sin momentum RSI"
+        if float(technical_signal.get("volume_acceleration", 0.0)) < 1.0:
+            return False, "escenario C sin aceleracion de volumen"
     return True, f"candidato escenario {scenario}"
 
 
@@ -499,7 +523,7 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         status = "locked"
     elif candidate:
         status = "candidate"
-    elif ts.get("scenario") in {"A", "B"}:
+    elif ts.get("scenario") in {"A", "B", "C"}:
         status = "scenario_only"
     else:
         status = "waiting"
@@ -512,7 +536,7 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
     elif candidate:
         rejection_stage = "candidate"
         rejection_reason = "esperando validacion IA/ejecucion"
-    elif ts.get("scenario") in {"A", "B"}:
+    elif ts.get("scenario") in {"A", "B", "C"}:
         rejection_stage = "guardrail"
     return {
         "symbol": scan.get("symbol"),
@@ -520,6 +544,7 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "scenario": ts.get("scenario"),
         "scenario_a": bool(ts.get("scenario_a")),
         "scenario_b": bool(ts.get("scenario_b")),
+        "scenario_c": bool(ts.get("scenario_c")),
         "regime": ts.get("regime"),
         "setup_score": ts.get("setup_score"),
         "spread_pct": ts.get("spread_pct"),

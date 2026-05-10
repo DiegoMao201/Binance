@@ -45,6 +45,7 @@ class OpenRouterAnalyzer:
             "scenario": ts.get("scenario"),
             "scenario_a": bool(ts.get("scenario_a", False)),
             "scenario_b": bool(ts.get("scenario_b", False)),
+            "scenario_c": bool(ts.get("scenario_c", False)),
             # --- Momentum técnico ---
             "rsi": ts.get("rsi"),
             "rsi_slope": ts.get("rsi_slope"),          # >0 = RSI recuperándose, señal real

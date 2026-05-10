@@ -91,16 +91,19 @@ def _compute_setup_score(
     casi todo (rebote desde sobreventa con volumen creciente, vela fuerte
     verde y RSI subiendo).
     """
-    if scenario not in {"A", "B"}:
+    if scenario not in {"A", "B", "C"}:
         return 0.0
 
     # 1. RSI sweet spot por escenario (16%)
     if scenario == "A":
         # Pullback ideal: RSI 30-45
         rsi_score = max(0.0, 1.0 - abs(rsi - 38) / 25)
-    else:
+    elif scenario == "B":
         # Sobreventa extrema: cuanto mas bajo, mejor (cap en 18)
         rsi_score = max(0.0, min(1.0, (32 - rsi) / 14))
+    else:
+        # Continuacion de tendencia: zona de momentum sano, sin sobre-extenderse.
+        rsi_score = max(0.0, 1.0 - abs(rsi - 58) / 16)
 
     # 2. RSI slope subiendo = recuperacion confirmada (16%)
     rsi_slope_score = max(0.0, min(1.0, rsi_slope / 8.0))
@@ -111,8 +114,13 @@ def _compute_setup_score(
     # 4. Volume acceleration: ultima vela vs ultimas 3 (16%)
     accel_score = max(0.0, min(1.0, (volume_acceleration - 1.0) / 1.5))
 
-    # 5. BB position: cerca del lower es ideal para reversion (16%)
-    bb_score = max(0.0, 1.0 - bb_position_pct) if bb_position_pct < 0.5 else 0.0
+    # 5. BB position (16%):
+    # - A/B: reversion, mejor cerca de BB lower.
+    # - C: continuacion, mejor en la mitad-superior sin estar totalmente extendido.
+    if scenario in {"A", "B"}:
+        bb_score = max(0.0, 1.0 - bb_position_pct) if bb_position_pct < 0.5 else 0.0
+    else:
+        bb_score = max(0.0, 1.0 - abs(bb_position_pct - 0.65) / 0.35)
 
     # 6. Vela fuerte verde + momentum (20%)
     body_score = candle_body_pct
@@ -186,6 +194,16 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
     # Logica OR
     scenario_a = bool(rsi <= rsi_max_a and close > ema_slow)            # Pullback con tendencia
     scenario_b = bool(rsi <= rsi_max_b and green_candle)                # Sobreventa extrema con freno
+    # Continuacion de tendencia con momentum sano (evita depender solo de RSI bajo).
+    ema_slow_slope = float(latest["ema_slow_slope"])
+
+    scenario_c = bool(
+        close > ema_slow
+        and green_candle
+        and ema_slow_slope > 0
+        and 52 <= rsi <= 68
+        and (volume_acceleration >= 1.05 or float(latest["volume_ratio"]) >= 0.90)
+    )
 
     if scenario_a:
         signal = "buy"
@@ -193,6 +211,9 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
     elif scenario_b:
         signal = "buy"
         scenario = "B"
+    elif scenario_c:
+        signal = "buy"
+        scenario = "C"
     elif bearish_cross or overbought:
         signal = "sell"
         scenario = None
@@ -221,6 +242,7 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
         "scenario": scenario,
         "scenario_a": scenario_a,
         "scenario_b": scenario_b,
+        "scenario_c": scenario_c,
         "confidence": round(float(confidence), 4),
         "rsi": round(rsi, 2),
         "close": round(close, 4),
