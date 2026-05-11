@@ -514,6 +514,15 @@ def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any
     if not (settings.min_atr_pct <= atr_pct <= settings.max_atr_pct):
         return False, "volatilidad fuera de rango"
     # Escenario C (continuacion) exige algo mas de traccion para no comprar ruido en 5m.
+    # Escenario A: pullback con tendencia. RSI debe estar rebotando, no aun cayendo.
+    # rsi_slope = rsi[-1] - rsi[-3]; si es muy negativo compramos en plena caida.
+    if scenario == "A":
+        if float(technical_signal.get("rsi_slope", 0.0)) < -1.0:
+            return False, "escenario A RSI todavia cayendo (slope < -1.0)"
+    # Escenario B: sobreventa extrema. Exigimos que el RSI al menos haya frenado.
+    if scenario == "B":
+        if float(technical_signal.get("rsi_slope", 0.0)) < -1.5:
+            return False, "escenario B RSI cayendo con fuerza (slope < -1.5)"
     if scenario == "C":
         if not bool(technical_signal.get("green_candle")):
             return False, "escenario C sin vela verde"

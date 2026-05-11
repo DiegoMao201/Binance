@@ -237,9 +237,9 @@ class ActiveTradeMonitor:
                     "Si ya hay trailing_tier > 0 el sistema lo maneja; no duplicar con UPDATE_SL.",
                 ],
                 "EMERGENCY_CLOSE": [
-                    "SOLO si hold_minutes >= 5 Y tape_momentum_pct < -0.5 Y orderbook_imbalance < 0.35 Y unrealized_pnl_pct < -0.50",
-                    "O: hold_minutes >= 5 Y unrealized_pnl_pct < -0.80 Y volume_ratio < 0.30 (capitulacion de volumen severa)",
-                    "O: hold_minutes > 60 Y unrealized_pnl_pct < -0.10 Y mfe_pct < 0.10 (muerte lenta sin traccion tras 1 hora)",
+                    "SOLO si hold_minutes >= 5 Y tape_momentum_pct < -0.5 Y orderbook_imbalance < 0.35 Y unrealized_pnl_pct < -0.65",
+                    "O: hold_minutes >= 5 Y unrealized_pnl_pct < -0.90 Y volume_ratio < 0.30 (capitulacion de volumen severa)",
+                    "O: hold_minutes > 90 Y unrealized_pnl_pct < -0.15 Y mfe_pct < 0.10 (muerte lenta sin traccion tras 1.5 horas)",
                     "NUNCA cerrar si hold_minutes < 5. El mercado necesita tiempo para reaccionar tras la entrada.",
                     "Cierre inmediato a mercado. Usar solo en situaciones de riesgo real, no por volatilidad normal.",
                 ],
@@ -300,8 +300,14 @@ class ActiveTradeMonitor:
             )
 
         # ── SEÑALES DE RIESGO U OPORTUNIDAD → CONSULTAR IA ────────────────────
-        if pnl_pct < -0.15:
-            return True, f"risk: pnl={pnl_pct:.3f}% en zona de perdida"
+        # Catastrofico inmediato: precio se mueve -0.50% o mas sin importar el tiempo.
+        if pnl_pct < -0.50:
+            return True, f"risk: pnl={pnl_pct:.3f}% catastrofico – consulta inmediata"
+
+        # PnL negativo moderado: solo consultar tras 3 minutos (spread+fees normales
+        # ya absorbidos). Antes de ese tiempo el mercado simplemente no reacciono aun.
+        if pnl_pct < -0.15 and hold_min >= 3:
+            return True, f"risk: pnl={pnl_pct:.3f}% en zona de perdida (hold={hold_min:.0f}min)"
 
         if trailing_tier == 0 and pnl_pct >= 0.20:
             return True, (
@@ -309,14 +315,15 @@ class ActiveTradeMonitor:
                 "posible UPDATE_SL"
             )
 
-        if trade_flow < 0.40 and pnl_pct < 0:
-            return True, f"risk: flow={trade_flow:.2f} < 0.40 con pnl negativo"
+        # Señales de microestructura negativa: igual, dar 3 min de margen primero.
+        if trade_flow < 0.40 and pnl_pct < 0 and hold_min >= 3:
+            return True, f"risk: flow={trade_flow:.2f} < 0.40 con pnl negativo (hold={hold_min:.0f}min)"
 
-        if ob_imbalance < 0.38 and pnl_pct < 0:
-            return True, f"risk: ob={ob_imbalance:.2f} bearish con pnl negativo"
+        if ob_imbalance < 0.38 and pnl_pct < 0 and hold_min >= 3:
+            return True, f"risk: ob={ob_imbalance:.2f} bearish con pnl negativo (hold={hold_min:.0f}min)"
 
-        if tape_mom < -0.40:
-            return True, f"risk: tape_momentum={tape_mom:.3f}% muy negativo"
+        if tape_mom < -0.40 and hold_min >= 2:
+            return True, f"risk: tape_momentum={tape_mom:.3f}% muy negativo (hold={hold_min:.0f}min)"
 
         if volume_ratio > 1.8:
             return True, f"alert: volume_ratio={volume_ratio:.2f} (spike inusual)"
