@@ -1168,9 +1168,18 @@ export default function DashboardClient({ initialData }) {
         {closeFailedFlag && (
           <div style={{ background: `${Y}12`, border: `1px solid ${Y}44`, borderRadius: 12, padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 18 }}>⚠</span>
-            <span style={{ fontSize: 13, color: Y, fontWeight: 600 }}>
+            <span style={{ fontSize: 13, color: Y, fontWeight: 600, flex: 1 }}>
               Cierre manual falló: {control?.manual_close_error || "error desconocido"} · El bot reintentará en el próximo ciclo · Verifica saldo libre en Binance
             </span>
+            <button
+              onClick={async () => {
+                await fetch("/api/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_close_error" }) });
+                await refresh();
+              }}
+              style={{ background: "transparent", border: `1px solid ${Y}55`, borderRadius: 6, color: Y, fontSize: 12, padding: "4px 10px", cursor: "pointer", flexShrink: 0 }}
+            >
+              × Cerrar aviso
+            </button>
           </div>
         )}
 

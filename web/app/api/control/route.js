@@ -20,6 +20,19 @@ async function writeControlFile(payload) {
 
 export async function POST(request) {
   const body = await request.json();
+
+  // Acción especial: limpiar el flag de cierre fallido
+  if (body?.action === "clear_close_error") {
+    let current = {};
+    try { current = JSON.parse(await fs.readFile(CONTROL_PATH, "utf8")); } catch {}
+    const cleaned = { ...current };
+    delete cleaned.manual_close_result;
+    delete cleaned.manual_close_error;
+    delete cleaned.manual_close_executed_at;
+    await writeControlFile(cleaned);
+    return NextResponse.json({ ok: true });
+  }
+
   const desiredState = body?.desiredState;
   const reason = body?.reason || "Cambio solicitado desde el dashboard.";
 
