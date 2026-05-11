@@ -191,6 +191,8 @@ function buildPos(openPosition, openPositions) {
 // ── Panel: Posición viva ──────────────────────────────────────────
 function PositionPanel({ openPosition, openPositions }) {
   const pos = buildPos(openPosition, openPositions);
+  const [closeState, setCloseState] = useState("idle"); // idle | confirming | sending | done
+
   if (!pos) {
     return (
       <Card title="Posición">
@@ -202,6 +204,25 @@ function PositionPanel({ openPosition, openPositions }) {
       </Card>
     );
   }
+
+  const handleRotateClick = () => setCloseState("confirming");
+  const handleConfirm = async () => {
+    setCloseState("sending");
+    try {
+      const res = await fetch("/api/manual-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: pos.symbol }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCloseState("done");
+    } catch (err) {
+      console.error("Manual close error:", err);
+      setCloseState("idle");
+    }
+  };
+  const handleCancel = () => setCloseState("idle");
+
   const pnlCol = pos.pnl >= 0 ? G : R;
   const slRisk  = pos.sl > 0 && pos.entry > 0 ? Math.abs(pos.sl - pos.entry) / pos.entry : 0;
   const tpRange = pos.tp > 0 && pos.entry > 0 ? Math.abs(pos.tp - pos.entry) / pos.entry : 0;
@@ -267,6 +288,43 @@ function PositionPanel({ openPosition, openPositions }) {
           ))}
         </div>
       </div>
+
+      {/* ── Botón Rotar Capital ─────────────────────────────────── */}
+      {closeState === "idle" && (
+        <button onClick={handleRotateClick} style={{
+          width: "100%", padding: "9px 0", borderRadius: 8, border: `1px solid ${Y}44`,
+          background: `${Y}12`, color: Y, fontWeight: 700, fontSize: 12,
+          cursor: "pointer", letterSpacing: "0.04em", marginTop: 2,
+        }}>
+          ⟳ Rotar Capital (Cerrar)
+        </button>
+      )}
+      {closeState === "confirming" && (
+        <div style={{ border: `1px solid ${R}44`, borderRadius: 8, padding: "10px 12px", background: `${R}0a`, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: TEXT, fontWeight: 600 }}>¿Cerrar {pos.symbol} ahora?</div>
+          <div style={{ fontSize: 11, color: MUTE }}>El bot cerrará a mercado en el próximo ciclo (≤60s). Esta acción se registrará en el historial.</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleConfirm} style={{
+              flex: 1, padding: "7px 0", borderRadius: 6, border: `1px solid ${R}55`,
+              background: `${R}22`, color: R, fontWeight: 700, fontSize: 12, cursor: "pointer",
+            }}>Confirmar cierre</button>
+            <button onClick={handleCancel} style={{
+              flex: 1, padding: "7px 0", borderRadius: 6, border: `1px solid ${BORD}`,
+              background: "transparent", color: MUTE, fontWeight: 600, fontSize: 12, cursor: "pointer",
+            }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+      {closeState === "sending" && (
+        <div style={{ textAlign: "center", fontSize: 12, color: Y, padding: "8px 0", opacity: 0.8 }}>
+          Enviando orden al bot…
+        </div>
+      )}
+      {closeState === "done" && (
+        <div style={{ textAlign: "center", fontSize: 12, color: G, padding: "8px 0", border: `1px solid ${G}33`, borderRadius: 8, background: `${G}0a` }}>
+          ✓ Orden enviada — el bot cerrará en el próximo ciclo
+        </div>
+      )}
     </Card>
   );
 }
