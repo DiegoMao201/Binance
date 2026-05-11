@@ -1142,6 +1142,8 @@ export default function DashboardClient({ initialData }) {
   const botStopped = control?.desired_state === "stopped";
   const closeFailedFlag = control?.manual_close_result === "failed";
   const showAlert  = killActive || !isOnline || botStopped;
+  const isKillSwitchStop = botStopped && control?.updated_by === "kill_switch";
+  const [ksResetting, setKsResetting] = useState(false);
 
   return (
     <div style={{ minHeight: "100vh", background: BG, color: TEXT, fontFamily: "'IBM Plex Sans','Segoe UI',sans-serif" }}>
@@ -1158,9 +1160,26 @@ export default function DashboardClient({ initialData }) {
         {showAlert && (
           <div style={{ background: "rgba(235,75,97,0.12)", border: `1px solid rgba(235,75,97,0.35)`, borderRadius: 12, padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 18 }}>⚠</span>
-            <span style={{ fontSize: 13, color: R, fontWeight: 600 }}>
-              {killActive ? "Kill Switch activo" : !isOnline ? "Bot offline · sin heartbeat reciente" : "Bot detenido"} · {status?.detail || "Verificar Coolify"}
+            <span style={{ fontSize: 13, color: R, fontWeight: 600, flex: 1 }}>
+              {killActive ? "Kill Switch activo" : !isOnline ? "Bot offline · sin heartbeat reciente" : "Bot detenido"} · {control?.reason || status?.detail || "Verificar Coolify"}
             </span>
+            {isKillSwitchStop && (
+              <button
+                disabled={ksResetting}
+                onClick={async () => {
+                  setKsResetting(true);
+                  try {
+                    await fetch("/api/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reset_kill_switch" }) });
+                    await refresh();
+                  } finally {
+                    setKsResetting(false);
+                  }
+                }}
+                style={{ background: ksResetting ? "rgba(235,75,97,0.15)" : "rgba(235,75,97,0.25)", border: `1px solid rgba(235,75,97,0.55)`, borderRadius: 6, color: R, fontSize: 12, fontWeight: 700, padding: "6px 14px", cursor: ksResetting ? "default" : "pointer", flexShrink: 0, whiteSpace: "nowrap" }}
+              >
+                {ksResetting ? "Reseteando…" : "🔄 Resetear y Reiniciar"}
+              </button>
+            )}
           </div>
         )}
 
