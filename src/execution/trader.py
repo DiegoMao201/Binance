@@ -268,6 +268,19 @@ class TradeExecutor:
             return result
 
         sellable = min(amount, float(asset_balance.get("free", 0.0)))
+        # Si el activo esta bloqueado por un OCO activo (free~0 pero total>0),
+        # cancelamos todas las ordenes abiertas para liberar el saldo antes de vender.
+        if sellable < amount * 0.9 and float(asset_balance.get("total", 0.0)) >= amount * 0.9:
+            self.logger.info(
+                "close_position_market %s: activo bloqueado en OCO (free=%.6f total=%.6f). Cancelando ordenes abiertas.",
+                target_symbol, float(asset_balance.get("free", 0.0)), float(asset_balance.get("total", 0.0)),
+            )
+            try:
+                self.client.cancel_all_orders_for_symbol(target_symbol)
+                asset_balance = self.client.fetch_asset_balance(symbol=target_symbol)
+                sellable = min(amount, float(asset_balance.get("free", 0.0)))
+            except BinanceClientError as exc:
+                self.logger.warning("close_position_market %s: no se pudieron cancelar OCO previas: %s", target_symbol, exc)
         if sellable <= 0:
             result["status"] = "rejected"
             result["reason"] = "Saldo libre del activo es 0; nada para cerrar."

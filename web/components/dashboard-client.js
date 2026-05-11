@@ -234,6 +234,17 @@ function PositionPanel({ openPosition, openPositions }) {
         <span style={{ fontSize: 11, color: MUTE }}>{Math.round(pos.holdM)}min</span>
       </div>
 
+      {/* Banner: posición recuperada del exchange, datos de entrada son estimados */}
+      {pos.scenario === "recovered_live" && (
+        <div style={{ background: `${Y}10`, border: `1px solid ${Y}44`, borderRadius: 8, padding: "8px 12px", display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 14, flexShrink: 0 }}>⚠</span>
+          <div>
+            <div style={{ fontSize: 11, color: Y, fontWeight: 700, marginBottom: 2 }}>Posición recuperada del exchange</div>
+            <div style={{ fontSize: 10, color: MUTE }}>El bot se reinició sin estado previo. Precio de entrada y SL/TP son estimados. Verifica en Binance antes de operar.</div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <div>
           <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>Entrada</div>
@@ -1077,6 +1088,7 @@ export default function DashboardClient({ initialData }) {
   const openPosition   = state?.open_position   || null;
   const tradeMonitorLog = payload?.tradeMonitorLog || [];
   const tradeMonitor   = state?.trade_monitor    || {};
+  const recoveryStatus = payload?.recoveryStatus  || {};
 
   const [focusSymbol, setFocusSymbol] = useState("");
   const activeSymbol = state?.active_symbol || null;
@@ -1128,6 +1140,7 @@ export default function DashboardClient({ initialData }) {
 
   const killActive = Boolean(risk?.kill_switch_triggered);
   const botStopped = control?.desired_state === "stopped";
+  const closeFailedFlag = control?.manual_close_result === "failed";
   const showAlert  = killActive || !isOnline || botStopped;
 
   return (
@@ -1141,12 +1154,22 @@ export default function DashboardClient({ initialData }) {
         {/* KPI strip */}
         <KpiStrip risk={risk} portfolio={portfolio} lastScans={lastScans} control={control} preFlight={preFlight} isOnline={isOnline} />
 
-        {/* Alert banner */}
+        {/* Alert banner — bot offline / kill switch / stopped */}
         {showAlert && (
           <div style={{ background: "rgba(235,75,97,0.12)", border: `1px solid rgba(235,75,97,0.35)`, borderRadius: 12, padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 18 }}>⚠</span>
             <span style={{ fontSize: 13, color: R, fontWeight: 600 }}>
               {killActive ? "Kill Switch activo" : !isOnline ? "Bot offline · sin heartbeat reciente" : "Bot detenido"} · {status?.detail || "Verificar Coolify"}
+            </span>
+          </div>
+        )}
+
+        {/* Alert banner — cierre manual falló (BNB bloqueado en OCO o error Binance) */}
+        {closeFailedFlag && (
+          <div style={{ background: `${Y}12`, border: `1px solid ${Y}44`, borderRadius: 12, padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 18 }}>⚠</span>
+            <span style={{ fontSize: 13, color: Y, fontWeight: 600 }}>
+              Cierre manual falló: {control?.manual_close_error || "error desconocido"} · El bot reintentará en el próximo ciclo · Verifica saldo libre en Binance
             </span>
           </div>
         )}

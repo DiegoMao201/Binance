@@ -1262,6 +1262,7 @@ def _recover_unmanaged_exchange_positions(
     settings: Settings,
     client: BinanceDataClient,
     logger: logging.Logger,
+    order_history: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     recovery_report: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1278,10 +1279,24 @@ def _recover_unmanaged_exchange_positions(
 
     tracked_symbols = {str(position.get("symbol") or "") for position in open_positions}
     recovered_positions = list(open_positions)
+    # Ventana de bloqueo post-cierre: si un simbolo fue cerrado recientemente
+    # (aparece en order_history con status submitted/simulated dentro de la ventana)
+    # no lo recuperamos para evitar el bucle closed → recovered_live → closed.
+    recovery_cooldown_minutes = max(settings.trade_cooldown_minutes, 15)  # minimo 15 min
 
     for symbol in settings.target_symbols:
         if symbol in tracked_symbols:
             recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": "already_tracked"})
+            continue
+
+        # Bloqueo cooldown: si este simbolo tuvo una orden reciente (cierre o entrada
+        # rechazada) NO lo recuperamos. Previene el bucle ghost-position.
+        if order_history and _is_symbol_in_cooldown(order_history, symbol, minutes=recovery_cooldown_minutes):
+            logger.debug(
+                "Recovery bloqueada para %s: simbolo en cooldown (%d min).",
+                symbol, recovery_cooldown_minutes,
+            )
+            recovery_report["skipped_symbols"].append({"symbol": symbol, "reason": f"symbol_in_cooldown_{recovery_cooldown_minutes}min"})
             continue
 
         try:
@@ -1721,7 +1736,7 @@ def run_cycle() -> None:
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
         live_mode = not settings.dry_run
-        open_positions, recovery_report = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger)
+        open_positions, recovery_report = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger, order_history)
         persist_history(settings.open_positions_file, open_positions)
         persist_state(settings.logs_dir / "recovery_status.json", recovery_report)
 
@@ -1746,72 +1761,97 @@ def run_cycle() -> None:
             )
             manual_exit_price: float | None = None
             manual_live_payload: dict[str, Any] = {}
+            manual_close_ok: bool = False  # guardabarros: solo avanzamos si el exchange confirmó
             if live_mode and target_pos.get("mode") == "live":
                 close_result = executor.close_position_market(target_pos)
                 if close_result.get("status") not in {"submitted", "simulated_close"}:
                     logger.error(
-                        "Manual close FALLO para %s: %s. Flag limpiado de todas formas para no bloquear.",
+                        "Manual close FALLO para %s: %s. Posicion NO eliminada del estado. Reintenta con el boton.",
                         target_pos.get("symbol"),
                         close_result,
                     )
+                    # Limpiar flag para no bloquear el ciclo, pero NO modificar open_positions.
+                    persist_state(
+                        settings.control_file,
+                        {
+                            **control_for_manual,
+                            "manual_close_request": False,
+                            "manual_close_symbol": None,
+                            "manual_close_executed_at": datetime.now(timezone.utc).isoformat(),
+                            "manual_close_result": "failed",
+                            "manual_close_error": str(close_result.get("reason", "unknown")),
+                        },
+                    )
+                    # Notificar el fallo via Telegram si live
+                    if live_mode:
+                        _notify_safe(notifier, logger, "error", {
+                            "title": "Manual Close FALLO",
+                            "symbol": target_pos.get("symbol"),
+                            "reason": close_result.get("reason", "unknown"),
+                        })
                 else:
                     manual_exit_price = float(close_result.get("avg_price") or 0.0) or None
                     manual_live_payload = close_result
-            if manual_exit_price is None:
-                # Dry run o fallo de live: usar mark_price como precio de salida estimado.
-                manual_exit_price = float(
-                    target_pos.get("mark_price")
-                    or target_pos.get("entry_price")
-                    or 0.0
+                    manual_close_ok = True
+            else:
+                # Dry run o posicion simulada: proceder sin llamar al exchange.
+                manual_close_ok = True
+            if manual_close_ok:
+                if manual_exit_price is None:
+                    # Dry run o posicion sin precio de fill: usar mark_price.
+                    manual_exit_price = float(
+                        target_pos.get("mark_price")
+                        or target_pos.get("entry_price")
+                        or 0.0
+                    )
+                manual_entry = float(target_pos.get("entry_price") or 0.0)
+                manual_amount = float(target_pos.get("amount") or 0.0)
+                manual_pnl = (manual_exit_price - manual_entry) * manual_amount
+                manual_closed_trade = {
+                    **target_pos,
+                    "closed_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_price": round(manual_exit_price, 4),
+                    "exit_reason": "manual_capital_rotation",
+                    "pnl_usdt": round(manual_pnl, 4),
+                    "pnl_pct": round(manual_pnl / max(manual_entry * manual_amount, 1e-9), 4),
+                    "status": "closed",
+                    "algo_version": target_pos.get("algo_version") or ALGO_VERSION,
+                    "live_close": manual_live_payload or None,
+                }
+                open_positions = [p for p in open_positions if p is not target_pos]
+                closed_trades.append(manual_closed_trade)
+                persist_history(settings.open_positions_file, open_positions)
+                persist_history(settings.closed_trades_file, closed_trades)
+                # Insertar en order_history para activar el cooldown global y evitar
+                # re-entrada inmediata en el mismo ciclo.
+                order_history.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "symbol": target_pos.get("symbol"),
+                    "side": "sell",
+                    "status": "submitted",
+                    "exit_reason": "manual_capital_rotation",
+                    "pnl_usdt": round(manual_pnl, 4),
+                })
+                persist_history(settings.order_history_file, order_history)
+                if live_mode:
+                    _notify_safe(notifier, logger, "trade", _format_trade_close_message(manual_closed_trade))
+                logger.info(
+                    "Manual capital rotation completado: %s exit=%.4f pnl=%.4f USDT.",
+                    target_pos.get("symbol"),
+                    manual_exit_price,
+                    manual_pnl,
                 )
-            manual_entry = float(target_pos.get("entry_price") or 0.0)
-            manual_amount = float(target_pos.get("amount") or 0.0)
-            manual_pnl = (manual_exit_price - manual_entry) * manual_amount
-            manual_closed_trade = {
-                **target_pos,
-                "closed_at": datetime.now(timezone.utc).isoformat(),
-                "exit_price": round(manual_exit_price, 4),
-                "exit_reason": "manual_capital_rotation",
-                "pnl_usdt": round(manual_pnl, 4),
-                "pnl_pct": round(manual_pnl / max(manual_entry * manual_amount, 1e-9), 4),
-                "status": "closed",
-                "algo_version": target_pos.get("algo_version") or ALGO_VERSION,
-                "live_close": manual_live_payload or None,
-            }
-            open_positions = [p for p in open_positions if p is not target_pos]
-            closed_trades.append(manual_closed_trade)
-            persist_history(settings.open_positions_file, open_positions)
-            persist_history(settings.closed_trades_file, closed_trades)
-            # Insertar en order_history para activar el cooldown global y evitar
-            # re-entrada inmediata en el mismo ciclo.
-            order_history.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "symbol": target_pos.get("symbol"),
-                "side": "sell",
-                "status": "submitted",
-                "exit_reason": "manual_capital_rotation",
-                "pnl_usdt": round(manual_pnl, 4),
-            })
-            persist_history(settings.order_history_file, order_history)
-            if live_mode:
-                _notify_safe(notifier, logger, "trade", _format_trade_close_message(manual_closed_trade))
-            logger.info(
-                "Manual capital rotation completado: %s exit=%.4f pnl=%.4f USDT.",
-                target_pos.get("symbol"),
-                manual_exit_price,
-                manual_pnl,
-            )
-            # Limpiar el flag del control file para no repetir en el proximo ciclo.
-            persist_state(
-                settings.control_file,
-                {
-                    **control_for_manual,
-                    "manual_close_request": False,
-                    "manual_close_symbol": None,
-                    "manual_close_executed_at": datetime.now(timezone.utc).isoformat(),
-                    "manual_close_result": "ok" if manual_live_payload.get("status") == "submitted" or not live_mode else "failed",
-                },
-            )
+                # Limpiar el flag del control file para no repetir en el proximo ciclo.
+                persist_state(
+                    settings.control_file,
+                    {
+                        **control_for_manual,
+                        "manual_close_request": False,
+                        "manual_close_symbol": None,
+                        "manual_close_executed_at": datetime.now(timezone.utc).isoformat(),
+                        "manual_close_result": "ok",
+                    },
+                )
 
         # 1) Escaneo SECUENCIAL multi-ticker (rate-limit safe gracias a enableRateLimit de ccxt).
         scan_results: list[dict[str, Any]] = []
