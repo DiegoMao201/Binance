@@ -227,19 +227,21 @@ class ActiveTradeMonitor:
                     "Si ya hay trailing_tier > 0 el sistema lo maneja; no duplicar con UPDATE_SL.",
                 ],
                 "EMERGENCY_CLOSE": [
-                    "tape_momentum_pct < -0.5 Y orderbook_imbalance < 0.38 Y unrealized_pnl_pct < 0.05",
-                    "O: unrealized_pnl_pct < -0.8 Y volume_ratio < 0.35 (capitulacion de volumen)",
-                    "O: hold_minutes > 90 Y unrealized_pnl_pct < 0.05 Y mfe_pct < 0.15 (muerte lenta sin traccion)",
-                    "Cierre inmediato a mercado. Capital primero.",
+                    "SOLO si hold_minutes >= 5 Y tape_momentum_pct < -0.5 Y orderbook_imbalance < 0.35 Y unrealized_pnl_pct < -0.50",
+                    "O: hold_minutes >= 5 Y unrealized_pnl_pct < -0.80 Y volume_ratio < 0.30 (capitulacion de volumen severa)",
+                    "O: hold_minutes > 60 Y unrealized_pnl_pct < -0.10 Y mfe_pct < 0.10 (muerte lenta sin traccion tras 1 hora)",
+                    "NUNCA cerrar si hold_minutes < 5. El mercado necesita tiempo para reaccionar tras la entrada.",
+                    "Cierre inmediato a mercado. Usar solo en situaciones de riesgo real, no por volatilidad normal.",
                 ],
             },
-            "priority": "PRIMERO NO PERDER. Proteger capital sobre maximizar ganancias.",
+            "priority": "PRIMERO NO PERDER. Pero dar tiempo al mercado: no cerrar en los primeros 5 minutos salvo catastrofe.",
             "instructions": [
                 "Responde SOLO JSON valido con: action, rationale, new_sl_pct (incluir solo si action=UPDATE_SL).",
                 "action debe ser exactamente HOLD, UPDATE_SL o EMERGENCY_CLOSE.",
                 "new_sl_pct: decimal sobre entry_price (0.0025 = +0.25%). Solo incluir si action=UPDATE_SL.",
                 "rationale: una frase concisa en espanol (max 150 chars) explicando la decision.",
                 "Usa los veredictos previos en 'recent_ai_verdicts_memory' para contexto. Si empeoro, escala.",
+                "Un PnL de -0.03% a -0.20% en los primeros minutos es normal (spread + slippage). Responde HOLD.",
                 "No inventes acciones. No devuelvas markdown. Solo el JSON.",
             ],
         }
@@ -386,14 +388,52 @@ class ActiveTradeMonitor:
                 "symbol": symbol,
             }
 
-        # 2) Memoria: cargar veredictos previos
+        # 2) Guard de tiempo minimo: nunca EMERGENCY_CLOSE ni UPDATE_SL antes de 5 minutos.
+        # El mercado necesita tiempo para reaccionar al fill; los primeros minutos son ruido.
+        hold_minutes_now = float(state.get("hold_minutes") or 0.0)
+        _MIN_HOLD_MINUTES = 5.0
+        if hold_minutes_now < _MIN_HOLD_MINUTES:
+            early_verdict: dict[str, Any] = {
+                "action": "HOLD",
+                "rationale": f"Hold minimo ({_MIN_HOLD_MINUTES:.0f}min) no cumplido ({hold_minutes_now:.1f}min). Esperando.",
+                "model": "hold_guard",
+                "consulted": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "state": state,
+                "new_sl_price": None,
+                "new_sl_pct": None,
+                "memory_window": 0,
+            }
+            self._persist_verdict(early_verdict)
+            self.logger.info(
+                "TradeMonitor HOLD-GUARD: %s hold=%.1fmin < %.0fmin minimo.",
+                symbol, hold_minutes_now, _MIN_HOLD_MINUTES,
+            )
+            return early_verdict
+
+        # 3) Memoria: cargar veredictos previos
         recent_verdicts = self._load_recent_verdicts(symbol, n=_MONITOR_MEMORY_WINDOW)
 
-        # 3) Construir prompt
+        # 4) Construir prompt
         prompt = self._build_monitor_prompt(state, recent_verdicts)
 
-        # 4) Consultar IA
+        # 5) Consultar IA
         ai_response = self._query_ai(prompt)
+
+        # 5b) Segunda guardia: si la IA propone EMERGENCY_CLOSE con PnL > -0.40%,
+        # degradar a HOLD. La IA a veces es demasiado conservadora en volatilidad normal.
+        if ai_response.get("action") == "EMERGENCY_CLOSE":
+            pnl_pct = float(state.get("unrealized_pnl_pct") or 0.0)
+            if pnl_pct > -0.40:
+                self.logger.warning(
+                    "TradeMonitor: EMERGENCY_CLOSE degradado a HOLD. PnL=%.3f%% > -0.40%% (no es emergencia real).",
+                    pnl_pct,
+                )
+                ai_response["action"] = "HOLD"
+                ai_response["rationale"] = (
+                    f"[Override] PnL={pnl_pct:.3f}%% no justifica emergencia; manteniendo posicion."
+                )
 
         # 5) Calcular nuevo precio de SL si UPDATE_SL
         new_sl_pct = float(ai_response.get("new_sl_pct") or 0.0025)  # default +0.25%
