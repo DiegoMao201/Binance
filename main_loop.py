@@ -12,6 +12,7 @@ from requests import RequestException
 
 from src.analysis.ai_client import OpenRouterAnalyzer
 from src.analysis.indicators import build_technical_signal, compute_indicators
+from src.analysis.trade_monitor import ActiveTradeMonitor
 from src.data.binance_client import BinanceClientError, BinanceDataClient
 from src.execution.trader import TradeExecutor
 from src.safety.risk_manager import RiskManager, RiskSnapshot
@@ -1767,6 +1768,150 @@ def run_cycle() -> None:
                     _notify_safe(notifier, logger, "trade", _format_trade_close_message(closed_trade))
         persist_history(settings.open_positions_file, open_positions)
 
+        # 2b) DYNAMIC AI TRADE MONITOR — evaluacion IA de posiciones abiertas.
+        # Se ejecuta cada ciclo (≈60s) cuando hay una posicion activa.
+        # Puede mover el SL a breakeven+ o cerrar de emergencia.
+        trade_monitor_verdict: dict[str, Any] = {}
+        if open_positions and settings.ai_monitor_enabled:
+            try:
+                monitor = ActiveTradeMonitor(settings, logger)
+                active_pos = open_positions[0]
+                active_sym = str(active_pos.get("symbol") or "")
+                # Buscar el scan de ese simbolo para datos tecnicos fresh
+                active_scan = next(
+                    (s for s in scan_results if s.get("symbol") == active_sym), None
+                )
+                trade_monitor_verdict = monitor.evaluate(active_pos, active_scan, client)
+                monitor_action = trade_monitor_verdict.get("action", "HOLD")
+
+                if monitor_action == "EMERGENCY_CLOSE":
+                    logger.warning(
+                        "TradeMonitor EMERGENCY_CLOSE para %s. Rationale: %s",
+                        active_sym,
+                        trade_monitor_verdict.get("rationale"),
+                    )
+                    # close_position_market es sincrono
+                    close_result = executor.close_position_market(active_pos)
+                    if close_result.get("status") in {"submitted", "simulated_close"}:
+                        exit_p = float(
+                            close_result.get("avg_price")
+                            or active_pos.get("mark_price")
+                            or active_pos.get("entry_price")
+                            or 0.0
+                        )
+                        entry_p = float(active_pos.get("entry_price") or 0.0)
+                        amt = float(active_pos.get("amount") or 0.0)
+                        pnl_usdt = (exit_p - entry_p) * amt
+                        emergency_closed = {
+                            **active_pos,
+                            "closed_at": datetime.now(timezone.utc).isoformat(),
+                            "exit_price": round(exit_p, 4),
+                            "exit_reason": "ai_emergency_close",
+                            "pnl_usdt": round(pnl_usdt, 4),
+                            "pnl_pct": round(
+                                pnl_usdt / max(entry_p * amt, 1e-9), 4
+                            ),
+                            "status": "closed",
+                            "trade_monitor_rationale": trade_monitor_verdict.get("rationale"),
+                            "live_close": close_result,
+                        }
+                        open_positions = [
+                            p for p in open_positions
+                            if p.get("symbol") != active_sym
+                        ]
+                        closed_trades.append(emergency_closed)
+                        newly_closed_trades.append(emergency_closed)
+                        persist_history(settings.open_positions_file, open_positions)
+                        persist_history(settings.closed_trades_file, closed_trades)
+                        if live_mode:
+                            _notify_safe(
+                                notifier, logger, "trade",
+                                _format_trade_close_message(emergency_closed),
+                            )
+                        logger.warning(
+                            "TradeMonitor cierre de emergencia ejecutado: %s pnl=%.4f USDT",
+                            active_sym,
+                            pnl_usdt,
+                        )
+                    else:
+                        logger.error(
+                            "TradeMonitor EMERGENCY_CLOSE fallo en ejecucion: %s", close_result
+                        )
+
+                elif monitor_action == "UPDATE_SL":
+                    new_sl_price = trade_monitor_verdict.get("new_sl_price")
+                    current_sl = float(active_pos.get("stop_loss") or 0.0)
+                    take_profit = float(active_pos.get("take_profit") or 0.0)
+                    is_improvement = (
+                        new_sl_price is not None
+                        and float(new_sl_price) > current_sl
+                    )
+                    if is_improvement:
+                        logger.info(
+                            "TradeMonitor UPDATE_SL para %s: current_sl=%.6f new_sl=%.6f rationale=%s",
+                            active_sym,
+                            current_sl,
+                            float(new_sl_price),
+                            trade_monitor_verdict.get("rationale"),
+                        )
+                        try:
+                            # price_to_precision es sincrono
+                            new_sl_formatted = executor.client.price_to_precision(
+                                float(new_sl_price), symbol=active_sym
+                            )
+                            # replace_stop_loss_async requiere contexto async
+                            sl_result = asyncio.run(
+                                executor.replace_stop_loss_async(
+                                    position=active_pos,
+                                    new_stop_loss=float(new_sl_formatted),
+                                    take_profit=take_profit,
+                                    trailing_tier=int(active_pos.get("trailing_tier") or 0),
+                                )
+                            )
+                            if sl_result.get("status") in {"submitted", "simulated"}:
+                                active_pos["stop_loss"] = float(new_sl_formatted)
+                                active_pos["monitor_sl_updated_at"] = datetime.now(timezone.utc).isoformat()
+                                active_pos["monitor_sl_rationale"] = trade_monitor_verdict.get("rationale")
+                                open_positions[0] = active_pos
+                                persist_history(settings.open_positions_file, open_positions)
+                                logger.info(
+                                    "TradeMonitor SL actualizado: %s new_sl=%.6f",
+                                    active_sym,
+                                    float(new_sl_formatted),
+                                )
+                            else:
+                                logger.warning(
+                                    "TradeMonitor UPDATE_SL no confirmado: %s", sl_result
+                                )
+                        except (BinanceClientError, ccxt.NetworkError, ccxt.ExchangeError) as exc:
+                            logger.warning(
+                                "TradeMonitor UPDATE_SL fallo para %s: %s", active_sym, exc
+                            )
+                    else:
+                        logger.info(
+                            "TradeMonitor UPDATE_SL descartado: new_sl=%.6f <= current_sl=%.6f",
+                            float(new_sl_price or 0),
+                            current_sl,
+                        )
+
+                else:  # HOLD
+                    logger.info(
+                        "TradeMonitor HOLD para %s. Rationale: %s",
+                        active_sym,
+                        trade_monitor_verdict.get("rationale"),
+                    )
+
+            except RuntimeError as exc:
+                # asyncio.run() no puede ejecutarse dentro de un event loop existente
+                logger.error(
+                    "TradeMonitor: conflicto de event loop; accion aplazada: %s", exc
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "TradeMonitor: error inesperado; el trade sigue con su gestion normal. %s",
+                    exc,
+                )
+
         # 3) MUTEX GLOBAL: si hay posicion activa en cualquier ticker, no abrimos otra.
         global_lock = len(open_positions) >= settings.max_global_open_positions
         active_symbol = open_positions[0].get("symbol") if open_positions else None
@@ -2229,6 +2374,7 @@ def run_cycle() -> None:
                 global_lock=global_lock,
                 active_symbol=active_symbol,
                 recovery=recovery_report,
+                trade_monitor=trade_monitor_verdict or {},
             ),
         )
         heartbeat_detail = decision.get("detail") or decision.get("reason") or "Ciclo completado"

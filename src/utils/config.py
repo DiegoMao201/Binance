@@ -69,6 +69,7 @@ class Settings:
     position_size_pct: float
     scenario_a_rsi_max: float
     scenario_b_rsi_max: float
+    ai_monitor_enabled: bool
     logs_dir: Path
     state_file: Path
     log_file: Path
@@ -161,6 +162,7 @@ def load_settings() -> Settings:
         position_size_pct=float(os.getenv("POSITION_SIZE_PCT", "0.95")),
         scenario_a_rsi_max=float(os.getenv("SCENARIO_A_RSI_MAX", "45")),
         scenario_b_rsi_max=float(os.getenv("SCENARIO_B_RSI_MAX", "32")),
+        ai_monitor_enabled=_get_bool("AI_MONITOR_ENABLED", True),
         logs_dir=logs_dir,
         state_file=logs_dir / "bot_state.json",
         log_file=logs_dir / "bot.log",

@@ -726,6 +726,170 @@ function GuardrailsPanel({ guardrails, scan }) {
   );
 }
 
+// ── Panel: Monitor IA de Trade Activo ────────────────────────────
+function TradeMonitorPanel({ tradeMonitorLog, tradeMonitor }) {
+  // Combina el log persistido con el veredicto actual del state (si existe)
+  const logEntries = Array.isArray(tradeMonitorLog) ? tradeMonitorLog : [];
+  // Últimas 8 entradas del log, más reciente primero
+  const recentLog = [...logEntries].slice(-8).reverse();
+
+  // Si el state tiene trade_monitor (veredicto de este ciclo), mostrarlo primero
+  const currentVerdict = tradeMonitor && tradeMonitor.action ? tradeMonitor : null;
+
+  const actionColor = (action) => {
+    if (action === "EMERGENCY_CLOSE") return R;
+    if (action === "UPDATE_SL") return Y;
+    if (action === "HOLD") return G;
+    return MUTE;
+  };
+
+  const actionIcon = (action) => {
+    if (action === "EMERGENCY_CLOSE") return "✕";
+    if (action === "UPDATE_SL") return "↑";
+    if (action === "HOLD") return "●";
+    return "?";
+  };
+
+  const hasAnyData = currentVerdict || recentLog.length > 0;
+
+  return (
+    <Card
+      title="Monitor IA · Trade Activo"
+      right={
+        currentVerdict ? (
+          <span style={{
+            fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+            background: `${actionColor(currentVerdict.action)}18`,
+            border: `1px solid ${actionColor(currentVerdict.action)}44`,
+            color: actionColor(currentVerdict.action),
+          }}>
+            {actionIcon(currentVerdict.action)} {currentVerdict.action}
+          </span>
+        ) : (
+          <span style={{ fontSize: 10, color: MUTE }}>sin posicion activa</span>
+        )
+      }
+    >
+      {!hasAnyData ? (
+        <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "16px 0" }}>
+          Sin veredictos del monitor. Se activa cuando hay una posicion abierta.
+        </div>
+      ) : (
+        <>
+          {/* Veredicto actual con detalles de estado */}
+          {currentVerdict && (
+            <div style={{
+              background: `${actionColor(currentVerdict.action)}0d`,
+              border: `1px solid ${actionColor(currentVerdict.action)}30`,
+              borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+                  background: `${actionColor(currentVerdict.action)}18`,
+                  border: `1px solid ${actionColor(currentVerdict.action)}44`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 14, color: actionColor(currentVerdict.action), fontWeight: 700,
+                }}>
+                  {actionIcon(currentVerdict.action)}
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: actionColor(currentVerdict.action) }}>
+                    {currentVerdict.action}
+                  </div>
+                  <div style={{ fontSize: 10, color: MUTE }}>{fmtDate(currentVerdict.timestamp)}</div>
+                </div>
+                <div style={{ marginLeft: "auto", fontSize: 10, color: MUTE }}>
+                  mem:{currentVerdict.memory_window ?? "–"}
+                </div>
+              </div>
+
+              {currentVerdict.rationale && (
+                <div style={{ fontSize: 12, color: TEXT, lineHeight: 1.5, opacity: 0.85 }}>
+                  {currentVerdict.rationale}
+                </div>
+              )}
+
+              {/* Métricas del estado en el momento del veredicto */}
+              {currentVerdict.state && (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+                  {[
+                    { label: "PnL%", value: `${Number(currentVerdict.state.unrealized_pnl_pct || 0) >= 0 ? "+" : ""}${n(currentVerdict.state.unrealized_pnl_pct, 3)}%`, color: tone(currentVerdict.state.unrealized_pnl_pct) },
+                    { label: "Flow", value: `${Math.round(Number(currentVerdict.state.trade_flow_score || 0) * 100)}%`, color: Number(currentVerdict.state.trade_flow_score) >= 0.52 ? G : R },
+                    { label: "Vol×", value: `${n(currentVerdict.state.volume_ratio, 2)}x`, color: Number(currentVerdict.state.volume_ratio) >= 1 ? G : R },
+                    { label: "OB%", value: `${Math.round(Number(currentVerdict.state.orderbook_imbalance || 0.5) * 100)}%`, color: Number(currentVerdict.state.orderbook_imbalance) >= 0.52 ? G : R },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 6, padding: "5px 7px" }}>
+                      <div style={{ fontSize: 9, color: MUTE }}>{label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace", color }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {currentVerdict.new_sl_price && (
+                <div style={{ fontSize: 11, color: Y }}>
+                  → Nuevo SL: <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{n(currentVerdict.new_sl_price, 6)}</span>
+                  {currentVerdict.new_sl_pct && ` (+${n(currentVerdict.new_sl_pct * 100, 2)}%)`}
+                </div>
+              )}
+
+              <div style={{ fontSize: 10, color: MUTE }}>
+                Modelo: {currentVerdict.model || "OpenRouter"}
+              </div>
+            </div>
+          )}
+
+          {/* Historial de veredictos */}
+          {recentLog.length > 0 && (
+            <div>
+              <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                Historial ({recentLog.length} entradas)
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {recentLog.slice(0, 6).map((entry, i) => {
+                  const ac = actionColor(entry.action);
+                  const st = entry.state || {};
+                  return (
+                    <div key={i} style={{
+                      display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 10px",
+                      borderRadius: 8, background: "rgba(255,255,255,0.025)",
+                      border: `1px solid rgba(255,255,255,0.05)`,
+                    }}>
+                      <div style={{
+                        width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                        background: `${ac}18`, border: `1px solid ${ac}40`,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 11, color: ac, fontWeight: 700,
+                      }}>
+                        {actionIcon(entry.action)}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: ac }}>{entry.action}</span>
+                          <span style={{ fontSize: 10, color: MUTE, flexShrink: 0 }}>{fmtDate(entry.timestamp)}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: MUTE, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {entry.rationale}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, fontSize: 10, color: MUTE, marginTop: 2 }}>
+                          <span>PnL:{Number(st.unrealized_pnl_pct || 0) >= 0 ? "+" : ""}{n(st.unrealized_pnl_pct, 2)}%</span>
+                          <span>Flow:{Math.round(Number(st.trade_flow_score || 0) * 100)}%</span>
+                          <span>Vol:{n(st.volume_ratio, 1)}×</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 // ── Header terminal ───────────────────────────────────────────────
 function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, controlBusy, sendControl }) {
   const pnl = Number(portfolio?.realized_pnl_usdt || 0);
@@ -853,6 +1017,8 @@ export default function DashboardClient({ initialData }) {
   const targetSymbols  = state?.target_symbols  || [];
   const preFlight      = payload?.preFlight     || {};
   const openPosition   = state?.open_position   || null;
+  const tradeMonitorLog = payload?.tradeMonitorLog || [];
+  const tradeMonitor   = state?.trade_monitor    || {};
 
   const [focusSymbol, setFocusSymbol] = useState("");
   const activeSymbol = state?.active_symbol || null;
@@ -940,6 +1106,9 @@ export default function DashboardClient({ initialData }) {
 
         {/* Equity curve */}
         <EquityPanel equityHistory={equityHistory} />
+
+        {/* Monitor IA de trade activo */}
+        <TradeMonitorPanel tradeMonitorLog={tradeMonitorLog} tradeMonitor={tradeMonitor} />
 
         {/* Scanner completo */}
         <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} />
