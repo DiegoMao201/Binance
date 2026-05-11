@@ -551,14 +551,19 @@ class BinanceDataClient:
         stop_limit_raw = stop_loss_price * (0.999 if side.lower() == "sell" else 1.001)
         stop_limit_precise = self.price_to_precision(stop_limit_raw, symbol=target)
 
+        # Binance nueva API orderList/oco (vigente desde 2025-12):
+        # Requiere aboveType/belowType en lugar de price/stopPrice/stopLimitPrice.
+        # Para SELL OCO de proteccion: take-profit arriba (LIMIT_MAKER) + stop-loss abajo (STOP_LOSS_LIMIT).
         params: dict[str, Any] = {
             "symbol": market["id"],
             "side": side.upper(),
             "quantity": self.private_exchange.amount_to_precision(target, quantity_precise),
-            "price": self.private_exchange.price_to_precision(target, take_profit_precise),
-            "stopPrice": self.private_exchange.price_to_precision(target, stop_trigger_precise),
-            "stopLimitPrice": self.private_exchange.price_to_precision(target, stop_limit_precise),
-            "stopLimitTimeInForce": "GTC",
+            "aboveType": "LIMIT_MAKER",
+            "abovePrice": self.private_exchange.price_to_precision(target, take_profit_precise),
+            "belowType": "STOP_LOSS_LIMIT",
+            "belowStopPrice": self.private_exchange.price_to_precision(target, stop_trigger_precise),
+            "belowPrice": self.private_exchange.price_to_precision(target, stop_limit_precise),
+            "belowTimeInForce": "GTC",
         }
 
         method_candidates = (
