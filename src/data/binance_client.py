@@ -501,6 +501,10 @@ class BinanceDataClient:
             lambda: self.private_exchange.create_market_order(target, side, amount)
         )
 
+    def cancel_all_orders_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        """Cancel ALL open orders for a symbol (used to clear stale OCOs on recovered positions)."""
+        return self._with_retries(lambda: self.private_exchange.cancel_all_orders(symbol) or [])
+
     def cancel_order_list(
         self,
         *,

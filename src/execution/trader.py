@@ -361,6 +361,26 @@ class TradeExecutor:
                 list_client_order_id=protection_order.get("listClientOrderId"),
             )
             result["cancel_payload"] = cancel_payload
+        else:
+            # Posición recuperada (recovered_live): no tenemos el orderListId guardado pero
+            # puede existir un OCO activo en el exchange que bloquea la creación del nuevo.
+            # Cancelamos todas las órdenes abiertas del símbolo para liberar el saldo.
+            try:
+                cancelled = await asyncio.to_thread(
+                    self.client.cancel_all_orders_for_symbol, target_symbol
+                )
+                if cancelled:
+                    self.logger.info(
+                        "replace_stop_loss_async %s: canceladas %d órdenes abiertas (posición recovered_live).",
+                        target_symbol,
+                        len(cancelled),
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    "replace_stop_loss_async %s: no se pudieron cancelar órdenes abiertas previas: %s",
+                    target_symbol,
+                    exc,
+                )
 
         holdings = await asyncio.to_thread(self.client.fetch_asset_balance, symbol=target_symbol)
         sellable_amount = min(amount, float(holdings.get("total") or 0.0))
