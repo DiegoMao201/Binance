@@ -9,7 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# El bot NO usa streamlit, plotly ni scikit-learn (solo el antiguo dashboard Streamlit los usaba).
+# Instalar solo las dependencias operativas para reducir imagen ~450MB y evitar disco lleno en Coolify.
+RUN pip install --upgrade pip --no-cache-dir && \
+    grep -v -E '^(streamlit|plotly|scikit-learn)' requirements.txt > /tmp/requirements.bot.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.bot.txt
 
 COPY . .
 
