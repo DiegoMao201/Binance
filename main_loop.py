@@ -1823,15 +1823,28 @@ def run_cycle() -> None:
                         newly_closed_trades.append(emergency_closed)
                         persist_history(settings.open_positions_file, open_positions)
                         persist_history(settings.closed_trades_file, closed_trades)
+                        # Insertar en order_history para que el cooldown global lo vea
+                        # y bloquee re-entradas durante trade_cooldown_minutes.
+                        order_history.append({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "symbol": active_sym,
+                            "side": "sell",
+                            "status": "submitted",
+                            "exit_reason": "ai_emergency_close",
+                            "pnl_usdt": round(pnl_usdt, 4),
+                        })
+                        persist_history(settings.order_history_file, order_history)
                         if live_mode:
                             _notify_safe(
                                 notifier, logger, "trade",
                                 _format_trade_close_message(emergency_closed),
                             )
                         logger.warning(
-                            "TradeMonitor cierre de emergencia ejecutado: %s pnl=%.4f USDT",
+                            "TradeMonitor cierre de emergencia ejecutado: %s pnl=%.4f USDT. "
+                            "Cooldown de %s min activo para evitar re-entrada inmediata.",
                             active_sym,
                             pnl_usdt,
+                            settings.trade_cooldown_minutes,
                         )
                     else:
                         logger.error(
@@ -2018,6 +2031,24 @@ def run_cycle() -> None:
         risk_snapshot = risk_manager.evaluate(balance_usd, equity_usd=equity_usd, high_water_mark=new_hwm)
 
         # 5) Kill switch global.
+        # Sanity guard: en trading spot sin apalancamiento es imposible perder >40%
+        # del equity en un solo ciclo. Un drawdown > 0.40 indica lectura transitoria
+        # mala del balance (e.g. Binance no ha liquidado el USDT tras un cierre reciente).
+        # En ese caso, ignorar el kill switch y dejar que el siguiente ciclo corrija.
+        _KS_SANITY_CAP = 0.40
+        if risk_snapshot.kill_switch_triggered and risk_snapshot.drawdown_pct > _KS_SANITY_CAP:
+            logger.error(
+                "Kill Switch IGNORADO (falso positivo): drawdown=%.4f > %.0f%% sanity cap. "
+                "Posible lectura de balance transitoria. Se revisara en el proximo ciclo.",
+                risk_snapshot.drawdown_pct,
+                _KS_SANITY_CAP * 100,
+            )
+            # Forzar recalculo conservador usando el equity anterior para no contaminar el HWM
+            risk_snapshot = risk_manager.evaluate(
+                balance_usd,
+                equity_usd=float(previous_state.get("risk", {}).get("equity_usd") or equity_usd),
+                high_water_mark=new_hwm,
+            )
         if risk_snapshot.kill_switch_triggered:
             decision = {
                 "action": "halt",
