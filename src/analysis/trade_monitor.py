@@ -32,6 +32,16 @@ from src.utils.state_store import load_history, persist_history
 _MONITOR_MEMORY_WINDOW = 3      # veredictos previos que se envian a la IA
 _MONITOR_LOG_RETENTION = 200    # maximo de entradas en el log persistido
 
+# Modelos gratuitos de OpenRouter para el monitor.
+# El monitor no necesita razonamiento complejo: solo decide HOLD / UPDATE_SL / EMERGENCY_CLOSE
+# con datos numericos ya procesados. Los modelos gratis son suficientes y evitan
+# gastar creditos en ciclos donde el trailing ya protege la posicion.
+_FREE_MONITOR_MODELS: list[str] = [
+    "google/gemini-2.0-flash-exp:free",
+    "meta-llama/llama-4-maverick:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+]
+
 
 class ActiveTradeMonitor:
     """Evalua posiciones abiertas con IA para maximizar ganancias y proteger capital.
@@ -247,11 +257,88 @@ class ActiveTradeMonitor:
         }
 
     # ─────────────────────────────────────────────────────────────────────────
+    # SMART GATE — decide si consultar la IA o emitir HOLD por reglas
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _should_consult_ai(self, state: dict[str, Any]) -> tuple[bool, str]:
+        """Decide si la situacion justifica gastar una llamada a la IA.
+
+        Logica:
+        - ZONA SEGURA: trailing tier activo + PnL >= 0  →  el SL ya protege, no hace falta IA.
+        - TENDENCIA CLARA: PnL >= 0.50% + flow sano  →  dejar correr, HOLD barato.
+        - SEÑALES DE RIESGO: cualquiera de las condiciones de abajo  →  consultar IA.
+        - Sin señal de ningún tipo  →  HOLD barato por defecto.
+
+        Returns:
+            (True, motivo) si se debe consultar la IA.
+            (False, motivo) si se puede emitir HOLD sin coste.
+        """
+        pnl_pct = float(state.get("unrealized_pnl_pct") or 0.0)
+        trailing_tier = int(state.get("trailing_tier") or 0)
+        trade_flow = float(state.get("trade_flow_score") or 0.5)
+        ob_imbalance = float(state.get("orderbook_imbalance") or 0.5)
+        volume_ratio = float(state.get("volume_ratio") or 1.0)
+        tape_mom = float(state.get("tape_momentum_pct") or 0.0)
+        hold_min = float(state.get("hold_minutes") or 0.0)
+
+        # ── ZONA SEGURA ────────────────────────────────────────────────────────
+        # Trailing tier >= 1 significa que el SL ya esta por encima del entry.
+        # Si ademas el PnL es positivo, el peor escenario es salir con ganancia neta.
+        # El trailing se encarga de todo; no hay decision que tomar.
+        if trailing_tier >= 1 and pnl_pct >= 0.0:
+            return False, (
+                f"smart_hold: trailing tier={trailing_tier} activo + "
+                f"pnl={pnl_pct:.3f}% >= 0. SL protegido."
+            )
+
+        # ── TENDENCIA CLARA SIN TRAILING ──────────────────────────────────────
+        # Ganancia solida + momentum sano → dejar correr.
+        if pnl_pct >= 0.50 and trade_flow >= 0.45 and volume_ratio >= 0.30:
+            return False, (
+                f"smart_hold: pnl={pnl_pct:.3f}% fuerte + "
+                f"flow={trade_flow:.2f} sano"
+            )
+
+        # ── SEÑALES DE RIESGO U OPORTUNIDAD → CONSULTAR IA ────────────────────
+        if pnl_pct < -0.15:
+            return True, f"risk: pnl={pnl_pct:.3f}% en zona de perdida"
+
+        if trailing_tier == 0 and pnl_pct >= 0.20:
+            return True, (
+                f"opportunity: pnl={pnl_pct:.3f}% >= 0.20% sin trailing → "
+                "posible UPDATE_SL"
+            )
+
+        if trade_flow < 0.40 and pnl_pct < 0:
+            return True, f"risk: flow={trade_flow:.2f} < 0.40 con pnl negativo"
+
+        if ob_imbalance < 0.38 and pnl_pct < 0:
+            return True, f"risk: ob={ob_imbalance:.2f} bearish con pnl negativo"
+
+        if tape_mom < -0.40:
+            return True, f"risk: tape_momentum={tape_mom:.3f}% muy negativo"
+
+        if volume_ratio > 1.8:
+            return True, f"alert: volume_ratio={volume_ratio:.2f} (spike inusual)"
+
+        if trailing_tier == 0 and hold_min > 45 and pnl_pct < 0.10:
+            return True, (
+                f"stagnation: {hold_min:.0f}min sin tier + "
+                f"pnl={pnl_pct:.3f}%"
+            )
+
+        # Sin señal de riesgo ni oportunidad → HOLD barato
+        return False, (
+            f"smart_hold: sin señales de riesgo "
+            f"(pnl={pnl_pct:.3f}% flow={trade_flow:.2f} tier={trailing_tier})"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
     # LLAMADA A LA IA
     # ─────────────────────────────────────────────────────────────────────────
 
     def _query_ai(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Consulta OpenRouter con fallback y parsea la respuesta JSON."""
+        """Consulta OpenRouter usando modelos gratuitos con fallback."""
         if not self.settings.openrouter_api_key:
             self.logger.warning("TradeMonitor: OpenRouter no configurado. Accion por defecto: HOLD.")
             return {
@@ -261,7 +348,12 @@ class ActiveTradeMonitor:
                 "consulted": False,
             }
 
-        models_to_try: list[str] = [self.settings.openrouter_model]
+        # Usar modelos gratuitos para el monitor. Si todos fallan, caer en el
+        # modelo configurado en settings (pagado) como ultimo recurso.
+        models_to_try: list[str] = list(_FREE_MONITOR_MODELS)
+        paid_fallback = self.settings.openrouter_model
+        if paid_fallback and paid_fallback not in models_to_try:
+            models_to_try.append(paid_fallback)
         for m in self.settings.openrouter_fallback_models:
             if m and m not in models_to_try:
                 models_to_try.append(m)
@@ -412,16 +504,45 @@ class ActiveTradeMonitor:
             )
             return early_verdict
 
-        # 3) Memoria: cargar veredictos previos
+        # 3) Smart gate: consultar IA solo si hay señal de riesgo u oportunidad.
+        # En ciclos donde el trailing protege la posicion y el PnL es positivo,
+        # emitir HOLD directamente sin coste de API.
+        should_consult, gate_reason = self._should_consult_ai(state)
+        if not should_consult:
+            cheap_verdict: dict[str, Any] = {
+                "action": "HOLD",
+                "rationale": gate_reason,
+                "model": "smart_gate",
+                "consulted": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "state": state,
+                "new_sl_price": None,
+                "new_sl_pct": None,
+                "memory_window": 0,
+            }
+            self._persist_verdict(cheap_verdict)
+            self.logger.info(
+                "TradeMonitor smart_gate HOLD: %s | %s",
+                symbol, gate_reason,
+            )
+            return cheap_verdict
+
+        self.logger.info(
+            "TradeMonitor: consultando IA para %s | motivo: %s",
+            symbol, gate_reason,
+        )
+
+        # 4) Memoria: cargar veredictos previos
         recent_verdicts = self._load_recent_verdicts(symbol, n=_MONITOR_MEMORY_WINDOW)
 
-        # 4) Construir prompt
+        # 5) Construir prompt
         prompt = self._build_monitor_prompt(state, recent_verdicts)
 
-        # 5) Consultar IA
+        # 6) Consultar IA (modelos gratuitos)
         ai_response = self._query_ai(prompt)
 
-        # 5b) Segunda guardia: si la IA propone EMERGENCY_CLOSE con PnL > -0.40%,
+        # 6b) Segunda guardia: si la IA propone EMERGENCY_CLOSE con PnL > -0.40%,
         # degradar a HOLD. La IA a veces es demasiado conservadora en volatilidad normal.
         if ai_response.get("action") == "EMERGENCY_CLOSE":
             pnl_pct = float(state.get("unrealized_pnl_pct") or 0.0)
@@ -435,14 +556,14 @@ class ActiveTradeMonitor:
                     f"[Override] PnL={pnl_pct:.3f}%% no justifica emergencia; manteniendo posicion."
                 )
 
-        # 5) Calcular nuevo precio de SL si UPDATE_SL
+        # 7) Calcular nuevo precio de SL si UPDATE_SL
         new_sl_pct = float(ai_response.get("new_sl_pct") or 0.0025)  # default +0.25%
         entry_price = float(position.get("entry_price") or 0.0)
         new_sl_price: float | None = None
         if ai_response.get("action") == "UPDATE_SL" and entry_price > 0:
             new_sl_price = round(entry_price * (1.0 + new_sl_pct), 8)
 
-        # 6) Construir veredicto final
+        # 8) Construir veredicto final
         verdict: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
@@ -456,7 +577,7 @@ class ActiveTradeMonitor:
             "memory_window": len(recent_verdicts),
         }
 
-        # 7) Persistir para el dashboard
+        # 9) Persistir para el dashboard
         self._persist_verdict(verdict)
 
         self.logger.info(
