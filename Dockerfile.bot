@@ -13,8 +13,20 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /data/logs
+# Crear el directorio en la imagen como fallback; el volumen de Coolify lo sobreescribe en runtime.
+RUN mkdir -p /data/logs && chmod 777 /data/logs
+
+# Entrypoint: garantiza el directorio en runtime (el volumen monta DESPUES del build),
+# limpia archivos .tmp huerfanos que puedan bloquear escrituras atomicas, y lanza el bot.
+RUN printf '#!/bin/sh\n\
+set -e\n\
+mkdir -p "${LOGS_DIR:-/data/logs}"\n\
+chmod 777 "${LOGS_DIR:-/data/logs}" 2>/dev/null || true\n\
+find "${LOGS_DIR:-/data/logs}" -name "*.tmp" -delete 2>/dev/null || true\n\
+echo "[entrypoint] LOGS_DIR=${LOGS_DIR:-/data/logs} listo."\n\
+exec python main_loop.py\n\
+' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 CMD ["python", "scripts/bot_healthcheck.py"]
 
-CMD ["python", "main_loop.py"]
+CMD ["/app/entrypoint.sh"]

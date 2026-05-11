@@ -2411,10 +2411,21 @@ def run_cycle() -> None:
 
 def main() -> None:
     settings = load_settings()
+    # Garantizar que el directorio de logs exista ANTES de cualquier escritura.
+    # Critico en Docker: el volumen /data/logs se monta en runtime sobre el directorio
+    # creado en la imagen; si el montaje tarda o falla, las escrituras explotan.
+    try:
+        settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Si ni siquiera podemos crear el directorio, fallar rapido con mensaje claro.
+        raise RuntimeError(
+            f"No se pudo crear/acceder al directorio de logs '{settings.logs_dir}': {exc}. "
+            "Verifica el volumen persistente en Coolify."
+        ) from exc
     logger = setup_logger(settings)
     notifier = _build_notifier(settings, logger)
     ensure_control_file()
-    logger.info("OptiFerre-Trader iniciado. DRY_RUN=%s", settings.dry_run)
+    logger.info("OptiFerre-Trader iniciado. DRY_RUN=%s LOGS_DIR=%s", settings.dry_run, settings.logs_dir)
 
     client = BinanceDataClient(settings)
     pre_flight = pre_flight_check(settings, client, logger)
