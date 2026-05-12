@@ -984,7 +984,11 @@ function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, c
         }} />
         <span style={{ fontWeight: 700, fontSize: 14, color: TEXT }}>OptiFerre Terminal</span>
         <span style={{ fontSize: 11, color: MUTE, borderLeft: `1px solid ${BORD}`, paddingLeft: 10 }}>
-          {status?.symbol || "ETH/USDT"} · {status?.timeframe || "5m"} · {isOnline ? "LIVE" : "OFFLINE"}
+          {(() => {
+            const syms = status?.target_symbols;
+            if (syms?.length > 1) return `${syms.length} mercados`;
+            return syms?.[0] || status?.symbol || "–";
+          })()} · {status?.timeframe || "5m"} · {isOnline ? "LIVE" : "OFFLINE"}
         </span>
       </div>
 
