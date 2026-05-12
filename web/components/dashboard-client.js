@@ -378,6 +378,12 @@ function AiPanel({ ai, scan, decision }) {
         </div>
       )}
 
+      {flags.includes("technical_fallback_mode") && (
+        <div style={{ fontSize: 10, color: Y, background: "rgba(245,158,11,0.10)", border: `1px solid rgba(245,158,11,0.30)`, borderRadius: 6, padding: "4px 8px", textAlign: "center" }}>
+          ⚠ Modo fallback técnico — OpenRouter no disponible
+        </div>
+      )}
+
       {flags.length > 0 && (
         <div>
           <div style={{ fontSize: 9, color: MUTE, marginBottom: 4, textTransform: "uppercase" }}>Risk Flags</div>
@@ -396,7 +402,7 @@ function AiPanel({ ai, scan, decision }) {
       )}
 
       <div style={{ fontSize: 10, color: MUTE, borderTop: `1px solid ${BORD}`, paddingTop: 8 }}>
-        Modelo: {ai?.model || "OpenRouter"}
+        Modelo: {flags.includes("technical_fallback_mode") ? "⚠ fallback técnico (sin OpenRouter)" : ai?.model || "OpenRouter"}
       </div>
     </Card>
   );

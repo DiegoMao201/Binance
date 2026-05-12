@@ -93,7 +93,10 @@ def load_settings() -> Settings:
     primary_symbol = os.getenv("TRADING_SYMBOL", "BTC/USDT")
     raw_targets = os.getenv("TARGET_SYMBOLS", primary_symbol)
     raw_whitelist_ips = os.getenv("BINANCE_WHITELIST_IPS", "")
-    raw_fallback_models = os.getenv("OPENROUTER_FALLBACK_MODELS", "google/gemini-2.5-flash,anthropic/claude-3.5-haiku")
+    raw_fallback_models = os.getenv(
+        "OPENROUTER_FALLBACK_MODELS",
+        "google/gemini-2.5-flash,anthropic/claude-3.5-haiku,meta-llama/llama-3.1-8b-instruct:free,google/gemini-flash-1.5-8b",
+    )
     target_symbols = tuple(
         dict.fromkeys(  # preserva orden y deduplica
             sym.strip().upper() for sym in raw_targets.split(",") if sym.strip()

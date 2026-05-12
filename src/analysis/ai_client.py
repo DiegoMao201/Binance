@@ -203,7 +203,7 @@ class OpenRouterAnalyzer:
                         "temperature": 0.1,
                         "response_format": {"type": "json_object"},
                     },
-                    timeout=4.0,
+                    timeout=7.0,
                 )
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
@@ -234,22 +234,148 @@ class OpenRouterAnalyzer:
                     exc,
                 )
 
-        self.logger.error(
-            "OpenRouter sin respuesta valida para %s tras modelos=%s (%s)",
+        self.logger.warning(
+            "OpenRouter sin respuesta valida para %s tras modelos=%s (%s). Activando evaluacion tecnica de fallback.",
             symbol or self.settings.trading_symbol,
             models_to_try,
             last_error,
         )
+        fallback_result = self._technical_fallback_analyze(technical_signal)
+        return _normalize(fallback_result, fallback_result.get("model", "technical_fallback"))
+
+    def _technical_fallback_analyze(self, technical_signal: dict[str, Any] | None) -> dict[str, Any]:
+        """Evaluacion tecnica pura cuando OpenRouter no responde tras intentar todos los modelos.
+
+        Proporciona una aprobacion conservadora basada unicamente en indicadores tecnicos.
+        Siempre incluye 'openrouter_unavailable' en risk_flags para que el operador sepa
+        que la IA externa no estuvo disponible y que la decision fue local.
+        """
+        ts = technical_signal or {}
+        scenario = str(ts.get("scenario") or "")
+        signal = str(ts.get("signal", "hold"))
+        setup_score = float(ts.get("setup_score") or 0.0)
+        rsi = float(ts.get("rsi") or 50.0)
+        rsi_slope = float(ts.get("rsi_slope") or 0.0)
+        volume_acceleration = float(ts.get("volume_acceleration") or 0.0)
+        orderbook_imbalance = float(ts.get("orderbook_imbalance") or 0.5)
+        trade_flow_score = float(ts.get("trade_flow_score") or 0.5)
+        macro_trend = str(ts.get("macro_trend") or "neutral").lower()
+        green_candle = bool(ts.get("green_candle"))
+        bullish_cross = bool(ts.get("bullish_cross"))
+        candle_body_pct = float(ts.get("candle_body_pct") or 0.0)
+
+        base_flags: list[str] = ["openrouter_unavailable", "technical_fallback_mode"]
+
+        # Solo aplica para senales buy con escenario valido
+        if signal != "buy" or scenario not in {"A", "B", "C", "D"}:
+            return {
+                "signal": "hold",
+                "confidence": 0.0,
+                "rationale": "Fallback tecnico: sin senal buy/escenario valido.",
+                "model": "technical_fallback",
+                "consulted": True,
+                "timed_out": False,
+                "approved": False,
+                "direction_alignment": "misaligned",
+                "setup_quality": "low",
+                "risk_flags": base_flags,
+            }
+
+        risk_flags = list(base_flags)
+
+        # Macro bearish bloquea salvo escenario B con agotamiento vendedor claro
+        if macro_trend == "bearish":
+            risk_flags.append("macro_bearish_pressure")
+            if not (scenario == "B" and rsi < 30):
+                return {
+                    "signal": "hold",
+                    "confidence": 0.0,
+                    "rationale": f"Fallback tecnico: macro bearish bloquea entrada. scenario={scenario} rsi={rsi:.1f}",
+                    "model": "technical_fallback",
+                    "consulted": True,
+                    "timed_out": False,
+                    "approved": False,
+                    "direction_alignment": "misaligned",
+                    "setup_quality": "low",
+                    "risk_flags": risk_flags,
+                }
+
+        if orderbook_imbalance < 0.40:
+            risk_flags.append("orderbook_vs_signal")
+
+        approved = False
+        confidence = 0.0
+
+        if scenario == "A":
+            # Pullback con tendencia: RSI rebotando desde zona de valor
+            cond_rsi = rsi <= 45 and rsi_slope >= -0.5
+            cond_score = setup_score >= 0.48
+            cond_ob = orderbook_imbalance >= 0.45
+            approved = cond_rsi and cond_score and cond_ob
+            if approved:
+                confidence = 0.63 if setup_score >= 0.58 else 0.58
+        elif scenario == "B":
+            # Sobreventa extrema: RSI en zona de agotamiento
+            cond_rsi = rsi <= 33 and rsi_slope >= -2.0
+            cond_score = setup_score >= 0.48
+            approved = cond_rsi and cond_score
+            if approved:
+                confidence = 0.64 if rsi <= 28 else 0.60
+        elif scenario == "C":
+            # Continuacion: vela verde solida + volumen acelerando + flow positivo
+            cond_candle = green_candle and candle_body_pct >= 0.30
+            cond_volume = volume_acceleration >= 0.85
+            cond_score = setup_score >= 0.52
+            cond_flow = trade_flow_score >= 0.50
+            approved = cond_candle and cond_volume and cond_score and cond_flow
+            if approved:
+                confidence = 0.61
+        elif scenario == "D":
+            # EMA cross: senal tecnica objetiva
+            cond_cross = bullish_cross
+            cond_score = setup_score >= 0.48
+            approved = cond_cross and cond_score
+            if approved:
+                confidence = 0.61
+
+        # Penalizacion por orderbook en contra
+        if "orderbook_vs_signal" in risk_flags and approved:
+            confidence = max(0.0, confidence - 0.05)
+            if confidence < 0.52:
+                approved = False
+
+        # Penalizacion por tape debil
+        if trade_flow_score < 0.42 and approved:
+            confidence = max(0.0, confidence - 0.04)
+            risk_flags.append("tape_weak")
+
+        setup_quality = "medium" if (approved and setup_score >= 0.52) else "low"
+
+        self.logger.info(
+            "Fallback tecnico para %s: approved=%s confidence=%.3f scenario=%s rsi=%.1f setup=%.3f ob=%.2f macro=%s",
+            ts.get("symbol", "?"),
+            approved,
+            confidence,
+            scenario,
+            rsi,
+            setup_score,
+            orderbook_imbalance,
+            macro_trend,
+        )
+
         return {
-            "signal": "hold",
-            "confidence": 0.0,
-            "rationale": "OpenRouter fallo en todos los modelos configurados; trade abortado por seguridad.",
-            "model": self.settings.openrouter_model,
+            "signal": "buy" if approved else "hold",
+            "confidence": round(confidence, 4),
+            "rationale": (
+                f"Fallback tecnico (OpenRouter no disponible): setup={setup_score:.2f} "
+                f"scenario={scenario} rsi={rsi:.1f} ob={orderbook_imbalance:.2f} "
+                f"approved={approved}"
+            ),
+            "model": "technical_fallback",
             "consulted": True,
-            "timed_out": True,
-            "timeout_seconds": 4.0,
-            "approved": False,
-            "direction_alignment": "misaligned",
-            "setup_quality": "low",
-            "risk_flags": ["openrouter_unavailable"],
+            "timed_out": False,
+            "approved": approved,
+            "direction_alignment": "aligned" if approved else "misaligned",
+            "setup_quality": setup_quality,
+            "risk_flags": risk_flags,
         }

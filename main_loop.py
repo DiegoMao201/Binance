@@ -343,14 +343,21 @@ def _build_guardrails(
     same_direction = signal == ai_signal.get("signal") if signal == "buy" else True
     ai_confidence = float(ai_signal.get("confidence", 0.0))
     ai_conf_threshold = settings.ai_confidence_threshold
+    # Extraer risk_flags pronto para detectar fallback tecnico antes de calcular umbrales
+    risk_flags_raw = ai_signal.get("risk_flags") or []
+    risk_flags = risk_flags_raw if isinstance(risk_flags_raw, list) else [str(risk_flags_raw)]
+    # Reduccion de umbral cuando la IA externa no esta disponible y el motor tecnico local evaluo
+    is_technical_fallback = "technical_fallback_mode" in risk_flags
+    if is_technical_fallback:
+        # El fallback tecnico tiene un techo de ~0.64; reducimos el umbral para permitir el paso
+        ai_conf_threshold = max(0.50, ai_conf_threshold - 0.10)
     if strong_micro:
         ai_conf_threshold = max(0.52, ai_conf_threshold - 0.05)
     ai_confident = ai_confidence >= ai_conf_threshold
     ai_approved = bool(ai_signal.get("approved", False))
     ai_alignment = ai_signal.get("direction_alignment") == "aligned"
     setup_quality = str(ai_signal.get("setup_quality", "low")).lower()
-    risk_flags_raw = ai_signal.get("risk_flags") or []
-    risk_flags = risk_flags_raw if isinstance(risk_flags_raw, list) else [str(risk_flags_raw)]
+    # risk_flags ya fue extraido arriba para detectar fallback_mode antes del threshold
 
     critical_risk_flags = {
         "openrouter_timeout",
@@ -360,7 +367,10 @@ def _build_guardrails(
         "illiquid_spread",
     }
     critical_flags_present = [f for f in risk_flags if str(f).lower() in critical_risk_flags]
-    non_critical_flags_count = max(0, len(risk_flags) - len(critical_flags_present))
+    # Los flags internos del fallback tecnico no cuentan como riesgos externos
+    internal_flags = {"openrouter_unavailable", "technical_fallback_mode", "not_consulted", "tape_weak"}
+    external_flags = [f for f in risk_flags if str(f).lower() not in internal_flags]
+    non_critical_flags_count = max(0, len(external_flags) - len(critical_flags_present))
 
     # Gate adaptativo:
     # - Escenario A: medium/high permitido; risk flags no bloquean por si solos.
@@ -379,7 +389,7 @@ def _build_guardrails(
             setup_quality == "high"
             or (
                 setup_quality == "medium"
-                and ai_confidence >= max(ai_conf_threshold, 0.60)
+                and ai_confidence >= max(ai_conf_threshold, 0.58 if is_technical_fallback else 0.60)
                 and len(critical_flags_present) == 0
                 and (strong_micro or orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.52))
             )
@@ -387,9 +397,10 @@ def _build_guardrails(
         ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
     else:
         high_ready = setup_quality == "high" and len(critical_flags_present) == 0
+        fallback_medium_floor = 0.55 if is_technical_fallback else 0.62
         medium_ready = (
             setup_quality == "medium"
-            and ai_confidence >= max(ai_conf_threshold, 0.62)
+            and ai_confidence >= max(ai_conf_threshold, fallback_medium_floor)
             and len(critical_flags_present) == 0
             and non_critical_flags_count <= 1
         )
