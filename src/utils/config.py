@@ -95,7 +95,7 @@ def load_settings() -> Settings:
     raw_whitelist_ips = os.getenv("BINANCE_WHITELIST_IPS", "")
     raw_fallback_models = os.getenv(
         "OPENROUTER_FALLBACK_MODELS",
-        "google/gemini-2.5-flash,anthropic/claude-3.5-haiku,meta-llama/llama-3.1-8b-instruct:free,google/gemini-flash-1.5-8b",
+        "openai/gpt-oss-120b:free,openrouter/free,nvidia/nemotron-3-super-120b-a12b:free",
     )
     target_symbols = tuple(
         dict.fromkeys(  # preserva orden y deduplica

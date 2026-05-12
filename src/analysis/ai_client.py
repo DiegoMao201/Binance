@@ -203,7 +203,7 @@ class OpenRouterAnalyzer:
                         "temperature": 0.1,
                         "response_format": {"type": "json_object"},
                     },
-                    timeout=7.0,
+                    timeout=30.0,
                 )
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
