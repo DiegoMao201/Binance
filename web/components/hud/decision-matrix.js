@@ -32,14 +32,20 @@ export default function DecisionMatrix({ matrix = [], focus = "" }) {
                   <div className="hud-matrix-ratio">{passing}/{total}</div>
                 </div>
               </div>
+              {sc.description && (
+                <div className="hud-matrix-desc">{sc.description}</div>
+              )}
               <ul className="hud-matrix-checks">
                 {sc.checks.map((c, i) => (
-                  <li key={i} className={c.ok ? "ok" : "fail"}>
+                  <li key={i} className={`${c.ok ? "ok" : "fail"} hud-tooltip-wrap`}>
                     <span className="hud-matrix-check-icon">
                       {c.ok ? <CheckCircle2 size={12} /> : <motion.span animate={{ opacity: [1, 0.35, 1] }} transition={{ duration: 1.0, repeat: Infinity }}><XCircle size={12} /></motion.span>}
                     </span>
                     <span className="hud-matrix-check-name">{c.name}</span>
                     <span className="hud-matrix-check-value">{c.value}</span>
+                    {c.tooltip && (
+                      <div className="hud-tooltip">{c.tooltip}</div>
+                    )}
                   </li>
                 ))}
               </ul>

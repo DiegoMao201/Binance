@@ -201,6 +201,7 @@
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   padding: 8px;
+  overflow: visible;
 }
 .hud-matrix-cell-active { border-color: var(--cyan); }
 .hud-matrix-cell-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
@@ -216,7 +217,7 @@
 .hud-matrix-label { font-size: 11px; color: var(--text); font-weight: 600; }
 .hud-matrix-ratio { font-size: 9px; color: var(--muted); letter-spacing: 0.12em; }
 .hud-matrix-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-.hud-matrix-checks li { display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center; font-size: 10px; padding: 2px 0; }
+.hud-matrix-checks li { display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center; font-size: 10px; padding: 2px 0; overflow: visible; }
 .hud-matrix-checks li.ok { color: var(--green); }
 .hud-matrix-checks li.fail { color: var(--red); text-shadow: 0 0 6px rgba(239,68,68,0.4); }
 .hud-matrix-check-icon { display: grid; place-items: center; }
@@ -224,6 +225,90 @@
 .hud-matrix-checks li.ok .hud-matrix-check-name { color: #b8d8c5; }
 .hud-matrix-checks li.fail .hud-matrix-check-name { color: #f1b6b6; }
 .hud-matrix-check-value { font-weight: 700; }
+
+/* ── TOOLTIP educativo (hover CSS puro) ────────────────────────── */
+.hud-tooltip-wrap { position: relative; }
+.hud-tooltip {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 8px;
+  z-index: 9999;
+  width: 260px;
+  padding: 10px 12px;
+  background: rgba(4, 12, 24, 0.97);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 7px;
+  color: #cfe3f5;
+  font-size: 10px;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), 0 4px 24px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  white-space: normal;
+}
+/* Flecha del tooltip */
+.hud-tooltip::before {
+  content: "";
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 5px solid transparent;
+  border-right-color: rgba(34, 211, 238, 0.35);
+}
+.hud-tooltip-wrap:hover .hud-tooltip { display: block; }
+
+/* ── Matrix description ────────────────────────────────────────── */
+.hud-matrix-desc {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+  line-height: 1.4;
+  opacity: 0.7;
+}
+
+/* ── Keyword badges (Neural Pulse) ─────────────────────────────── */
+.hud-neural-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 0 4px;
+  justify-content: center;
+  min-height: 28px;
+}
+.hud-keyword-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: 20px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.03);
+  transition: all 0.15s;
+  cursor: default;
+}
+.hud-keyword-badge:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* ── RSI Panel (below chart) ───────────────────────────────────── */
+.hud-rsi-panel {
+  margin-top: 4px;
+  border-top: 1px solid rgba(34, 211, 238, 0.10);
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+.hud-rsi-panel canvas {
+  display: block;
+}
+
+
 
 /* ── SCANNER ───────────────────────────────────────────────────── */
 .hud-scanner-list { display: flex; flex-direction: column; gap: 4px; }

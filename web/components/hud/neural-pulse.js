@@ -1,14 +1,17 @@
 "use client";
 import { motion, AnimatePresence } from "framer-motion";
 import { Activity, Brain } from "lucide-react";
+import { extractAiKeywords } from "../../lib/derive-hud-state";
 
 // Confidence IA con anillo pulsante. Color cambia según threshold (default 0.55).
-export default function NeuralPulse({ confidence = 0, threshold = 0.55, signal = "hold", model = "lazy_gate", approved = false, fallbackMode = false }) {
+export default function NeuralPulse({ confidence = 0, threshold = 0.55, signal = "hold", model = "lazy_gate", approved = false, fallbackMode = false, rationale = "" }) {
   const conf = Math.max(0, Math.min(1, Number(confidence) || 0));
   const pct = Math.round(conf * 100);
   const above = conf >= threshold;
   const color = !approved ? "#6b7280" : above ? "#22c55e" : conf >= threshold - 0.1 ? "#facc15" : "#ef4444";
   const ring = `conic-gradient(${color} ${pct * 3.6}deg, rgba(255,255,255,0.05) 0)`;
+
+  const keywords = extractAiKeywords(rationale);
 
   return (
     <div className="hud-neural">
@@ -31,6 +34,23 @@ export default function NeuralPulse({ confidence = 0, threshold = 0.55, signal =
           </div>
         </motion.div>
       </div>
+
+      {keywords.length > 0 && (
+        <div className="hud-neural-keywords">
+          {keywords.map((kw, i) => (
+            <motion.span
+              key={kw.tag}
+              className="hud-keyword-badge"
+              style={{ borderColor: kw.color, color: kw.color, boxShadow: `0 0 8px ${kw.color}55` }}
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: i * 0.08, type: "spring", stiffness: 400, damping: 20 }}
+            >
+              {kw.tag}
+            </motion.span>
+          ))}
+        </div>
+      )}
 
       <div className="hud-neural-meta">
         <div className="hud-neural-row">

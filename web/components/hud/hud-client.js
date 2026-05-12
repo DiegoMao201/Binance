@@ -204,6 +204,7 @@ export default function HudClient({ initialData }) {
             model={focusAi?.model ?? "lazy_gate"}
             approved={Boolean(focusAi?.approved)}
             fallbackMode={Boolean(focusAi?.risk_flags?.includes?.("technical_fallback_mode"))}
+            rationale={focusAi?.rationale ?? ""}
           />
 
           <motion.div className="hud-position" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
@@ -234,7 +235,9 @@ export default function HudClient({ initialData }) {
             takeProfit={takeProfit}
             entryPrice={entryPrice}
             symbol={focusSymbol}
-            height={460}
+            height={360}
+            rsiMaxA={Number(state?.settings?.scenario_a_rsi_max ?? 52)}
+            rsiMaxB={Number(state?.settings?.scenario_b_rsi_max ?? 36)}
           />
           <AuditTerminal events={events} />
         </section>

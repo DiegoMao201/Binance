@@ -1,11 +1,12 @@
 "use client";
 import { useEffect, useRef } from "react";
+import RsiPanel from "./rsi-panel";
 
 // Componente de gráfica TradingView-style con lightweight-charts.
 // - Renderiza velas + EMA20 + markers ENTRY/EXIT/LIVE + trailing SL en vivo.
 // - Side-effect free: solo escribe en el container y limpia al desmontar.
 // - 60fps: lightweight-charts es WebGL-free pero altamente optimizado (canvas).
-export default function LiveChart({ candles = [], markers = [], trailingSL = null, entryPrice = null, takeProfit = null, height = 420, symbol = "" }) {
+export default function LiveChart({ candles = [], markers = [], trailingSL = null, entryPrice = null, takeProfit = null, height = 360, symbol = "", rsiMaxA = 52, rsiMaxB = 36 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
@@ -160,6 +161,7 @@ export default function LiveChart({ candles = [], markers = [], trailingSL = nul
         </span>
       </div>
       <div ref={containerRef} style={{ width: "100%", height }} className="hud-chart-canvas" />
+      <RsiPanel candles={candles} rsiMaxA={rsiMaxA} rsiMaxB={rsiMaxB} />
     </div>
   );
 }
