@@ -379,3 +379,324 @@
   border-top: 1px solid var(--line-soft);
   background: rgba(4, 8, 13, 0.6);
 }
+
+/* ── Desktop: hide mobile-only elements ────────────────────────── */
+.hud-mobile-nav   { display: none; }
+.hud-mobile-strip { display: none; }
+.hud-signal-flash { display: none; }
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVE — Mobile Terminal  (≤ 768px)
+   Concepto: Native trading app — bottom nav · tab panels · glow
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* ── Body / shell ─────────────────────────────────────────── */
+  .hud-shell {
+    min-height: 100svh;
+    overflow-x: hidden;
+  }
+
+  /* ── TOPBAR: compact single row ───────────────────────────── */
+  .hud-topbar {
+    grid-template-columns: 1fr auto;
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .hud-brand { gap: 8px; }
+  .hud-brand-mark { width: 26px; height: 26px; border-radius: 6px; }
+  .hud-brand-title { font-size: 12px; }
+  .hud-brand-sub { display: none; }
+  .hud-topbar-stats { display: none; }
+  .hud-topbar-conn { flex-direction: row; gap: 5px; align-items: center; }
+  .hud-conn { padding: 4px 7px; font-size: 9px; gap: 4px; }
+  .hud-conn span { display: none; }
+
+  /* ── STATS STRIP ──────────────────────────────────────────── */
+  .hud-mobile-strip {
+    display: flex !important;
+    overflow-x: auto;
+    gap: 5px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(6, 13, 22, 0.92);
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .hud-mobile-strip::-webkit-scrollbar { display: none; }
+  .hud-mobile-strip-pill {
+    scroll-snap-align: start;
+    flex-shrink: 0;
+    padding: 4px 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 64px;
+  }
+  .hud-mobile-strip-label {
+    font-size: 8px;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    text-transform: uppercase;
+    line-height: 1;
+  }
+  .hud-mobile-strip-value {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── SIGNAL FLASH BANNER ──────────────────────────────────── */
+  .hud-signal-flash {
+    display: block !important;
+    position: sticky;
+    top: 46px;
+    z-index: 25;
+    padding: 7px 16px;
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.18), rgba(34, 211, 238, 0.08));
+    border-bottom: 1px solid rgba(34, 197, 94, 0.45);
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: #22c55e;
+    letter-spacing: 0.1em;
+    text-shadow: 0 0 14px rgba(34, 197, 94, 0.7);
+    animation: hud-blink 2s infinite;
+  }
+
+  /* ── CONTROL BAR ──────────────────────────────────────────── */
+  .hud-controlbar {
+    padding: 6px 10px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .hud-controlbar-left {
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex: 1;
+  }
+  .hud-controlbar-left::-webkit-scrollbar { display: none; }
+  .hud-control-label { display: none; }
+  .hud-symbol-tabs { gap: 4px; }
+  .hud-symbol-tab {
+    padding: 7px 13px;
+    font-size: 11px;
+    min-height: 36px;
+    touch-action: manipulation;
+  }
+  .hud-controlbar-right {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 4px;
+  }
+  .hud-btn {
+    padding: 8px 4px;
+    font-size: 9px;
+    justify-content: center;
+    min-height: 36px;
+    touch-action: manipulation;
+  }
+
+  /* ── MAIN: tab-based full-screen panels ───────────────────── */
+  .hud-main {
+    display: block !important;
+    padding: 10px;
+    padding-bottom: 80px;
+  }
+  .hud-col-left,
+  .hud-col-center,
+  .hud-col-right { gap: 10px; }
+
+  /* Tab visibility — parent carries data-mobile-tab */
+  [data-mobile-tab="pulse"] .hud-col-center,
+  [data-mobile-tab="pulse"] .hud-col-right { display: none !important; }
+
+  [data-mobile-tab="chart"] .hud-col-left,
+  [data-mobile-tab="chart"] .hud-col-right { display: none !important; }
+  [data-mobile-tab="chart"] .hud-terminal  { display: none !important; }
+
+  [data-mobile-tab="matrix"] .hud-col-left,
+  [data-mobile-tab="matrix"] .hud-col-center { display: none !important; }
+
+  [data-mobile-tab="feed"] .hud-col-left,
+  [data-mobile-tab="feed"] .hud-col-right { display: none !important; }
+  [data-mobile-tab="feed"] .hud-chart-wrap { display: none !important; }
+  [data-mobile-tab="feed"] .hud-terminal {
+    height: calc(100svh - 210px) !important;
+  }
+  [data-mobile-tab="feed"] .hud-terminal-body {
+    height: calc(100svh - 290px) !important;
+    max-height: unset !important;
+  }
+  /* Full-width terminal msg on mobile */
+  [data-mobile-tab="feed"] .hud-terminal-msg {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+  }
+  [data-mobile-tab="feed"] .hud-terminal-line {
+    grid-template-columns: 55px 45px 60px 1fr;
+    gap: 5px;
+  }
+
+  /* ── Neural Pulse: compact ring ───────────────────────────── */
+  .hud-neural-ring { width: 130px; height: 130px; }
+  .hud-neural-core { width: 94px; height: 94px; }
+  .hud-neural-pct  { font-size: 24px; }
+  .hud-neural-sub  { font-size: 8px; }
+
+  /* ── Position grid: 3 cols on mobile ─────────────────────── */
+  .hud-position-grid { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .hud-position-grid b { font-size: 12px; }
+
+  /* ── Chart: mobile height ─────────────────────────────────── */
+  .hud-chart-canvas { min-height: 260px; }
+
+  /* ── Decision Matrix: 2×2, compact ───────────────────────── */
+  .hud-matrix-grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .hud-matrix-cell { padding: 7px; }
+  .hud-matrix-desc { display: none; }
+  .hud-matrix-id  { width: 22px; height: 22px; font-size: 11px; }
+
+  /* ── Tooltips: hidden on mobile (no hover) ────────────────── */
+  .hud-tooltip { display: none !important; }
+
+  /* ── Footer: hidden on mobile ─────────────────────────────── */
+  .hud-foot { display: none; }
+
+  /* ── BOTTOM NAVIGATION ────────────────────────────────────── */
+  .hud-mobile-nav {
+    display: flex !important;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 64px;
+    background: rgba(3, 7, 14, 0.97);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-top: 1px solid rgba(34, 211, 238, 0.2);
+    box-shadow:
+      0 -1px 0 rgba(34, 211, 238, 0.06),
+      0 -12px 40px rgba(0, 0, 0, 0.5);
+    z-index: 100;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .hud-mobile-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    color: #3a5068;
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+    text-transform: uppercase;
+    position: relative;
+    min-height: 44px;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition: color 0.18s;
+  }
+  .hud-mobile-tab-icon { line-height: 1; transition: filter 0.18s; }
+  .hud-mobile-tab-label { line-height: 1; }
+
+  /* Top glow line */
+  .hud-mobile-tab::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 25%; right: 25%;
+    height: 2px;
+    border-radius: 0 0 4px 4px;
+    background: currentColor;
+    opacity: 0;
+    box-shadow: 0 0 10px currentColor, 0 0 4px currentColor;
+    transition: opacity 0.18s;
+  }
+  .hud-mobile-tab.active::before { opacity: 1; }
+
+  /* Per-tab active colors */
+  .hud-mobile-tab[data-tab="pulse"].active {
+    color: #a78bfa;
+  }
+  .hud-mobile-tab[data-tab="pulse"].active .hud-mobile-tab-icon {
+    filter: drop-shadow(0 0 6px rgba(167, 139, 250, 0.9));
+  }
+  .hud-mobile-tab[data-tab="chart"].active {
+    color: #facc15;
+  }
+  .hud-mobile-tab[data-tab="chart"].active .hud-mobile-tab-icon {
+    filter: drop-shadow(0 0 6px rgba(250, 204, 21, 0.9));
+  }
+  .hud-mobile-tab[data-tab="matrix"].active {
+    color: #22d3ee;
+  }
+  .hud-mobile-tab[data-tab="matrix"].active .hud-mobile-tab-icon {
+    filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.9));
+  }
+  .hud-mobile-tab[data-tab="feed"].active {
+    color: #22c55e;
+  }
+  .hud-mobile-tab[data-tab="feed"].active .hud-mobile-tab-icon {
+    filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.9));
+  }
+
+  /* Activity badge (pulsing dot) */
+  .hud-mobile-tab-badge {
+    position: absolute;
+    top: 8px;
+    right: calc(50% - 18px);
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    border: 1.5px solid #030710;
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.9);
+    animation: hud-blink 1s infinite;
+  }
+  [data-tab="chart"] .hud-mobile-tab-badge {
+    background: var(--amber);
+    box-shadow: 0 0 8px rgba(250, 204, 21, 0.9);
+  }
+
+  /* ── Panels: full width, better touch ────────────────────── */
+  .hud-neural,
+  .hud-position,
+  .hud-matrix,
+  .hud-scanner,
+  .hud-terminal,
+  .hud-chart-wrap {
+    border-radius: 12px;
+  }
+
+  /* ── Scanner: compact on mobile ──────────────────────────── */
+  .hud-scanner-row {
+    padding: 8px 10px;
+    font-size: 12px;
+    min-height: 42px;
+    touch-action: manipulation;
+  }
+
+  /* ── Keyword badges: smaller on mobile ───────────────────── */
+  .hud-keyword-badge { font-size: 8px; padding: 2px 6px; }
+}
+
+/* ── Extra small phones (≤ 390px) ─────────────────────────────── */
+@media (max-width: 390px) {
+  .hud-mobile-tab-label { display: none; }
+  .hud-mobile-tab { justify-content: center; gap: 0; }
+  .hud-mobile-tab::before { left: 20%; right: 20%; }
+  .hud-matrix-grid { grid-template-columns: 1fr 1fr; gap: 4px; }
+  .hud-matrix-checks li { font-size: 9px; }
+}
+

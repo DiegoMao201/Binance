@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Cpu, Wifi, WifiOff, Activity, TrendingUp, TrendingDown, Pause, Play, Square, RotateCcw } from "lucide-react";
+import { Cpu, Wifi, WifiOff, Activity, TrendingUp, TrendingDown, Pause, Play, Square, RotateCcw, Brain, BarChart2, Layers, List, Zap } from "lucide-react";
 
 import LiveChart from "./live-chart";
 import NeuralPulse from "./neural-pulse";
@@ -32,11 +32,38 @@ function StatPill({ label, value, accent = "#22d3ee", trend = 0 }) {
   );
 }
 
+// ── Mobile Bottom Navigation ──────────────────────────────────────────────────
+function MobileNav({ tab, setTab, hasSignal, hasPosition }) {
+  const TABS = [
+    { id: "pulse", icon: <Brain size={20} />, label: "NEURAL", badge: hasSignal },
+    { id: "chart", icon: <BarChart2 size={20} />, label: "CHART", badge: hasPosition },
+    { id: "matrix", icon: <Layers size={20} />, label: "MATRIX" },
+    { id: "feed", icon: <List size={20} />, label: "FEED" },
+  ];
+  return (
+    <nav className="hud-mobile-nav" aria-label="Panel navigation">
+      {TABS.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => setTab(t.id)}
+          className={`hud-mobile-tab${tab === t.id ? " active" : ""}`}
+          data-tab={t.id}
+        >
+          <span className="hud-mobile-tab-icon">{t.icon}</span>
+          {t.badge && <span className="hud-mobile-tab-badge" />}
+          <span className="hud-mobile-tab-label">{t.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 export default function HudClient({ initialData }) {
   const [payload, setPayload] = useState(initialData);
   const [connected, setConnected] = useState(false);
   const [focusSymbol, setFocusSymbol] = useState("");
   const [controlBusy, setControlBusy] = useState(false);
+  const [mobileTab, setMobileTab] = useState("pulse");
 
   // SSE event-driven (chokidar push). Si falla, retry exponencial.
   useEffect(() => {
@@ -134,8 +161,11 @@ export default function HudClient({ initialData }) {
     finally { setControlBusy(false); }
   }
 
+  const hasSignal = Boolean(focusAi?.approved && focusAi?.signal === "buy");
+  const hasPosition = Boolean(focusOpen);
+
   return (
-    <div className="hud-shell">
+    <div className="hud-shell" data-mobile-tab={mobileTab}>
       {/* TOP BAR */}
       <header className="hud-topbar">
         <div className="hud-brand">
@@ -166,6 +196,46 @@ export default function HudClient({ initialData }) {
           </div>
         </div>
       </header>
+
+      {/* MOBILE: stats strip (horizontal scroll) */}
+      <div className="hud-mobile-strip">
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">EQUITY</span>
+          <span className="hud-mobile-strip-value" style={{ color: "#22d3ee" }}>{fmtUsd(equity)}</span>
+        </div>
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">PnL</span>
+          <span className="hud-mobile-strip-value" style={{ color: realized >= 0 ? "#22c55e" : "#ef4444" }}>{realized != null ? `${realized >= 0 ? "+" : ""}${fmtUsd(realized, 3)}` : "—"}</span>
+        </div>
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">WIN%</span>
+          <span className="hud-mobile-strip-value" style={{ color: "#facc15" }}>{winRate != null ? `${Number(winRate).toFixed(1)}%` : "—"}</span>
+        </div>
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">TRADES</span>
+          <span className="hud-mobile-strip-value" style={{ color: "#a78bfa" }}>{totalTrades}</span>
+        </div>
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">DD</span>
+          <span className="hud-mobile-strip-value" style={{ color: "#f97316" }}>{drawdown != null ? fmtPct(drawdown) : "—"}</span>
+        </div>
+        <div className="hud-mobile-strip-pill">
+          <span className="hud-mobile-strip-label">W/L</span>
+          <span className="hud-mobile-strip-value" style={{ color: "#22d3ee" }}>{wins != null && losses != null ? `${wins}/${losses}` : "—"}</span>
+        </div>
+        <div className="hud-mobile-strip-pill" style={{ borderColor: isOnline ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)" }}>
+          <span className="hud-mobile-strip-label">BOT</span>
+          <span className="hud-mobile-strip-value" style={{ color: isOnline ? "#22c55e" : "#ef4444", fontSize: 11 }}>{isOnline ? "LIVE" : "STALE"}</span>
+        </div>
+      </div>
+
+      {/* MOBILE: signal flash banner */}
+      {hasSignal && (
+        <div className="hud-signal-flash">
+          <Zap size={12} style={{ display: "inline", verticalAlign: "middle", marginRight: 5 }} />
+          SEÑAL ACTIVA · {focusSymbol} · {Math.round((focusAi?.confidence ?? 0) * 100)}% CONF
+        </div>
+      )}
 
       {/* CONTROL BAR */}
       <div className="hud-controlbar">
@@ -272,6 +342,9 @@ export default function HudClient({ initialData }) {
       <footer className="hud-foot">
         OptiFerre HUD · event-driven SSE · {payload?.serverTime ? new Date(payload.serverTime).toISOString().slice(11, 19) : "--:--:--"} UTC
       </footer>
+
+      {/* MOBILE: bottom navigation */}
+      <MobileNav tab={mobileTab} setTab={setMobileTab} hasSignal={hasSignal} hasPosition={hasPosition} />
     </div>
   );
 }

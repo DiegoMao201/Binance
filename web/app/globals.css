@@ -682,3 +682,122 @@ tbody tr:hover {
     align-items: flex-start;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVE CLÁSICO — Mobile  (≤ 768px)
+   Layout stack: content-first, sidebar al fondo, compact grids
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+
+  /* Prevent horizontal blowout */
+  html, body { overflow-x: hidden; max-width: 100vw; }
+
+  /* ── Layout stack ─────────────────────────────────────────── */
+  .page-shell {
+    display: flex !important;
+    flex-direction: column;
+    grid-template-columns: unset;
+  }
+
+  /* Content first on mobile (bot data above sidebar controls) */
+  .content {
+    order: 1;
+    padding: 12px;
+    gap: 12px;
+  }
+
+  /* Sidebar: compact strip at bottom */
+  .sidebar {
+    order: 2;
+    border-right: none;
+    border-top: 1px solid #182433;
+    padding: 12px;
+    gap: 10px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Hero header ──────────────────────────────────────────── */
+  .hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .hero h2 { font-size: 1.4rem; }
+  .hero-actions { flex-wrap: wrap; gap: 8px; }
+
+  /* ── Grids ────────────────────────────────────────────────── */
+  .alerts-grid { grid-template-columns: 1fr; }
+
+  /* 2×N for metrics — more data visible than single column */
+  .metrics-grid,
+  .telemetry-grid,
+  .analytics-kpis {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .details-grid,
+  .matrix-layout { grid-template-columns: 1fr; }
+
+  /* ── Panels ───────────────────────────────────────────────── */
+  .alert-card,
+  .metric-card,
+  .telemetry-card,
+  .panel,
+  .narrative-card {
+    padding: 12px;
+    border-radius: 14px;
+  }
+
+  .metric-value { font-size: 1.3rem; }
+
+  /* ── Tables: horizontal scroll ────────────────────────────── */
+  .table-wrap,
+  .matrix-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table { font-size: 11px; min-width: 480px; }
+  th, td { padding: 8px 8px; }
+
+  /* ── Panel header ─────────────────────────────────────────── */
+  .panel-header {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* ── Timeline ─────────────────────────────────────────────── */
+  .timeline-head {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* ── Nav pills ────────────────────────────────────────────── */
+  .nav-pills { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; padding-bottom: 2px; }
+  .nav-pills::-webkit-scrollbar { display: none; }
+  .nav-pill { white-space: nowrap; font-size: 12px; padding: 8px 12px; }
+
+  /* ── Control buttons: full width ──────────────────────────── */
+  .button-stack { gap: 6px; }
+  .control-btn {
+    padding: 13px 12px;
+    font-size: 13px;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  /* ── Status pills: compact ────────────────────────────────── */
+  .status-pill { font-size: 11px; padding: 6px 10px; }
+
+  /* ── Timeline: full width ─────────────────────────────────── */
+  .timeline-content { padding: 10px 12px; border-radius: 10px; }
+
+  /* ── Matrix page ──────────────────────────────────────────── */
+  .matrix-page-shell { padding: 12px; gap: 12px; }
+  .matrix-page-hero { flex-direction: column; gap: 12px; }
+  .matrix-page-title { font-size: 1.5rem; }
+  .matrix-callout { position: static; }
+}
