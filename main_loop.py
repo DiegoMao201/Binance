@@ -526,22 +526,27 @@ def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any
     if not (settings.min_atr_pct <= atr_pct <= settings.max_atr_pct):
         return False, "volatilidad fuera de rango"
     # Escenario C (continuacion) exige algo mas de traccion para no comprar ruido en 5m.
-    # Escenario A: pullback con tendencia. RSI debe estar rebotando, no aun cayendo.
-    # rsi_slope = rsi[-1] - rsi[-3]; si es muy negativo compramos en plena caida.
+    # Escenario A: pullback con tendencia. Permitimos slope ligeramente negativo
+    # (mercado oscila); solo rechazamos si la caida es muy agresiva.
+    rsi_value = float(technical_signal.get("rsi", 50.0))
+    rsi_slope_value = float(technical_signal.get("rsi_slope", 0.0))
     if scenario == "A":
-        if float(technical_signal.get("rsi_slope", 0.0)) < -1.0:
-            return False, "escenario A RSI todavia cayendo (slope < -1.0)"
-    # Escenario B: sobreventa extrema. Exigimos que el RSI al menos haya frenado.
+        if rsi_slope_value < -1.8:
+            return False, "escenario A RSI cayendo con fuerza (slope < -1.8)"
+    # Escenario B: sobreventa extrema.
+    # OVERRIDE deep-oversold: si RSI <= 28, capturamos el knife-catch sin exigir
+    # vela verde ni freno de slope (los rebotes mas explosivos vienen de aqui).
     if scenario == "B":
-        if float(technical_signal.get("rsi_slope", 0.0)) < -1.5:
-            return False, "escenario B RSI cayendo con fuerza (slope < -1.5)"
+        deep_oversold = rsi_value <= 28.0
+        if not deep_oversold and rsi_slope_value < -2.2:
+            return False, "escenario B RSI cayendo con fuerza (slope < -2.2)"
     if scenario == "C":
         if not bool(technical_signal.get("green_candle")):
             return False, "escenario C sin vela verde"
         # Relajamos: RSI slope no debe estar cayendo agresivamente (era > 0)
-        if float(technical_signal.get("rsi_slope", 0.0)) < -1.5:
+        if rsi_slope_value < -1.5:
             return False, "escenario C RSI cayendo con fuerza"
-        if float(technical_signal.get("volume_acceleration", 0.0)) < 0.85:
+        if float(technical_signal.get("volume_acceleration", 0.0)) < 0.80:
             return False, "escenario C sin aceleracion de volumen"
     # Escenario D (EMA cross): confirmar que el cruce sea real
     if scenario == "D":

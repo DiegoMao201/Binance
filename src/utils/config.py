@@ -157,8 +157,8 @@ def load_settings() -> Settings:
         max_atr_pct=float(os.getenv("MAX_ATR_PCT", "0.022")),  # Coolify: 0.022 (era 0.018)
         min_volume_ratio=float(os.getenv("MIN_VOLUME_RATIO", "0.15")),  # Coolify: 0.15 (era 1.10 → bloqueaba casi todo)
         max_spread_pct=float(os.getenv("MAX_SPREAD_PCT", "0.0015")),
-        min_orderbook_imbalance=float(os.getenv("MIN_ORDERBOOK_IMBALANCE", "0.48")),
-        min_trade_flow_score=float(os.getenv("MIN_TRADE_FLOW_SCORE", "0.50")),
+        min_orderbook_imbalance=float(os.getenv("MIN_ORDERBOOK_IMBALANCE", "0.45")),
+        min_trade_flow_score=float(os.getenv("MIN_TRADE_FLOW_SCORE", "0.45")),
         guardrail_relaxation=float(os.getenv("GUARDRAIL_RELAXATION", "0.08")),
         trade_cooldown_minutes=int(os.getenv("TRADE_COOLDOWN_MINUTES", "5")),  # Coolify: 5 (era 10)
         ai_min_interval_seconds=int(os.getenv("AI_MIN_INTERVAL_SECONDS", "120")),  # Coolify: 120 (era 300)

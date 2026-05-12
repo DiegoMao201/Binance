@@ -199,7 +199,8 @@ def build_technical_signal(frame: pd.DataFrame, settings: Settings | None = None
 
     # Logica OR
     scenario_a = bool(rsi <= rsi_max_a and close > ema_slow)            # Pullback con tendencia
-    scenario_b = bool(rsi <= rsi_max_b and green_candle)                # Sobreventa extrema con freno
+    # Sobreventa extrema con freno O deep-oversold (RSI<=28 acepta knife-catch sin vela verde).
+    scenario_b = bool((rsi <= rsi_max_b and green_candle) or rsi <= 28.0)
     # Continuacion de tendencia con momentum sano (evita depender solo de RSI bajo).
     ema_slow_slope = float(latest["ema_slow_slope"])
 
