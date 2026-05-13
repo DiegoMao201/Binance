@@ -418,6 +418,28 @@ def _build_guardrails(
         ai_setup_ready,
         scenario == "A" or ai_risk_clear,
     ])
+
+    # ── [Bypass AI] Technical Override ──────────────────────────────────────
+    # Activado cuando el modelo de IA es el fallback (lazy_gate / gratuito)
+    # O cuando hay un error de API (openrouter_unavailable en risk_flags).
+    # Condición: solo Escenario B con RSI extremo y volumen mínimo aceptable.
+    # El override NO rebaja el SL ni cambia el sizing — solo omite el gate de IA.
+    _ai_model_used = str(ai_signal.get("model", "")).lower()
+    _is_lazy_fallback = (
+        _ai_model_used == "lazy_gate"
+        or "openrouter_unavailable" in risk_flags
+        or _ai_model_used == ""
+    )
+    if not ai_gate_ready and _is_lazy_fallback and scenario == "B":
+        _rsi_override = float(technical_signal.get("rsi", 99.0))
+        _vol_override  = float(technical_signal.get("volume_ratio", 0.0))
+        # Umbral estricto: RSI <= 30 (sobreventa extrema) y volumen mínimo 0.8x
+        # para que el knife-catch tenga liquidez real antes de entrar.
+        _technical_override = _rsi_override <= 30.0 and _vol_override >= 0.8
+        if _technical_override:
+            ai_gate_ready = True
+    # ── [/Bypass AI] ─────────────────────────────────────────────────────────
+
     # Volatilidad: solo exigimos piso de ATR (regla del usuario), techo opcional.
     atr_pct = float(technical_signal.get("atr_pct", 0.0))
     volatility_ready = atr_pct >= settings.min_atr_pct and atr_pct <= settings.max_atr_pct
@@ -451,6 +473,24 @@ def _build_guardrails(
             and flow_ready
             and macro_trend != "bearish"
         )
+        # ── [Bypass Macro] Mean Reversion Valve ──────────────────────────────
+        # Si la macro es BEARISH pero el 5m detecta sobreventa extrema + volumen,
+        # permitimos capturar el rebote táctico sin esperar confirmación macro.
+        # Esto captura los "fallen knife bounces" más explosivos de media reversión.
+        # Condición doble: RSI <= 30 (extremo) + volumen acelerado (>= 1.2x media)
+        # para que no sea una caída libre sin compradores — tiene que haber acción.
+        if not regime_ready and scenario == "B" and macro_trend == "bearish":
+            _rsi_mr = float(technical_signal.get("rsi", 99.0))
+            _vol_mr = float(technical_signal.get("volume_ratio", 0.0))
+            _ob_mr  = float(orderbook_imbalance)
+            _mean_reversion_bypass = (
+                _rsi_mr <= 30.0       # Sobreventa extrema confirmada
+                and _vol_mr >= 1.2    # Volumen >= 1.2x promedio (compradores llegando)
+                and _ob_mr >= 0.30    # Mínimo de presión compradora en orderbook
+            )
+            if _mean_reversion_bypass:
+                regime_ready = True
+        # ── [/Bypass Macro] ───────────────────────────────────────────────────
         regime_min_score = max(0.55, 0.62 - score_relax)
     elif regime == "chop":
         # En chop solo entramos si el spread es sano y el tape acompana.
