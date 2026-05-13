@@ -143,7 +143,18 @@ class OpenRouterAnalyzer:
             }
 
         payload = self._build_payload(frame, symbol=symbol, technical_signal=technical_signal)
-        models_to_try: list[str] = [self.settings.openrouter_model]
+
+        # Cadena de modelos para ENTRADAS:
+        #   1. openrouter_entry_model          → modelo pagado preciso (Gemini 2.5 Flash)
+        #   2. openrouter_entry_fallback_models → fallbacks pagados (GPT-4.1 mini, etc.)
+        #   3. openrouter_model + fallback_models → último recurso (puede ser free)
+        models_to_try: list[str] = [self.settings.openrouter_entry_model]
+        for candidate in self.settings.openrouter_entry_fallback_models:
+            if candidate and candidate not in models_to_try:
+                models_to_try.append(candidate)
+        # Agregar modelo genérico y sus fallbacks como último recurso
+        if self.settings.openrouter_model and self.settings.openrouter_model not in models_to_try:
+            models_to_try.append(self.settings.openrouter_model)
         for candidate in self.settings.openrouter_fallback_models:
             if candidate and candidate not in models_to_try:
                 models_to_try.append(candidate)
@@ -208,14 +219,14 @@ class OpenRouterAnalyzer:
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
-                if model_name != self.settings.openrouter_model:
+                if model_name != self.settings.openrouter_entry_model:
                     parsed["fallback_used"] = True
-                    parsed["fallback_from"] = self.settings.openrouter_model
+                    parsed["fallback_from"] = self.settings.openrouter_entry_model
                 self.logger.info(
-                    "OpenRouter OK para %s con modelo=%s fallback=%s",
+                    "OpenRouter ENTRADA OK | symbol=%s model=%s fallback=%s",
                     symbol or self.settings.trading_symbol,
                     model_name,
-                    model_name != self.settings.openrouter_model,
+                    model_name != self.settings.openrouter_entry_model,
                 )
                 return _normalize(parsed, model_name)
             except (requests.Timeout, TimeoutError) as exc:

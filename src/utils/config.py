@@ -20,6 +20,8 @@ class Settings:
     openrouter_api_key: str
     openrouter_model: str
     openrouter_fallback_models: tuple[str, ...]
+    openrouter_entry_model: str
+    openrouter_entry_fallback_models: tuple[str, ...]
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
@@ -97,6 +99,10 @@ def load_settings() -> Settings:
         "OPENROUTER_FALLBACK_MODELS",
         "openai/gpt-oss-120b:free,openrouter/free,nvidia/nemotron-3-super-120b-a12b:free",
     )
+    raw_entry_fallback_models = os.getenv(
+        "OPENROUTER_ENTRY_FALLBACK_MODELS",
+        "openai/gpt-4.1-mini,nvidia/nemotron-3-super-120b-a12b:free",
+    )
     target_symbols = tuple(
         dict.fromkeys(  # preserva orden y deduplica
             sym.strip().upper() for sym in raw_targets.split(",") if sym.strip()
@@ -107,6 +113,9 @@ def load_settings() -> Settings:
     )
     fallback_models = tuple(
         dict.fromkeys(model.strip() for model in raw_fallback_models.split(",") if model.strip())
+    )
+    entry_fallback_models = tuple(
+        dict.fromkeys(model.strip() for model in raw_entry_fallback_models.split(",") if model.strip())
     )
     return Settings(
         binance_api_key=os.getenv("BINANCE_API_KEY", ""),
@@ -119,6 +128,8 @@ def load_settings() -> Settings:
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"),
         openrouter_fallback_models=fallback_models,
+        openrouter_entry_model=os.getenv("OPENROUTER_ENTRY_MODEL", "google/gemini-2.5-flash-preview-05-14"),
+        openrouter_entry_fallback_models=entry_fallback_models,
         trading_symbol=primary_symbol,
         target_symbols=target_symbols,
         max_global_open_positions=int(os.getenv("MAX_GLOBAL_OPEN_POSITIONS", "1")),
