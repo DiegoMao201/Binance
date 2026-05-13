@@ -688,48 +688,42 @@ async def _settle_open_positions(
     logger: logging.Logger,
     persist_open_positions: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    # ---- Trailing stop: dos modos ----
-    # Modo legacy (fallback): triggers/offsets fijos por tier.
-    # Modo ATR (cuando la posicion tiene atr_pct grabado al abrir):
-    #   trigger del tier N = N * 1.0 * ATR%   (1ATR, 2ATR, 3ATR...)
-    #   offset del SL nuevo = entry + (trigger - 0.5*ATR%)  -> bloquea en BE+
-    # Esto adapta el trailing a la volatilidad real del par. Un BTC con
-    # ATR=0.15% no necesita esperar +0.5% para mover SL; un SOL con ATR=1%
-    # tampoco quiere break-even en +0.2%.
-    trailing_tiers: tuple[tuple[int, float, float], ...] = (
-        (1, 0.005, 0.002),
-        (2, 0.008, 0.004),
-        (3, 0.010, 0.006),
-        (4, 0.014, 0.008),
-        (5, 0.018, 0.010),
+    # ---- Trailing stop: Strict Percentage-Based Tiers ----
+    # Tiers deterministas basados en el MFE% real desde precio de entrada.
+    # Sin dependencia de ATR — el sistema reacciona al recorrido concreto de cada
+    # posición, no a la volatilidad estimada. Esto garantiza que el usuario NUNCA
+    # necesita intervenir manualmente: el bot asegura cada micro-escalon de ganancia.
+    #
+    # Formato: (tier_id, trigger_pct, sl_offset_pct)
+    #   trigger_pct   = MFE mínimo desde entry para activar el tier
+    #   sl_offset_pct = nivel del nuevo SL como % positivo desde entry
+    #                   (el signo se aplica según side en el call site)
+    #
+    # TIER 1 cubre los fees de ida+vuelta (0.2% round-trip) + micro ganancia.
+    _TRAILING_TIERS: tuple[tuple[int, float, float], ...] = (
+        (1, 0.0050, 0.0020),  # MFE >= +0.50% → SL en entry +0.20%  (cubre fees)
+        (2, 0.0080, 0.0040),  # MFE >= +0.80% → SL en entry +0.40%
+        (3, 0.0120, 0.0080),  # MFE >= +1.20% → SL en entry +0.80%
+        (4, 0.0160, 0.0120),  # MFE >= +1.60% → SL en entry +1.20%
     )
 
     def _resolve_trailing_tier(mfe_pct: float, atr_pct: float | None = None) -> tuple[int, float | None]:
-        # Modo ATR: tiers escalan con la volatilidad realizada.
-        if atr_pct is not None and atr_pct > 0:
-            # Cap de ATR a 0.015 (1.5%) para no exigir movimientos imposibles
-            # en pares calientes; floor 0.002 (0.2%) para no hacer micro-trailing.
-            effective_atr = min(0.015, max(0.002, float(atr_pct)))
-            atr_tiers = [
-                (1, 1.0 * effective_atr, 0.3 * effective_atr),  # +1 ATR -> SL en +0.3 ATR
-                (2, 1.5 * effective_atr, 0.7 * effective_atr),  # +1.5 ATR -> SL en +0.7 ATR
-                (3, 2.0 * effective_atr, 1.0 * effective_atr),  # +2 ATR -> SL en +1 ATR
-                (4, 2.8 * effective_atr, 1.5 * effective_atr),
-                (5, 3.5 * effective_atr, 2.0 * effective_atr),
-            ]
-            target_tier = 0
-            target_offset: float | None = None
-            for tier_id, trigger_pct, offset_pct in atr_tiers:
-                if mfe_pct >= trigger_pct:
-                    target_tier = tier_id
-                    target_offset = offset_pct
-            return target_tier, target_offset
+        """Evalúa los tiers en cascada ascendente y devuelve el más alto alcanzado.
 
-        # Fallback legacy si no tenemos ATR.
-        target_tier = 0
-        target_offset = None
-        for tier_id, trigger_pct, offset_pct in trailing_tiers:
-            if mfe_pct >= trigger_pct:
+        El parámetro ``atr_pct`` se conserva por compatibilidad de firma pero ya
+        no afecta el resultado — los tiers son 100% porcentuales.
+
+        Invariante de no-retroceso: el llamador compara ``new_tier > trailing_tier``
+        antes de mover el SL, por lo que este método nunca degrada una protección
+        ya consolidada.
+        """
+        target_tier: int = 0
+        target_offset: float | None = None
+        # Iteración ascendente: el último tier cuyo trigger es superado gana.
+        # Usamos comparación con tolerancia flotante mínima para evitar errores
+        # de representación binaria en precios de 8 decimales.
+        for tier_id, trigger_pct, offset_pct in _TRAILING_TIERS:
+            if mfe_pct >= trigger_pct - 1e-9:
                 target_tier = tier_id
                 target_offset = offset_pct
         return target_tier, target_offset
@@ -858,9 +852,7 @@ async def _settle_open_positions(
             # El bot solo toca Binance al cruzar un tier superior de MFE. Esto evita churn
             # intra-tier y mantiene el presupuesto de rate limit bajo control.
             mfe_pct = float(position.get("mfe_pct", 0.0) or 0.0)
-            entry_atr_pct = position.get("entry_atr_pct")
-            entry_atr_pct = float(entry_atr_pct) if entry_atr_pct is not None else None
-            new_tier, new_sl_offset_pct = _resolve_trailing_tier(mfe_pct, atr_pct=entry_atr_pct)
+            new_tier, new_sl_offset_pct = _resolve_trailing_tier(mfe_pct)
             if new_tier > trailing_tier and new_sl_offset_pct is not None and entry_price > 0:
                 raw_new_sl = entry_price * (1 + new_sl_offset_pct) if side == "buy" else entry_price * (1 - new_sl_offset_pct)
                 try:

@@ -160,13 +160,14 @@ function Card({ title, right, children, style = {} }) {
   );
 }
 
-// ── Trailing tier data ────────────────────────────────────────────
+// ── Trailing tier data (Strict Percentage-Based, sincronizado con main_loop.py) ─
+// Estructura espejo exacta de _TRAILING_TIERS en el backend.
+// trigger = MFE mínimo para activar | slAt = SL garantizado desde entry
 const TIERS = [
-  { tier: 1, trigger: 0.005, label: "BE+" },
-  { tier: 2, trigger: 0.008, label: "+0.4%" },
-  { tier: 3, trigger: 0.010, label: "+0.6%" },
-  { tier: 4, trigger: 0.014, label: "+0.8%" },
-  { tier: 5, trigger: 0.018, label: "+1.0%" },
+  { tier: 1, trigger: 0.0050, slAt: 0.0020, label: "T1 · MFE +0.50% → SL +0.20%" },
+  { tier: 2, trigger: 0.0080, slAt: 0.0040, label: "T2 · MFE +0.80% → SL +0.40%" },
+  { tier: 3, trigger: 0.0120, slAt: 0.0080, label: "T3 · MFE +1.20% → SL +0.80%" },
+  { tier: 4, trigger: 0.0160, slAt: 0.0120, label: "T4 · MFE +1.60% → SL +1.20%" },
 ];
 
 function buildPos(openPosition, openPositions) {
@@ -287,17 +288,39 @@ function PositionPanel({ openPosition, openPositions }) {
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE, marginBottom: 5 }}>
           <span>Trailing Tier {pos.tier > 0 ? pos.tier : "–"}</span>
-          <span style={{ color: pos.tier > 0 ? G : MUTE }}>{pos.tier > 0 ? "✓ SL protegido" : "esperando +0.5%"}</span>
+          {(() => {
+            const activeTier = TIERS.find(t => t.tier === pos.tier);
+            const nextTier   = TIERS.find(t => t.tier === pos.tier + 1);
+            if (pos.tier === 0) {
+              const needed = TIERS[0].trigger - pos.mfe;
+              return <span style={{ color: MUTE }}>esperando +0.50% (faltan {pct(Math.max(0, needed))})</span>;
+            }
+            if (activeTier && nextTier) {
+              const needed = nextTier.trigger - pos.mfe;
+              return (
+                <span style={{ color: G }}>
+                  ✓ SL en +{pct(activeTier.slAt)}
+                  {needed > 0 && <span style={{ color: MUTE }}> · T{nextTier.tier} en {pct(Math.max(0, needed))}</span>}
+                </span>
+              );
+            }
+            return <span style={{ color: G }}>✓ SL en +{pct(activeTier?.slAt ?? 0)} · máx protección</span>;
+          })()}
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           {TIERS.map((t) => (
             <div key={t.tier} style={{
-              flex: 1, height: 5, borderRadius: 4,
-              background: pos.tier >= t.tier ? (t.tier <= 2 ? Y : G) : "rgba(255,255,255,0.07)",
+              flex: 1, height: 6, borderRadius: 4,
+              background: pos.tier >= t.tier ? (t.tier === 1 ? Y : G) : "rgba(255,255,255,0.07)",
               transition: "background 0.3s ease",
             }} title={t.label} />
           ))}
         </div>
+        {pos.tier > 0 && (
+          <div style={{ fontSize: 9, color: MUTE, marginTop: 4, textAlign: "right" }}>
+            SL bloqueado en entry {pos.tier > 0 ? `+${pct(TIERS[pos.tier - 1]?.slAt ?? 0)}` : "−"}
+          </div>
+        )}
       </div>
 
       {/* ── Botón Rotar Capital ─────────────────────────────────── */}
