@@ -635,6 +635,49 @@ def _degraded_risk_snapshot(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FEE ACCOUNTING HELPER
+# Calcula el PnL NETO descontando comisiones de entrada y salida.
+# Fee de exchange Binance: 0.1% por lado (0.2% round-trip). Si el cierre live
+# reporta fee_quote real, se usa ese valor; si no, se estima al 0.1%.
+# En DRY_RUN siempre se estiman las fees para no confundir con cero.
+# ─────────────────────────────────────────────────────────────────────────────
+_BINANCE_FEE_RATE = 0.001  # 0.1% por lado
+
+
+def _compute_net_pnl(
+    exit_price: float,
+    entry_price: float,
+    amount: float,
+    side: str,
+    *,
+    exit_fee_quote: float | None = None,
+    entry_fee_quote: float | None = None,
+    mode: str = "live",
+) -> tuple[float, float]:
+    """Devuelve (pnl_neto_usdt, total_fees_usdt).
+
+    Para posiciones live, usa las fees reales del exchange cuando están disponibles;
+    en caso contrario las estima al 0.1% por lado. En DRY_RUN siempre estima.
+    """
+    gross = (exit_price - entry_price) * amount if side == "buy" else (entry_price - exit_price) * amount
+    notional_entry = entry_price * amount
+    notional_exit = exit_price * amount
+    is_live = str(mode).lower() in {"live"}
+    # Fee de salida: real (live) o estimada
+    if is_live and exit_fee_quote is not None:
+        fee_exit = max(0.0, float(exit_fee_quote))
+    else:
+        fee_exit = notional_exit * _BINANCE_FEE_RATE
+    # Fee de entrada: real (live) o estimada
+    if is_live and entry_fee_quote is not None:
+        fee_entry = max(0.0, float(entry_fee_quote))
+    else:
+        fee_entry = notional_entry * _BINANCE_FEE_RATE
+    total_fees = fee_entry + fee_exit
+    return round(gross - total_fees, 6), round(total_fees, 6)
+
+
 async def _settle_open_positions(
     open_positions: list[dict[str, Any]],
     candles_by_symbol: dict[str, dict[str, Any]],
@@ -998,7 +1041,15 @@ async def _settle_open_positions(
                 continue
             exit_price = float(close_result.get("avg_price") or exit_price)
 
-        pnl_usdt = (exit_price - entry_price) * amount if side == "buy" else (entry_price - exit_price) * amount
+        # PnL NETO: descuenta fees reales de salida + fees estimadas de entrada.
+        # entry_fee_quote se persiste al abrir la posición (ver run_cycle).
+        _net, _fees = _compute_net_pnl(
+            exit_price, entry_price, amount, side,
+            exit_fee_quote=live_payload.get("fee_quote") if live_payload else None,
+            entry_fee_quote=position.get("entry_fee_quote"),
+            mode=position.get("mode", "live"),
+        )
+        pnl_usdt = _net
         closed_trades.append(
             {
                 **position,
@@ -1007,6 +1058,7 @@ async def _settle_open_positions(
                 "exit_reason": exit_reason,
                 "pnl_usdt": round(pnl_usdt, 4),
                 "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
+                "fees_usdt": round(_fees, 6),
                 "status": "closed",
                 "algo_version": position.get("algo_version") or LEGACY_HOT_SWAP_VERSION,
                 "live_close": live_payload or None,
@@ -1161,12 +1213,29 @@ def _reconcile_live_open_positions(
         candle = candles_by_symbol.get(symbol) or {}
         exit_price = float(candle.get("close") or position.get("fill_price") or position.get("entry_price") or 0.0)
         entry_price = float(position.get("entry_price") or 0.0)
-        pnl_usdt = (exit_price - entry_price) * amount
+        # PnL NETO con estimación de fees (no tenemos fee_quote real en cierre externo).
+        _net, _fees = _compute_net_pnl(
+            exit_price, entry_price, amount, str(position.get("side", "buy")),
+            mode=position.get("mode", "live"),
+        )
+        pnl_usdt = _net
+
+        # ── ALERTA: MANUAL CLOSE DETECTADO ───────────────────────────────────
+        # La posición fue cerrada fuera del bot (dashboard de Binance, app, etc.)
+        # sin que ningún trigger automático (SL/TP/trailing/monitor) lo ordenara.
+        # Esto destruye el MFE acumulado y corta el sistema de trailing stop.
+        mfe_pct = float(position.get("mfe_pct") or 0.0)
+        mfe_usdt = float(position.get("mfe_usdt") or 0.0)
         logger.warning(
-            "Posicion %s reconciliada como cerrada fuera del bot. holdings_total=%.8f amount=%.8f",
+            "MANUAL CLOSE DETECTED: Se ha saboteado el MFE de la operacion. "
+            "symbol=%s mfe_pct=%.4f%% mfe_usdt=%.4f exit_reason=external_reconcile "
+            "pnl_neto=%.4f fees=%.4f. "
+            "El trailing stop y el TP automatico fueron anulados por intervencion externa.",
             symbol,
-            held_total,
-            amount,
+            mfe_pct * 100,
+            mfe_usdt,
+            pnl_usdt,
+            _fees,
         )
         externally_closed.append(
             {
@@ -1176,6 +1245,7 @@ def _reconcile_live_open_positions(
                 "exit_reason": "external_reconcile",
                 "pnl_usdt": round(pnl_usdt, 4),
                 "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
+                "fees_usdt": round(_fees, 6),
                 "status": "closed",
                 "live_close": {
                     "status": "reconciled_external",
@@ -1824,7 +1894,31 @@ def run_cycle() -> None:
                     )
                 manual_entry = float(target_pos.get("entry_price") or 0.0)
                 manual_amount = float(target_pos.get("amount") or 0.0)
-                manual_pnl = (manual_exit_price - manual_entry) * manual_amount
+                # PnL NETO con fees reales del cierre manual.
+                _net_mc, _fees_mc = _compute_net_pnl(
+                    manual_exit_price, manual_entry, manual_amount,
+                    str(target_pos.get("side", "buy")),
+                    exit_fee_quote=(manual_live_payload or {}).get("fee_quote") if manual_live_payload else None,
+                    entry_fee_quote=target_pos.get("entry_fee_quote"),
+                    mode=target_pos.get("mode", "live"),
+                )
+                manual_pnl = _net_mc
+                # ── ALERTA: CIERRE MANUAL FORZADO ───────────────────────────
+                # El operador ordenó cerrar la posición antes de que SL/TP/trailing
+                # o el AI monitor tomaran la decisión. Esto destruye el edge estadístico.
+                _mfe_manual_pct = float(target_pos.get("mfe_pct") or 0.0)
+                _mfe_manual_usdt = float(target_pos.get("mfe_usdt") or 0.0)
+                logger.warning(
+                    "MANUAL CLOSE DETECTED: Se ha saboteado el MFE de la operacion. "
+                    "symbol=%s mfe_pct=%.4f%% mfe_usdt=%.4f exit_reason=manual_capital_rotation "
+                    "pnl_neto=%.4f fees=%.4f. "
+                    "El trailing stop y el TP automatico fueron anulados por intervencion manual.",
+                    target_pos.get("symbol"),
+                    _mfe_manual_pct * 100,
+                    _mfe_manual_usdt,
+                    manual_pnl,
+                    _fees_mc,
+                )
                 manual_closed_trade = {
                     **target_pos,
                     "closed_at": datetime.now(timezone.utc).isoformat(),
@@ -1832,6 +1926,7 @@ def run_cycle() -> None:
                     "exit_reason": "manual_capital_rotation",
                     "pnl_usdt": round(manual_pnl, 4),
                     "pnl_pct": round(manual_pnl / max(manual_entry * manual_amount, 1e-9), 4),
+                    "fees_usdt": round(_fees_mc, 6),
                     "status": "closed",
                     "algo_version": target_pos.get("algo_version") or ALGO_VERSION,
                     "live_close": manual_live_payload or None,
@@ -1956,7 +2051,14 @@ def run_cycle() -> None:
                         )
                         entry_p = float(active_pos.get("entry_price") or 0.0)
                         amt = float(active_pos.get("amount") or 0.0)
-                        pnl_usdt = (exit_p - entry_p) * amt
+                        # PnL NETO con fees reales del cierre de emergencia.
+                        _net_em, _fees_em = _compute_net_pnl(
+                            exit_p, entry_p, amt, str(active_pos.get("side", "buy")),
+                            exit_fee_quote=close_result.get("fee_quote"),
+                            entry_fee_quote=active_pos.get("entry_fee_quote"),
+                            mode=active_pos.get("mode", "live"),
+                        )
+                        pnl_usdt = _net_em
                         emergency_closed = {
                             **active_pos,
                             "closed_at": datetime.now(timezone.utc).isoformat(),
@@ -1966,6 +2068,7 @@ def run_cycle() -> None:
                             "pnl_pct": round(
                                 pnl_usdt / max(entry_p * amt, 1e-9), 4
                             ),
+                            "fees_usdt": round(_fees_em, 6),
                             "status": "closed",
                             "trade_monitor_rationale": trade_monitor_verdict.get("rationale"),
                             "live_close": close_result,
@@ -2453,6 +2556,9 @@ def run_cycle() -> None:
                         "conviction_multiplier": decision.get("conviction_multiplier"),
                         "sl_pct_used": decision.get("sl_pct_used"),
                         "tp_pct_used": decision.get("tp_pct_used"),
+                        # Fee de entrada real (disponible en live; None en DRY_RUN).
+                        # Se usa al cerrar para calcular PnL neto exacto.
+                        "entry_fee_quote": decision.get("fee_quote"),
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)

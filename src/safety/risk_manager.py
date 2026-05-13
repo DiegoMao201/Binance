@@ -50,6 +50,16 @@ class RiskManager:
         if baseline > 0:
             daily_pnl_pct = (equity - baseline) / baseline
 
+        # Kill switch adaptativo: en cuentas pequeñas (<$25) usamos un umbral
+        # más conservador (KILL_SWITCH_SMALL_ACCOUNT_DRAWDOWN=0.04) para proteger
+        # capital donde cada $0.07 de fee representa el 0.35% del equity total.
+        # Para cuentas mayores se respeta el umbral configurado.
+        _SMALL_ACCOUNT_THRESHOLD_USD = 25.0
+        _SMALL_ACCOUNT_KS_PCT = 0.04
+        effective_ks_threshold = self.settings.kill_switch_drawdown
+        if equity <= _SMALL_ACCOUNT_THRESHOLD_USD:
+            effective_ks_threshold = min(effective_ks_threshold, _SMALL_ACCOUNT_KS_PCT)
+
         return RiskSnapshot(
             balance_usd=round(float(balance_usd), 4),
             equity_usd=round(equity, 4),
@@ -58,7 +68,7 @@ class RiskManager:
             recommended_trade_usd=recommended_trade_usd,
             drawdown_pct=round(drawdown, 6),
             daily_pnl_pct=round(daily_pnl_pct, 6),
-            kill_switch_triggered=drawdown >= self.settings.kill_switch_drawdown,
+            kill_switch_triggered=drawdown >= effective_ks_threshold,
         )
 
     def compute_trade_notional(
