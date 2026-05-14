@@ -1190,7 +1190,8 @@ export default function DashboardClient({ initialData }) {
     if (!hb) return false;
     const ref = payload?.serverTime ? new Date(payload.serverTime).getTime() : NaN;
     if (isNaN(ref)) return false;
-    return ref - new Date(hb).getTime() < 120000;
+    // 300 s threshold: with 4 markets + sequential AI calls a cycle can take >2 min.
+    return ref - new Date(hb).getTime() < 300000;
   }, [payload?.serverTime, status?.heartbeat_at]);
 
   const focusScan = useMemo(() => {

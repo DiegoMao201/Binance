@@ -2957,6 +2957,9 @@ def run_cycle() -> None:
                         symbol_ai_signal.get("cached_age_seconds", 0),
                     )
                 else:
+                    # Keep the heartbeat fresh while waiting for the AI call
+                    # (can take 10-30 s per symbol; 4 markets easily exceed 120 s).
+                    write_heartbeat("online", f"IA analizando {symbol}…")
                     symbol_ai_signal = ai_analyzer.analyze(
                         scan["frame"],
                         symbol=symbol,
