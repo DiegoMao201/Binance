@@ -3,7 +3,7 @@ import { verifyJWT } from "@/lib/auth";
 
 // ─── Protected route prefixes ─────────────────────────────────────────────────
 // Add portal routes here as the Fase 2+ modules are built.
-const PROTECTED_PREFIXES = ["/portal", "/admin", "/api/portfolio", "/api/admin"];
+const PROTECTED_PREFIXES = ["/portal", "/admin", "/client", "/api/portfolio", "/api/admin"];
 
 // ─── Public auth routes (never redirect-loop) ─────────────────────────────────
 const AUTH_PATHS = [
