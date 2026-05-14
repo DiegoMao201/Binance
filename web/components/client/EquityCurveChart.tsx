@@ -18,7 +18,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  type TooltipProps,
 } from "recharts";
 import type { EquityPoint } from "./client-types";
 
@@ -36,7 +35,16 @@ type ChartDatum = {
 };
 
 // ─── Custom Tooltip ───────────────────────────────────────────────────────────
-function CustomTooltip({ active, payload, label }: TooltipProps<number, string>) {
+type RechartsTooltipPayload = Array<{ value?: number; name?: string }>;
+function CustomTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: RechartsTooltipPayload;
+  label?: string;
+}) {
   if (!active || !payload?.length) return null;
   const value = payload[0]?.value ?? 0;
   return (
