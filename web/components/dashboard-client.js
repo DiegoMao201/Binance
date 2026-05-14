@@ -170,6 +170,13 @@ const TIERS = [
   { tier: 4, trigger: 0.0160, slAt: 0.0120, label: "T4 · MFE +1.60% → SL +1.20%" },
 ];
 
+// ── Entry Logic Tag config (Telemetry) ─────────────────────────────────────
+const ENTRY_TAG_META = {
+  standard_ai:  { label: "IA Standard",     color: "#12D98B", icon: "◈", title: "Gemini conf ≥ 55% — flujo normal" },
+  bypass_ai:    { label: "Bypass IA",        color: "#F5A623", icon: "⚡", title: "lazy_gate / API error — override RSI≤30 + vol≥0.8" },
+  bypass_macro: { label: "Mean Reversion",   color: "#E040FB", icon: "↩", title: "Macro bearish + RSI≤30 + vol≥1.2 + OB≥30%" },
+};
+
 function buildPos(openPosition, openPositions) {
   if (!openPosition) return null;
   const full = openPositions?.find((p) => p.symbol === openPosition.symbol) || openPosition;
@@ -182,9 +189,20 @@ function buildPos(openPosition, openPositions) {
   const pnl   = Number(full.unrealized_pnl_usdt || openPosition.unrealized_pnl_usdt || 0);
   const pnlP  = entry > 0 ? (mark - entry) / entry : 0;
   const tier  = Number(full.trailing_tier || openPosition.trailing_tier || 0);
+  // Telemetry Tag: qué lógica autorizó la entrada (standard_ai | bypass_ai | bypass_macro)
+  const entryTag = full.entry_logic_tag || openPosition.entry_logic_tag || "standard_ai";
   return {
     symbol: full.symbol, side: full.side, scenario: full.scenario,
-    entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier,
+    entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier, entryTagition.mfe_pct     || 0);
+  const mae   = Number(full.mae_pct     || openPosition.mae_pct     || 0);
+  const pnl   = Number(full.unrealized_pnl_usdt || openPosition.unrealized_pnl_usdt || 0);
+  const pnlP  = entry > 0 ? (mark - entry) / entry : 0;
+  const tier  = Number(full.trailing_tier || openPosition.trailing_tier || 0);
+  // Telemetry Tag: qué lógica autorizó la entrada (standard_ai | bypass_ai | bypass_macro)
+  const entryTag = full.entry_logic_tag || openPosition.entry_logic_tag || "standard_ai";
+  return {
+    symbol: full.symbol, side: full.side, scenario: full.scenario,
+    entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier, entryTag,
     holdM: Number(full.hold_minutes || 0),
   };
 }
@@ -224,7 +242,27 @@ function PositionPanel({ openPosition, openPositions }) {
   };
   const handleCancel = () => setCloseState("idle");
 
-  const pnlCol = pos.pnl >= 0 ? G : R;
+  const pnlC
+
+      {/* ── Entry Logic Tag Badge (Telemetry) ─────────────────────────────── */}
+      {(() => {
+        const meta = ENTRY_TAG_META[pos.entryTag] || ENTRY_TAG_META.standard_ai;
+        const isOverride = pos.entryTag !== "standard_ai";
+        return (
+          <div title={meta.title} style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            background: `${meta.color}18`,
+            border: `1px solid ${meta.color}44`,
+            borderRadius: 6, padding: "4px 8px",
+            fontSize: 10, color: meta.color, fontWeight: 700,
+            letterSpacing: "0.03em",
+          }}>
+            <span style={{ fontSize: 12 }}>{meta.icon}</span>
+            {meta.label}
+            {isOverride && <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 2 }}>OVERRIDE</span>}
+          </div>
+        );
+      })()}ol = pos.pnl >= 0 ? G : R;
   const slRisk  = pos.sl > 0 && pos.entry > 0 ? Math.abs(pos.sl - pos.entry) / pos.entry : 0;
   const tpRange = pos.tp > 0 && pos.entry > 0 ? Math.abs(pos.tp - pos.entry) / pos.entry : 0;
   return (
@@ -234,6 +272,26 @@ function PositionPanel({ openPosition, openPositions }) {
         <span style={{ fontSize: 11, background: "rgba(18,217,139,0.15)", color: G, borderRadius: 4, padding: "2px 6px", fontWeight: 700 }}>LONG</span>
         <span style={{ fontSize: 11, color: MUTE }}>{Math.round(pos.holdM)}min</span>
       </div>
+
+      {/* ── Entry Logic Tag Badge (Telemetry) ─────────────────────────────── */}
+      {(() => {
+        const meta = ENTRY_TAG_META[pos.entryTag] || ENTRY_TAG_META.standard_ai;
+        const isOverride = pos.entryTag !== "standard_ai";
+        return (
+          <div title={meta.title} style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            background: `${meta.color}18`,
+            border: `1px solid ${meta.color}44`,
+            borderRadius: 6, padding: "4px 8px",
+            fontSize: 10, color: meta.color, fontWeight: 700,
+            letterSpacing: "0.03em",
+          }}>
+            <span style={{ fontSize: 12 }}>{meta.icon}</span>
+            {meta.label}
+            {isOverride && <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 2 }}>OVERRIDE</span>}
+          </div>
+        );
+      })()}
 
       {/* Banner: posición recuperada del exchange, datos de entrada son estimados */}
       {pos.scenario === "recovered_live" && (
@@ -666,13 +724,21 @@ function TradeHistoryPanel({ closedTrades }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
           {trades.map((t, i) => {
             const pnl = Number(t.pnl_usdt || t.realized_pnl_usdt || 0);
-            const pc = pnl >= 0 ? G : R;
+            const pc  = pnl >= 0 ? G : R;
+            // Telemetry Tag: muestra el badge de lógica de entrada en cada trade cerrado
+            const tagMeta = ENTRY_TAG_META[t.entry_logic_tag] || ENTRY_TAG_META.standard_ai;
             return (
               <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 10px", borderRadius: 8, background: `${pc}0a`, border: `1px solid ${pc}20` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                   <ScenBadge sc={t.scenario} size={18} />
                   <span style={{ fontWeight: 600, fontSize: 12 }}>{t.symbol}</span>
                   <span style={{ fontSize: 10, color: MUTE }}>{t.exit_reason}</span>
+                  {/* Entry Logic Tag badge en historial */}
+                  <span title={tagMeta.title} style={{
+                    fontSize: 9, color: tagMeta.color, fontWeight: 700,
+                    background: `${tagMeta.color}18`, borderRadius: 4,
+                    padding: "1px 5px", border: `1px solid ${tagMeta.color}33`,
+                  }}>{tagMeta.icon} {tagMeta.label}</span>
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div style={{ color: pc, fontWeight: 700, fontFamily: "monospace", fontSize: 12 }}>{pnl >= 0 ? "+" : ""}{n(pnl, 4)} USDT</div>

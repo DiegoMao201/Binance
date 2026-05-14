@@ -430,6 +430,8 @@ def _build_guardrails(
         or "openrouter_unavailable" in risk_flags
         or _ai_model_used == ""
     )
+    # Telemetry: rastrear qué bypass activó la entrada.
+    _bypass_ai_active: bool = False
     if not ai_gate_ready and _is_lazy_fallback and scenario == "B":
         _rsi_override = float(technical_signal.get("rsi", 99.0))
         _vol_override  = float(technical_signal.get("volume_ratio", 0.0))
@@ -438,6 +440,7 @@ def _build_guardrails(
         _technical_override = _rsi_override <= 30.0 and _vol_override >= 0.8
         if _technical_override:
             ai_gate_ready = True
+            _bypass_ai_active = True  # Telemetry Tag
     # ── [/Bypass AI] ─────────────────────────────────────────────────────────
 
     # Volatilidad: solo exigimos piso de ATR (regla del usuario), techo opcional.
@@ -479,6 +482,8 @@ def _build_guardrails(
         # Esto captura los "fallen knife bounces" más explosivos de media reversión.
         # Condición doble: RSI <= 30 (extremo) + volumen acelerado (>= 1.2x media)
         # para que no sea una caída libre sin compradores — tiene que haber acción.
+        # Telemetry: rastrear si el bypass macro se activó.
+        _bypass_macro_active: bool = False
         if not regime_ready and scenario == "B" and macro_trend == "bearish":
             _rsi_mr = float(technical_signal.get("rsi", 99.0))
             _vol_mr = float(technical_signal.get("volume_ratio", 0.0))
@@ -490,6 +495,16 @@ def _build_guardrails(
             )
             if _mean_reversion_bypass:
                 regime_ready = True
+                _bypass_macro_active = True  # Telemetry Tag
+                # ── [Flow Bypass Patch] ──────────────────────────────────────
+                # Dentro del bypass macro, el MIN_TRADE_FLOW_SCORE global (0.44)
+                # se reduce a 0.30. Los rebotes de media reversión arranca con
+                # flow bajo porque los market makers aún no han reaccionado.
+                # La restricción aplica SOLO aquí — el resto del código sigue
+                # usando settings.min_trade_flow_score sin cambios.
+                if trade_flow_score < settings.min_trade_flow_score and trade_flow_score >= 0.30:
+                    flow_ready = True
+                # ── [/Flow Bypass Patch] ─────────────────────────────────────
         # ── [/Bypass Macro] ───────────────────────────────────────────────────
         regime_min_score = max(0.55, 0.62 - score_relax)
     elif regime == "chop":
@@ -551,6 +566,17 @@ def _build_guardrails(
         "insufficient_balance_backoff_active": insufficient_backoff_active,
         "insufficient_balance_failures": insufficient_failures,
         "executable_signal": executable_signal,
+        # ── Telemetry Tags ───────────────────────────────────────────────────
+        # Identifica el camino lógico que aprobó la entrada.
+        # standard_ai  = flujo normal, Gemini conf >= umbral
+        # bypass_ai    = lazy_gate / API error + RSI<=30 + vol>=0.8
+        # bypass_macro = mean reversion: trending_down + bearish + RSI<=30 + vol>=1.2
+        "entry_logic_tag": (
+            "bypass_macro" if locals().get("_bypass_macro_active", False)
+            else "bypass_ai" if _bypass_ai_active
+            else "standard_ai"
+        ),
+        # ── /Telemetry Tags ──────────────────────────────────────────────────
     }
 
 
@@ -2534,6 +2560,9 @@ def run_cycle() -> None:
             decision["regime"] = technical_signal.get("regime")
             decision["setup_score"] = technical_signal.get("setup_score")
             decision["conviction_multiplier"] = conviction_multiplier
+            # Telemetry Patch: propagar el tag de lógica de entrada al decision dict
+            # para que se persista en open_positions y order_history.
+            decision["entry_logic_tag"] = chosen_guardrails.get("entry_logic_tag", "standard_ai")
             append_history(settings.order_history_file, decision)
             order_history = load_history(settings.order_history_file)
 
@@ -2591,6 +2620,9 @@ def run_cycle() -> None:
                         # Fee de entrada real (disponible en live; None en DRY_RUN).
                         # Se usa al cerrar para calcular PnL neto exacto.
                         "entry_fee_quote": decision.get("fee_quote"),
+                        # Telemetry Tag: qué lógica de bypass (si alguna) aprobó la entrada.
+                        # standard_ai | bypass_ai | bypass_macro
+                        "entry_logic_tag": decision.get("entry_logic_tag", "standard_ai"),
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)
