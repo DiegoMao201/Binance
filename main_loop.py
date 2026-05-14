@@ -73,6 +73,9 @@ def _log_async_notification_failure(task: asyncio.Task[None], logger: logging.Lo
 
 _AUTH_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
 _BALANCE_BACKOFF_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
+# Per-symbol radar-alert cooldown (unix timestamp of last send).
+_RADAR_ALERT_STATE: dict[str, float] = {}
+_RADAR_ALERT_COOLDOWN_SECONDS: int = 300  # 5 min per symbol
 
 
 def _maybe_notify_balance_backoff(settings: Settings, logger: logging.Logger, failures: int) -> None:
@@ -127,21 +130,136 @@ def _maybe_notify_auth_invalid(settings: Settings, logger: logging.Logger, detai
 def _format_trade_open_message(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "symbol": decision.get("symbol", "n/d"),
-        "side": str(decision.get("side", "LONG")).upper(),
+        "side": str(decision.get("side", "BUY")).upper(),
         "entry_price": decision.get("fill_price") or decision.get("price") or 0.0,
         "stop_loss": decision.get("stop_loss", 0.0),
-        "pnl_usdt": decision.get("pnl_usdt", 0.0),
+        "take_profit": decision.get("take_profit"),
+        "notional_usdt": decision.get("notional_usdt"),
+        "ai_confidence": decision.get("ai_confidence"),
+        "scenario": decision.get("scenario"),
+        "regime": decision.get("regime"),
+        "entry_logic_tag": decision.get("entry_logic_tag", "standard_ai"),
+        "ai_risk_flags": decision.get("ai_risk_flags") or [],
+        "mode": decision.get("mode", "live"),
     }
 
 
 def _format_trade_close_message(closed_trade: dict[str, Any]) -> dict[str, Any]:
+    # Compute hold_minutes for closed trade if not already stored
+    hold_minutes = closed_trade.get("hold_minutes")
+    if hold_minutes is None:
+        try:
+            from datetime import datetime, timezone  # noqa: PLC0415
+            opened_s = closed_trade.get("opened_at") or ""
+            closed_s = closed_trade.get("closed_at") or ""
+            if opened_s and closed_s:
+                def _parse(s: str) -> datetime:
+                    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                                "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+                        try:
+                            return datetime.strptime(s, fmt)
+                        except ValueError:
+                            continue
+                    raise ValueError(f"unparseable: {s}")
+                delta = _parse(closed_s) - _parse(opened_s)
+                hold_minutes = delta.total_seconds() / 60
+        except Exception:  # noqa: BLE001
+            hold_minutes = None
     return {
         "symbol": closed_trade.get("symbol", "n/d"),
         "side": "CLOSE",
-        "entry": closed_trade.get("entry_price") or closed_trade.get("fill_price") or closed_trade.get("exit_price"),
+        "entry_price": closed_trade.get("entry_price") or closed_trade.get("fill_price"),
+        "exit_price": closed_trade.get("exit_price"),
         "stop_loss": closed_trade.get("stop_loss"),
         "pnl_usdt": closed_trade.get("pnl_usdt", 0.0),
+        "pnl_pct": closed_trade.get("pnl_pct"),
+        "exit_reason": closed_trade.get("exit_reason", "desconocido"),
+        "hold_minutes": hold_minutes,
+        "mode": closed_trade.get("mode", "live"),
     }
+
+
+def _compute_scan_proximity(scan: dict[str, Any]) -> tuple[float, str, float, float]:
+    """Compute the highest gate proximity across all MicroGateRadar gates.
+
+    Returns (proximity_0_to_1, gate_name, current_value, threshold).
+    Mirrors the logic in web/components/MicroGateRadar.js.
+    """
+    ts = scan  # scan is already a technical_signal-enriched dict
+
+    def _pct(val: Any, threshold: float) -> float:
+        try:
+            return min(float(val) / threshold, 1.0) if threshold else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    gates: list[tuple[str, float, float]] = [
+        # (name, current_value, threshold)
+        ("flow_v3",   float(ts.get("order_flow_imbalance") or 0.0),     0.40),
+        ("ob_v3",     float(ts.get("orderbook_pressure") or 0.0),        0.50),
+        ("vol_accel", float(ts.get("volume_acceleration") or 0.0),       0.60),
+        ("atr_c1",    float(ts.get("atr_pct") or 0.0),                   0.003),
+        ("bb_c2",     float(ts.get("bb_width_pct") or 0.0),              0.005),
+        ("flow_mga",  float(ts.get("order_flow_imbalance") or 0.0),     0.62),
+        ("ob_mga",    float(ts.get("orderbook_pressure") or 0.0),        0.57),
+    ]
+
+    best_name, best_val, best_thr, best_prox = "n/d", 0.0, 0.0, 0.0
+    for name, val, thr in gates:
+        p = _pct(val, thr)
+        if p > best_prox:
+            best_prox, best_name, best_val, best_thr = p, name, val, thr
+
+    return best_prox, best_name, best_val, best_thr
+
+
+def _maybe_notify_radar_alert(
+    notifier: "TelegramTelemetry",
+    logger: logging.Logger,
+    scan_summary: dict[str, Any],
+    mode: str,
+) -> None:
+    """Fire a Radar Alert Telegram push when a gate is >= 88% proximity.
+
+    Rate-limited to once per _RADAR_ALERT_COOLDOWN_SECONDS per symbol.
+    Only fires when no position is open for that symbol (global_lock is checked
+    by the caller — if global_lock is True, caller skips this).
+    """
+    ts = scan_summary.get("technical_signal") or scan_summary
+    symbol = str(scan_summary.get("symbol") or ts.get("symbol") or "n/d")
+    prox, gate_name, cur_val, threshold = _compute_scan_proximity(ts)
+
+    if prox < 0.88:
+        return
+
+    now = time.time()
+    last_sent = _RADAR_ALERT_STATE.get(symbol, 0.0)
+    if now - last_sent < _RADAR_ALERT_COOLDOWN_SECONDS:
+        return
+
+    _RADAR_ALERT_STATE[symbol] = now
+    regime = str(ts.get("regime") or "NORMAL")
+    delta_raw = threshold - cur_val
+    try:
+        delta_s = f"{delta_raw:.5f}"
+    except Exception:  # noqa: BLE001
+        delta_s = "n/d"
+
+    _notify_safe(
+        notifier,
+        logger,
+        "radar",
+        {
+            "symbol": symbol,
+            "regime": regime,
+            "gate": gate_name,
+            "proximity_pct": round(prox * 100, 1),
+            "current_value": round(cur_val, 6),
+            "required_value": round(threshold, 6),
+            "delta": delta_s,
+            "mode": mode,
+        },
+    )
 
 
 def write_heartbeat(status: str, detail: str | None = None) -> None:
@@ -2051,8 +2169,7 @@ def run_cycle() -> None:
                     "pnl_usdt": round(manual_pnl, 4),
                 })
                 persist_history(settings.order_history_file, order_history)
-                if live_mode:
-                    _notify_safe(notifier, logger, "trade", _format_trade_close_message(manual_closed_trade))
+                _notify_safe(notifier, logger, "trade_close", _format_trade_close_message(manual_closed_trade))
                 logger.info(
                     "Manual capital rotation completado: %s exit=%.4f pnl=%.4f USDT.",
                     target_pos.get("symbol"),
@@ -2147,9 +2264,8 @@ def run_cycle() -> None:
         if newly_closed_trades:
             closed_trades.extend(newly_closed_trades)
             persist_history(settings.closed_trades_file, closed_trades)
-            if live_mode:
-                for closed_trade in newly_closed_trades:
-                    _notify_safe(notifier, logger, "trade", _format_trade_close_message(closed_trade))
+            for closed_trade in newly_closed_trades:
+                _notify_safe(notifier, logger, "trade_close", _format_trade_close_message(closed_trade))
         persist_history(settings.open_positions_file, open_positions)
 
         # 2b) DYNAMIC AI TRADE MONITOR — evaluacion IA de posiciones abiertas.
@@ -2226,11 +2342,10 @@ def run_cycle() -> None:
                             "pnl_usdt": round(pnl_usdt, 4),
                         })
                         persist_history(settings.order_history_file, order_history)
-                        if live_mode:
-                            _notify_safe(
-                                notifier, logger, "trade",
-                                _format_trade_close_message(emergency_closed),
-                            )
+                        _notify_safe(
+                            notifier, logger, "trade_close",
+                            _format_trade_close_message(emergency_closed),
+                        )
                         logger.warning(
                             "TradeMonitor cierre de emergencia ejecutado: %s pnl=%.4f USDT. "
                             "Cooldown de %s min activo para evitar re-entrada inmediata.",
@@ -2498,6 +2613,13 @@ def run_cycle() -> None:
             return
 
         # 6) Carrera de senales multi-mercado.
+        # Radar pre-check: notifica por Telegram si algún scan tiene >= 88% de
+        # proximidad a un gate, siempre que no haya posicion abierta (global_lock).
+        if not global_lock:
+            _mode_tag = "live" if live_mode else "dry_run"
+            for _radar_scan in scan_results:
+                _maybe_notify_radar_alert(notifier, logger, _radar_scan, _mode_tag)
+
         # Regla profesional: la IA evalua CADA candidato que paso las guardias
         # tecnicas, con cache por simbolo (una lectura de BTC no se reutiliza
         # para ETH). El primer simbolo que cumpla TODOS los guardarrailes
@@ -2729,8 +2851,14 @@ def run_cycle() -> None:
                 persist_history(settings.open_positions_file, open_positions)
                 global_lock = True
                 active_symbol = symbol
-                if live_mode and decision.get("status") == "submitted":
-                    _notify_safe(notifier, logger, "trade", _format_trade_open_message(decision))
+                if decision.get("status") == "submitted":
+                    # Propagate enrichment fields that executor adds to decision
+                    decision["ai_confidence"] = ai_signal.get("confidence")
+                    decision["ai_risk_flags"] = ai_signal.get("risk_flags") or []
+                    decision["scenario"] = technical_signal.get("scenario")
+                    decision["regime"] = technical_signal.get("regime")
+                    decision["mode"] = "dry_run" if not live_mode else "live"
+                    _notify_safe(notifier, logger, "trade_open", _format_trade_open_message(decision))
         else:
             # No hubo entrada: usamos el MEJOR candidato evaluado por IA como
             # referencia honesta del rechazo. Si no hubo ningun candidato, caemos
