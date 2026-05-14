@@ -2579,11 +2579,18 @@ def run_cycle() -> None:
                             mode=active_pos.get("mode", "live"),
                         )
                         pnl_usdt = _net_em
+                        # Usar el exit_reason del veredicto si es un bailout
+                        # especializado (p.ej. momentum_exhaustion_bailout);
+                        # de lo contrario usar el generico ai_emergency_close.
+                        _exit_reason = (
+                            trade_monitor_verdict.get("exit_reason")
+                            or "ai_emergency_close"
+                        )
                         emergency_closed = {
                             **active_pos,
                             "closed_at": datetime.now(timezone.utc).isoformat(),
                             "exit_price": round(exit_p, 4),
-                            "exit_reason": "ai_emergency_close",
+                            "exit_reason": _exit_reason,
                             "pnl_usdt": round(pnl_usdt, 4),
                             "pnl_pct": round(
                                 pnl_usdt / max(entry_p * amt, 1e-9), 4
@@ -2608,7 +2615,7 @@ def run_cycle() -> None:
                             "symbol": active_sym,
                             "side": "sell",
                             "status": "submitted",
-                            "exit_reason": "ai_emergency_close",
+                            "exit_reason": _exit_reason,
                             "pnl_usdt": round(pnl_usdt, 4),
                         })
                         persist_history(settings.order_history_file, order_history)

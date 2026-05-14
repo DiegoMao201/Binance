@@ -158,6 +158,11 @@ class ActiveTradeMonitor:
             abs(take_profit - mark_price) / entry_price * 100, 4
         ) if entry_price > 0 and take_profit > 0 else None
 
+        # TP target en % desde entry (para Momentum Exhaustion Bailout)
+        tp_pct_target = round(
+            (take_profit - entry_price) / entry_price * 100, 4
+        ) if entry_price > 0 and take_profit > entry_price else 0.0
+
         return {
             "symbol": symbol,
             "side": position.get("side"),
@@ -166,6 +171,7 @@ class ActiveTradeMonitor:
             "mark_price": round(mark_price, 6),
             "stop_loss": round(stop_loss, 6),
             "take_profit": round(take_profit, 6),
+            "tp_pct_target": tp_pct_target,
             "trailing_tier": trailing_tier,
             "unrealized_pnl_usdt": unrealized_usdt,
             "unrealized_pnl_pct": unrealized_pct,
@@ -280,6 +286,32 @@ class ActiveTradeMonitor:
         volume_ratio = float(state.get("volume_ratio") or 1.0)
         tape_mom = float(state.get("tape_momentum_pct") or 0.0)
         hold_min = float(state.get("hold_minutes") or 0.0)
+
+        # ── MOMENTUM EXHAUSTION BAILOUT ────────────────────────────────────────
+        # Condicion: estamos en zona profunda de ganancias (tier >= 3), el precio
+        # alcanzo >= 90% del camino al TP (MFE alto), pero ha retrocedido al menos
+        # 0.20% desde ese pico Y el trade_flow_score confirma colapso de momentum.
+        # En ese escenario, esperar al trailing SL es suboptimo — cerrar ya.
+        # Solo activa en tier >= 3 para no interferir en zona de riesgo.
+        mfe_pct_val = float(state.get("mfe_pct") or 0.0)
+        tp_pct_target_val = float(state.get("tp_pct_target") or 0.0)
+        _EXHAUSTION_MFE_THRESHOLD = 0.90    # MFE >= 90% del camino al TP
+        _EXHAUSTION_PULLBACK_FLOOR = 0.20   # retroceso minimo desde MFE
+        _EXHAUSTION_FLOW_CEILING = 0.30     # flow_score maximo (colapso confirmado)
+        _EXHAUSTION_MIN_TIER = 3            # solo activa si trailing tier alto
+        if (
+            trailing_tier >= _EXHAUSTION_MIN_TIER
+            and tp_pct_target_val > 0.0
+            and mfe_pct_val >= _EXHAUSTION_MFE_THRESHOLD * tp_pct_target_val
+            and pnl_pct <= mfe_pct_val - _EXHAUSTION_PULLBACK_FLOOR
+            and trade_flow < _EXHAUSTION_FLOW_CEILING
+        ):
+            return True, (
+                f"momentum_exhaustion: mfe={mfe_pct_val:.3f}%% >= 90%% de "
+                f"tp_target={tp_pct_target_val:.3f}%%, retroceso desde pico "
+                f"{mfe_pct_val - pnl_pct:.3f}%% >= 0.20%%, "
+                f"flow={trade_flow:.2f} < 0.30 (agotamiento confirmado)"
+            )
 
         # ── ZONA SEGURA ────────────────────────────────────────────────────────
         # Trailing tier >= 1 significa que el SL ya esta por encima del entry.
@@ -514,7 +546,41 @@ class ActiveTradeMonitor:
         # 3) Smart gate: consultar IA solo si hay señal de riesgo u oportunidad.
         # En ciclos donde el trailing protege la posicion y el PnL es positivo,
         # emitir HOLD directamente sin coste de API.
+        # Excepcion: el Momentum Exhaustion Bailout es determinista — si el gate
+        # lo devuelve como motivo, cerramos sin pasar por la IA.
         should_consult, gate_reason = self._should_consult_ai(state)
+
+        # ── MOMENTUM EXHAUSTION BAILOUT (determinista, sin IA) ────────────────
+        if should_consult and gate_reason.startswith("momentum_exhaustion:"):
+            pnl_pct_now = float(state.get("unrealized_pnl_pct") or 0.0)
+            mfe_now = float(state.get("mfe_pct") or 0.0)
+            flow_now = float(state.get("trade_flow_score") or 0.5)
+            tier_now = int(state.get("trailing_tier") or 0)
+            exhaustion_verdict: dict[str, Any] = {
+                "action": "EMERGENCY_CLOSE",
+                "exit_reason": "momentum_exhaustion_bailout",
+                "rationale": (
+                    f"[MEB] Tier={tier_now} | MFE={mfe_now:.3f}% >= 90% TP | "
+                    f"retroceso={mfe_now - pnl_pct_now:.3f}% >= 0.20% | "
+                    f"flow={flow_now:.2f} < 0.30 — asegurando PnL={pnl_pct_now:.3f}%"
+                ),
+                "model": "momentum_exhaustion_bailout",
+                "consulted": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "state": state,
+                "new_sl_price": None,
+                "new_sl_pct": None,
+                "memory_window": 0,
+            }
+            self._persist_verdict(exhaustion_verdict)
+            self.logger.critical(
+                "TradeMonitor MEB | %s | Tier=%d MFE=%.3f%% PnL=%.3f%% Flow=%.2f "
+                "— momentum_exhaustion_bailout activado — cerrando a mercado",
+                symbol, tier_now, mfe_now, pnl_pct_now, flow_now,
+            )
+            return exhaustion_verdict
+
         if not should_consult:
             cheap_verdict: dict[str, Any] = {
                 "action": "HOLD",
