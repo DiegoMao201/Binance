@@ -10,6 +10,7 @@
 
 import { cookies } from "next/headers";
 import { verifyJWT } from "@/lib/auth";
+import { prisma } from "@/lib/db";
 import sgMail from "@sendgrid/mail";
 import { z } from "zod";
 
@@ -50,6 +51,13 @@ export async function sendSupportMessage(
   }
   const { subject, message } = parsed.data;
 
+  // ── Fetch sender email from DB ────────────────────────────────────────────
+  const user = await prisma.user.findUnique({
+    where: { id: payload.sub },
+    select: { email: true },
+  });
+  const senderEmail = user?.email ?? null;
+
   // ── Env guard ─────────────────────────────────────────────────────────────
   if (!process.env.SENDGRID_API_KEY || !FROM_EMAIL || !ADMIN_EMAIL) {
     console.warn("[support] SendGrid env vars missing — support message not sent.");
@@ -64,12 +72,13 @@ export async function sendSupportMessage(
     await sgMail.send({
       to: ADMIN_EMAIL,
       from: { email: FROM_EMAIL, name: FROM_NAME },
-      replyTo: payload.email ?? undefined,
-      subject: `[Soporte] ${subject} — ${payload.email ?? "cliente"}`,
+      replyTo: senderEmail ?? undefined,
+      subject: `[Soporte] ${subject} — ${senderEmail ?? "cliente"}`,
       text: [
         `Mensaje de soporte de un inversor.`,
         ``,
-        `Usuario: ${payload.email ?? payload.sub}`,
+        `Usuario: ${senderEmail ?? payload.sub}`,
+
         `Asunto: ${subject}`,
         ``,
         `Mensaje:`,
@@ -87,7 +96,7 @@ export async function sendSupportMessage(
     </div>
     <div style="padding:28px 32px">
       <p style="margin:0 0 6px;color:#6b8299;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em">Inversor</p>
-      <p style="margin:0 0 20px;color:#dce7f5;font-size:14px">${payload.email ?? payload.sub}</p>
+      <p style="margin:0 0 20px;color:#dce7f5;font-size:14px">${senderEmail ?? payload.sub}</p>
       <p style="margin:0 0 6px;color:#6b8299;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em">Mensaje</p>
       <div style="background:#080e16;border:1px solid #1a2b3c;border-radius:10px;padding:16px 20px">
         <p style="margin:0;color:#dce7f5;font-size:14px;line-height:1.65;white-space:pre-wrap">${message.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>
