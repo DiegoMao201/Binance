@@ -5,16 +5,21 @@
  * Receives pre-serialised InvestorRow[] from the Server Component.
  * All monetary values are strings — rendered with toLocaleString() for
  * locale-appropriate thousands separators.
+ *
+ * Each row has "Aportar" / "Retirar" action buttons that open TreasuryModal.
  */
 
+import { useState } from "react";
 import type { InvestorRow } from "@/lib/pamm";
+import { TreasuryModal, type ModalAction } from "./TreasuryModal";
 
-const CARD  = "#0a1018";
-const BORD  = "#1a2b3c";
-const TEXT  = "#dce7f5";
-const MUTE  = "#6b8299";
-const GREEN = "#12d98b";
-const RED   = "#eb4b61";
+const CARD   = "#0a1018";
+const BORD   = "#1a2b3c";
+const TEXT   = "#dce7f5";
+const MUTE   = "#6b8299";
+const GREEN  = "#12d98b";
+const RED    = "#eb4b61";
+const INDIGO = "#6366f1";
 
 function fmtUSDT(v: string): string {
   return "$" + Number(v).toLocaleString("en-US", {
@@ -27,8 +32,33 @@ interface Props {
   investors: InvestorRow[];
 }
 
+type ActiveModal = {
+  userId:         string;
+  userName:       string;
+  currentBalance: string;
+  action:         ModalAction;
+};
+
 export function InvestorTable({ investors }: Props) {
+  const [activeModal, setActiveModal] = useState<ActiveModal | null>(null);
+
+  function openModal(inv: InvestorRow, action: ModalAction) {
+    setActiveModal({
+      userId:         inv.id,
+      userName:       inv.name,
+      currentBalance: inv.balance,
+      action,
+    });
+  }
+
   return (
+    <>
+      {activeModal && (
+        <TreasuryModal
+          {...activeModal}
+          onClose={() => setActiveModal(null)}
+        />
+      )}
     <div
       style={{
         background: CARD,
@@ -89,7 +119,7 @@ export function InvestorTable({ investors }: Props) {
           >
             <thead>
               <tr>
-                {["Nombre", "Email", "Depósito bruto", "Balance actual", "ROI neto"].map(
+                {["Nombre", "Email", "Depósito bruto", "Balance actual", "ROI neto", "Acciones"].map(
                   (col) => (
                     <th
                       key={col}
@@ -99,11 +129,11 @@ export function InvestorTable({ investors }: Props) {
                         fontWeight: 600,
                         letterSpacing: "0.08em",
                         textTransform: "uppercase",
-                        textAlign: col === "Nombre" || col === "Email" ? "left" : "right",
+                        textAlign: col === "Nombre" || col === "Email" || col === "Acciones" ? "left" : "right",
                         paddingBottom: 10,
                         borderBottom: `1px solid ${BORD}`,
                         whiteSpace: "nowrap",
-                        paddingRight: col !== "ROI neto" ? 16 : 0,
+                        paddingRight: col !== "Acciones" ? 16 : 0,
                       }}
                     >
                       {col}
@@ -180,12 +210,53 @@ export function InvestorTable({ investors }: Props) {
                         fontFamily: "monospace",
                         fontWeight: 700,
                         textAlign: "right",
-                        padding: "11px 0",
+                        padding: "11px 16px 11px 0",
                         whiteSpace: "nowrap",
                       }}
                     >
                       {positive ? "+" : ""}
                       {roi.toFixed(2)}%
+                    </td>
+                    <td style={{ padding: "8px 0", whiteSpace: "nowrap" }}>
+                      <button
+                        onClick={() => openModal(inv, "add")}
+                        title="Aportar capital"
+                        style={{
+                          background: "rgba(18,217,139,0.1)",
+                          border: `1px solid rgba(18,217,139,0.3)`,
+                          borderRadius: 6,
+                          color: GREEN,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          marginRight: 6,
+                          transition: "background 0.15s",
+                        }}
+                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.2)")}
+                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.1)")}
+                      >
+                        + Aportar
+                      </button>
+                      <button
+                        onClick={() => openModal(inv, "withdraw")}
+                        title="Retirar capital"
+                        style={{
+                          background: "rgba(99,102,241,0.1)",
+                          border: `1px solid rgba(99,102,241,0.3)`,
+                          borderRadius: 6,
+                          color: INDIGO,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          transition: "background 0.15s",
+                        }}
+                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.2)")}
+                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.1)")}
+                      >
+                        − Retirar
+                      </button>
                     </td>
                   </tr>
                 );
@@ -195,5 +266,48 @@ export function InvestorTable({ investors }: Props) {
         </div>
       )}
     </div>
+    </                 borderRadius: 6,
+                          color: GREEN,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          marginRight: 6,
+                          transition: "background 0.15s",
+                        }}
+                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.2)")}
+                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.1)")}
+                      >
+                        + Aportar
+                      </button>
+                      <button
+                        onClick={() => openModal(inv, "withdraw")}
+                        title="Retirar capital"
+                        style={{
+                          background: "rgba(99,102,241,0.1)",
+                          border: `1px solid rgba(99,102,241,0.3)`,
+                          borderRadius: 6,
+                          color: INDIGO,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          transition: "background 0.15s",
+                        }}
+                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.2)")}
+                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.1)")}
+                      >
+                        − Retirar
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+    </>
   );
 }

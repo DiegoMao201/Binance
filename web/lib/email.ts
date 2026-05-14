@@ -107,3 +107,163 @@ export async function sendOtpEmail(to: string, otp: string): Promise<void> {
 
   await sgMail.send(msg);
 }
+
+// ─── sendTradeClosedEmail ──────────────────────────────────────────────────────
+
+/**
+ * Sends a "trade closed — WIN" notification to an investor.
+ *
+ * Errors are NOT swallowed — the caller (webhook route) wraps each send in
+ * an individual try/catch so one failure does not block the rest.
+ *
+ * @throws {Error} if SendGrid returns a non-2xx status or env vars are absent.
+ */
+export async function sendTradeClosedEmail(
+  to: string,
+  investorName: string | null,
+  symbol: string,
+  netPnlPct: number
+): Promise<void> {
+  if (!process.env.SENDGRID_API_KEY) {
+    console.warn(`[email] SENDGRID_API_KEY not set. Trade closed for ${to}: ${symbol} +${netPnlPct}%`);
+    return;
+  }
+  if (!FROM_EMAIL) {
+    console.warn(`[email] MAIL_FROM_EMAIL not set. Trade closed for ${to}: ${symbol} +${netPnlPct}%`);
+    return;
+  }
+
+  const name        = investorName ?? "Inversor";
+  const pctDisplay  = netPnlPct.toFixed(2);
+  const year        = new Date().getFullYear();
+
+  const msg: MailDataRequired = {
+    to,
+    from: { email: FROM_EMAIL, name: FROM_NAME },
+    subject: `${PRODUCT_NAME} — Operación cerrada exitosamente en ${symbol} (+${pctDisplay}%)`,
+    text: [
+      `Hola ${name},`,
+      ``,
+      `OptiFerre Terminal ha cerrado exitosamente una operación en ${symbol}`,
+      `con un rendimiento del +${pctDisplay}%.`,
+      ``,
+      `Su balance ha sido actualizado. Ingrese a su panel para ver los detalles.`,
+      ``,
+      `— Equipo ${PRODUCT_NAME}`,
+    ].join("\n"),
+    html: `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${PRODUCT_NAME}</title>
+</head>
+<body style="margin:0;padding:0;background:#080e16;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#080e16;padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="520" cellpadding="0" cellspacing="0" style="background:#0a1018;border:1px solid #1a2b3c;border-radius:16px;overflow:hidden;">
+
+          <!-- Header band -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#0d3a26 0%,#0a2c1e 100%);padding:28px 36px;border-bottom:1px solid #12d98b30;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td>
+                    <p style="margin:0;color:#12d98b;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;margin-bottom:6px;">
+                      Operación cerrada
+                    </p>
+                    <p style="margin:0;color:#dce7f5;font-size:22px;font-weight:800;letter-spacing:-0.4px;">
+                      ${PRODUCT_NAME}
+                    </p>
+                  </td>
+                  <td align="right">
+                    <!-- WIN badge -->
+                    <div style="background:#12d98b15;border:1px solid #12d98b60;border-radius:8px;padding:8px 16px;display:inline-block;">
+                      <p style="margin:0;color:#12d98b;font-size:20px;font-weight:800;font-family:monospace;letter-spacing:1px;">
+                        +${pctDisplay}%
+                      </p>
+                      <p style="margin:2px 0 0;color:#6b8299;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;text-align:center;">
+                        rendimiento
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:32px 36px;">
+              <p style="margin:0 0 20px;color:#94a3b8;font-size:14px;line-height:1.6;">
+                Hola <strong style="color:#dce7f5;">${name}</strong>,
+              </p>
+              <p style="margin:0 0 24px;color:#dce7f5;font-size:15px;line-height:1.7;">
+                OptiFerre Terminal ha cerrado exitosamente una operación en
+                <strong style="color:#57c1ff;font-family:monospace;">${symbol}</strong>
+                con un rendimiento del
+                <strong style="color:#12d98b;">+${pctDisplay}%</strong>.
+              </p>
+
+              <!-- Detail pill -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#080e16;border:1px solid #1a2b3c;border-radius:10px;margin-bottom:28px;">
+                <tr>
+                  <td style="padding:18px 24px;border-right:1px solid #1a2b3c;">
+                    <p style="margin:0 0 4px;color:#6b8299;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;">Par</p>
+                    <p style="margin:0;color:#57c1ff;font-size:18px;font-weight:700;font-family:monospace;">${symbol}</p>
+                  </td>
+                  <td style="padding:18px 24px;border-right:1px solid #1a2b3c;">
+                    <p style="margin:0 0 4px;color:#6b8299;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;">Resultado</p>
+                    <p style="margin:0;color:#12d98b;font-size:18px;font-weight:700;font-family:monospace;">WIN ✓</p>
+                  </td>
+                  <td style="padding:18px 24px;">
+                    <p style="margin:0 0 4px;color:#6b8299;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;">Rendimiento</p>
+                    <p style="margin:0;color:#12d98b;font-size:18px;font-weight:700;font-family:monospace;">+${pctDisplay}%</p>
+                  </td>
+                </tr>
+              </table>
+
+              <p style="margin:0 0 28px;color:#94a3b8;font-size:14px;line-height:1.6;">
+                Su balance ha sido actualizado. Ingrese a su panel de inversor para consultar los detalles de la operación y el estado actualizado de su portafolio.
+              </p>
+
+              <!-- CTA Button -->
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+                <tr>
+                  <td style="background:#12d98b;border-radius:8px;padding:14px 32px;text-align:center;">
+                    <a href="https://tradingdiegomao.datovatenexuspro.com/client/dashboard"
+                       style="color:#080e16;font-size:14px;font-weight:700;text-decoration:none;letter-spacing:0.02em;">
+                      Ver mi panel →
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:18px 36px;border-top:1px solid #1a2b3c;">
+              <p style="margin:0;color:#334155;font-size:11px;text-align:center;line-height:1.6;">
+                Recibiste este correo porque eres inversor activo en ${PRODUCT_NAME}.<br/>
+                © ${year} ${PRODUCT_NAME} — Portal de Inversores Institucional
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`,
+    trackingSettings: {
+      clickTracking: { enable: false },
+      openTracking:  { enable: false },
+    },
+  };
+
+  await sgMail.send(msg);
+}
