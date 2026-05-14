@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -1398,6 +1399,116 @@ def _build_portfolio_summary(
     }
 
 
+def _deduce_exit_reason(position: dict[str, Any], exit_price: float, logger: logging.Logger) -> str:
+    """Deduce the true exit reason for a position that disappeared without a bot-issued close.
+
+    Compares the known exit price (last candle close / mark price) against the
+    position's stored SL / TP thresholds with a 0.05% relative tolerance to
+    absorb normal slippage.  Falls back to ``external_reconcile`` only when no
+    threshold matches.
+
+    Deduction rules (evaluated in priority order):
+    1. exit_price >= take_profit            → "take_profit"
+    2. exit_price ≈ current stop_loss
+       AND trailing_tier > 0               → "trailing_stop_tier_<N>"
+    3. exit_price ≈ current stop_loss
+       AND trailing_tier == 0              → "stop_loss"
+    4. exit_price ≈ initial_stop_loss
+       (trailing had been set but price fell through to original SL level)
+                                           → "stop_loss"
+    5. exit_price < entry_price
+       (drawdown — assume stop-loss even if price is far below, covers flash-crash)
+                                           → "stop_loss"
+    6. Otherwise                           → "external_reconcile"
+    """
+    # ── Extract position state ───────────────────────────────────────────────
+    entry_price    = float(position.get("entry_price") or 0.0)
+    take_profit    = float(position.get("take_profit") or 0.0)
+    stop_loss      = float(position.get("stop_loss") or 0.0)          # current SL (may be trailing)
+    initial_sl     = float(position.get("initial_stop_loss") or stop_loss)
+    trailing_tier  = int(position.get("trailing_tier") or 0)
+    symbol         = str(position.get("symbol") or "")
+
+    if exit_price <= 0 or entry_price <= 0:
+        logger.debug(
+            "EXIT DEDUCTOR: symbol=%s — exit_price or entry_price is zero, "
+            "cannot deduce; falling back to external_reconcile.",
+            symbol,
+        )
+        return "external_reconcile"
+
+    # Relative tolerance: 0.05% of the reference price.
+    # math.isclose(a, b, rel_tol=5e-4) is True when |a-b| <= 5e-4 * max(|a|,|b|).
+    _TOL = 5e-4  # 0.05%
+
+    def _close_to(price: float, reference: float) -> bool:
+        if reference <= 0:
+            return False
+        return math.isclose(price, reference, rel_tol=_TOL)
+
+    # ── Rule 1: Take-Profit hit ──────────────────────────────────────────────
+    # For a long, TP is above entry. A candle close AT or above TP is a hit.
+    if take_profit > 0 and (exit_price >= take_profit or _close_to(exit_price, take_profit)):
+        logger.info(
+            "EXIT DEDUCTOR: symbol=%s exit_price=%.6f — DEDUCED take_profit "
+            "(tp=%.6f tol=%.4f%%)",
+            symbol, exit_price, take_profit, _TOL * 100,
+        )
+        return "take_profit"
+
+    # ── Rule 2 / 3: Stop-Loss hit (current SL) ──────────────────────────────
+    if stop_loss > 0 and (exit_price <= stop_loss or _close_to(exit_price, stop_loss)):
+        if trailing_tier > 0:
+            reason = f"trailing_stop_tier_{trailing_tier}"
+            logger.info(
+                "EXIT DEDUCTOR: symbol=%s exit_price=%.6f — DEDUCED %s "
+                "(sl=%.6f trailing_tier=%d tol=%.4f%%)",
+                symbol, exit_price, reason, stop_loss, trailing_tier, _TOL * 100,
+            )
+            return reason
+        else:
+            logger.info(
+                "EXIT DEDUCTOR: symbol=%s exit_price=%.6f — DEDUCED stop_loss "
+                "(sl=%.6f no trailing tol=%.4f%%)",
+                symbol, exit_price, stop_loss, _TOL * 100,
+            )
+            return "stop_loss"
+
+    # ── Rule 4: Price touched the initial SL even if current SL was trailed ──
+    # (rare: price fell through all tiers back to original protection level)
+    if initial_sl > 0 and (exit_price <= initial_sl or _close_to(exit_price, initial_sl)):
+        logger.info(
+            "EXIT DEDUCTOR: symbol=%s exit_price=%.6f — DEDUCED stop_loss via "
+            "initial_stop_loss=%.6f (trailing_tier=%d, price fell through all tiers)",
+            symbol, exit_price, initial_sl, trailing_tier,
+        )
+        return "stop_loss"
+
+    # ── Rule 5: Flash-crash / drawdown — price ended below entry ─────────────
+    # Even if not close to any stored SL, a close below entry signals the SL
+    # was hit (possibly with extreme slippage or OCO/stop-market gap).
+    if exit_price < entry_price:
+        logger.info(
+            "EXIT DEDUCTOR: symbol=%s exit_price=%.6f < entry=%.6f — DEDUCED "
+            "stop_loss (drawdown / flash-crash; sl=%.6f initial_sl=%.6f "
+            "trailing_tier=%d)",
+            symbol, exit_price, entry_price, stop_loss, initial_sl, trailing_tier,
+        )
+        if trailing_tier > 0:
+            # Trailing was active: the SL that got hit was the trailed one.
+            return f"trailing_stop_tier_{trailing_tier}"
+        return "stop_loss"
+
+    # ── Rule 6: Cannot deduce — genuine external / manual close ─────────────
+    logger.debug(
+        "EXIT DEDUCTOR: symbol=%s exit_price=%.6f — no threshold matched "
+        "(tp=%.6f sl=%.6f initial_sl=%.6f trailing_tier=%d); "
+        "classifying as external_reconcile.",
+        symbol, exit_price, take_profit, stop_loss, initial_sl, trailing_tier,
+    )
+    return "external_reconcile"
+
+
 def _reconcile_live_open_positions(
     open_positions: list[dict[str, Any]],
     candles_by_symbol: dict[str, dict[str, Any]],
@@ -1443,35 +1554,59 @@ def _reconcile_live_open_positions(
         )
         pnl_usdt = _net
 
-        # ── ALERTA: MANUAL CLOSE DETECTADO ───────────────────────────────────
-        # La posición fue cerrada fuera del bot (dashboard de Binance, app, etc.)
-        # sin que ningún trigger automático (SL/TP/trailing/monitor) lo ordenara.
-        # Esto destruye el MFE acumulado y corta el sistema de trailing stop.
+        # ── EXIT-REASON DEDUCTOR ─────────────────────────────────────────────
+        # La posición desapareció sin que el bot emitiera la orden de cierre.
+        # En lugar de registrar siempre "external_reconcile", deducimos el motivo
+        # real comparando el precio de salida con los umbrales almacenados.
+        #
+        # Tolerancia de slippage: 0.05% del precio de referencia (configurable).
+        # Usamos math.isclose con rel_tol=0.0005 como delta relativo.
+        #
+        # Campos relevantes del estado de la posición:
+        #   take_profit       — precio del TP original
+        #   stop_loss         — precio del SL *actual* (puede haber sido movido por el trailing)
+        #   initial_stop_loss — SL original al abrir (< entry para long)
+        #   trailing_tier     — 0 si nunca se activó trailing; 1-4 si fue movido
+
+        deduced_exit_reason = _deduce_exit_reason(position, exit_price, logger)
+
         mfe_pct = float(position.get("mfe_pct") or 0.0)
         mfe_usdt = float(position.get("mfe_usdt") or 0.0)
-        logger.warning(
-            "MANUAL CLOSE DETECTED: Se ha saboteado el MFE de la operacion. "
-            "symbol=%s mfe_pct=%.4f%% mfe_usdt=%.4f exit_reason=external_reconcile "
-            "pnl_neto=%.4f fees=%.4f. "
-            "El trailing stop y el TP automatico fueron anulados por intervencion externa.",
-            symbol,
-            mfe_pct * 100,
-            mfe_usdt,
-            pnl_usdt,
-            _fees,
-        )
+
+        if deduced_exit_reason == "external_reconcile":
+            logger.warning(
+                "MANUAL CLOSE DETECTED: Se ha saboteado el MFE de la operacion. "
+                "symbol=%s mfe_pct=%.4f%% mfe_usdt=%.4f exit_reason=external_reconcile "
+                "pnl_neto=%.4f fees=%.4f. "
+                "El trailing stop y el TP automatico fueron anulados por intervencion externa.",
+                symbol,
+                mfe_pct * 100,
+                mfe_usdt,
+                pnl_usdt,
+                _fees,
+            )
+        else:
+            logger.info(
+                "EXIT DEDUCED: symbol=%s exit_price=%.6f deduced_reason=%s "
+                "trailing_tier=%s pnl_neto=%.4f",
+                symbol,
+                exit_price,
+                deduced_exit_reason,
+                position.get("trailing_tier", 0),
+                pnl_usdt,
+            )
         externally_closed.append(
             {
                 **position,
                 "closed_at": datetime.now(timezone.utc).isoformat(),
                 "exit_price": round(exit_price, 4),
-                "exit_reason": "external_reconcile",
+                "exit_reason": deduced_exit_reason,
                 "pnl_usdt": round(pnl_usdt, 4),
                 "pnl_pct": round((pnl_usdt / max(entry_price * amount, 1e-9)), 4),
                 "fees_usdt": round(_fees, 6),
                 "status": "closed",
                 "live_close": {
-                    "status": "reconciled_external",
+                    "status": "reconciled_external" if deduced_exit_reason == "external_reconcile" else "reconciled_deduced",
                     "post_close_holdings": holdings,
                 },
             }
