@@ -193,15 +193,6 @@ function buildPos(openPosition, openPositions) {
   const entryTag = full.entry_logic_tag || openPosition.entry_logic_tag || "standard_ai";
   return {
     symbol: full.symbol, side: full.side, scenario: full.scenario,
-    entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier, entryTagition.mfe_pct     || 0);
-  const mae   = Number(full.mae_pct     || openPosition.mae_pct     || 0);
-  const pnl   = Number(full.unrealized_pnl_usdt || openPosition.unrealized_pnl_usdt || 0);
-  const pnlP  = entry > 0 ? (mark - entry) / entry : 0;
-  const tier  = Number(full.trailing_tier || openPosition.trailing_tier || 0);
-  // Telemetry Tag: qué lógica autorizó la entrada (standard_ai | bypass_ai | bypass_macro)
-  const entryTag = full.entry_logic_tag || openPosition.entry_logic_tag || "standard_ai";
-  return {
-    symbol: full.symbol, side: full.side, scenario: full.scenario,
     entry, mark, sl, tp, mfe, mae, pnl, pnlP, tier, entryTag,
     holdM: Number(full.hold_minutes || 0),
   };
@@ -242,27 +233,7 @@ function PositionPanel({ openPosition, openPositions }) {
   };
   const handleCancel = () => setCloseState("idle");
 
-  const pnlC
-
-      {/* ── Entry Logic Tag Badge (Telemetry) ─────────────────────────────── */}
-      {(() => {
-        const meta = ENTRY_TAG_META[pos.entryTag] || ENTRY_TAG_META.standard_ai;
-        const isOverride = pos.entryTag !== "standard_ai";
-        return (
-          <div title={meta.title} style={{
-            display: "inline-flex", alignItems: "center", gap: 5,
-            background: `${meta.color}18`,
-            border: `1px solid ${meta.color}44`,
-            borderRadius: 6, padding: "4px 8px",
-            fontSize: 10, color: meta.color, fontWeight: 700,
-            letterSpacing: "0.03em",
-          }}>
-            <span style={{ fontSize: 12 }}>{meta.icon}</span>
-            {meta.label}
-            {isOverride && <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 2 }}>OVERRIDE</span>}
-          </div>
-        );
-      })()}ol = pos.pnl >= 0 ? G : R;
+  const pnlCol = pos.pnl >= 0 ? G : R;
   const slRisk  = pos.sl > 0 && pos.entry > 0 ? Math.abs(pos.sl - pos.entry) / pos.entry : 0;
   const tpRange = pos.tp > 0 && pos.entry > 0 ? Math.abs(pos.tp - pos.entry) / pos.entry : 0;
   return (
@@ -1108,6 +1079,9 @@ function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, c
         <Link href="/matriz" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${BORD}`, fontSize: 11, color: MUTE, textDecoration: "none", background: "rgba(255,255,255,0.03)" }}>
           Matriz →
         </Link>
+        <Link href="/montecarlo" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid #1a3a2a`, fontSize: 11, color: "#12d98b", textDecoration: "none", background: "rgba(18,217,139,0.06)" }}>
+          Monte Carlo →
+        </Link>
       </div>
     </header>
   );
@@ -1336,6 +1310,8 @@ export default function DashboardClient({ initialData }) {
           OptiFerre Terminal v2.0 · Refresh automático 5s · Último: {lastRefresh ? lastRefresh.toLocaleTimeString() : "–"}
           &nbsp;·&nbsp;
           <Link href="/matriz" style={{ color: MUTE, textDecoration: "underline" }}>Ver Matriz completa</Link>
+          &nbsp;·&nbsp;
+          <Link href="/montecarlo" style={{ color: "#12d98b", textDecoration: "underline" }}>Monte Carlo 30d →</Link>
         </div>
       </div>
     </div>
