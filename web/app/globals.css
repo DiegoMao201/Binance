@@ -157,6 +157,15 @@
   color: #f4b942;
 }
 
+/* ── Client Dashboard KPI card hover effects ──────────── */
+.kpi-hover {
+  transition: box-shadow 0.25s, transform 0.25s;
+}
+.kpi-hover:hover              { transform: translateY(-2px); }
+.kpi-hover-green:hover        { box-shadow: 0 0 28px rgba(18,217,139,0.12); }
+.kpi-hover-red:hover          { box-shadow: 0 0 28px rgba(235,75,97,0.12); }
+.kpi-hover-blue:hover         { box-shadow: 0 0 28px rgba(87,193,255,0.12); }
+
 * {
   box-sizing: border-box;
 }

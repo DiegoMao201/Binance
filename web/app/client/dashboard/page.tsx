@@ -285,7 +285,7 @@ export default async function ClientDashboardPage() {
             >
               {/* Balance hero card */}
               <div
-                className="kpi-card"
+                className="kpi-card kpi-hover kpi-hover-green"
                 style={{
                   background: CARD,
                   border: `1px solid ${BORD}`,
@@ -294,15 +294,6 @@ export default async function ClientDashboardPage() {
                   gridColumn: "span 2",
                   borderLeft: `3px solid ${GREEN}`,
                   minWidth: 0,
-                  transition: "box-shadow 0.25s, transform 0.25s",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 28px rgba(18,217,139,0.12)";
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
                 }}
               >
                 <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
@@ -319,21 +310,13 @@ export default async function ClientDashboardPage() {
 
               {/* ROI card */}
               <div
+                className={`kpi-hover ${roiPositive ? "kpi-hover-green" : "kpi-hover-red"}`}
                 style={{
                   background: CARD,
                   border: `1px solid ${BORD}`,
                   borderRadius: 20,
                   padding: "24px 24px 20px",
                   borderLeft: `3px solid ${roiPositive ? GREEN : RED}`,
-                  transition: "box-shadow 0.25s, transform 0.25s",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = `0 0 28px ${roiPositive ? "rgba(18,217,139,0.12)" : "rgba(235,75,97,0.12)"}`;
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
                 }}
               >
                 <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
@@ -358,21 +341,13 @@ export default async function ClientDashboardPage() {
 
               {/* Trades count card */}
               <div
+                className="kpi-hover kpi-hover-blue"
                 style={{
                   background: CARD,
                   border: `1px solid ${BORD}`,
                   borderRadius: 20,
                   padding: "24px 24px 20px",
                   borderLeft: `3px solid ${BLUE}`,
-                  transition: "box-shadow 0.25s, transform 0.25s",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 28px rgba(87,193,255,0.12)";
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
-                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
                 }}
               >
                 <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>

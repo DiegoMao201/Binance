@@ -1086,6 +1086,9 @@ function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, c
         <Link href="/cohort" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid #1a2a3a`, fontSize: 11, color: "#60a5fa", textDecoration: "none", background: "rgba(96,165,250,0.06)" }}>
           V3 Cohort →
         </Link>
+        <Link href="/admin/dashboard" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid #2a1a3a`, fontSize: 11, color: "#a78bfa", textDecoration: "none", background: "rgba(167,139,250,0.06)", fontWeight: 600 }}>
+          Admin Panel →
+        </Link>
       </div>
     </header>
   );
