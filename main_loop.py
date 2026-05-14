@@ -75,8 +75,9 @@ def _log_async_notification_failure(task: asyncio.Task[None], logger: logging.Lo
 _AUTH_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
 _BALANCE_BACKOFF_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
 # Per-symbol radar-alert cooldown (unix timestamp of last send).
+# 1-hour silence per symbol: prevents alert fatigue when a coin lingers near a gate.
 _RADAR_ALERT_STATE: dict[str, float] = {}
-_RADAR_ALERT_COOLDOWN_SECONDS: int = 300  # 5 min per symbol
+_RADAR_ALERT_COOLDOWN_SECONDS: int = 3600  # 1 hour per symbol
 
 
 def _maybe_notify_balance_backoff(settings: Settings, logger: logging.Logger, failures: int) -> None:
@@ -220,9 +221,11 @@ def _maybe_notify_radar_alert(
     scan_summary: dict[str, Any],
     mode: str,
 ) -> None:
-    """Fire a Radar Alert Telegram push when a gate is >= 88% proximity.
+    """Fire a Radar Alert Telegram push when a gate is >= 96% proximity.
 
-    Rate-limited to once per _RADAR_ALERT_COOLDOWN_SECONDS per symbol.
+    Threshold is intentionally strict (96%) to fire only when entry is imminent.
+    Rate-limited to once per _RADAR_ALERT_COOLDOWN_SECONDS (1 h) per symbol to
+    prevent alert fatigue when a coin lingers near the gate for extended periods.
     Only fires when no position is open for that symbol (global_lock is checked
     by the caller — if global_lock is True, caller skips this).
     """
@@ -230,7 +233,7 @@ def _maybe_notify_radar_alert(
     symbol = str(scan_summary.get("symbol") or ts.get("symbol") or "n/d")
     prox, gate_name, cur_val, threshold = _compute_scan_proximity(ts)
 
-    if prox < 0.88:
+    if prox < 0.96:
         return
 
     now = time.time()

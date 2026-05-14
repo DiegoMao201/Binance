@@ -188,27 +188,12 @@ class TelegramTelemetry:
         return "\n".join(lines)
 
     def _render_radar(self, data: dict[str, Any]) -> str:
-        """🟡 Radar Alert — gate at > 88% proximity — HTML."""
-        symbol  = _h(str(data.get("symbol") or "N/D"))
-        regime  = _h(str(data.get("regime") or "NORMAL"))
-        gate    = _h(str(data.get("gate") or "–"))
-        prox    = data.get("proximity_pct")
-        prox_s  = _h(f"{float(prox):.0f}%") if prox else "n/d"
-        val_s   = _h(str(data.get("current_value") or "n/d"))
-        req_s   = _h(str(data.get("required_value") or "n/d"))
-        delta_s = _h(str(data.get("delta") or "n/d"))
-        lines = [
-            "🟡 <b>RADAR ALERT — Setup formándose</b>",
-            f"<b>{symbol}</b>  ·  Régimen <b>{regime}</b>",
-            "",
-            f"🎯 Gate próxima  <b>{gate}</b>",
-            f"📊 Proximidad    <b>{prox_s}</b>",
-            f"📈 Valor actual  <code>{val_s}</code>  /  req <code>{req_s}</code>",
-            f"📏 Delta         <code>{delta_s}</code>",
-            "",
-            "<i>El bot evaluará automáticamente cuando se cruce el umbral.</i>",
-        ]
-        return "\n".join(lines)
+        """🟡 Radar Alert — ultra-compact single-line format (low-noise policy)."""
+        symbol = _h(str(data.get("symbol") or "N/D"))
+        gate   = _h(str(data.get("gate") or "gate"))
+        prox   = data.get("proximity_pct")
+        prox_s = _h(f"{float(prox):.0f}") if prox else "??"
+        return f"🟡 [RADAR] <b>{symbol}</b> al <b>{prox_s}%</b> de cruzar <code>{gate}</code>"
 
     # ── Legacy renderers (kept for backward-compat, now emit HTML too) ───────
 
