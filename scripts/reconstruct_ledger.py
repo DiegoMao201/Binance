@@ -415,6 +415,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", type=str, help="ISO date (YYYY-MM-DD) — only audit trades closed on/after this date")
     parser.add_argument("--rate-ms", type=int, default=250, help="ms to sleep between Binance API calls (default 250)")
     parser.add_argument("--limit", type=int, default=0, help="Audit only the first N trades (0 = all)")
+    # TODO: added — skip trades that were archived by archive_nomatch.py.
+    parser.add_argument("--skip-archived", action="store_true", default=True,
+                        help="Skip trades tagged ledger_audit_status=archived_no_exchange_record (default: True)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -445,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
             ts = _iso_to_ms(str(t.get("closed_at") or ""))
             if ts is None or ts < since_ms:
                 continue
+        # TODO: added — honour archive_nomatch.py tagging.
+        if args.skip_archived and t.get("ledger_audit_status") == "archived_no_exchange_record":
+            continue
         target.append(t)
 
     if args.limit > 0:

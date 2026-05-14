@@ -1706,12 +1706,124 @@ def _has_recoverable_live_holdings(settings: Settings, client: BinanceDataClient
     return False
 
 
+def _rehidrate_recovered_position(
+    recovered: dict[str, Any],
+    previous_open_positions: list[dict[str, Any]],
+    closed_trades: list[dict[str, Any]],
+    settings: Settings,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Inject persisted metadata into a freshly-recovered exchange position.
+
+    When the bot restarts and finds an orphaned holding on Binance it builds a
+    minimal "recovered_live" position dict.  Without this function that dict
+    lacks critical fields:
+        - trailing_tier / initial_stop_loss (trailing engine needs these)
+        - ai_prompt_version / ai_regime      (cohort analytics)
+        - scenario / ai_confidence / entry_rsi (dashboard display)
+        - entry_logic_tag                    (telemetry badge)
+
+    Search order:
+      1. Previous open_positions.json  — hot reload: bot restarted mid-trade.
+      2. closed_trades.json (last entry for symbol) — position closed + reopened
+         before the bot had a chance to write open_positions.
+      3. Inverse-calculate trailing_tier from SL distance if no persisted state
+         is found (cold recovery — no historical record).
+    """
+    symbol = str(recovered.get("symbol") or "")
+    entry_price = float(recovered.get("entry_price") or 0.0)
+    current_sl = float(recovered.get("stop_loss") or 0.0)
+
+    # ── Strategy 1: previous open_positions (exact symbol match) ─────────────
+    prev_match = next((p for p in previous_open_positions if str(p.get("symbol") or "") == symbol), None)
+    if prev_match:
+        _FIELDS_TO_RESTORE = (
+            "trailing_tier", "initial_stop_loss", "ai_prompt_version", "ai_regime",
+            "scenario", "ai_confidence", "entry_rsi", "entry_logic_tag",
+            "ai_micro_gate_path", "ai_risk_flags", "ai_setup_quality",
+            "conviction_multiplier", "sl_pct_used", "tp_pct_used",
+            "entry_atr_pct", "entry_regime", "entry_setup_score",
+            "algo_version",
+        )
+        restored: dict[str, Any] = {}
+        for field in _FIELDS_TO_RESTORE:
+            if prev_match.get(field) is not None:
+                restored[field] = prev_match[field]
+        if restored:
+            logger.info(
+                "Recovery rehidration [open_positions]: %s restored fields: %s",
+                symbol, list(restored.keys()),
+            )
+            return {**recovered, **restored, "rehidrated_from": "previous_open_positions"}
+
+    # ── Strategy 2: last closed_trade for same symbol ─────────────────────────
+    closed_for_symbol = [t for t in closed_trades if str(t.get("symbol") or "") == symbol and t.get("mode") == "live"]
+    if closed_for_symbol:
+        last_closed = closed_for_symbol[-1]
+        _CLOSED_FIELDS = (
+            "ai_prompt_version", "ai_regime", "scenario", "entry_logic_tag",
+            "ai_micro_gate_path", "algo_version",
+        )
+        restored = {}
+        for field in _CLOSED_FIELDS:
+            if last_closed.get(field) is not None:
+                restored[field] = last_closed[field]
+        if restored:
+            logger.info(
+                "Recovery rehidration [closed_trades]: %s partial metadata restored: %s",
+                symbol, list(restored.keys()),
+            )
+            return {**recovered, **restored, "rehidrated_from": "last_closed_trade"}
+
+    # ── Strategy 3: inverse-calculate trailing tier from SL distance ──────────
+    # If SL is above entry (trailing already moved) infer the tier.
+    inferred_tier = 0
+    inferred_initial_sl: float | None = None
+    if entry_price > 0 and current_sl > 0:
+        sl_pct_from_entry = (current_sl - entry_price) / entry_price
+        from src.safety.risk_manager import RiskManager  # noqa: PLC0415
+        _TRAILING_TIERS = [
+            {"tier": 4, "trigger": 0.0160, "slAt": 0.0120},
+            {"tier": 3, "trigger": 0.0120, "slAt": 0.0080},
+            {"tier": 2, "trigger": 0.0080, "slAt": 0.0040},
+            {"tier": 1, "trigger": 0.0050, "slAt": 0.0020},
+        ]
+        for tier_def in _TRAILING_TIERS:
+            if abs(sl_pct_from_entry - tier_def["slAt"]) < 0.0015:  # ±0.15% tolerance
+                inferred_tier = tier_def["tier"]
+                inferred_initial_sl = round(entry_price * (1.0 - tier_def["slAt"]), 4)
+                break
+        if sl_pct_from_entry < -0.0005:
+            # SL is still below entry — tier 0, initial_sl = current_sl
+            inferred_initial_sl = current_sl
+
+    if inferred_tier > 0 or inferred_initial_sl is not None:
+        logger.info(
+            "Recovery rehidration [inverse-calc]: %s inferred trailing_tier=%d initial_stop_loss=%s",
+            symbol, inferred_tier, inferred_initial_sl,
+        )
+        return {
+            **recovered,
+            "trailing_tier": inferred_tier,
+            "initial_stop_loss": inferred_initial_sl or current_sl,
+            "rehidrated_from": "inverse_calculation",
+        }
+
+    logger.warning(
+        "Recovery rehidration [none]: %s — no persisted metadata and inverse-calc inconclusive. "
+        "Position will run with default trailing_tier=0.",
+        symbol,
+    )
+    return {**recovered, "rehidrated_from": "none"}
+
+
 def _recover_unmanaged_exchange_positions(
     open_positions: list[dict[str, Any]],
     settings: Settings,
     client: BinanceDataClient,
     logger: logging.Logger,
     order_history: list[dict[str, Any]] | None = None,
+    closed_trades: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     recovery_report: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1808,6 +1920,14 @@ def _recover_unmanaged_exchange_positions(
             "mfe_usdt": 0.0,
         }
         logger.warning("Posicion live recuperada desde exchange para %s: %s", symbol, recovered)
+        # Restore persisted metadata to avoid trailing/exit "amnesia".
+        recovered = _rehidrate_recovered_position(
+            recovered,
+            previous_open_positions=list(open_positions),  # positions loaded before this loop
+            closed_trades=closed_trades or [],
+            settings=settings,
+            logger=logger,
+        )
         recovered_positions.append(recovered)
         recovery_report["recovered_positions"].append(
             {
@@ -2194,7 +2314,10 @@ def run_cycle() -> None:
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
         live_mode = not settings.dry_run
-        open_positions, recovery_report = _recover_unmanaged_exchange_positions(open_positions, settings, client, logger, order_history)
+        open_positions, recovery_report = _recover_unmanaged_exchange_positions(
+            open_positions, settings, client, logger, order_history,
+            closed_trades=closed_trades,
+        )
         persist_history(settings.open_positions_file, open_positions)
         persist_state(settings.logs_dir / "recovery_status.json", recovery_report)
 
