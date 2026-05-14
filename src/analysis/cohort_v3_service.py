@@ -141,11 +141,11 @@ async def _fetch_from_db(dsn: str) -> dict[str, Any]:
     """
     conn = await asyncpg.connect(dsn)
     try:
-        kpis_row, breakdown_rows = await asyncio.gather(
-            conn.fetchrow("SELECT * FROM v_cohort_v3_metrics"),
-            conn.fetch(
-                "SELECT * FROM v_cohort_v3_breakdown ORDER BY dimension, n_trades DESC"
-            ),
+        # Sequential queries on a single connection — asyncpg does not allow
+        # concurrent operations on the same connection object.
+        kpis_row = await conn.fetchrow("SELECT * FROM v_cohort_v3_metrics")
+        breakdown_rows = await conn.fetch(
+            "SELECT * FROM v_cohort_v3_breakdown ORDER BY dimension, n_trades DESC"
         )
     finally:
         await conn.close()
