@@ -518,16 +518,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("nomatch_debug.json written (empty — all trades reconciled) → %s", nomatch_path)
 
-    # Merge audited results back into the full list (preserving non-target trades).
-    if args.since or args.limit > 0:
-        audited_by_key = {(t.get("opened_at"), t.get("symbol")): t for t in audited}
-        merged: list[dict[str, Any]] = []
-        for t in raw:
-            key = (t.get("opened_at"), t.get("symbol"))
-            merged.append(audited_by_key.get(key, t))
-        final = merged
-    else:
-        final = audited
+    # Merge audited results back into the full list (preserving non-target trades:
+    # archived, out-of-window, or limit-excluded entries must survive --apply).
+    audited_by_key = {(t.get("opened_at"), t.get("symbol")): t for t in audited}
+    final: list[dict[str, Any]] = []
+    for t in raw:
+        key = (t.get("opened_at"), t.get("symbol"))
+        final.append(audited_by_key.get(key, t))
 
     if not args.apply:
         logger.info("DRY-RUN — no files written.  Re-run with --apply to persist.")
