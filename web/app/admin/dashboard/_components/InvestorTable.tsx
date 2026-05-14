@@ -266,48 +266,6 @@ export function InvestorTable({ investors }: Props) {
         </div>
       )}
     </div>
-    </                 borderRadius: 6,
-                          color: GREEN,
-                          fontSize: 11,
-                          fontWeight: 700,
-                          padding: "5px 10px",
-                          cursor: "pointer",
-                          marginRight: 6,
-                          transition: "background 0.15s",
-                        }}
-                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.2)")}
-                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.1)")}
-                      >
-                        + Aportar
-                      </button>
-                      <button
-                        onClick={() => openModal(inv, "withdraw")}
-                        title="Retirar capital"
-                        style={{
-                          background: "rgba(99,102,241,0.1)",
-                          border: `1px solid rgba(99,102,241,0.3)`,
-                          borderRadius: 6,
-                          color: INDIGO,
-                          fontSize: 11,
-                          fontWeight: 700,
-                          padding: "5px 10px",
-                          cursor: "pointer",
-                          transition: "background 0.15s",
-                        }}
-                        onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.2)")}
-                        onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.1)")}
-                      >
-                        − Retirar
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
     </>
   );
 }
