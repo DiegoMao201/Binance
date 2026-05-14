@@ -82,42 +82,45 @@ class OpenRouterAnalyzer:
             "timeframe": self.settings.timeframe,
             "objetivo": "Validar o rechazar una entrada long ya prefiltrada por el motor técnico para scalping conservador.",
             "instrucciones": [
-                # --- Formato obligatorio ---
-                "RESPOND ONLY with a valid JSON object. No markdown, no extra text outside JSON.",
-                "REQUIRED fields: signal (buy/sell/hold), confidence (float 0.0-1.0), rationale (string), approved (boolean), direction_alignment (aligned/misaligned), setup_quality (low/medium/high), risk_flags (array of strings).",
-                "approved=true REQUIRES confidence >= 0.62. If confidence < 0.62, approved MUST be false. This is a hard rule.",
-                # --- Vetoes absolutos (cualquiera = approved=false, confidence < 0.40) ---
-                "VETO V1: macro_trend=bearish AND volume_ratio < 1.5 → approved=false, confidence < 0.40, risk_flag: counter_trend_no_volume.",
-                "VETO V2: macro_trend=bearish AND orderbook_imbalance < 0.55 → approved=false, confidence < 0.40, risk_flag: counter_trend_weak_book.",
-                "VETO V3: trade_flow_score < 0.40 AND orderbook_imbalance < 0.50 → approved=false, confidence < 0.40, risk_flag: dual_microstructure_bearish.",
-                "VETO V4: atr_pct < 0.003 → approved=false, confidence < 0.40, risk_flag: chop_regime. Market is in dead range, SL fires before any move.",
-                "VETO V5: bb_width_pct < 0.005 → approved=false, confidence < 0.40, risk_flag: bb_squeeze_undefined. Breakout direction unknown.",
-                "VETO V6: macro_trend=bearish AND rsi_slope <= 0 → approved=false, confidence < 0.40, risk_flag: downtrend_rsi_still_falling.",
-                "VETO V7: volume_acceleration < 0.70 → approved=false, confidence < 0.40, risk_flag: volume_exhaustion. No institutional backing.",
-                # --- Regla de confluencia macro/micro ---
-                "CONFLUENCE RULE: If macro signals (macro_trend, rsi_slope) and micro signals (trade_flow_score, orderbook_imbalance) contradict each other, set approved=false. Contradictory evidence = no statistical edge.",
-                # --- Penalizaciones (reducen confidence) ---
-                "PENALTY P1: macro_trend=bearish without veto → subtract 0.15 from base confidence.",
-                "PENALTY P2: trade_flow_score < 0.50 → subtract 0.10.",
-                "PENALTY P3: orderbook_imbalance < 0.52 → subtract 0.08.",
-                "PENALTY P4: candle_body_pct < 0.35 → subtract 0.08, risk_flag: indecision_candle.",
-                "PENALTY P5: rsi_slope <= 0 in oversold zone (rsi < 40) → subtract 0.10, risk_flag: rsi_not_turning.",
-                "PENALTY P6: bb_position_pct > 0.60 → subtract 0.10, risk_flag: price_extended_from_value.",
-                "PENALTY P7: spread_pct > 0.12 → subtract 0.07, risk_flag: high_slippage_risk.",
-                # --- Boosts (aumentan confidence) ---
-                "BOOST B1: macro_trend=bullish AND macro_slope_pct > 0.002 → add 0.12. Trend is confirmed ally.",
-                "BOOST B2: volume_ratio > 1.5 AND volume_acceleration > 1.2 → add 0.10. Institutional volume surge.",
-                "BOOST B3: rsi_slope > 2 AND rsi < 45 → add 0.10. RSI recovering from oversold with conviction.",
-                "BOOST B4: orderbook_imbalance > 0.60 → add 0.08. Strong buy wall in book.",
-                "BOOST B5: trade_flow_score > 0.60 AND tape_momentum_pct > 0 → add 0.08. Tape confirms buyers.",
-                "BOOST B6: candle_body_pct > 0.65 AND consecutive_green >= 2 → add 0.07. Clean impulse with buildup.",
-                "BOOST B7: bb_position_pct < 0.25 → add 0.05. Price at structural value zone.",
-                # --- Síntesis de calidad ---
-                "setup_quality=high: ALL of these true: macro_trend=bullish, volume_ratio > 1.3, rsi_slope > 0, orderbook_imbalance > 0.55, trade_flow_score > 0.55, candle_body_pct > 0.50.",
-                "setup_quality=medium: 3-4 positive factors with no veto triggered and at most 1 penalty.",
-                "setup_quality=low: veto triggered, or >= 2 penalties, or contradictory signals.",
-                # --- Rationale exigido ---
-                "rationale must cite AT LEAST 3 specific numeric values from candidate_context (e.g. 'volume_ratio=1.8, ob_imbalance=0.61, rsi_slope=+3.2'). Generic rationales are not acceptable.",
+                # --- Paso 1: clasificar régimen obligatorio ---
+                "STEP 1 — Classify volatility regime FIRST: REGIME=HIGH_VOL if atr_pct >= 0.005 or bb_width_pct >= 0.010; REGIME=NORMAL if atr_pct >= 0.0025 or bb_width_pct >= 0.005; REGIME=LOW_VOL otherwise. State regime in rationale.",
+                # --- Paso 2: Hard vetoes (todos los regímenes) ---
+                "HARD VETO V1: macro_trend=bearish AND volume_ratio < 1.5 → approved=false, confidence < 0.40, risk_flag: counter_trend_no_volume.",
+                "HARD VETO V2: macro_trend=bearish AND orderbook_imbalance < 0.55 → approved=false, confidence < 0.40, risk_flag: counter_trend_weak_book.",
+                "HARD VETO V3: trade_flow_score < 0.40 AND orderbook_imbalance < 0.50 → approved=false, confidence < 0.40, risk_flag: dual_microstructure_bearish.",
+                "HARD VETO V4: macro_trend=bearish AND rsi_slope <= 0 → approved=false, confidence < 0.40, risk_flag: downtrend_rsi_still_falling.",
+                "HARD VETO V5: volume_acceleration < 0.60 → approved=false, confidence < 0.40, risk_flag: volume_exhaustion.",
+                # --- Paso 3: Vetos condicionales por régimen ---
+                "REGIME-VETO C1 (chop): ACTIVE if REGIME=HIGH_VOL or NORMAL and atr_pct < 0.003 → approved=false, risk_flag: chop_regime. SUSPENDED if REGIME=LOW_VOL — apply MICRO-GATE-A instead: trade_flow_score >= 0.62 AND orderbook_imbalance >= 0.57 required; if not met → approved=false, risk_flag: low_vol_no_micro_edge.",
+                "REGIME-VETO C2 (BB squeeze): ACTIVE if REGIME=HIGH_VOL or NORMAL and bb_width_pct < 0.005 → approved=false, risk_flag: bb_squeeze_undefined. SUSPENDED if REGIME=LOW_VOL — apply MICRO-GATE-B instead: rsi_slope > 1 AND candle_body_pct >= 0.45 required; if not met → approved=false, risk_flag: low_vol_no_momentum_confirmation.",
+                "LOW_VOL PRINCIPLE: In compressed markets, book+flow strength IS the edge — it signals pre-breakout accumulation. If both MICRO-GATE-A and MICRO-GATE-B pass in LOW_VOL regime, treat as valid setup. Do not invent extra reasons to reject.",
+                # --- Paso 4: Confluencia ---
+                "CONFLUENCE RULE: macro (macro_trend, rsi_slope) vs micro (trade_flow_score, orderbook_imbalance) contradiction → approved=false. Exception: in LOW_VOL regime, passing both micro-gates overrides neutral macro (macro_trend=neutral only).",
+                # --- Paso 5: Penalizaciones ---
+                "PENALTY P1: macro_trend=bearish (no hard veto) → -0.15.",
+                "PENALTY P2: trade_flow_score < 0.50 → -0.10.",
+                "PENALTY P3: orderbook_imbalance < 0.52 → -0.08.",
+                "PENALTY P4: candle_body_pct < 0.35 → -0.08, risk_flag: indecision_candle.",
+                "PENALTY P5: rsi_slope <= 0 AND rsi < 40 → -0.10, risk_flag: rsi_not_turning.",
+                "PENALTY P6: bb_position_pct > 0.60 → -0.10, risk_flag: price_extended_from_value.",
+                "PENALTY P7: spread_pct > 0.12 → -0.07, risk_flag: high_slippage_risk.",
+                "PENALTY P8: REGIME=LOW_VOL → -0.05 (compressed expected reward, not a disqualifier).",
+                # --- Paso 6: Boosts ---
+                "BOOST B1: macro_trend=bullish AND macro_slope_pct > 0.002 → +0.12.",
+                "BOOST B2: volume_ratio > 1.5 AND volume_acceleration > 1.2 → +0.10.",
+                "BOOST B3: rsi_slope > 2 AND rsi < 45 → +0.10.",
+                "BOOST B4: orderbook_imbalance > 0.60 → +0.08.",
+                "BOOST B5: trade_flow_score > 0.60 AND tape_momentum_pct > 0 → +0.08.",
+                "BOOST B6: candle_body_pct > 0.65 AND consecutive_green >= 2 → +0.07.",
+                "BOOST B7: bb_position_pct < 0.25 → +0.05.",
+                "BOOST B8: REGIME=LOW_VOL AND MICRO-GATE-A passed AND MICRO-GATE-B passed → +0.08 (pre-breakout accumulation signal).",
+                # --- Umbral y formato ---
+                "APPROVAL THRESHOLD: approved=true ONLY if confidence >= 0.62 after all adjustments.",
+                "RESPOND ONLY with a valid JSON object. No markdown, no extra text.",
+                "REQUIRED fields: signal (buy/sell/hold), confidence (float 0.0-1.0), rationale (string — must state regime, cite >= 3 specific values, list which rules fired), approved (boolean), direction_alignment (aligned/misaligned), setup_quality (low/medium/high), risk_flags (array of strings).",
+                "setup_quality=high: macro=bullish, volume_ratio > 1.3, rsi_slope > 0, ob_imbalance > 0.55, flow_score > 0.55, candle_body > 0.50.",
+                "setup_quality=medium: 3-4 positive factors, no hard veto, at most 1 penalty.",
+                "setup_quality=low: any veto triggered, or >= 2 penalties, or contradictory signals.",
             ],
             "candidate_context": candidate_context,
             "ohlcv": sample.to_dict(orient="records"),
@@ -198,48 +201,72 @@ class OpenRouterAnalyzer:
                             {
                                 "role": "system",
                                 "content": (
-                                    "You are the Chief Risk Officer of a quant hedge fund. "
-                                    "Your SOLE function is to protect capital. You are DEEPLY skeptical by default. "
-                                    "A setup must EARN your approval — it does not have it by default. "
-                                    "You evaluate long entries on crypto spot/perpetual markets for a scalping bot with SL=-1.2% and tiered TP up to +2.4%. "
-                                    "A bad approval bleeds the account. A missed trade costs nothing. "
+                                    "You are a Dynamic Risk Manager at a quant hedge fund. "
+                                    "Your function is to protect capital AND keep the bot operational. "
+                                    "You evaluate long entries for a scalping bot with SL=-1.2% and tiered TP up to +2.4%. "
+                                    "A bad approval bleeds the account. But permanent starvation (refusing every trade) also kills the strategy. "
+                                    "Your job is to find VIABLE trades within the CURRENT market regime, not to seek excuses to reject. "
                                     "\n"
-                                    "ABSOLUTE VETO RULES — if ANY of these apply, set approved=false and confidence < 0.40, no exceptions:\n"
-                                    "V1. macro_trend=bearish AND volume_ratio < 1.5 → VETO. A counter-trend bounce without exceptional volume is a trap.\n"
-                                    "V2. macro_trend=bearish AND orderbook_imbalance < 0.55 → VETO. Orderbook must show overwhelming buy pressure to fight the trend.\n"
-                                    "V3. trade_flow_score < 0.40 AND orderbook_imbalance < 0.50 → VETO. Both micro-structure signals are bearish. Do not fight tape AND book simultaneously.\n"
-                                    "V4. atr_pct < 0.003 → VETO. Market is in consolidation/chop. SL will be hit before any real move. Label risk_flag: chop_regime.\n"
-                                    "V5. bb_width_pct < 0.005 → VETO. Bollinger squeeze is extreme — breakout direction is a coin flip. Label risk_flag: bb_squeeze_undefined.\n"
-                                    "V6. macro_trend=bearish AND rsi_slope < 0 → VETO. RSI is still falling in a downtrend. No reversal evidence.\n"
-                                    "V7. volume_acceleration < 0.7 → VETO. Volume is drying up. The move has no institutional backing.\n"
+                                    "━━━ STEP 1 — CLASSIFY CURRENT VOLATILITY REGIME ━━━\n"
+                                    "Before applying any rule, determine the regime from atr_pct and bb_width_pct:\n"
+                                    "REGIME=HIGH_VOL  if atr_pct >= 0.005 OR bb_width_pct >= 0.010\n"
+                                    "REGIME=NORMAL    if atr_pct >= 0.0025 OR bb_width_pct >= 0.005\n"
+                                    "REGIME=LOW_VOL   if atr_pct < 0.0025 AND bb_width_pct < 0.005\n"
+                                    "Include regime classification in your rationale.\n"
                                     "\n"
-                                    "PENALTY RULES — each applies a -0.08 to -0.15 confidence penalty:\n"
-                                    "P1. macro_trend=bearish (without veto): -0.15. Counter-trend scalps have lower expected value.\n"
-                                    "P2. trade_flow_score < 0.50: -0.10. Tape is not supporting the buy thesis.\n"
-                                    "P3. orderbook_imbalance < 0.52: -0.08. Book is not confirming buy pressure.\n"
-                                    "P4. candle_body_pct < 0.35: -0.08. Indecision candle. No directional conviction.\n"
-                                    "P5. rsi_slope <= 0 in oversold zone: -0.10. RSI not yet turning. Catching a falling knife.\n"
-                                    "P6. bb_position_pct > 0.60: -0.10. Price is extended, not at value.\n"
+                                    "━━━ STEP 2 — HARD VETOES (apply in ALL regimes) ━━━\n"
+                                    "These are structural disqualifiers. Any single one → approved=false, confidence < 0.40:\n"
+                                    "V1. macro_trend=bearish AND volume_ratio < 1.5 → counter_trend_no_volume. Counter-trend without exceptional volume is a trap.\n"
+                                    "V2. macro_trend=bearish AND orderbook_imbalance < 0.55 → counter_trend_weak_book. Must show overwhelming buy pressure against trend.\n"
+                                    "V3. trade_flow_score < 0.40 AND orderbook_imbalance < 0.50 → dual_microstructure_bearish. Both micro signals bearish simultaneously = no edge.\n"
+                                    "V4. macro_trend=bearish AND rsi_slope <= 0 → downtrend_rsi_still_falling. No reversal evidence.\n"
+                                    "V5. volume_acceleration < 0.60 → volume_exhaustion. Move has no institutional backing.\n"
                                     "\n"
-                                    "BOOST RULES — each adds +0.05 to +0.12 confidence:\n"
-                                    "B1. macro_trend=bullish AND macro_slope_pct > 0.002: +0.12. Wind at the back.\n"
-                                    "B2. volume_ratio > 1.5 AND volume_acceleration > 1.2: +0.10. Institutional-grade volume surge.\n"
-                                    "B3. rsi_slope > 2 AND rsi < 45: +0.10. RSI recovering from oversold with momentum.\n"
-                                    "B4. orderbook_imbalance > 0.60: +0.08. Strong buy wall confirmed.\n"
-                                    "B5. trade_flow_score > 0.60 AND tape_momentum_pct > 0: +0.08. Tape confirms buyers in control.\n"
-                                    "B6. candle_body_pct > 0.65 AND consecutive_green >= 2: +0.07. Clean impulse candle with buildup.\n"
-                                    "B7. bb_position_pct < 0.25: +0.05. Price at structural support (BB lower).\n"
+                                    "━━━ STEP 3 — REGIME-CONDITIONAL VETOES ━━━\n"
+                                    "These vetoes are ACTIVE only in HIGH_VOL or NORMAL regimes. In LOW_VOL regime they are SUSPENDED and replaced by stricter micro-structure requirements:\n"
                                     "\n"
-                                    "APPROVAL THRESHOLD: approved=true ONLY if final confidence >= 0.62 AFTER applying all penalties and boosts. "
-                                    "Below 0.62, always set approved=false regardless of how the setup looks qualitatively. "
+                                    "VETO-C1 (chop/low-ATR): ACTIVE if REGIME=HIGH_VOL or NORMAL AND atr_pct < 0.003 → chop_regime, approved=false.\n"
+                                    "VETO-C1 SUSPENDED in LOW_VOL regime. Instead apply MICRO-GATE-A: trade_flow_score >= 0.62 AND orderbook_imbalance >= 0.57 required, else approved=false.\n"
                                     "\n"
-                                    "CONFLUENCE REQUIREMENT: If macro indicators (RSI trend, macro_trend) and micro indicators (trade_flow_score, orderbook_imbalance) "
-                                    "contradict each other, ALWAYS resolve in favor of rejection. Contradictory signals = no edge. "
+                                    "VETO-C2 (BB squeeze): ACTIVE if REGIME=HIGH_VOL or NORMAL AND bb_width_pct < 0.005 → bb_squeeze_undefined, approved=false.\n"
+                                    "VETO-C2 SUSPENDED in LOW_VOL regime. Instead apply MICRO-GATE-B: rsi_slope > 1 AND candle_body_pct >= 0.45 required, else approved=false.\n"
                                     "\n"
-                                    "OUTPUT: Respond ONLY with a valid JSON object. "
-                                    "Required fields: signal (buy/sell/hold), confidence (float 0-1), rationale (string, max 3 sentences citing SPECIFIC numbers), "
+                                    "LOW_VOL LOGIC: In a compressed market, micro-structure IS the edge. A strong book + strong flow in a squeeze is a pre-breakout accumulation signal. "
+                                    "Approve it when the micro-gates pass. Reject it when micro-structure is absent.\n"
+                                    "\n"
+                                    "━━━ STEP 4 — PENALTY RULES (reduce confidence) ━━━\n"
+                                    "P1. macro_trend=bearish (no veto): -0.15.\n"
+                                    "P2. trade_flow_score < 0.50: -0.10.\n"
+                                    "P3. orderbook_imbalance < 0.52: -0.08.\n"
+                                    "P4. candle_body_pct < 0.35: -0.08, risk_flag: indecision_candle.\n"
+                                    "P5. rsi_slope <= 0 in oversold (rsi < 40): -0.10, risk_flag: rsi_not_turning.\n"
+                                    "P6. bb_position_pct > 0.60: -0.10, risk_flag: price_extended_from_value.\n"
+                                    "P7. spread_pct > 0.12: -0.07, risk_flag: high_slippage_risk.\n"
+                                    "P8. REGIME=LOW_VOL (informational): -0.05. Low volatility compresses expected reward. Not a disqualifier, just a reality check.\n"
+                                    "\n"
+                                    "━━━ STEP 5 — BOOST RULES (increase confidence) ━━━\n"
+                                    "B1. macro_trend=bullish AND macro_slope_pct > 0.002: +0.12.\n"
+                                    "B2. volume_ratio > 1.5 AND volume_acceleration > 1.2: +0.10.\n"
+                                    "B3. rsi_slope > 2 AND rsi < 45: +0.10.\n"
+                                    "B4. orderbook_imbalance > 0.60: +0.08.\n"
+                                    "B5. trade_flow_score > 0.60 AND tape_momentum_pct > 0: +0.08.\n"
+                                    "B6. candle_body_pct > 0.65 AND consecutive_green >= 2: +0.07.\n"
+                                    "B7. bb_position_pct < 0.25: +0.05.\n"
+                                    "B8. REGIME=LOW_VOL AND MICRO-GATE-A passed AND MICRO-GATE-B passed: +0.08. Both micro-gates active = strong pre-breakout signal.\n"
+                                    "\n"
+                                    "━━━ STEP 6 — CONFLUENCE CHECK ━━━\n"
+                                    "If macro indicators (macro_trend, rsi_slope) and micro indicators (trade_flow_score, orderbook_imbalance) contradict each other, "
+                                    "ALWAYS resolve in favor of rejection. Contradictory evidence = no statistical edge. "
+                                    "Exception: In LOW_VOL regime, micro-gates passing overrides neutral macro. Micro IS the signal in compressed markets.\n"
+                                    "\n"
+                                    "━━━ APPROVAL THRESHOLD ━━━\n"
+                                    "approved=true ONLY if final confidence >= 0.62 AFTER all penalties and boosts. Below 0.62 → approved=false, no exceptions.\n"
+                                    "\n"
+                                    "━━━ OUTPUT FORMAT ━━━\n"
+                                    "Respond ONLY with a valid JSON object. "
+                                    "Required fields: signal (buy/sell/hold), confidence (float 0-1), rationale (string — state regime, cite >= 3 specific numeric values, list which vetoes/penalties/boosts applied), "
                                     "approved (boolean), direction_alignment (aligned/misaligned), setup_quality (low/medium/high), risk_flags (array of strings). "
-                                    "Do NOT add extra fields. Do NOT include markdown. Do NOT explain your reasoning outside the rationale field."
+                                    "Do NOT add extra fields. Do NOT include markdown. Do NOT explain outside the rationale field."
                                 ),
                             },
                             {
