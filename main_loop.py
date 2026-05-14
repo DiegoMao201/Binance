@@ -1630,7 +1630,11 @@ def _compute_equity(balance_usd: float, open_positions: list[dict[str, Any]], ma
         if side == "buy" and position.get("mode") == "live":
             holdings = position.get("reconciled_holdings") or {}
             held_total = float(holdings.get("total") or 0.0)
-            if holdings:
+            # Sanity guard: if held_total is < 20% of the expected position amount,
+            # the holdings are stale dust from a previously closed trade (e.g. 0.000964 SOL
+            # left over after the last close).  Using that dust value would make equity
+            # appear to crash to near-zero.  Fall back to position `amount` in that case.
+            if holdings and held_total >= amount * 0.20:
                 effective_amount = max(0.0, min(amount, held_total))
         if side == "buy":
             open_value += effective_amount * mark_price
