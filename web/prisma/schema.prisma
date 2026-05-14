@@ -42,7 +42,8 @@ model User {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at")      @db.Timestamptz(6)
 
-  otpCodes OtpCode[]
+  otpCodes           OtpCode[]
+  ledgerTransactions LedgerTransaction[]
 
   @@index([isActive], map: "idx_users_active")
   @@map("users")
@@ -62,4 +63,29 @@ model OtpCode {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("otp_codes")
+}
+
+// ─── ledger_transactions ──────────────────────────────────────────────────────
+// Immutable audit log: every deposit, fee retention, and withdrawal is recorded.
+// NEVER delete rows — financial auditing requires a complete history.
+// type: 'DEPOSIT' | 'ENTRY_FEE' | 'PERFORMANCE_FEE' | 'WITHDRAWAL'
+model LedgerTransaction {
+  id          BigInt   @id @default(autoincrement())
+  userId      String   @map("user_id") @db.Uuid
+
+  // Transaction type — constrained at DB level via CHECK (see migration 003).
+  type        String   @db.VarChar(32)
+
+  // Always positive. The sign is implicit in `type`:
+  // DEPOSIT → inflow to client; ENTRY_FEE / PERFORMANCE_FEE → fee retained by admin.
+  amountUsdt  Decimal  @map("amount_usdt") @db.Decimal(28, 12)
+
+  description String?  @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "idx_ledger_user_id")
+  @@index([type],   map: "idx_ledger_type")
+  @@map("ledger_transactions")
 }

@@ -3,7 +3,7 @@ import { verifyJWT } from "@/lib/auth";
 
 // ─── Protected route prefixes ─────────────────────────────────────────────────
 // Add portal routes here as the Fase 2+ modules are built.
-const PROTECTED_PREFIXES = ["/portal", "/api/portfolio", "/api/admin"];
+const PROTECTED_PREFIXES = ["/portal", "/admin", "/api/portfolio", "/api/admin"];
 
 // ─── Public auth routes (never redirect-loop) ─────────────────────────────────
 const AUTH_PATHS = [
@@ -48,6 +48,14 @@ export async function middleware(request: NextRequest) {
       );
     }
     // Browser routes: redirect to login.
+    const loginUrl = request.nextUrl.clone();
+    loginUrl.pathname = "/portal/login";
+    loginUrl.search = `?next=${encodeURIComponent(pathname)}`;
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // ── Admin-only guard (browser routes) ────────────────────────────────────
+  if (pathname.startsWith("/admin") && payload.role !== "admin") {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/portal/login";
     loginUrl.search = `?next=${encodeURIComponent(pathname)}`;
