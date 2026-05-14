@@ -21,6 +21,9 @@ import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { EquityCurveChart } from "@/components/client/EquityCurveChart";
 import { TradeHistoryTable } from "@/components/client/TradeHistoryTable";
+import { ActiveTradeRadar } from "@/components/client/ActiveTradeRadar";
+import { SupportWidget } from "@/components/client/SupportWidget";
+import { MotionGrid, MotionCard } from "@/components/client/DashboardMotionLayout";
 import type { TradeRow, EquityPoint } from "@/components/client/client-types";
 
 export const dynamic = "force-dynamic";
@@ -157,6 +160,11 @@ export default async function ClientDashboardPage() {
 
   // ── 5. Bot status ────────────────────────────────────────────────────────────
   const isBotActive = Array.isArray(openPositions) && openPositions.length > 0;
+  const firstPosition = isBotActive
+    ? (openPositions[0] as Record<string, unknown>)
+    : null;
+  const liveSymbol  = typeof firstPosition?.symbol  === "string" ? firstPosition.symbol  : undefined;
+  const liveOpenedAt = typeof firstPosition?.opened_at === "string" ? firstPosition.opened_at : undefined;
 
   // ── 6. Trade rows for the table ─────────────────────────────────────────────
   // bot already computes user_net_pnl_usdt correctly (asymmetric fee).
@@ -254,129 +262,178 @@ export default async function ClientDashboardPage() {
       {/* ── Main content ── */}
       <main style={{ padding: "28px 24px", maxWidth: 1100, margin: "0 auto" }}>
 
-        {/* ── KPI hero row ── */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: 16,
-            marginBottom: 28,
-          }}
-        >
-          {/* Balance hero card */}
-          <div
-            style={{
-              background: CARD,
-              border: `1px solid ${BORD}`,
-              borderRadius: 20,
-              padding: "24px 24px 20px",
-              gridColumn: "span 2",
-              borderLeft: `3px solid ${GREEN}`,
-              minWidth: 0,
-            }}
-          >
-            <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
-              Balance Actual
-            </p>
-            <p style={{ color: TEXT, fontSize: 36, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
-              {kpiBalance}
-            </p>
-            <p style={{ color: MUTE, fontSize: 12 }}>
-              Capital neto inicial:{" "}
-              <span style={{ color: TEXT }}>{kpiDeposited}</span>
-            </p>
-          </div>
+        {/* ── Staggered grid ── */}
+        <MotionGrid style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-          {/* ROI card */}
-          <div
-            style={{
-              background: CARD,
-              border: `1px solid ${BORD}`,
-              borderRadius: 20,
-              padding: "24px 24px 20px",
-              borderLeft: `3px solid ${roiPositive ? GREEN : RED}`,
-            }}
-          >
-            <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
-              Retorno Neto Total
-            </p>
-            <p
+          {/* ── Live Radar ── */}
+          <MotionCard>
+            <ActiveTradeRadar
+              active={isBotActive}
+              symbol={liveSymbol}
+              openedAt={liveOpenedAt}
+            />
+          </MotionCard>
+
+          {/* ── KPI hero row ── */}
+          <MotionCard>
+            <div
               style={{
-                color: roiPositive ? GREEN : RED,
-                fontSize: 32,
-                fontWeight: 800,
-                fontFamily: "monospace",
-                letterSpacing: "-0.03em",
-                marginBottom: 4,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                gap: 16,
               }}
             >
-              {kpiRoi}
-            </p>
-            <p style={{ color: MUTE, fontSize: 12 }}>
-              Comisión de gestión: <span style={{ color: TEXT }}>{kpiPerfFee}</span> sobre ganancias
-            </p>
-          </div>
+              {/* Balance hero card */}
+              <div
+                className="kpi-card"
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 20px",
+                  gridColumn: "span 2",
+                  borderLeft: `3px solid ${GREEN}`,
+                  minWidth: 0,
+                  transition: "box-shadow 0.25s, transform 0.25s",
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 28px rgba(18,217,139,0.12)";
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Balance Actual
+                </p>
+                <p style={{ color: TEXT, fontSize: 36, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                  {kpiBalance}
+                </p>
+                <p style={{ color: MUTE, fontSize: 12 }}>
+                  Capital neto inicial:{" "}
+                  <span style={{ color: TEXT }}>{kpiDeposited}</span>
+                </p>
+              </div>
 
-          {/* Trades count card */}
-          <div
-            style={{
-              background: CARD,
-              border: `1px solid ${BORD}`,
-              borderRadius: 20,
-              padding: "24px 24px 20px",
-              borderLeft: `3px solid ${BLUE}`,
-            }}
-          >
-            <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
-              Operaciones
-            </p>
-            <p style={{ color: TEXT, fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
-              {trades.length}
-            </p>
-            <p style={{ color: MUTE, fontSize: 12 }}>
-              Historial completo de asignaciones
-            </p>
-          </div>
-        </div>
+              {/* ROI card */}
+              <div
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 20px",
+                  borderLeft: `3px solid ${roiPositive ? GREEN : RED}`,
+                  transition: "box-shadow 0.25s, transform 0.25s",
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = `0 0 28px ${roiPositive ? "rgba(18,217,139,0.12)" : "rgba(235,75,97,0.12)"}`;
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Retorno Neto Total
+                </p>
+                <p
+                  style={{
+                    color: roiPositive ? GREEN : RED,
+                    fontSize: 32,
+                    fontWeight: 800,
+                    fontFamily: "monospace",
+                    letterSpacing: "-0.03em",
+                    marginBottom: 4,
+                  }}
+                >
+                  {kpiRoi}
+                </p>
+                <p style={{ color: MUTE, fontSize: 12 }}>
+                  Comisión de gestión: <span style={{ color: TEXT }}>{kpiPerfFee}</span> sobre ganancias
+                </p>
+              </div>
 
-        {/* ── Equity curve ── */}
-        {chartPoints.length > 1 && (
-          <div
-            style={{
-              background: CARD,
-              border: `1px solid ${BORD}`,
-              borderRadius: 20,
-              padding: "24px 24px 16px",
-              marginBottom: 24,
-            }}
-          >
-            <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
-              Curva de Capital
-            </p>
-            <EquityCurveChart points={chartPoints} />
-          </div>
-        )}
+              {/* Trades count card */}
+              <div
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 20px",
+                  borderLeft: `3px solid ${BLUE}`,
+                  transition: "box-shadow 0.25s, transform 0.25s",
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 28px rgba(87,193,255,0.12)";
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(-2px)";
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
+                  (e.currentTarget as HTMLDivElement).style.transform = "translateY(0)";
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Operaciones
+                </p>
+                <p style={{ color: TEXT, fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                  {trades.length}
+                </p>
+                <p style={{ color: MUTE, fontSize: 12 }}>
+                  Historial completo de asignaciones
+                </p>
+              </div>
+            </div>
+          </MotionCard>
 
-        {/* ── Trade history ── */}
-        <div
-          style={{
-            background: CARD,
-            border: `1px solid ${BORD}`,
-            borderRadius: 20,
-            padding: "24px 24px 8px",
-          }}
-        >
-          <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
-            Historial de Operaciones
-          </p>
-          <TradeHistoryTable trades={trades} />
-        </div>
+          {/* ── Equity curve ── */}
+          {chartPoints.length > 1 && (
+            <MotionCard>
+              <div
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 16px",
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
+                  Curva de Capital
+                </p>
+                <EquityCurveChart points={chartPoints} />
+              </div>
+            </MotionCard>
+          )}
+
+          {/* ── Trade history ── */}
+          <MotionCard>
+            <div
+              style={{
+                background: CARD,
+                border: `1px solid ${BORD}`,
+                borderRadius: 20,
+                padding: "24px 24px 8px",
+                marginBottom: 80, // room for FAB
+              }}
+            >
+              <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
+                Historial de Operaciones
+              </p>
+              <TradeHistoryTable trades={trades} />
+            </div>
+          </MotionCard>
+
+        </MotionGrid>
 
       </main>
+
+      {/* ── Support FAB (client component) ── */}
+      <SupportWidget />
     </div>
   );
 }
-
 // ─── Live status badge (server-rendered, no interactivity) ───────────────────
 function LiveBadge({ active }: { active: boolean }) {
   return (
