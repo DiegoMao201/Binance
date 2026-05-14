@@ -16,10 +16,18 @@ const PRODUCT_NAME = "OptiFerre Portal";
  */
 export async function sendOtpEmail(to: string, otp: string): Promise<void> {
   if (!process.env.SENDGRID_API_KEY) {
-    throw new Error("SENDGRID_API_KEY is not configured.");
+    // ⚠ SendGrid not configured — log OTP to server console so admin can
+    // retrieve it from Coolify container logs as a fallback.
+    console.warn(
+      `[email] SENDGRID_API_KEY not set. OTP for ${to}: ${otp}  (expires in 10 min)`
+    );
+    return;
   }
   if (!FROM_EMAIL) {
-    throw new Error("SENDGRID_FROM_EMAIL is not configured.");
+    console.warn(
+      `[email] SENDGRID_FROM_EMAIL not set. OTP for ${to}: ${otp}  (expires in 10 min)`
+    );
+    return;
   }
 
   const msg: MailDataRequired = {
