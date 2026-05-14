@@ -14,6 +14,25 @@ const ROOT = process.env.BOT_STATE_DIR
   ? process.env.BOT_STATE_DIR
   : path.join(process.cwd(), "..", "logs");
 
+// ─── DB-backed cache (written by src/analysis/cohort_v3_service.py) ──────────
+// When cohort_v3_metrics.json exists AND is fresh (< 5 min old), the route
+// returns it directly — no JSON-file scan needed.  Falls back to the legacy
+// in-process computation when the cache is absent or stale.
+const CACHE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+async function readDbCache() {
+  try {
+    const cachePath = path.join(ROOT, "cohort_v3_metrics.json");
+    const raw = await fs.readFile(cachePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const generatedAt = new Date(parsed.generated_at).getTime();
+    if (Date.now() - generatedAt > CACHE_MAX_AGE_MS) return null; // stale
+    return parsed; // { generated_at, cohort, filter, metrics }
+  } catch {
+    return null; // file absent or malformed — fall through to legacy path
+  }
+}
+
 async function readJson(file, fallback) {
   try {
     const raw = await fs.readFile(path.join(ROOT, file), "utf8");
@@ -146,6 +165,45 @@ function round2(n) { return Math.round(n * 100) / 100; }
 function round4(n) { return Math.round(n * 10000) / 10000; }
 
 export async function GET() {
+  // ── Priority 1: DB-backed cache (cohort_v3_metrics.json) ─────────────────
+  // Written by src/analysis/cohort_v3_service.py after every trade close.
+  // When fresh, this path is O(1) — a single file read with no trade scan.
+  const dbCache = await readDbCache();
+  if (dbCache) {
+    const m = dbCache.metrics;
+    const allTrades = await readJson("closed_trades.json", []);
+    const v3Trades  = allTrades.filter(isV3);
+    const WR_TARGET = 55.0;
+    const wrGap = m.win_rate_pct !== null ? round2(WR_TARGET - m.win_rate_pct) : null;
+
+    return NextResponse.json(
+      {
+        cohort:        "v3",
+        source:        "db_cache",
+        filter:        dbCache.filter,
+        generated_at:  dbCache.generated_at,
+        summary: {
+          total_all_time:     allTrades.length,
+          total_v3:           v3Trades.length,
+          total_legacy:       allTrades.length - v3Trades.length,
+          micro_gate_entries: v3Trades.filter((t) => t.ai_micro_gate_path === "micro_gate").length,
+          standard_entries:   v3Trades.filter((t) => t.ai_micro_gate_path !== "micro_gate").length,
+        },
+        target: {
+          win_rate_target_pct:  WR_TARGET,
+          current_win_rate_pct: m.win_rate_pct,
+          gap_to_target_pct:    wrGap,
+          on_track:             wrGap !== null ? wrGap <= 0 : null,
+        },
+        v3: m,
+      },
+      { headers: { "Cache-Control": "no-store, max-age=0" } }
+    );
+  }
+
+  // ── Priority 2: legacy in-process computation from closed_trades.json ────
+  // Used while the DB is not yet live (no DATABASE_URL configured) or during
+  // the first minutes after deployment before the service writes the cache.
   const allTrades = await readJson("closed_trades.json", []);
 
   // Strict tag-based split — isV3() checks ai_prompt_version='v3' exclusively.
@@ -169,6 +227,7 @@ export async function GET() {
   return NextResponse.json(
     {
       cohort: "v3",
+      source: "json_file",
       filter: "tag:ai_prompt_version=v3 (strict, no timestamp fallback)",
       generated_at: new Date().toISOString(),
       summary: {
