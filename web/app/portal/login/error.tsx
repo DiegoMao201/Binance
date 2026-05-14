@@ -10,8 +10,6 @@
  * to look up the full trace in Coolify server logs.
  */
 
-"use client";
-
 import { useEffect } from "react";
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
