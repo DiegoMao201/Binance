@@ -3,8 +3,10 @@ import sgMail, { type MailDataRequired } from "@sendgrid/mail";
 // Initialise once at module load. The key is validated at runtime by SendGrid.
 sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? "");
 
-const FROM_EMAIL = process.env.SENDGRID_FROM_EMAIL ?? "";
-const PRODUCT_NAME = "OptiFerre Portal";
+// MAIL_FROM_EMAIL / MAIL_FROM_NAME match the env vars already in Coolify.
+const FROM_EMAIL = process.env.MAIL_FROM_EMAIL ?? process.env.SENDGRID_FROM_EMAIL ?? "";
+const FROM_NAME  = process.env.MAIL_FROM_NAME  ?? "OptiFerre Portal";
+const PRODUCT_NAME = FROM_NAME;
 
 /**
  * Sends a one-time password email to the investor.
@@ -16,8 +18,6 @@ const PRODUCT_NAME = "OptiFerre Portal";
  */
 export async function sendOtpEmail(to: string, otp: string): Promise<void> {
   if (!process.env.SENDGRID_API_KEY) {
-    // ⚠ SendGrid not configured — log OTP to server console so admin can
-    // retrieve it from Coolify container logs as a fallback.
     console.warn(
       `[email] SENDGRID_API_KEY not set. OTP for ${to}: ${otp}  (expires in 10 min)`
     );
@@ -25,14 +25,14 @@ export async function sendOtpEmail(to: string, otp: string): Promise<void> {
   }
   if (!FROM_EMAIL) {
     console.warn(
-      `[email] SENDGRID_FROM_EMAIL not set. OTP for ${to}: ${otp}  (expires in 10 min)`
+      `[email] MAIL_FROM_EMAIL not set. OTP for ${to}: ${otp}  (expires in 10 min)`
     );
     return;
   }
 
   const msg: MailDataRequired = {
     to,
-    from: FROM_EMAIL,
+    from: { email: FROM_EMAIL, name: FROM_NAME },
     subject: `${PRODUCT_NAME} — Tu código de acceso`,
     text: [
       `Tu código de acceso único para ${PRODUCT_NAME} es:`,
