@@ -2693,6 +2693,31 @@ def run_cycle() -> None:
                         # Telemetry Tag: qué lógica de bypass (si alguna) aprobó la entrada.
                         # standard_ai | bypass_ai | bypass_macro
                         "entry_logic_tag": decision.get("entry_logic_tag", "standard_ai"),
+                        # ── Prompt-version cohort tracking ────────────────────────────
+                        # Identifica qué versión del AI prompt aprobó este trade.
+                        # Permite aislar métricas de V3 (regime-aware) de V1/V2.
+                        # v3 = Regime-Aware Dynamic Risk Manager (commit e08e40e, 2026-05-13)
+                        "ai_prompt_version": "v3",
+                        "ai_risk_flags": list(ai_signal.get("risk_flags") or []),
+                        "ai_setup_quality": ai_signal.get("setup_quality", "low"),
+                        # REGIME detectado por la IA al evaluar: LOW_VOL | NORMAL | HIGH_VOL
+                        # Extraído del rationale si la IA lo reporta, sino derivado de atr_pct.
+                        "ai_regime": (
+                            "LOW_VOL" if float(technical_signal.get("atr_pct", 0.0) or 0.0) < 0.0025
+                            and float(technical_signal.get("bb_width_pct", 0.0) or 0.0) < 0.005
+                            else "HIGH_VOL" if float(technical_signal.get("atr_pct", 0.0) or 0.0) >= 0.005
+                            else "NORMAL"
+                        ),
+                        # micro_gate_path: "standard" | "micro_gate" (LOW_VOL con MICRO-GATE-A/B)
+                        "ai_micro_gate_path": (
+                            "micro_gate"
+                            if (
+                                float(technical_signal.get("atr_pct", 0.0) or 0.0) < 0.0025
+                                and float(technical_signal.get("bb_width_pct", 0.0) or 0.0) < 0.005
+                            )
+                            else "standard"
+                        ),
+                        # ── /Prompt-version cohort tracking ──────────────────────────
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)

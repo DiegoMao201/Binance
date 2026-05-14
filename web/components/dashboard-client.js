@@ -1082,6 +1082,9 @@ function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, c
         <Link href="/montecarlo" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid #1a3a2a`, fontSize: 11, color: "#12d98b", textDecoration: "none", background: "rgba(18,217,139,0.06)" }}>
           Monte Carlo →
         </Link>
+        <Link href="/cohort" style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid #1a2a3a`, fontSize: 11, color: "#60a5fa", textDecoration: "none", background: "rgba(96,165,250,0.06)" }}>
+          V3 Cohort →
+        </Link>
       </div>
     </header>
   );
@@ -1312,6 +1315,8 @@ export default function DashboardClient({ initialData }) {
           <Link href="/matriz" style={{ color: MUTE, textDecoration: "underline" }}>Ver Matriz completa</Link>
           &nbsp;·&nbsp;
           <Link href="/montecarlo" style={{ color: "#12d98b", textDecoration: "underline" }}>Monte Carlo 30d →</Link>
+          &nbsp;·&nbsp;
+          <Link href="/cohort" style={{ color: "#60a5fa", textDecoration: "underline" }}>V3 Cohort →</Link>
         </div>
       </div>
     </div>
