@@ -29,5 +29,8 @@
     "@types/react-dom": "^19.2.3",
     "prisma": "^6.8.2",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }
