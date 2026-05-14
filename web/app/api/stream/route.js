@@ -43,8 +43,9 @@ export async function GET() {
           controller.enqueue(encoder.encode(`event: state\ndata: ${json}\n\n`));
           controller.enqueue(encoder.encode(`data: ${json}\n\n`));
           lastPushAt = Date.now();
-        } catch {
-          /* ignore read errors */
+        } catch (err) {
+          // BUG FIX: was silent — log so SSE serialization errors surface in server logs.
+          console.error("[stream/route] readDashboardState error:", err?.message || err);
         }
       };
 

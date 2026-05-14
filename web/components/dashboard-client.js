@@ -1136,8 +1136,10 @@ export default function DashboardClient({ initialData }) {
       const next = await res.json();
       setPayload(next);
       setLastRefresh(new Date());
-    } catch {
-      /* silent */
+    } catch (err) {
+      // BUG FIX: was silent — now logs to console so the "ghost trade" cause
+      // is visible in DevTools without requiring backend changes.
+      console.error("[DashboardClient] /api/state refresh error:", err);
     }
   }, []);
 
@@ -1162,7 +1164,12 @@ export default function DashboardClient({ initialData }) {
   const lastScans      = state?.last_scans      || [];
   const targetSymbols  = state?.target_symbols  || [];
   const preFlight      = payload?.preFlight     || {};
-  const openPosition   = state?.open_position   || null;
+  // BUG FIX: state.open_position (bot_state.json) is written at the END of the ~60s
+  // main loop cycle, while open_positions.json is written immediately on trade open.
+  // During the gap, the 5s poll returns openPositions[0] with data but
+  // state.open_position is still null — causing "Sin posición abierta".
+  // Fallback: use openPositions[0] when the summary key is absent.
+  const openPosition   = state?.open_position   || openPositions[0] || null;
   const tradeMonitorLog = payload?.tradeMonitorLog || [];
   const tradeMonitor   = state?.trade_monitor    || {};
   const recoveryStatus = payload?.recoveryStatus  || {};

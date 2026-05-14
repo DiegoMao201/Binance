@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 import json
 import logging
 import os
@@ -67,7 +68,14 @@ def _quarantine_corrupted_json(path: Path) -> None:
 
 
 def persist_state(path: Path, state: dict[str, Any]) -> None:
-    payload = json.dumps(state, indent=2, ensure_ascii=False)
+    def _default(obj: Any) -> Any:
+        # PAMM refactor introduced Decimal in some code paths.
+        # Silently cast to float so json.dumps never raises TypeError.
+        if isinstance(obj, decimal.Decimal):
+            return float(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    payload = json.dumps(state, indent=2, ensure_ascii=False, default=_default)
     _safe_atomic_write(path, payload)
 
 

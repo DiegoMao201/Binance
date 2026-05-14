@@ -2077,8 +2077,17 @@ def _summarize_open_position(open_positions: list[dict[str, Any]]) -> dict[str, 
         "fill_price": p.get("fill_price"),
         "slippage_pct": p.get("slippage_pct"),
         "trailing_tier": p.get("trailing_tier", 0),
+        "initial_stop_loss": p.get("initial_stop_loss"),
         "conviction_multiplier": p.get("conviction_multiplier"),
         "algo_version": p.get("algo_version"),
+        # Telemetry tag: required by buildPos() in dashboard-client.js.
+        # Without this, the frontend falls back to "standard_ai" — fine but
+        # the badge would be wrong for bypass_ai / bypass_macro entries.
+        "entry_logic_tag": p.get("entry_logic_tag", "standard_ai"),
+        # entry_atr_pct is used by the frontend's trailing tier progress bar.
+        "entry_atr_pct": float(p.get("entry_atr_pct") or 0.0),
+        # mode used by the frontend live/dry-run badge.
+        "mode": p.get("mode"),
     }
 
 
