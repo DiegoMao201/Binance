@@ -63,13 +63,15 @@ def parse_ts(ts: str | None) -> float | None:
         return None
 
 
-def is_v3(trade: dict, cutoff_ts: float) -> bool:
-    """True if this trade belongs to the V3 cohort."""
-    if trade.get("ai_prompt_version") == "v3":
-        return True
-    ts = trade.get("opened_at") or trade.get("closed_at")
-    epoch = parse_ts(ts)
-    return epoch is not None and epoch >= cutoff_ts
+def is_v3(trade: dict) -> bool:
+    """True if this trade belongs to the V3 cohort.
+
+    Classification is STRICT: only trades explicitly tagged with
+    ai_prompt_version='v3' qualify. The timestamp-based fallback
+    (opened_at >= cutoff) was removed to prevent data leakage from
+    pre-deployment trades executed on the same calendar day.
+    """
+    return trade.get("ai_prompt_version") == "v3"
 
 
 def pnl_of(trade: dict) -> float:
@@ -230,20 +232,16 @@ def print_report(v3: CohortMetrics, legacy: CohortMetrics | None, target: float)
 
 def main():
     ap = argparse.ArgumentParser(description="V3 Cohort Analytics")
-    ap.add_argument("--cutoff", default=V3_CUTOFF_DEFAULT, help="ISO8601 cutoff (default: V3 deploy date)")
     ap.add_argument("--json", action="store_true", dest="as_json", help="Output JSON instead of pretty report")
     ap.add_argument("--all-time", action="store_true", dest="all_time", help="Show legacy cohort too")
     ap.add_argument("--file", default=str(CLOSED_TRADES_FILE), help="Path to closed_trades.json")
     args = ap.parse_args()
 
-    cutoff_ts = parse_ts(args.cutoff)
-    if cutoff_ts is None:
-        print(f"[ERROR] Cannot parse cutoff: {args.cutoff}", file=sys.stderr)
-        sys.exit(1)
-
     all_trades = load_trades(Path(args.file))
-    v3_trades = [t for t in all_trades if is_v3(t, cutoff_ts)]
-    legacy_trades = [t for t in all_trades if not is_v3(t, cutoff_ts)]
+    # Strict tag-only filter: only trades with ai_prompt_version='v3' belong to V3 cohort.
+    # Timestamp fallback removed — it caused pre-deployment trades to leak into V3.
+    v3_trades = [t for t in all_trades if is_v3(t)]
+    legacy_trades = [t for t in all_trades if not is_v3(t)]
 
     v3_metrics = CohortMetrics("v3", v3_trades)
     legacy_metrics = CohortMetrics("legacy", legacy_trades) if args.all_time else None
@@ -251,7 +249,7 @@ def main():
     if args.as_json:
         out = {
             "generated_at": datetime.now(tz=timezone.utc).isoformat(),
-            "cutoff_iso": datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).isoformat(),
+            "filter": "tag:ai_prompt_version=v3 (strict, no timestamp fallback)",
             "target_win_rate_pct": WIN_RATE_TARGET,
             "gap_to_target_pct": round(WIN_RATE_TARGET - (v3_metrics.win_rate or 0), 2),
             "on_track": (v3_metrics.win_rate or 0) >= WIN_RATE_TARGET,

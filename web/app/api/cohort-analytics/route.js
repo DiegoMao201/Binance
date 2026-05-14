@@ -4,11 +4,11 @@ import path from "node:path";
 
 export const dynamic = "force-dynamic";
 
-// ─── V3 cohort cutoff ────────────────────────────────────────────────────────
-// commit e08e40e pushed 2026-05-13. Any trade opened AFTER this timestamp
-// OR carrying ai_prompt_version="v3" tag belongs to the V3 cohort.
-const V3_CUTOFF_ISO = "2026-05-13T00:00:00.000Z";
-const V3_CUTOFF_MS = Date.parse(V3_CUTOFF_ISO);
+// ─── V3 cohort filter ────────────────────────────────────────────────────────
+// Classification is STRICT: only trades explicitly tagged with
+// ai_prompt_version='v3' qualify. The timestamp-based fallback was removed
+// to prevent data leakage — pre-deployment trades on 2026-05-13 (morning)
+// were incorrectly captured by the midnight cutoff.
 
 const ROOT = process.env.BOT_STATE_DIR
   ? process.env.BOT_STATE_DIR
@@ -27,12 +27,10 @@ async function readJson(file, fallback) {
 const FEE_RT_PCT = 0.002;
 
 function isV3(trade) {
-  // Primary: explicit tag injected from commit a66075a+
-  if (trade.ai_prompt_version === "v3") return true;
-  // Fallback: timestamp-based cutoff
-  const ts = trade.opened_at || trade.closed_at;
-  if (!ts) return false;
-  return Date.parse(ts) >= V3_CUTOFF_MS;
+  // Strict tag-only check. Null/undefined ai_prompt_version → Legacy.
+  // Timestamp fallback removed: it caused morning-of-deploy trades to
+  // contaminate the V3 cohort (data leakage).
+  return trade.ai_prompt_version === "v3";
 }
 
 function computeCohortMetrics(trades) {
@@ -147,21 +145,12 @@ function isV3Regime(t) {
 function round2(n) { return Math.round(n * 100) / 100; }
 function round4(n) { return Math.round(n * 10000) / 10000; }
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  // Allow overriding cutoff via query param (ISO string)
-  const cutoffParam = searchParams.get("cutoff");
-  const cutoffMs = cutoffParam ? Date.parse(cutoffParam) : V3_CUTOFF_MS;
-
+export async function GET() {
   const allTrades = await readJson("closed_trades.json", []);
 
-  const v3Trades = allTrades.filter((t) => {
-    if (t.ai_prompt_version === "v3") return true;
-    const ts = t.opened_at || t.closed_at;
-    return ts ? Date.parse(ts) >= cutoffMs : false;
-  });
-
-  const legacyTrades = allTrades.filter((t) => !v3Trades.includes(t));
+  // Strict tag-based split — isV3() checks ai_prompt_version='v3' exclusively.
+  const v3Trades = allTrades.filter(isV3);
+  const legacyTrades = allTrades.filter((t) => !isV3(t));
 
   const v3Metrics = computeCohortMetrics(v3Trades);
   const legacyMetrics = computeCohortMetrics(legacyTrades);
@@ -180,7 +169,7 @@ export async function GET(request) {
   return NextResponse.json(
     {
       cohort: "v3",
-      cutoff_iso: new Date(cutoffMs).toISOString(),
+      filter: "tag:ai_prompt_version=v3 (strict, no timestamp fallback)",
       generated_at: new Date().toISOString(),
       summary: {
         total_all_time: allTrades.length,
