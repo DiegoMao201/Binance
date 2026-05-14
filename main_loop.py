@@ -677,6 +677,12 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "candle_timestamp": str(candle.get("timestamp")) if candle else None,
         "orderbook": scan.get("orderbook") or {},
         "macro_regime": scan.get("macro_regime") or {},
+        # ── Micro-Gate proximity fields (V3 AI prompt, regime-aware gates) ──
+        # Required by MicroGateRadar UI component.
+        "bb_width_pct": ts.get("bb_width_pct"),
+        "rsi_slope": ts.get("rsi_slope"),
+        "candle_body_pct": ts.get("candle_body_pct"),
+        "volume_acceleration": ts.get("volume_acceleration"),
     }
 
 

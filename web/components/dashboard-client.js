@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import MicroGateRadar from "./MicroGateRadar";
 
 const Plot = dynamic(() => import("react-plotly.js"), {
   ssr: false,
@@ -1297,6 +1298,9 @@ export default function DashboardClient({ initialData }) {
 
         {/* Scanner completo */}
         <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} />
+
+        {/* Micro-Gate Radar: distancia a los gates V3 del símbolo enfocado */}
+        <MicroGateRadar scan={focusScan} />
 
         {/* Fila inferior: trades + analytics + timeline */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
