@@ -64,6 +64,12 @@ _AMOUNT_REL_TOL = Decimal("0.005")    # 0.5%
 _PRICE_REL_TOL  = Decimal("0.003")    # 0.3%
 _TIME_WINDOW_MS = 5 * 60 * 1000       # ±5 min around the closed_at timestamp
 
+# TODO: added — tolerance for partial-fill aggregation (sum of fills ≈ total amount).
+_PARTIAL_FILL_AMOUNT_TOL = Decimal("0.01")   # 1%
+_PARTIAL_FILL_WINDOW_MS  = 30 * 60 * 1000   # ±30 min for partial fill grouping
+# Modes that identify simulation/paper trades — must not be queried on Binance.
+_DRY_RUN_MODES: frozenset[str] = frozenset({"dry_run", "paper", "test", "simulation"})
+
 
 # ────────────────────────── helpers ──────────────────────────────────────────
 
@@ -160,6 +166,98 @@ def _find_matching_fill(
     return best[1] if best else None
 
 
+# TODO: added — partial-fills aggregator.
+def _aggregate_partial_fills(
+    trades: list[dict[str, Any]],
+    *,
+    expected_amount: Decimal,
+    expected_ts_ms: int | None,
+    side: str,
+    logger: logging.Logger,
+) -> dict[str, Any] | None:
+    """Try to reconstruct a single logical fill from multiple partial fills.
+
+    Binance can split one order into N fills.  If the sum of fills whose
+    side/timestamp match the expected close equals expected_amount (within
+    _PARTIAL_FILL_AMOUNT_TOL = 1 %), we accept them as a group and return a
+    synthetic fill dict with weighted-average price and summed fees.
+
+    Grouping priority:
+      1. Same ``order`` id (most reliable — groups an order's fills exactly).
+      2. Falls back to a time-window group (±30 min) when order id is absent
+         or differs across fills (uncommon on Binance spot).
+    """
+    side_lower = side.lower()
+    # Pre-filter: right side and within ±30 min of expected close.
+    candidates: list[dict[str, Any]] = []
+    for t in trades:
+        if str(t.get("side", "")).lower() != side_lower:
+            continue
+        ts_ms = int(t.get("timestamp") or 0)
+        if expected_ts_ms is not None and abs(ts_ms - expected_ts_ms) > _PARTIAL_FILL_WINDOW_MS:
+            continue
+        candidates.append(t)
+
+    if not candidates:
+        return None
+
+    # Attempt Strategy A: group by order id.
+    from itertools import groupby  # noqa: PLC0415
+    by_order: dict[str, list[dict[str, Any]]] = {}
+    for t in candidates:
+        oid = str(t.get("order") or "_no_order")
+        by_order.setdefault(oid, []).append(t)
+
+    def _merge(group: list[dict[str, Any]]) -> dict[str, Any] | None:
+        total_amount = sum(_to_dec(t.get("amount")) for t in group)
+        if not _close(total_amount, expected_amount, _PARTIAL_FILL_AMOUNT_TOL):
+            return None
+        # Weighted-average price.
+        total_cost = sum(_to_dec(t.get("amount")) * _to_dec(t.get("price")) for t in group)
+        wavg_price = total_cost / total_amount if total_amount else Decimal("0")
+        # Sum fees (quote currency only; non-quote fees are already fallen-back elsewhere).
+        total_fee = Decimal("0")
+        fee_currency = ""
+        for t in group:
+            fo = t.get("fee") or {}
+            total_fee += _to_dec(fo.get("cost"))
+            if not fee_currency:
+                fee_currency = str(fo.get("currency") or "")
+        return {
+            "order": group[0].get("order"),
+            "side": side_lower,
+            "amount": float(total_amount),
+            "price": float(wavg_price),
+            "fee": {"cost": float(total_fee), "currency": fee_currency},
+            "timestamp": group[0].get("timestamp"),
+            "_partial_fills_count": len(group),
+        }
+
+    # Try each order-id group.
+    for oid, group in by_order.items():
+        if len(group) < 2:
+            continue  # single fill would have been found by the single-fill matcher.
+        merged = _merge(group)
+        if merged is not None:
+            logger.debug(
+                "PARTIAL FILL AGGREGATED: order=%s fills=%d total_amount=%.6f wavg_price=%.6f",
+                oid, len(group), float(sum(_to_dec(t.get("amount")) for t in group)), merged["price"],
+            )
+            return merged
+
+    # Fallback: aggregate ALL candidates into one group (no order-id clustering).
+    if len(candidates) >= 2:
+        merged = _merge(candidates)
+        if merged is not None:
+            logger.debug(
+                "PARTIAL FILL AGGREGATED (time-window): fills=%d total_amount=%.6f wavg_price=%.6f",
+                len(candidates), float(sum(_to_dec(t.get("amount")) for t in candidates)), merged["price"],
+            )
+            return merged
+
+    return None
+
+
 def _audit_trade(
     trade: dict[str, Any],
     exchange: ccxt.binance,
@@ -173,17 +271,25 @@ def _audit_trade(
         out["ledger_audit_status"] = "skipped_no_symbol"
         return out
 
+    # TODO: added — skip simulation/paper trades; they have no Binance executions.
+    mode_tag = str(trade.get("mode") or "").lower().strip()
+    if mode_tag in _DRY_RUN_MODES or trade.get("is_live") is False:
+        out["ledger_audit_status"] = "skipped_dry_run"
+        return out
+
     # Build (since) window: from opened_at - 1h to closed_at + 1h.  Binance
     # fetch_my_trades is paginated; we use a reasonable window to limit weight.
+    # Extended to 24 h before opened to cover delayed/async partial fills.
     opened_ms = _iso_to_ms(str(trade.get("opened_at") or ""))
     closed_ms = _iso_to_ms(str(trade.get("closed_at") or ""))
     if closed_ms is None:
         out["ledger_audit_status"] = "skipped_no_closed_at"
         return out
-    since_ms = (opened_ms or closed_ms) - 60 * 60 * 1000  # 1 h before opened
+    since_ms = (opened_ms or closed_ms) - 24 * 60 * 60 * 1000  # TODO: extended to 24 h
 
     try:
-        trades = exchange.fetch_my_trades(symbol, since=since_ms, limit=200)
+        # TODO: increased limit to 500 for better coverage of busy trading days.
+        trades = exchange.fetch_my_trades(symbol, since=since_ms, limit=500)
     except ccxt.BaseError as exc:
         logger.warning("fetch_my_trades failed for %s: %s", symbol, exc)
         out["ledger_audit_status"] = f"fetch_error: {exc.__class__.__name__}"
@@ -207,9 +313,29 @@ def _audit_trade(
         side="sell",  # close of a long is a sell
     )
 
+    # TODO: added — partial-fill aggregation fallback.
+    agg_match: dict[str, Any] | None = None
     if match is None:
+        agg_match = _aggregate_partial_fills(
+            trades,
+            expected_amount=expected_amount,
+            expected_ts_ms=closed_ms,
+            side="sell",
+            logger=logger,
+        )
+
+    if match is None and agg_match is None:
         out["ledger_audit_status"] = "no_match_found"
+        # Store diagnostic context so the debug dump is informative.
+        out["_debug_fetch_count"]      = len(trades)
+        out["_debug_expected_amount"]  = float(expected_amount)
+        out["_debug_expected_price"]   = float(expected_price)
+        out["_debug_closed_at"]        = trade.get("closed_at")
+        out["_debug_exchange_order_id"] = expected_order_id
         return out
+
+    if match is None:
+        match = agg_match  # type: ignore[assignment]
 
     # ── Recompute Net PnL from the authoritative fill ────────────────────────
     real_price  = _to_dec(match.get("price"))
@@ -236,8 +362,16 @@ def _audit_trade(
     stored_pnl = _to_dec(trade.get("pnl_usdt"))
     delta = audited_pnl - stored_pnl
 
+    # Determine match method tag.
+    if agg_match is not None and match is agg_match:
+        match_method = f"partial_fills_aggregated_{match.get('_partial_fills_count', '?')}"
+    elif expected_order_id and str(match.get("order")) == str(expected_order_id):
+        match_method = "order_id"
+    else:
+        match_method = "fuzzy"
+
     out["ledger_audit_status"]       = "ok"
-    out["ledger_audit_match_method"] = "order_id" if expected_order_id and str(match.get("order")) == str(expected_order_id) else "fuzzy"
+    out["ledger_audit_match_method"] = match_method
     out["ledger_reconstructed_at"]   = datetime.now(timezone.utc).isoformat()
     out["ledger_pnl_delta_usdt"]     = float(round(delta, 6))
     out["ledger_audited_exit_price"] = float(round(real_price, 8))
@@ -324,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     audited: list[dict[str, Any]] = []
     deltas: list[float] = []
     n_ok, n_skip, n_nomatch, n_err = 0, 0, 0, 0
+    # TODO: added — collect no-match trades for the debug dump.
+    nomatch_debug: list[dict[str, Any]] = []
 
     for idx, trade in enumerate(target, 1):
         new_trade = _audit_trade(trade, exchange, logger, rate_sleep_s)
@@ -336,6 +472,11 @@ def main(argv: list[str] | None = None) -> int:
             n_skip += 1
         elif status == "no_match_found":
             n_nomatch += 1
+            # TODO: added — stash full trade + diagnostics for post-run inspection.
+            nomatch_debug.append({
+                "_audit_index": idx,
+                **{k: v for k, v in new_trade.items()},
+            })
         else:
             n_err += 1
         if idx % 25 == 0:
@@ -350,6 +491,26 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("  Errors        : %d", n_err)
     logger.info("  Σ ΔPnL (audit - stored) = %.4f USDT", total_delta)
     logger.info("─" * 60)
+
+    # TODO: added — always write nomatch_debug.json (overwrite each run).
+    nomatch_path = settings.logs_dir / "nomatch_debug.json"
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_audited": len(target),
+        "n_nomatch": n_nomatch,
+        "advice": (
+            "Possible causes: dry_run trade not filtered (check 'mode' field), "
+            "partial fill not aggregated (check _debug_fetch_count), "
+            "trade executed more than 24 h after open (widen --rate-ms window), "
+            "or trade was placed/closed manually outside the bot."
+        ),
+        "trades": nomatch_debug,
+    }
+    nomatch_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    if nomatch_debug:
+        logger.warning("nomatch_debug.json written with %d entries → %s", n_nomatch, nomatch_path)
+    else:
+        logger.info("nomatch_debug.json written (empty — all trades reconciled) → %s", nomatch_path)
 
     # Merge audited results back into the full list (preserving non-target trades).
     if args.since or args.limit > 0:
