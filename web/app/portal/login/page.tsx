@@ -8,7 +8,7 @@
  *   On success: redirect to ?next param or /client/dashboard
  */
 
-import { useState, useTransition, useRef, useEffect } from "react";
+import { useState, useTransition, useRef, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 // ─── Palette (shared with rest of portal) ────────────────────────────────────
@@ -23,7 +23,8 @@ const RED   = "#eb4b61";
 
 type Step = "email" | "otp";
 
-export default function LoginPage() {
+// Inner component: contains useSearchParams — MUST be inside <Suspense>.
+function LoginForm() {
   const searchParams   = useSearchParams();
   const nextPath       = searchParams.get("next") || "/client/dashboard";
 
@@ -257,6 +258,32 @@ export default function LoginPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// ─── Page export: wraps the form in Suspense ────────────────────────────────
+// Required by Next.js App Router: any component that calls useSearchParams()
+// must be wrapped in <Suspense>. Without this, Next.js throws during static
+// rendering in production → blank white screen.
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div
+          style={{
+            minHeight: "100vh",
+            background: "#080e16",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <span style={{ color: "#6b8299", fontSize: 13 }}>Cargando…</span>
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
 
