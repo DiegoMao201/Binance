@@ -753,6 +753,7 @@ async def _settle_open_positions(
     executor: TradeExecutor,
     logger: logging.Logger,
     persist_open_positions: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+    microstructure_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # ---- Trailing stop: Strict Percentage-Based Tiers ----
     # Tiers deterministas basados en el MFE% real desde precio de entrada.
@@ -1010,10 +1011,50 @@ async def _settle_open_positions(
             )
             dynamic_mfe_cap, dynamic_loss_cut, degradation_steps = _resolve_dynamic_stagnation_thresholds(hold_minutes)
 
+            # 0) Micro-Structure Bailout:
+            # Cierre defensivo anticipado cuando la microestructura colapsa mientras
+            # la posicion esta en drawdown. Actua ANTES del Hard SL para preservar capital
+            # cuando el orderbook imbalance y el trade flow score caen simultaneamente.
+            # Guardia: solo si PnL < 0, hold >= BAILOUT_MIN_HOLD_MINUTES, y metricas disponibles.
+            _ms = (microstructure_by_symbol or {}).get(symbol, {})
+            _ob_bailout = _ms.get("orderbook_imbalance")
+            _flow_bailout = _ms.get("trade_flow_score")
+            bailout_triggered = (
+                settings.bailout_enabled
+                and unrealized_pct < -settings.bailout_min_drawdown_pct
+                and hold_minutes is not None
+                and hold_minutes >= settings.bailout_min_hold_minutes
+                and _ob_bailout is not None
+                and _flow_bailout is not None
+                and _ob_bailout < settings.bailout_max_ob_imbalance
+                and _flow_bailout < settings.bailout_max_flow_score
+            )
+            if bailout_triggered:
+                exit_price = mark_price
+                exit_reason = "microstructure_bailout"
+                position["smart_exit"] = {
+                    "rule": "microstructure_bailout",
+                    "hold_minutes": round(hold_minutes, 1),
+                    "unrealized_pct": round(unrealized_pct, 6),
+                    "orderbook_imbalance": round(float(_ob_bailout), 4),
+                    "trade_flow_score": round(float(_flow_bailout), 4),
+                    "threshold_ob": settings.bailout_max_ob_imbalance,
+                    "threshold_flow": settings.bailout_max_flow_score,
+                }
+                logger.warning(
+                    "Bailout Executed: Micro-structure collapsed while in drawdown. Preventing Hard SL. "
+                    "%s side=%s hold=%.1fmin pnl=%.3f%% ob_imbalance=%.3f flow_score=%.3f",
+                    symbol,
+                    side,
+                    hold_minutes,
+                    unrealized_pct * 100,
+                    _ob_bailout,
+                    _flow_bailout,
+                )
             # 1) Hard timeout inteligente:
             # si una posicion lleva demasiado tiempo sin asegurar tier 1,
             # cerramos por mercado para reciclar capital y evitar "muertes lentas".
-            if (
+            elif (
                 hard_timeout_enabled
                 and hold_minutes >= settings.smart_hard_timeout_minutes
                 and trailing_tier < 1
@@ -2048,6 +2089,34 @@ def run_cycle() -> None:
         async def _persist_open_positions_async(snapshot: list[dict[str, Any]]) -> None:
             await asyncio.to_thread(persist_history, settings.open_positions_file, snapshot)
 
+        # ---- Microstructure fresca para Bailout ----
+        # Para open positions que no estuvieran en scan_results como candidatos,
+        # hacemos fetch directo de orderbook + trade_flow para tener datos actualizados
+        # en cada tick. Posiciones candidatas ya traen los datos de _scan_symbol.
+        microstructure_by_symbol: dict[str, dict[str, Any]] = {
+            sr["symbol"]: {
+                "orderbook_imbalance": sr["technical_signal"].get("orderbook_imbalance"),
+                "trade_flow_score": sr["technical_signal"].get("trade_flow_score"),
+            }
+            for sr in scan_results
+            if sr.get("technical_signal", {}).get("orderbook_imbalance") is not None
+            or sr.get("technical_signal", {}).get("trade_flow_score") is not None
+        }
+        if settings.bailout_enabled and open_positions:
+            for _pos in open_positions:
+                _sym = _pos.get("symbol")
+                if _sym and _sym not in microstructure_by_symbol:
+                    try:
+                        _ob = client.fetch_orderbook_snapshot(symbol=_sym, depth=20)
+                        _tf = client.fetch_trade_flow_snapshot(symbol=_sym, limit=80)
+                        microstructure_by_symbol[_sym] = {
+                            "orderbook_imbalance": _ob.get("imbalance") if _ob else None,
+                            "trade_flow_score": _tf.get("flow_score") if _tf else None,
+                        }
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.debug("Bailout: no se pudo obtener microestructura para %s: %s", _sym, _exc)
+                        microstructure_by_symbol[_sym] = {"orderbook_imbalance": None, "trade_flow_score": None}
+
         open_positions, newly_closed_trades = asyncio.run(
             _settle_open_positions(
                 open_positions,
@@ -2057,6 +2126,7 @@ def run_cycle() -> None:
                 executor=executor,
                 logger=logger,
                 persist_open_positions=_persist_open_positions_async,
+                microstructure_by_symbol=microstructure_by_symbol,
             )
         )
         if live_mode and open_positions:

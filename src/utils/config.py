@@ -72,6 +72,12 @@ class Settings:
     scenario_a_rsi_max: float
     scenario_b_rsi_max: float
     ai_monitor_enabled: bool
+    # ---- Micro-Structure Bailout ----
+    bailout_enabled: bool
+    bailout_min_drawdown_pct: float
+    bailout_max_ob_imbalance: float
+    bailout_max_flow_score: float
+    bailout_min_hold_minutes: int
     logs_dir: Path
     state_file: Path
     log_file: Path
@@ -177,6 +183,11 @@ def load_settings() -> Settings:
         scenario_a_rsi_max=float(os.getenv("SCENARIO_A_RSI_MAX", "52")),  # Coolify: 52 (era 45)
         scenario_b_rsi_max=float(os.getenv("SCENARIO_B_RSI_MAX", "36")),  # Coolify: 36 (era 32)
         ai_monitor_enabled=_get_bool("AI_MONITOR_ENABLED", True),
+        bailout_enabled=_get_bool("BAILOUT_ENABLED", True),
+        bailout_min_drawdown_pct=float(os.getenv("BAILOUT_MIN_DRAWDOWN_PCT", "0.003")),
+        bailout_max_ob_imbalance=float(os.getenv("BAILOUT_MAX_OB_IMBALANCE", "0.20")),
+        bailout_max_flow_score=float(os.getenv("BAILOUT_MAX_FLOW_SCORE", "0.30")),
+        bailout_min_hold_minutes=int(os.getenv("BAILOUT_MIN_HOLD_MINUTES", "10")),
         logs_dir=logs_dir,
         state_file=logs_dir / "bot_state.json",
         log_file=logs_dir / "bot.log",
