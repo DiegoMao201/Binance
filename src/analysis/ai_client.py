@@ -229,10 +229,14 @@ class OpenRouterAnalyzer:
         payload = self._build_payload(frame, symbol=symbol, technical_signal=technical_signal)
 
         # Cadena de modelos para ENTRADAS:
-        #   1. openrouter_entry_model          → modelo pagado preciso (Gemini 2.5 Flash)
+        #   0. __openai_direct__ (gpt-4o-mini) → primero si OPENAI_API_KEY configurado
+        #   1. openrouter_entry_model          → modelo pagado OpenRouter (fallback)
         #   2. openrouter_entry_fallback_models → fallbacks pagados (GPT-4.1 mini, etc.)
-        #   3. openrouter_model + fallback_models → último recurso (puede ser free)
-        models_to_try: list[str] = [self.settings.openrouter_entry_model]
+        #   3. openrouter_model + fallback_models → último recurso
+        models_to_try: list[str] = []
+        if self.settings.openai_api_key:
+            models_to_try.append("__openai_direct__")  # OpenAI gpt-4o-mini directo
+        models_to_try.append(self.settings.openrouter_entry_model)
         for candidate in self.settings.openrouter_entry_fallback_models:
             if candidate and candidate not in models_to_try:
                 models_to_try.append(candidate)
@@ -249,14 +253,25 @@ class OpenRouterAnalyzer:
         last_error = "unknown_error"
         for model_name in models_to_try:
             try:
+                # Enrutar a OpenAI directo o OpenRouter según el modelo
+                if model_name == "__openai_direct__":
+                    _api_url = "https://api.openai.com/v1/chat/completions"
+                    _api_key = self.settings.openai_api_key
+                    _actual_model = "gpt-4o-mini"
+                    _timeout = 12.0
+                else:
+                    _api_url = "https://openrouter.ai/api/v1/chat/completions"
+                    _api_key = self.settings.openrouter_api_key
+                    _actual_model = model_name
+                    _timeout = 30.0
                 response = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    _api_url,
                     headers={
-                        "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+                        "Authorization": f"Bearer {_api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": model_name,
+                        "model": _actual_model,
                         "messages": [
                             {
                                 "role": "system",
@@ -337,10 +352,18 @@ class OpenRouterAnalyzer:
                         "temperature": 0.1,
                         "response_format": {"type": "json_object"},
                     },
-                    timeout=30.0,
+                    timeout=_timeout,
                 )
-                # Detect 429 BEFORE raise_for_status so we can backoff gracefully.
+                # Detect 429 BEFORE raise_for_status para backoff correcto.
+                # OpenRouter: break (la cuota es por-key). OpenAI direct: continue (intenta OpenRouter).
                 if response.status_code == 429:
+                    if model_name == "__openai_direct__":
+                        self.logger.warning(
+                            "OpenAI directo 429 para %s. Fallback a OpenRouter.",
+                            symbol or self.settings.trading_symbol,
+                        )
+                        last_error = "openai_rate_limited"
+                        continue
                     backoff_s = self._trigger_429_backoff(response.headers.get("Retry-After"))
                     self.logger.error(
                         "OpenRouter 429 Too Many Requests para %s (modelo=%s). Backoff %.0fs (consecutivos=%d).",
@@ -350,7 +373,7 @@ class OpenRouterAnalyzer:
                         self._consecutive_429,
                     )
                     last_error = f"rate_limited:{backoff_s:.0f}s"
-                    # Do NOT try further models — quota is per-key, all will 429.
+                    # Do NOT try further OpenRouter models — quota is per-key, all will 429.
                     break
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
@@ -358,25 +381,28 @@ class OpenRouterAnalyzer:
                 # schema fails or the API has an internal issue). Do not crash.
                 if content is None:
                     self.logger.warning(
-                        "OpenRouter devolvio content=None para %s (modelo=%s). Tratando como fallo.",
+                        "AI devolvio content=None para %s (modelo=%s). Tratando como fallo.",
                         symbol or self.settings.trading_symbol, model_name,
                     )
                     last_error = "content_none"
                     continue
                 parsed = json.loads(content)
-                # Reset 429 counter on first successful response.
-                self._consecutive_429 = 0
-                self._rate_limit_until = None
-                if model_name != self.settings.openrouter_entry_model:
+                # Reset 429 counter on first successful OpenRouter response.
+                if model_name != "__openai_direct__":
+                    self._consecutive_429 = 0
+                    self._rate_limit_until = None
+                is_primary = model_name in ("__openai_direct__", self.settings.openrouter_entry_model)
+                if not is_primary:
                     parsed["fallback_used"] = True
-                    parsed["fallback_from"] = self.settings.openrouter_entry_model
+                    parsed["fallback_from"] = "openai_direct" if self.settings.openai_api_key else self.settings.openrouter_entry_model
+                display_model = "openai/gpt-4o-mini" if model_name == "__openai_direct__" else model_name
                 self.logger.info(
-                    "OpenRouter ENTRADA OK | symbol=%s model=%s fallback=%s",
+                    "AI ENTRADA OK | symbol=%s model=%s fallback=%s",
                     symbol or self.settings.trading_symbol,
-                    model_name,
-                    model_name != self.settings.openrouter_entry_model,
+                    display_model,
+                    not is_primary,
                 )
-                return _normalize(parsed, model_name)
+                return _normalize(parsed, display_model)
             except (requests.Timeout, TimeoutError) as exc:
                 last_error = f"timeout:{exc}"
                 self.logger.warning(

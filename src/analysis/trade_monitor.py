@@ -32,14 +32,12 @@ from src.utils.state_store import load_history, persist_history
 _MONITOR_MEMORY_WINDOW = 3      # veredictos previos que se envian a la IA
 _MONITOR_LOG_RETENTION = 200    # maximo de entradas en el log persistido
 
-# Modelos gratuitos de OpenRouter para el monitor.
-# El monitor no necesita razonamiento complejo: solo decide HOLD / UPDATE_SL / EMERGENCY_CLOSE
-# con datos numericos ya procesados. Los modelos gratis son suficientes y evitan
-# gastar creditos en ciclos donde el trailing ya protege la posicion.
-_FREE_MONITOR_MODELS: list[str] = [
-    "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-4-maverick:free",
-    "deepseek/deepseek-chat-v3-0324:free",
+# Modelo directo OpenAI (gpt-4o-mini) para el monitor — confiable y de bajo costo.
+# Se usa cuando OPENAI_API_KEY está configurado.
+# Fallback: openai/gpt-4.1-mini vía OpenRouter (modelo pagado, siempre disponible).
+_OPENAI_DIRECT_MODEL = "gpt-4o-mini"
+_OPENROUTER_MONITOR_FALLBACKS: list[str] = [
+    "openai/gpt-4.1-mini",  # modelo pagado confiable en OpenRouter
 ]
 
 
@@ -377,7 +375,69 @@ class ActiveTradeMonitor:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _query_ai(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Consulta OpenRouter usando modelos gratuitos con fallback."""
+        """Consulta IA: primero OpenAI directo (gpt-4o-mini) si disponible, luego OpenRouter."""
+        system_prompt = (
+            "Eres el cerebro de un bot de trading spot en Binance. "
+            "Tu funcion exclusiva es monitorear posiciones abiertas y decidir cada minuto: "
+            "HOLD (mantener), UPDATE_SL (mover stop a breakeven+), o EMERGENCY_CLOSE (cortar ya). "
+            "Prioridad absoluta: primero no perder. Las comisiones de Binance son 0.1% por lado "
+            "(0.2% round-trip); el profit debe superar eso para que valga la pena mantener. "
+            "Responde solo con JSON valido, sin markdown, sin texto adicional fuera del JSON."
+        )
+
+        # ── OpenAI directo (gpt-4o-mini) ────────────────────────────────────────────────
+        if self.settings.openai_api_key:
+            try:
+                response = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": _OPENAI_DIRECT_MODEL,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {
+                                "role": "user",
+                                "content": json.dumps(payload, ensure_ascii=False),
+                            },
+                        ],
+                        "temperature": 0.05,
+                        "response_format": {"type": "json_object"},
+                    },
+                    timeout=12.0,
+                )
+                response.raise_for_status()
+                raw = response.json()["choices"][0]["message"]["content"]
+                if raw is not None:
+                    parsed: dict[str, Any] = json.loads(raw)
+                    action = str(parsed.get("action", "HOLD")).upper().strip()
+                    if action not in {"HOLD", "UPDATE_SL", "EMERGENCY_CLOSE"}:
+                        action = "HOLD"
+                    parsed["action"] = action
+                    parsed.setdefault("rationale", "Sin explicacion.")
+                    parsed["model"] = f"openai/{_OPENAI_DIRECT_MODEL}"
+                    parsed["consulted"] = True
+                    self.logger.info(
+                        "TradeMonitor AI | modelo=openai/%s symbol=%s action=%s rationale=%s",
+                        _OPENAI_DIRECT_MODEL,
+                        payload.get("symbol"),
+                        action,
+                        str(parsed.get("rationale", ""))[:120],
+                    )
+                    return parsed
+            except (requests.Timeout, TimeoutError):
+                self.logger.warning(
+                    "TradeMonitor: OpenAI directo timeout para %s. Fallback a OpenRouter.",
+                    payload.get("symbol"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    "TradeMonitor: OpenAI directo error (%s). Fallback a OpenRouter.", exc
+                )
+
+        # ── Fallback: OpenRouter con modelos pagados ─────────────────────────────────
         if not self.settings.openrouter_api_key:
             self.logger.warning("TradeMonitor: OpenRouter no configurado. Accion por defecto: HOLD.")
             return {
@@ -387,24 +447,11 @@ class ActiveTradeMonitor:
                 "consulted": False,
             }
 
-        # Usar modelos gratuitos para el monitor. Si todos fallan, caer en el
-        # modelo configurado en settings (pagado) como ultimo recurso.
-        models_to_try: list[str] = list(_FREE_MONITOR_MODELS)
-        paid_fallback = self.settings.openrouter_model
-        if paid_fallback and paid_fallback not in models_to_try:
-            models_to_try.append(paid_fallback)
-        for m in self.settings.openrouter_fallback_models:
-            if m and m not in models_to_try:
+        # Usar modelos pagados de OpenRouter (sin modelos gratuitos muertos).
+        models_to_try: list[str] = list(_OPENROUTER_MONITOR_FALLBACKS)
+        for m in self.settings.openrouter_entry_fallback_models:
+            if m and m not in models_to_try and ":free" not in m and m != "openrouter/free":
                 models_to_try.append(m)
-
-        system_prompt = (
-            "Eres el cerebro de un bot de trading spot en Binance. "
-            "Tu funcion exclusiva es monitorear posiciones abiertas y decidir cada minuto: "
-            "HOLD (mantener), UPDATE_SL (mover stop a breakeven+), o EMERGENCY_CLOSE (cortar ya). "
-            "Prioridad absoluta: primero no perder. Las comisiones de Binance son 0.1% por lado "
-            "(0.2% round-trip); el profit debe superar eso para que valga la pena mantener. "
-            "Responde solo con JSON valido, sin markdown, sin texto adicional fuera del JSON."
-        )
 
         last_error = "no_models"
         for model_name in models_to_try:
@@ -674,7 +721,7 @@ class ActiveTradeMonitor:
         # 5) Construir prompt
         prompt = self._build_monitor_prompt(state, recent_verdicts)
 
-        # 6) Consultar IA (modelos gratuitos)
+        # 6) Consultar IA (OpenAI directo o OpenRouter)
         ai_response = self._query_ai(prompt)
 
         # 6b) Segunda guardia: si la IA propone EMERGENCY_CLOSE con PnL > -0.40%,
@@ -692,11 +739,22 @@ class ActiveTradeMonitor:
                 )
 
         # 7) Calcular nuevo precio de SL si UPDATE_SL
-        new_sl_pct = float(ai_response.get("new_sl_pct") or 0.0025)  # default +0.25%
+        # Trailing real desde el precio actual (no fijo en entry+0.25%).
+        # - Floor: entry + 0.25% (garantiza breakeven tras comisiones)
+        # - Target: mark_price - 0.15% (trailing detrás del precio actual)
+        # - Solo mover si la mejora es >= 0.01% del entry (evita micro-churn)
         entry_price = float(position.get("entry_price") or 0.0)
         new_sl_price: float | None = None
         if ai_response.get("action") == "UPDATE_SL" and entry_price > 0:
-            new_sl_price = round(entry_price * (1.0 + new_sl_pct), 8)
+            mark_price_now = float(state.get("mark_price") or entry_price)
+            current_sl_now = float(state.get("stop_loss") or 0.0)
+            breakeven_floor = round(entry_price * 1.0025, 8)         # entry + 0.25%
+            trailing_target = round(mark_price_now * (1.0 - 0.0015), 8)  # mark - 0.15%
+            candidate = max(breakeven_floor, trailing_target)
+            min_improvement = round(entry_price * 0.0001, 8)  # >= 0.01% mejora minima
+            if candidate >= current_sl_now + min_improvement:
+                new_sl_price = candidate
+            # else: mejora insuficiente → new_sl_price queda None → executor lo descarta
 
         # 8) Construir veredicto final
         verdict: dict[str, Any] = {
@@ -708,7 +766,6 @@ class ActiveTradeMonitor:
             "consulted": bool(ai_response.get("consulted", True)),
             "state": state,
             "new_sl_price": new_sl_price,
-            "new_sl_pct": new_sl_pct if ai_response.get("action") == "UPDATE_SL" else None,
             "memory_window": len(recent_verdicts),
         }
 
