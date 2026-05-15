@@ -3297,6 +3297,8 @@ def run_cycle() -> None:
                 )
 
             if decision.get("status") in {"simulated", "submitted"}:
+                # Snapshot del perfil de mercado al momento de entrar (para auditoría histórica).
+                market_settings = apply_market_profile(settings, symbol)
                 open_positions.append(
                     {
                         "opened_at": decision.get("timestamp"),
@@ -3360,6 +3362,22 @@ def run_cycle() -> None:
                             else "standard"
                         ),
                         # ── /Prompt-version cohort tracking ──────────────────────────
+                        # ── Per-market profile snapshot (audit) ──────────────────────
+                        # Captura los umbrales EFECTIVOS del perfil de mercado al
+                        # momento de entrar. Si después modificamos los perfiles,
+                        # podremos auditar trades históricos contra los umbrales
+                        # exactos que regían en ese momento.
+                        "entry_profile": {
+                            "scenario_a_rsi_max": float(getattr(market_settings, "scenario_a_rsi_max", 0.0)),
+                            "scenario_b_rsi_max": float(getattr(market_settings, "scenario_b_rsi_max", 0.0)),
+                            "min_atr_pct": float(getattr(market_settings, "min_atr_pct", 0.0)),
+                            "max_atr_pct": float(getattr(market_settings, "max_atr_pct", 0.0)),
+                            "min_volume_ratio": float(getattr(market_settings, "min_volume_ratio", 0.0)),
+                            "min_orderbook_imbalance": float(getattr(market_settings, "min_orderbook_imbalance", 0.0)),
+                            "min_trade_flow_score": float(getattr(market_settings, "min_trade_flow_score", 0.0)),
+                            "max_spread_pct": float(getattr(market_settings, "max_spread_pct", 0.0)),
+                            "ai_confidence_threshold": float(getattr(market_settings, "ai_confidence_threshold", 0.0)),
+                        } if market_settings is not None else None,
                     }
                 )
                 persist_history(settings.open_positions_file, open_positions)

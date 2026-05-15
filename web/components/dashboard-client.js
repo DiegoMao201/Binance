@@ -838,6 +838,135 @@ function Gauge({ label, live, min, max, unit = "", decimals = 2, inRange = false
   );
 }
 
+// ── Market Audit · estadísticas históricas por mercado/escenario ─────────
+// Tabla pivote: símbolo × scenario → trades, win%, pnl, hold avg.
+// Lee state.closed_trades (el bot persiste cada cierre con symbol+scenario).
+function MarketAuditPanel({ closedTrades, targetSymbols, focusSymbol, onSymbol }) {
+  const symbols = (targetSymbols && targetSymbols.length)
+    ? targetSymbols
+    : Array.from(new Set((closedTrades || []).map((t) => t.symbol).filter(Boolean)));
+
+  // Agregar por symbol y por symbol+scenario.
+  const bySym = {};
+  for (const t of (closedTrades || [])) {
+    const sym = t.symbol;
+    if (!sym) continue;
+    if (!bySym[sym]) {
+      bySym[sym] = {
+        symbol: sym, count: 0, wins: 0, losses: 0,
+        pnlSum: 0, pnlPctSum: 0, holdSum: 0, fees: 0,
+        best: -Infinity, worst: Infinity,
+        scenarios: { A: 0, B: 0, C: 0, D: 0, other: 0 },
+        winsByScenario: { A: 0, B: 0, C: 0, D: 0, other: 0 },
+      };
+    }
+    const row = bySym[sym];
+    const pnl = Number(t.pnl_usdt || 0);
+    const pnlPct = Number(t.pnl_pct || 0);
+    const fees = Number(t.fees_usdt || 0);
+    const sc = t.scenario && ["A","B","C","D"].includes(t.scenario) ? t.scenario : "other";
+    row.count += 1;
+    if (pnl > 0) { row.wins += 1; row.winsByScenario[sc] += 1; }
+    else if (pnl < 0) row.losses += 1;
+    row.pnlSum += pnl;
+    row.pnlPctSum += pnlPct;
+    row.fees += fees;
+    if (pnl > row.best) row.best = pnl;
+    if (pnl < row.worst) row.worst = pnl;
+    row.scenarios[sc] += 1;
+    // Hold time
+    if (t.opened_at && t.closed_at) {
+      try {
+        const op = new Date(t.opened_at).getTime();
+        const cl = new Date(t.closed_at).getTime();
+        if (op > 0 && cl > op) row.holdSum += (cl - op) / 60000;
+      } catch (_) {}
+    }
+  }
+
+  return (
+    <Card title={`Auditoría por Mercado · ${symbols.length} mercados · ${(closedTrades||[]).length} trades cerrados`}>
+      <div style={{ fontSize: 11, color: MUTE, marginBottom: 4 }}>
+        Performance histórica por mercado. Win-rate por <b style={{ color: TEXT }}>escenario</b> permite
+        identificar qué setup funciona mejor por moneda y refinar perfiles.
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: MUTE, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {["Símbolo", "Trades", "Win%", "PnL Σ", "PnL avg", "Hold avg", "Best", "Worst", "Esc A", "Esc B", "Esc C", "Esc D", "Fees"].map((h) => (
+                <th key={h} style={{ textAlign: h === "Símbolo" ? "left" : "center", padding: "6px 8px", borderBottom: `1px solid ${BORD}`, whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {symbols.map((sym) => {
+              const r = bySym[sym] || {
+                symbol: sym, count: 0, wins: 0, losses: 0,
+                pnlSum: 0, pnlPctSum: 0, holdSum: 0, fees: 0,
+                best: 0, worst: 0,
+                scenarios: { A: 0, B: 0, C: 0, D: 0, other: 0 },
+                winsByScenario: { A: 0, B: 0, C: 0, D: 0, other: 0 },
+              };
+              const winRate = r.count > 0 ? (r.wins / r.count) : 0;
+              const avgPnl = r.count > 0 ? (r.pnlSum / r.count) : 0;
+              const avgHold = r.count > 0 ? (r.holdSum / r.count) : 0;
+              const isActive = sym === focusSymbol;
+              const pnlCol = r.pnlSum > 0 ? G : r.pnlSum < 0 ? R : MUTE;
+              const wrCol = r.count === 0 ? MUTE : winRate >= 0.5 ? G : winRate >= 0.4 ? Y : R;
+
+              const cellSc = (sc) => {
+                const total = r.scenarios[sc] || 0;
+                if (total === 0) return <span style={{ color: MUTE }}>–</span>;
+                const w = r.winsByScenario[sc] || 0;
+                const wr = w / total;
+                return (
+                  <span style={{ fontFamily: "monospace", color: wr >= 0.5 ? G : wr >= 0.4 ? Y : R }}>
+                    {total}<span style={{ color: MUTE, fontSize: 9 }}> ({Math.round(wr*100)}%)</span>
+                  </span>
+                );
+              };
+
+              return (
+                <tr key={sym} onClick={() => onSymbol && onSymbol(sym)}
+                  style={{ cursor: "pointer", background: isActive ? "rgba(87,193,255,0.06)" : "transparent", borderLeft: `3px solid ${isActive ? B : "transparent"}` }}>
+                  <td style={{ padding: "8px 8px", fontWeight: 700 }}>{sym}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace" }}>{r.count}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: wrCol, fontWeight: 600 }}>
+                    {r.count === 0 ? "–" : `${Math.round(winRate*100)}%`}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: pnlCol, fontWeight: 700 }}>
+                    {r.pnlSum >= 0 ? "+" : ""}{r.pnlSum.toFixed(3)}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: avgPnl >= 0 ? G : R }}>
+                    {r.count === 0 ? "–" : (avgPnl >= 0 ? "+" : "") + avgPnl.toFixed(3)}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: MUTE }}>
+                    {r.count === 0 ? "–" : `${avgHold.toFixed(0)}m`}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: r.best > 0 ? G : MUTE }}>
+                    {r.count === 0 ? "–" : (r.best >= 0 ? "+" : "") + r.best.toFixed(3)}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: r.worst < 0 ? R : MUTE }}>
+                    {r.count === 0 ? "–" : r.worst.toFixed(3)}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>{cellSc("A")}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>{cellSc("B")}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>{cellSc("C")}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center" }}>{cellSc("D")}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: MUTE, fontSize: 11 }}>
+                    {r.count === 0 ? "–" : r.fees.toFixed(3)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
 // ── Scanner Matrix ────────────────────────────────────────────────
 function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
   const symbols = targetSymbols.length ? targetSymbols : lastScans.map((s) => s.symbol);
@@ -1536,6 +1665,14 @@ export default function DashboardClient({ initialData }) {
         {/* Estrategias por mercado · perfiles de entrada en vivo */}
         <MarketProfilesPanel
           lastScans={lastScans}
+          targetSymbols={targetSymbols}
+          focusSymbol={focusSymbol}
+          onSymbol={setFocusSymbol}
+        />
+
+        {/* Auditoría histórica por mercado · trades cerrados agrupados por symbol/scenario */}
+        <MarketAuditPanel
+          closedTrades={closedTrades}
           targetSymbols={targetSymbols}
           focusSymbol={focusSymbol}
           onSymbol={setFocusSymbol}
