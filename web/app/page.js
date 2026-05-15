@@ -1,4 +1,4 @@
-import DashboardClient from "../components/dashboard-client";
+import DashboardClient from "../components/operator-terminal";
 import { readDashboardState } from "../lib/read-dashboard-state";
 
 
