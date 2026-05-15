@@ -51,6 +51,7 @@ _CADENCE_FIELDS: tuple[str, ...] = (
     "ai_cache_ttl_seconds",      # TTL del cache IA por mercado (override AI_MIN_INTERVAL_SECONDS)
     "price_delta_reuse_pct",     # umbral de drift de precio para reusar verdict cacheado
     "scenario_c_pullback_pct",   # pullback minimo exigido en escenario C
+    "vol_accel_threshold",       # umbral V-Veto V5 de aceleracion de volumen por mercado
     "priority",                  # menor = se escanea/consulta IA primero (1=alta urgencia)
     "label",                     # tag visible en frontend ("Scalper Salvaje", etc.)
     "cadence_tag",               # tag de velocidad ("turbo", "rapida", "estandar", "institucional")
@@ -82,6 +83,7 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_cache_ttl_seconds": 180,
         "price_delta_reuse_pct": 0.0020,    # 0.20% drift permitido para reuso
         "scenario_c_pullback_pct": 0.0020,  # pullback estricto
+        "vol_accel_threshold": 0.60,        # BTC: instituiconal, threshold alto
         "priority": 5,
         "label": "Oro Digital",
         "cadence_tag": "institucional",
@@ -102,6 +104,7 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_cache_ttl_seconds": 120,
         "price_delta_reuse_pct": 0.0018,
         "scenario_c_pullback_pct": 0.0018,
+        "vol_accel_threshold": 0.55,        # ETH: moderado
         "priority": 4,
         "label": "Plata Líquida",
         "cadence_tag": "estandar",
@@ -123,6 +126,7 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_cache_ttl_seconds": 75,
         "price_delta_reuse_pct": 0.0015,
         "scenario_c_pullback_pct": 0.0015,
+        "vol_accel_threshold": 0.50,        # SOL: rapido pero menos meme
         "priority": 3,
         "label": "Velocista",
         "cadence_tag": "rapida",
@@ -143,6 +147,7 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_cache_ttl_seconds": 90,
         "price_delta_reuse_pct": 0.0015,
         "scenario_c_pullback_pct": 0.0015,
+        "vol_accel_threshold": 0.55,        # BNB: estandar
         "priority": 4,
         "label": "Nativo Binance",
         "cadence_tag": "estandar",
@@ -157,13 +162,14 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "min_volume_ratio": 0.10,
         "min_orderbook_imbalance": 0.42,
         "min_trade_flow_score": 0.42,
-        "max_spread_pct": 0.0020,
+        "max_spread_pct": 0.0035,          # spread real DOGE ~0.25-0.35%
         "ai_confidence_threshold": 0.52,
         "guardrail_relaxation": 0.12,
         "min_bb_width_pct": 0.0,
         "ai_cache_ttl_seconds": 45,
         "price_delta_reuse_pct": 0.0010,    # mas estricto: re-evaluar antes
         "scenario_c_pullback_pct": 0.0010,
+        "vol_accel_threshold": 0.40,        # DOGE: turbo meme, vol noisy
         "priority": 2,
         "label": "Scalper Salvaje",
         "cadence_tag": "turbo",
@@ -178,13 +184,14 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "min_volume_ratio": 0.08,
         "min_orderbook_imbalance": 0.40,
         "min_trade_flow_score": 0.40,
-        "max_spread_pct": 0.0025,
+        "max_spread_pct": 0.0055,          # spread real WIF ~0.40-0.55%
         "ai_confidence_threshold": 0.50,
         "guardrail_relaxation": 0.15,
         "min_bb_width_pct": 0.0,
         "ai_cache_ttl_seconds": 30,         # MAXIMA velocidad: meme volatil
         "price_delta_reuse_pct": 0.0008,    # cualquier movimiento >0.08% re-evalua
         "scenario_c_pullback_pct": 0.0008,
+        "vol_accel_threshold": 0.35,        # WIF: small-cap meme, vol extremadamente noisy
         "priority": 1,                      # PRIMERO en cada ciclo
         "label": "Scalper Extremo",
         "cadence_tag": "turbo",
@@ -196,6 +203,7 @@ _DEFAULT_CADENCE: dict[str, Any] = {
     "ai_cache_ttl_seconds": None,        # None => usar settings.ai_min_interval_seconds
     "price_delta_reuse_pct": 0.0015,     # default global historico
     "scenario_c_pullback_pct": 0.0015,
+    "vol_accel_threshold": 0.60,         # default global (conservador)
     "priority": 5,
     "label": "Default",
     "cadence_tag": "estandar",

@@ -38,7 +38,7 @@ const THRESHOLDS = {
   // Hard vetoes (all regimes)
   flow_v3:     { label: "Flow Score (V-Veto V3)",     key: "trade_flow_score",     required: 0.40, fmt: "pct" },
   ob_v3:       { label: "OB Imbalance (V-Veto V3)",   key: "orderbook_imbalance",  required: 0.50, fmt: "pct" },
-  vol_accel:   { label: "Vol Acceleration (V-Veto V5)",key: "volume_acceleration", required: 0.60, fmt: "x"   },
+  vol_accel:   { label: "Vol Acceleration (V-Veto V5)",key: "volume_acceleration", required: 0.60, fmt: "x", perMarket: true },
   // Conditional vetoes — NORMAL / HIGH_VOL only
   atr_c1:      { label: "ATR % (C-Veto C1)",          key: "atr_pct",              required: 0.003, fmt: "pct4" },
   bb_c2:       { label: "BB Width (C-Veto C2)",        key: "bb_width_pct",         required: 0.005, fmt: "pct4" },
@@ -181,6 +181,10 @@ function GateRow({ spec, value, groupMet }) {
 }
 
 function GateGroup({ title, gates, scan, allMet, dimmed }) {
+  // Resolve per-market vol_accel threshold if available in cadence data
+  const volAccelThr = Number(scan?.cadence?.vol_accel_threshold ?? 0.60);
+  const resolvedThresholds = { ...THRESHOLDS, vol_accel: { ...THRESHOLDS.vol_accel, required: volAccelThr } };
+
   return (
     <div style={{
       marginBottom: 14,
@@ -208,8 +212,8 @@ function GateGroup({ title, gates, scan, allMet, dimmed }) {
       {gates.map((gk) => (
         <GateRow
           key={gk}
-          spec={THRESHOLDS[gk]}
-          value={scan[THRESHOLDS[gk].key]}
+          spec={resolvedThresholds[gk]}
+          value={scan[resolvedThresholds[gk].key]}
           groupMet={allMet}
         />
       ))}
@@ -262,13 +266,16 @@ const MicroGateRadar = memo(function MicroGateRadar({ scan }) {
   const regime = useMemo(() => classifyRegime(s), [s.atr_pct, s.bb_width_pct]);
   const isLowVol = regime === "LOW_VOL";
 
+  // Per-market vol_accel threshold from cadence data (backend)
+  const volAccelThr = Number(s.cadence?.vol_accel_threshold ?? 0.60);
+
   // ── Evaluate each gate group ─────────────────────────────────────────
   const groups = useMemo(() => {
     // Hard vetoes — all regimes
     // V3: flow OR ob must pass (union condition)
     const flowV3 = Number(s.trade_flow_score ?? 0);
     const obV3   = Number(s.orderbook_imbalance ?? 0);
-    const hardMet = (flowV3 >= 0.40 || obV3 >= 0.50) && Number(s.volume_acceleration ?? 0) >= 0.60;
+    const hardMet = (flowV3 >= 0.40 || obV3 >= 0.50) && Number(s.volume_acceleration ?? 0) >= volAccelThr;
 
     // Conditional vetoes — NORMAL/HIGH_VOL
     const condMet = Number(s.atr_pct ?? 0) >= 0.003 && Number(s.bb_width_pct ?? 0) >= 0.005;
@@ -281,24 +288,25 @@ const MicroGateRadar = memo(function MicroGateRadar({ scan }) {
 
     return { hardMet, condMet, mgaMet, mgbMet };
   }, [
-    s.trade_flow_score, s.orderbook_imbalance, s.volume_acceleration,
+    s.trade_flow_score, s.orderbook_imbalance, s.volume_acceleration, volAccelThr,
     s.atr_pct, s.bb_width_pct, s.rsi_slope, s.candle_body_pct,
   ]);
 
   // ── Overall proximity score (avg of relevant gates) ──────────────────
   const proximityScore = useMemo(() => {
+    const resolvedThresholds = { ...THRESHOLDS, vol_accel: { ...THRESHOLDS.vol_accel, required: volAccelThr } };
     const keys = isLowVol
       ? ["flow_mga", "ob_mga", "rsi_mgb", "body_mgb", "flow_v3", "ob_v3", "vol_accel"]
       : ["atr_c1", "bb_c2", "flow_v3", "ob_v3", "vol_accel"];
 
     const ratios = keys.map((k) => {
-      const spec = THRESHOLDS[k];
+      const spec = resolvedThresholds[k];
       const v = s[spec.key];
       return v !== null && v !== undefined ? proximity(Number(v), spec.required) : 0;
     });
     const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length;
     return Math.round(avg * 100);
-  }, [isLowVol, s.trade_flow_score, s.orderbook_imbalance, s.volume_acceleration,
+  }, [isLowVol, volAccelThr, s.trade_flow_score, s.orderbook_imbalance, s.volume_acceleration,
       s.atr_pct, s.bb_width_pct, s.rsi_slope, s.candle_body_pct]);
 
   const symbol = s.symbol || "–";

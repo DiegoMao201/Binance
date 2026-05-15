@@ -146,11 +146,11 @@ class OpenRouterAnalyzer:
                 # --- Paso 1: clasificar régimen obligatorio ---
                 "STEP 1 — Classify volatility regime FIRST: REGIME=HIGH_VOL if atr_pct >= 0.005 or bb_width_pct >= 0.010; REGIME=NORMAL if atr_pct >= 0.0025 or bb_width_pct >= 0.005; REGIME=LOW_VOL otherwise. State regime in rationale.",
                 # --- Paso 2: Hard vetoes (todos los regímenes) ---
-                "HARD VETO V1: macro_trend=bearish AND volume_ratio < 1.5 → approved=false, confidence < 0.40, risk_flag: counter_trend_no_volume.",
-                "HARD VETO V2: macro_trend=bearish AND orderbook_imbalance < 0.55 → approved=false, confidence < 0.40, risk_flag: counter_trend_weak_book.",
+                "HARD VETO V1: macro_trend=bearish AND volume_ratio < 1.5 → approved=false, confidence < 0.40, risk_flag: counter_trend_no_volume. EXCEPTION: if scenario_a=true AND rsi <= 54, this veto does NOT apply — Scenario A is a structured oversold counter-trend rebound; being counter-trend to the macro is intentional and expected. In that case set direction_alignment=aligned.",
+                "HARD VETO V2: macro_trend=bearish AND orderbook_imbalance < 0.55 → approved=false, confidence < 0.40, risk_flag: counter_trend_weak_book. EXCEPTION: if scenario_a=true AND rsi <= 54, this veto does NOT apply.",
                 "HARD VETO V3: trade_flow_score < 0.40 AND orderbook_imbalance < 0.50 → approved=false, confidence < 0.40, risk_flag: dual_microstructure_bearish.",
-                "HARD VETO V4: macro_trend=bearish AND rsi_slope <= 0 → approved=false, confidence < 0.40, risk_flag: downtrend_rsi_still_falling.",
-                "HARD VETO V5: volume_acceleration < 0.60 → approved=false, confidence < 0.40, risk_flag: volume_exhaustion.",
+                "HARD VETO V4: macro_trend=bearish AND rsi_slope <= 0 → approved=false, confidence < 0.40, risk_flag: downtrend_rsi_still_falling. EXCEPTION: if scenario_a=true AND rsi <= 54, this veto does NOT apply.",
+                "HARD VETO V5: volume_acceleration < 0.60 → approved=false, confidence < 0.40, risk_flag: volume_exhaustion. EXCEPTION: if scenario_a=true, threshold is 0.35 (meme/turbo markets have inherently noisy volume acceleration; any positive acceleration above 0.35 is sufficient confirmation for an oversold rebound).",
                 # --- Paso 3: Vetos condicionales por régimen ---
                 "REGIME-VETO C1 (chop): ACTIVE if REGIME=HIGH_VOL or NORMAL and atr_pct < 0.003 → approved=false, risk_flag: chop_regime. SUSPENDED if REGIME=LOW_VOL — apply MICRO-GATE-A instead: trade_flow_score >= 0.62 AND orderbook_imbalance >= 0.57 required; if not met → approved=false, risk_flag: low_vol_no_micro_edge.",
                 "REGIME-VETO C2 (BB squeeze): ACTIVE if REGIME=HIGH_VOL or NORMAL and bb_width_pct < 0.005 → approved=false, risk_flag: bb_squeeze_undefined. SUSPENDED if REGIME=LOW_VOL — apply MICRO-GATE-B instead: rsi_slope > 1 AND candle_body_pct >= 0.45 required; if not met → approved=false, risk_flag: low_vol_no_momentum_confirmation.",
@@ -468,10 +468,15 @@ class OpenRouterAnalyzer:
 
         risk_flags = list(base_flags)
 
-        # Macro bearish bloquea salvo escenario B con agotamiento vendedor claro
+        # Macro bearish bloquea salvo:
+        # - Escenario B con agotamiento vendedor claro (RSI < 30)
+        # - Escenario A (counter-trend rebound estructurado): el punto de Scenario A
+        #   ES operar contra la macro cuando RSI está sobrevendido. Bloquearlo aquí
+        #   destruye exactamente los setups que Scenario A fue diseñado para capturar.
         if macro_trend == "bearish":
             risk_flags.append("macro_bearish_pressure")
-            if not (scenario == "B" and rsi < 30):
+            allowed_counter_trend = (scenario == "B" and rsi < 30) or (scenario == "A" and rsi <= 54)
+            if not allowed_counter_trend:
                 return {
                     "signal": "hold",
                     "confidence": 0.0,

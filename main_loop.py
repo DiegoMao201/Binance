@@ -279,11 +279,15 @@ def _compute_scan_proximity(scan: dict[str, Any]) -> tuple[float, str, float, fl
         except (TypeError, ValueError):
             return 0.0
 
+    # Per-market vol_accel threshold: WIF 0.35, DOGE 0.40, SOL 0.50, BNB/ETH 0.55, BTC 0.60
+    _symbol = ts.get("symbol")
+    _vol_accel_thr = float(get_market_cadence(_symbol).get("vol_accel_threshold") or 0.60)
+
     gates: list[tuple[str, float, float]] = [
         # (name, current_value, threshold)
         ("flow_v3",   float(ts.get("order_flow_imbalance") or 0.0),     0.40),
         ("ob_v3",     float(ts.get("orderbook_pressure") or 0.0),        0.50),
-        ("vol_accel", float(ts.get("volume_acceleration") or 0.0),       0.60),
+        ("vol_accel", float(ts.get("volume_acceleration") or 0.0),       _vol_accel_thr),
         ("atr_c1",    float(ts.get("atr_pct") or 0.0),                   0.003),
         ("bb_c2",     float(ts.get("bb_width_pct") or 0.0),              0.005),
         ("flow_mga",  float(ts.get("order_flow_imbalance") or 0.0),     0.62),
@@ -631,11 +635,24 @@ def _build_guardrails(
         ai_setup_ready = high_ready or medium_ready
         ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
 
+    # Scenario A is a structured counter-trend rebound — the AI may return
+    # approved=false / direction_alignment=misaligned because Veto V1 fires
+    # on bearish macro + low volume_ratio. That veto is correct for random
+    # counter-trend bets but WRONG for Scenario A where being counter-trend
+    # is the entire point (oversold rebound from support). Bypass both flags
+    # when: confidence is above threshold, setup is acceptable, and no
+    # critical risk flags are present.
+    scenario_a_override = (
+        scenario == "A"
+        and ai_confident
+        and ai_setup_ready
+        and len(critical_flags_present) == 0
+    )
     ai_gate_ready = all([
         ai_confident,
         same_direction,
-        ai_approved,
-        ai_alignment,
+        ai_approved or scenario_a_override,
+        ai_alignment or scenario_a_override,
         ai_setup_ready,
         scenario == "A" or ai_risk_clear,
     ])
