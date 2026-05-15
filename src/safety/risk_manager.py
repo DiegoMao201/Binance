@@ -149,25 +149,25 @@ class RiskManager:
         if atr_pct is not None and atr_pct > 0:
             atr = float(atr_pct)
 
-            # ── [Dynamic TP] ──────────────────────────────────────────────────
-            # SL permanece fijo en el valor configurado (-1.2%) sin importar ATR.
-            # El SL dinámico anterior (max(sl_base, 1.5*ATR)) fue eliminado porque
-            # en mercados tranquilos lo ensanchaba sin mejorar el ratio riesgo/reward.
-            sl_pct = sl_pct_base  # Siempre el fijo configurado.
+            # ── [Dynamic SL — Sniper Mode] ──────────────────────────────────────
+            # SL = max(config_sl, sniper_mult * ATR). En alta beta (WIF, DOGE),
+            # el ATR refleja el ruido real. Con mult=1.5 y ATR=0.14%: SL = -0.21%.
+            # Con ATR=0.50%: SL = -0.75%. Si mult==0: comportamiento legacy (SL fijo).
+            sniper_mult = float(getattr(self.settings, "sniper_dynamic_sl_atr_mult", 0.0))
+            if sniper_mult > 0:
+                sl_pct = max(sl_pct_base, min(sniper_mult * atr, 0.04))
+            else:
+                sl_pct = sl_pct_base  # legacy: SL fijo configurado.
+            # ── [/Dynamic SL] ──────────────────────────────────────────────────
 
-            # TP adaptativo: cuando ATR < 0.20%, el TP estático (+2.4%) es
-            # matemáticamente inalcanzable (requiere 17x el rango medio de vela).
-            # Fórmula: Dynamic_TP = MAX(1.0%, MIN(2.4%, ATR * 10))
-            # Ejemplos con datos reales de hoy:
-            #   ATR=0.14%  → TP = MAX(1.0%, MIN(2.4%, 1.40%)) = 1.40%
-            #   ATR=0.20%  → TP = MAX(1.0%, MIN(2.4%, 2.00%)) = 2.00%
-            #   ATR=0.30%  → TP = MAX(1.0%, MIN(2.4%, 3.00%)) = 2.40% (cap)
+            # ── [Dynamic TP] ───────────────────────────────────────────────────
+            # TP adaptativo: cuando ATR < 0.20%, el TP estático es inalcanzable.
+            # Fórmula: Dynamic_TP = MAX(1.0%, MIN(TP_base, ATR * 10))
             tp_pct = max(0.010, min(tp_pct_base, atr * 10))
-            # ── [/Dynamic TP] ─────────────────────────────────────────────────
+            # ── [/Dynamic TP] ──────────────────────────────────────────────────
 
-            # Hard cap: nunca arriesgar más del 4% por trade (SL fijo pero validamos).
+            # Hard caps.
             sl_pct = min(sl_pct, 0.04)
-            # TP cap en 6%: capturas reales a corto plazo, no esperamos lunas.
             tp_pct = min(tp_pct, 0.06)
         else:
             sl_pct = sl_pct_base

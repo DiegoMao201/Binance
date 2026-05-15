@@ -1101,12 +1101,17 @@ async def _settle_open_positions(
     #   sl_offset_pct = nivel del nuevo SL como % positivo desde entry
     #                   (el signo se aplica según side en el call site)
     #
-    # TIER 1 cubre los fees de ida+vuelta (0.2% round-trip) + micro ganancia.
+    # TRAILING TIERS 2.0 — Diseño "Hit & Run":
+    # Tier 1 activa al +0.35%: SL sube a Atomic Breakeven (entry + 0.22% = fees 0.20% + buffer).
+    # Tier 2 activa al +0.70%: SL sube a entry +0.55% (= mark - 0.15% aproximado).
+    # Tier 3 activa al +1.10%: SL sube a entry +0.95% (= mark - 0.15% aproximado).
+    # Tier 4 activa al +1.50%: SL sube a entry +1.35% (= mark - 0.15% aproximado).
+    # El offset es siempre desde entry; la diferencia entre tiers es 0.15% = trailing offset efectivo.
     _TRAILING_TIERS: tuple[tuple[int, float, float], ...] = (
-        (1, 0.0050, 0.0020),  # MFE >= +0.50% → SL en entry +0.20%  (cubre fees)
-        (2, 0.0080, 0.0040),  # MFE >= +0.80% → SL en entry +0.40%
-        (3, 0.0120, 0.0080),  # MFE >= +1.20% → SL en entry +0.80%
-        (4, 0.0160, 0.0120),  # MFE >= +1.60% → SL en entry +1.20%
+        (1, 0.0035, 0.0022),  # MFE >= +0.35% → SL en entry +0.22% (atomic breakeven: fees + buffer)
+        (2, 0.0070, 0.0055),  # MFE >= +0.70% → SL en entry +0.55% (≈ mark - 0.15%)
+        (3, 0.0110, 0.0095),  # MFE >= +1.10% → SL en entry +0.95% (≈ mark - 0.15%)
+        (4, 0.0150, 0.0135),  # MFE >= +1.50% → SL en entry +1.35% (≈ mark - 0.15%)
     )
 
     def _resolve_trailing_tier(mfe_pct: float, atr_pct: float | None = None) -> tuple[int, float | None]:
@@ -3294,6 +3299,87 @@ def run_cycle() -> None:
                     str(technical_signal["signal"]) == "buy",
                     symbol_ai_signal.get("consulted", False),
                 ]):
+                    # ── [SNIPER GATE] ─────────────────────────────────────────────────────
+                    # Gates reforzados para meme-coins (WIF, DOGE, PEPE):
+                    #  1. OB Imbalance >= 0.62 (precision gate: 50% es moneda al aire)
+                    #  2. OI Delta no negativamente extremo (institucional liquidando)
+                    #  3. Top Trader L/S ratio > 0.80 (ballenas no estan net-short)
+                    #  4. Scenario B REQUIERE liquidation_spike >= $300k (V-Shape trigger)
+                    # Fallos en Futures API son fail-open (no bloquean) para resiliencia.
+                    _sniper_syms = {s.upper() for s in (settings.sniper_symbols or ())}
+                    _is_sniper = symbol.upper() in _sniper_syms
+                    _sniper_pass = True
+                    _sniper_veto = None
+
+                    if _is_sniper:
+                        # 1. OB Imbalance Sniper Gate
+                        _ob_sniper = float(symbol_guardrails.get("orderbook_imbalance") or 0.0)
+                        if _ob_sniper < settings.sniper_ob_imbalance_min:
+                            _sniper_pass = False
+                            _sniper_veto = (
+                                f"OB={_ob_sniper:.3f} < sniper_ob_min={settings.sniper_ob_imbalance_min:.2f} "
+                                f"(meme-coin precision gate — compradores insuficientes)"
+                            )
+
+                        # 2. OI Delta Veto (fallo de fetch = fail-open)
+                        if _sniper_pass and settings.oi_delta_veto_enabled:
+                            try:
+                                _oi_hist = client.fetch_open_interest_history(symbol, period="5m", limit=3)
+                                if len(_oi_hist) >= 2 and _oi_hist[-2] > 0:
+                                    _oi_delta_pct = (_oi_hist[-1] - _oi_hist[-2]) / _oi_hist[-2]
+                                    if _oi_delta_pct < -0.02:  # OI cayo > 2% en 5 min
+                                        _sniper_pass = False
+                                        _sniper_veto = (
+                                            f"OI_delta={_oi_delta_pct*100:+.2f}% < -2%% "
+                                            f"(institucional cerrando posiciones, veto)"
+                                        )
+                            except Exception:  # noqa: BLE001
+                                pass  # fail-open: no bloquear si futures API no responde
+
+                        # 3. Top Trader L/S Ratio Veto
+                        if _sniper_pass and settings.top_trader_ls_veto_enabled:
+                            try:
+                                _ls_ratio = client.fetch_top_trader_long_short_ratio(symbol)
+                                if _ls_ratio is not None and _ls_ratio < 0.80:
+                                    _sniper_pass = False
+                                    _sniper_veto = (
+                                        f"TopTrader_LS={_ls_ratio:.3f} < 0.80 "
+                                        f"(ballenas net-short — no ir contra institucionales)"
+                                    )
+                            except Exception:  # noqa: BLE001
+                                pass  # fail-open
+
+                        # 4. Scenario B: REQUIERE liquidation spike >= $300k (V-Shape)
+                        _scen = str(technical_signal.get("scenario") or "")
+                        if _sniper_pass and _scen == "B":
+                            try:
+                                _liq_usd = client.fetch_liquidation_volume_usd(
+                                    symbol, window_seconds=settings.sniper_liq_window_seconds
+                                )
+                                if _liq_usd < settings.sniper_liq_spike_usd:
+                                    _sniper_pass = False
+                                    _sniper_veto = (
+                                        f"Scenario B requiere liquidation_spike >= "
+                                        f"${settings.sniper_liq_spike_usd:,.0f} USD "
+                                        f"(actual=${_liq_usd:,.0f}) — esperando capitulacion"
+                                    )
+                                else:
+                                    logger.info(
+                                        "SNIPER B V-Shape activado: liquidation_spike=%.0f USD "
+                                        ">= %.0f threshold | %s",
+                                        _liq_usd, settings.sniper_liq_spike_usd, symbol,
+                                    )
+                            except Exception:  # noqa: BLE001
+                                pass  # fail-open: si no podemos leer liquidaciones, no bloqueamos
+
+                    if not _sniper_pass:
+                        logger.info(
+                            "SNIPER GATE veto %s: %s",
+                            symbol, _sniper_veto,
+                        )
+                        continue  # proximo simbolo en el scan loop
+                    # ── [/SNIPER GATE] ────────────────────────────────────────────────────
+
                     chosen_scan = scan
                     chosen_guardrails = symbol_guardrails
                     ai_signal = symbol_ai_signal

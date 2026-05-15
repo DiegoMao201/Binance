@@ -416,6 +416,107 @@ class BinanceDataClient:
             "flow_score": round(max(0.0, min(1.0, flow_score)), 4),
         }
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # FUTURES DATA — Liquidaciones, Open Interest, Top Trader L/S Ratio
+    # Todas las llamadas usan el proxy configurado y nunca lanzan excepciones al
+    # llamador; ante error devuelven un dict con "error" o None/0.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _futures_get(self, endpoint: str, params: dict[str, Any], timeout: float = 5.0) -> Any:
+        """GET directo a Binance Futures REST (fapi.binance.com) via proxy configurado."""
+        import requests as _req
+
+        base_url = "https://fapi.binance.com"
+        proxies: dict[str, str] | None = None
+        if self.settings.binance_proxy_url:
+            proxies = {
+                "http": self.settings.binance_proxy_url,
+                "https": self.settings.binance_proxy_url,
+            }
+        response = _req.get(f"{base_url}{endpoint}", params=params, proxies=proxies, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _spot_to_futures_symbol(symbol: str) -> str:
+        """Convierte 'WIF/USDT' → 'WIFUSDT' para la API de futuros."""
+        return symbol.replace("/", "").upper()
+
+    def fetch_liquidation_volume_usd(self, symbol: str, window_seconds: int = 30) -> float:
+        """Volumen total de liquidaciones forzadas en los ultimos `window_seconds`.
+
+        Usa el endpoint publico /fapi/v1/allForceOrders (no requiere autenticacion).
+        Devuelve 0.0 ante cualquier error para no bloquear el flujo de entrada.
+        """
+        import time as _time
+
+        fapi_symbol = self._spot_to_futures_symbol(symbol)
+        start_ms = int((_time.time() - window_seconds) * 1000)
+        try:
+            data = self._futures_get(
+                "/fapi/v1/allForceOrders",
+                {"symbol": fapi_symbol, "startTime": start_ms, "limit": 1000},
+            )
+            if not isinstance(data, list):
+                return 0.0
+            total_usd = sum(
+                float(o.get("origQty", 0.0)) * float(o.get("price", 0.0))
+                for o in data
+                if isinstance(o, dict)
+            )
+            return round(total_usd, 2)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def fetch_open_interest(self, symbol: str) -> float:
+        """Open Interest actual en contratos (futuros perpetuos).
+
+        Devuelve 0.0 ante error.
+        """
+        fapi_symbol = self._spot_to_futures_symbol(symbol)
+        try:
+            data = self._futures_get("/fapi/v1/openInterest", {"symbol": fapi_symbol})
+            return float(data.get("openInterest", 0.0)) if isinstance(data, dict) else 0.0
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def fetch_top_trader_long_short_ratio(self, symbol: str, period: str = "5m", limit: int = 3) -> float | None:
+        """Ratio long/short de top traders (institucionales) en futuros.
+
+        Devuelve el ratio mas reciente (>1.0 = mas longs que shorts) o None si no disponible.
+        Usa el endpoint /futures/data/topLongShortPositionRatio.
+        """
+        fapi_symbol = self._spot_to_futures_symbol(symbol)
+        try:
+            data = self._futures_get(
+                "/futures/data/topLongShortPositionRatio",
+                {"symbol": fapi_symbol, "period": period, "limit": limit},
+            )
+            if not isinstance(data, list) or not data:
+                return None
+            # Dato mas reciente es el ultimo elemento.
+            latest = data[-1]
+            return float(latest.get("longShortRatio", 1.0)) if isinstance(latest, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def fetch_open_interest_history(self, symbol: str, period: str = "5m", limit: int = 3) -> list[float]:
+        """Historial de OI para calcular delta.
+
+        Devuelve lista de valores OI (el mas reciente al final) o lista vacia si error.
+        """
+        fapi_symbol = self._spot_to_futures_symbol(symbol)
+        try:
+            data = self._futures_get(
+                "/futures/data/openInterestHist",
+                {"symbol": fapi_symbol, "period": period, "limit": limit},
+            )
+            if not isinstance(data, list):
+                return []
+            return [float(d.get("sumOpenInterest", 0.0)) for d in data if isinstance(d, dict)]
+        except Exception:  # noqa: BLE001
+            return []
+
     def ping(self) -> bool:
         try:
             self._with_retries(lambda: self.public_exchange.fetch_time())

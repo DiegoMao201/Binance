@@ -578,6 +578,92 @@ class ActiveTradeMonitor:
         # EXCEPCION CRITICA: los vetos de microestructura (colapso de orderbook + flow)
         # tienen PRIORIDAD ABSOLUTA sobre el hold_guard. Si el mercado colapsa en segundos,
         # esperamos que la posicion este al menos 5 minutos SOLO cuando el ambiente es neutral.
+
+        # ── [TIME-DECAY KILL-SWITCH] ──────────────────────────────────────────
+        # En mercados de alta beta (WIF, DOGE), el tiempo es el enemigo.
+        # Cada minuto sin price action aumenta la probabilidad de black swan.
+        #
+        # Regla: Si current_time > entry_time + hard_limit Y pnl < tp_tier1:
+        #   1. Mover SL a Atomic Breakeven (entry + fees + 0.02% = 0.22%)
+        #   2. Si orderflow_score < 15%: EMERGENCY_CLOSE inmediato.
+        _sym_upper = symbol.upper()
+        if "WIF" in _sym_upper:
+            _time_limit = float(self.settings.time_decay_wif_minutes)
+        elif "DOGE" in _sym_upper:
+            _time_limit = float(self.settings.time_decay_doge_minutes)
+        else:
+            _time_limit = float(self.settings.time_decay_default_minutes)
+
+        _atomic_be_pct = float(self.settings.time_decay_atomic_be_pct)    # 0.0022
+        _flow_exit_pct = float(self.settings.time_decay_flow_exit_pct)    # 0.15
+        _hold_now = float(state.get("hold_minutes") or 0.0)
+        _entry_p  = float(state.get("entry_price") or 0.0)
+        _pnl_now  = float(state.get("unrealized_pnl_pct") or 0.0)
+        _flow_now = float(state.get("trade_flow_score") or 1.0)
+        _stop_now = float(state.get("stop_loss") or 0.0)
+        _tier_now = int(state.get("trailing_tier") or 0)
+        # TP tier1 objetivo (0.35% del nuevo tier1): no cerramos si ya llegamos ahí
+        _tp_tier1 = 0.0035
+
+        if _time_limit > 0 and _hold_now >= _time_limit and _tier_now < 1:
+            # Sub-condicion: solo actua si no hemos alcanzado el objetivo minimo de PnL
+            if _pnl_now < _tp_tier1 * 100:  # _pnl_now esta en %
+                # Caso 2: orderflow colapsado → EMERGENCY_CLOSE (Hit & Run)
+                if _flow_now < _flow_exit_pct:
+                    _td_verdict: dict[str, Any] = {
+                        "action": "EMERGENCY_CLOSE",
+                        "exit_reason": "time_decay_flow_exit",
+                        "rationale": (
+                            f"[TIME-DECAY] {symbol} hold={_hold_now:.1f}min >= {_time_limit:.0f}min limit "
+                            f"| pnl={_pnl_now:.3f}% sin asegurar tier1 "
+                            f"| flow={_flow_now:.2f} < {_flow_exit_pct:.2f} (Hit & Run activado)"
+                        ),
+                        "model": "time_decay_kill_switch",
+                        "consulted": False,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "state": state,
+                        "new_sl_price": None,
+                        "new_sl_pct": None,
+                        "memory_window": 0,
+                    }
+                    self._persist_verdict(_td_verdict)
+                    self.logger.critical(
+                        "TIME-DECAY KILL-SWITCH [FLOW EXIT] %s hold=%.1fmin pnl=%.3f%% flow=%.2f — cerrando",
+                        symbol, _hold_now, _pnl_now, _flow_now,
+                    )
+                    return _td_verdict
+
+                # Caso 1: time limit superado, flow neutral/positivo → UPDATE_SL a atomic breakeven
+                elif _entry_p > 0:
+                    _atomic_be_price = _entry_p * (1.0 + _atomic_be_pct)
+                    # Solo emitir UPDATE_SL si el SL actual todavia esta por debajo del atomic BE
+                    if _stop_now < _atomic_be_price * 0.9999:
+                        _td_be_verdict: dict[str, Any] = {
+                            "action": "UPDATE_SL",
+                            "exit_reason": "time_decay_atomic_breakeven",
+                            "new_sl_pct": _atomic_be_pct,
+                            "rationale": (
+                                f"[TIME-DECAY] {symbol} hold={_hold_now:.1f}min >= {_time_limit:.0f}min "
+                                f"| pnl={_pnl_now:.3f}% | Moviendo SL a Atomic Breakeven "
+                                f"entry+{_atomic_be_pct*100:.2f}% (cubre fees + buffer)"
+                            ),
+                            "model": "time_decay_kill_switch",
+                            "consulted": False,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "symbol": symbol,
+                            "state": state,
+                            "new_sl_price": round(_atomic_be_price, 8),
+                            "memory_window": 0,
+                        }
+                        self._persist_verdict(_td_be_verdict)
+                        self.logger.warning(
+                            "TIME-DECAY KILL-SWITCH [ATOMIC BE] %s hold=%.1fmin pnl=%.3f%% "
+                            "→ SL movido a entry+%.2f%% = %.6f",
+                            symbol, _hold_now, _pnl_now, _atomic_be_pct * 100, _atomic_be_price,
+                        )
+                        return _td_be_verdict
+        # ── [/TIME-DECAY KILL-SWITCH] ──────────────────────────────────────────
         hold_minutes_now = float(state.get("hold_minutes") or 0.0)
         _MIN_HOLD_MINUTES = 5.0
 

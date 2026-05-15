@@ -79,6 +79,29 @@ class Settings:
     bailout_max_ob_imbalance: float
     bailout_max_flow_score: float
     bailout_min_hold_minutes: int
+    # ---- Sniper Mode — High-Beta Meme Coins ----
+    # Symbols donde se activan gates de microestructura reforzados (WIF, DOGE, PEPE).
+    sniper_symbols: tuple[str, ...]
+    # OB imbalance minimo en modo sniper (default 0.62 vs 0.45 normal).
+    sniper_ob_imbalance_min: float
+    # Volumen de liquidaciones (USD) en la ventana de 30s para trigger Scenario B.
+    sniper_liq_spike_usd: float
+    # Ventana en segundos para calcular liquidations volume.
+    sniper_liq_window_seconds: int
+    # Multiplicador ATR para SL dinamico (sl = entry - atr_mult * atr). 0 = disabled.
+    sniper_dynamic_sl_atr_mult: float
+    # ---- Time-Decay Kill-Switch ----
+    # Hard time limit en minutos por simbolo. Si se pasa, se mueve SL a atomic breakeven.
+    time_decay_wif_minutes: int
+    time_decay_doge_minutes: int
+    time_decay_default_minutes: int
+    # SL atomico de breakeven: entry + este pct cubre fees (0.20%) + buffer (0.02%).
+    time_decay_atomic_be_pct: float
+    # Si orderflow_score < este umbral tras time limit, ejecutar cierre inmediato.
+    time_decay_flow_exit_pct: float
+    # ---- Futures Data Gates (OI + Top Trader) ----
+    oi_delta_veto_enabled: bool
+    top_trader_ls_veto_enabled: bool
     # ---- PAMM Webhook ----
     # URL of the Next.js PAMM allocation endpoint.
     # e.g. https://tradingdiegomao.datovatenexuspro.com/api/webhooks/trade-closed
@@ -196,6 +219,24 @@ def load_settings() -> Settings:
         bailout_max_ob_imbalance=float(os.getenv("BAILOUT_MAX_OB_IMBALANCE", "0.20")),
         bailout_max_flow_score=float(os.getenv("BAILOUT_MAX_FLOW_SCORE", "0.30")),
         bailout_min_hold_minutes=int(os.getenv("BAILOUT_MIN_HOLD_MINUTES", "10")),
+        sniper_symbols=tuple(
+            dict.fromkeys(
+                sym.strip().upper()
+                for sym in os.getenv("SNIPER_SYMBOLS", "WIF/USDT,DOGE/USDT").split(",")
+                if sym.strip()
+            )
+        ),
+        sniper_ob_imbalance_min=float(os.getenv("SNIPER_OB_IMBALANCE_MIN", "0.62")),
+        sniper_liq_spike_usd=float(os.getenv("SNIPER_LIQ_SPIKE_USD", "300000.0")),
+        sniper_liq_window_seconds=int(os.getenv("SNIPER_LIQ_WINDOW_SECONDS", "30")),
+        sniper_dynamic_sl_atr_mult=float(os.getenv("SNIPER_DYNAMIC_SL_ATR_MULT", "1.5")),
+        time_decay_wif_minutes=int(os.getenv("TIME_DECAY_WIF_MINUTES", "18")),
+        time_decay_doge_minutes=int(os.getenv("TIME_DECAY_DOGE_MINUTES", "25")),
+        time_decay_default_minutes=int(os.getenv("TIME_DECAY_DEFAULT_MINUTES", "0")),
+        time_decay_atomic_be_pct=float(os.getenv("TIME_DECAY_ATOMIC_BE_PCT", "0.0022")),
+        time_decay_flow_exit_pct=float(os.getenv("TIME_DECAY_FLOW_EXIT_PCT", "0.15")),
+        oi_delta_veto_enabled=_get_bool("OI_DELTA_VETO_ENABLED", True),
+        top_trader_ls_veto_enabled=_get_bool("TOP_TRADER_LS_VETO_ENABLED", True),
         pamm_webhook_url=os.getenv("PAMM_WEBHOOK_URL", "").strip(),
         webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
         logs_dir=logs_dir,
