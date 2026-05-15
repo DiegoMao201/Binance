@@ -431,6 +431,14 @@ class ActiveTradeMonitor:
                 )
                 response.raise_for_status()
                 raw = response.json()["choices"][0]["message"]["content"]
+                # Guard: some models return null content under heavy load.
+                if raw is None:
+                    self.logger.warning(
+                        "TradeMonitor: content=None del modelo=%s. Probando fallback.",
+                        model_name,
+                    )
+                    last_error = "content_none"
+                    continue
                 parsed: dict[str, Any] = json.loads(raw)
 
                 # Normalizar action
@@ -520,9 +528,63 @@ class ActiveTradeMonitor:
             }
 
         # 2) Guard de tiempo minimo: nunca EMERGENCY_CLOSE ni UPDATE_SL antes de 5 minutos.
-        # El mercado necesita tiempo para reaccionar al fill; los primeros minutos son ruido.
+        # EXCEPCION CRITICA: los vetos de microestructura (colapso de orderbook + flow)
+        # tienen PRIORIDAD ABSOLUTA sobre el hold_guard. Si el mercado colapsa en segundos,
+        # esperamos que la posicion este al menos 5 minutos SOLO cuando el ambiente es neutral.
         hold_minutes_now = float(state.get("hold_minutes") or 0.0)
         _MIN_HOLD_MINUTES = 5.0
+
+        # ── Veto de emergencia temprana (bypass del hold_guard) ────────────────
+        # Actua SIN importar el tiempo transcurrido. Verifica las mismas condiciones
+        # que microstructure_bailout en main_loop pero aplicadas al monitor de IA.
+        ob_now   = float(state.get("orderbook_imbalance") or 1.0)
+        flow_now = float(state.get("trade_flow_score") or 1.0)
+        pnl_now  = float(state.get("unrealized_pnl_pct") or 0.0)
+        tape_now = float(state.get("tape_momentum_pct") or 0.0)
+
+        # Condicion 1: Orderbook Y flujo AMBOS colapsan mientras el trade esta en rojo.
+        _EMERGENCY_OB_FLOOR   = 0.20  # ob_imbalance < 0.20 = dominacion vendedora severa
+        _EMERGENCY_FLOW_FLOOR = 0.25  # trade_flow_score < 0.25 = colapso de flujo institucional
+        _EMERGENCY_PNL_FLOOR  = -0.30 # solo activa si ya hay drawdown
+        _dual_collapse = (
+            ob_now   < _EMERGENCY_OB_FLOOR
+            and flow_now < _EMERGENCY_FLOW_FLOOR
+            and pnl_now  < _EMERGENCY_PNL_FLOOR
+        )
+        # Condicion 2: Tape momentum catastrofico (venta agresiva masiva) independiente del PnL.
+        _EMERGENCY_TAPE_FLOOR = -1.5  # tape_momentum_pct < -1.5% = cascada de ventas
+        _tape_cascade = tape_now < _EMERGENCY_TAPE_FLOOR
+
+        if _dual_collapse or _tape_cascade:
+            _reason = (
+                f"dual_micro_collapse: ob={ob_now:.2f}<{_EMERGENCY_OB_FLOOR} "
+                f"flow={flow_now:.2f}<{_EMERGENCY_FLOW_FLOOR} pnl={pnl_now:.3f}%"
+                if _dual_collapse else
+                f"tape_cascade: tape_momentum={tape_now:.3f}%<{_EMERGENCY_TAPE_FLOOR}"
+            )
+            emergency_early: dict[str, Any] = {
+                "action": "EMERGENCY_CLOSE",
+                "exit_reason": "emergency_micro_veto",
+                "rationale": (
+                    f"[EMERGENCY BYPASS] hold={hold_minutes_now:.1f}min. "
+                    f"{_reason}. Hold-guard anulado: microestructura exige cierre inmediato."
+                ),
+                "model": "emergency_micro_veto",
+                "consulted": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "state": state,
+                "new_sl_price": None,
+                "new_sl_pct": None,
+                "memory_window": 0,
+            }
+            self._persist_verdict(emergency_early)
+            self.logger.critical(
+                "TradeMonitor EMERGENCY-BYPASS hold_guard: %s hold=%.1fmin | %s",
+                symbol, hold_minutes_now, _reason,
+            )
+            return emergency_early
+
         if hold_minutes_now < _MIN_HOLD_MINUTES:
             early_verdict: dict[str, Any] = {
                 "action": "HOLD",

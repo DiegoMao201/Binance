@@ -354,6 +354,15 @@ class OpenRouterAnalyzer:
                     break
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
+                # Guard: some models return null content (e.g. when the JSON mode
+                # schema fails or the API has an internal issue). Do not crash.
+                if content is None:
+                    self.logger.warning(
+                        "OpenRouter devolvio content=None para %s (modelo=%s). Tratando como fallo.",
+                        symbol or self.settings.trading_symbol, model_name,
+                    )
+                    last_error = "content_none"
+                    continue
                 parsed = json.loads(content)
                 # Reset 429 counter on first successful response.
                 self._consecutive_429 = 0
