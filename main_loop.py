@@ -48,6 +48,84 @@ def _build_notifier(settings: Settings, logger: logging.Logger) -> TelegramTelem
     )
 
 
+_PAMM_WEBHOOK_TIMEOUT_S = 10  # seconds — bot must not be blocked by Next.js latency
+
+
+def _fire_pamm_webhook(
+    closed_trade: dict[str, Any],
+    settings: "Settings",
+    logger: logging.Logger,
+) -> None:
+    """Fire-and-forget PAMM allocation webhook to the Next.js portal.
+
+    Sends the closed trade's PnL to /api/webhooks/trade-closed so the portal
+    distributes the return across all active client balances, charges the 5%
+    performance fee + Binance commission, and writes immutable allocation rows.
+
+    Rules:
+      - Silently skipped in dry_run mode (no balance changes on paper trades).
+      - Silently skipped when PAMM_WEBHOOK_URL or WEBHOOK_SECRET are not set
+        (e.g. during local development without a portal).
+      - All exceptions are caught and logged as warnings — a webhook failure
+        must never take the bot down.
+    """
+    if getattr(settings, "dry_run", True):
+        logger.debug("[PAMM] dry_run — webhook skipped for %s", closed_trade.get("symbol"))
+        return
+
+    webhook_url    = getattr(settings, "pamm_webhook_url", "").strip()
+    webhook_secret = getattr(settings, "webhook_secret", "").strip()
+    if not webhook_url or not webhook_secret:
+        logger.debug("[PAMM] PAMM_WEBHOOK_URL / WEBHOOK_SECRET no configurados — omitiendo webhook.")
+        return
+
+    symbol      = closed_trade.get("symbol", "UNKNOWN")
+    pnl_pct     = float(closed_trade.get("pnl_pct") or 0.0)
+    side        = str(closed_trade.get("side") or "BUY").upper()
+    exit_reason = str(closed_trade.get("exit_reason") or "unknown")
+    fees_usdt   = float(closed_trade.get("fees_usdt") or 0.0)
+
+    # Approximate Binance commission as a fraction of position notional.
+    # notional = entry_price × amount. Falls back to the standard 0.1% fee.
+    entry_price = float(
+        closed_trade.get("entry_price") or closed_trade.get("fill_price") or 0.0
+    )
+    amount   = float(closed_trade.get("amount") or 0.0)
+    notional = entry_price * amount
+    fees_pct = round(fees_usdt / notional, 8) if notional > 0 else 0.001
+
+    payload = {
+        "symbol":      symbol,
+        "pnl_pct":     pnl_pct,
+        "side":        side,
+        "exit_reason": exit_reason,
+        "fees_pct":    fees_pct,
+    }
+
+    try:
+        import requests as _req  # noqa: PLC0415 — lazy import to avoid startup cost
+        resp = _req.post(
+            webhook_url,
+            json=payload,
+            headers={"Authorization": f"Bearer {webhook_secret}"},
+            timeout=_PAMM_WEBHOOK_TIMEOUT_S,
+        )
+        if resp.status_code == 200:
+            _data = resp.json()
+            logger.info(
+                "[PAMM] Webhook OK — %s pnl_pct=%.4f allocated=%d clientes.",
+                symbol, pnl_pct, _data.get("allocated", 0),
+            )
+        else:
+            logger.warning(
+                "[PAMM] Webhook rechazado %d para %s: %s",
+                resp.status_code, symbol, resp.text[:300],
+            )
+    except Exception as exc:  # noqa: BLE001
+        # A network error or timeout must never crash the bot.
+        logger.warning("[PAMM] Webhook error (no crítico): %s", exc)
+
+
 def _notify_safe(notifier: TelegramTelemetry, logger: logging.Logger, level: str, data: dict[str, Any]) -> None:
     if not notifier.configured:
         return
@@ -2487,6 +2565,8 @@ def run_cycle() -> None:
                 })
                 persist_history(settings.order_history_file, order_history)
                 _notify_safe(notifier, logger, "trade_close", _format_trade_close_message(manual_closed_trade))
+                # Distribute PnL to all PAMM investors atomically via the portal.
+                _fire_pamm_webhook(manual_closed_trade, settings, logger)
                 logger.info(
                     "Manual capital rotation completado: %s exit=%.4f pnl=%.4f USDT.",
                     target_pos.get("symbol"),
@@ -2583,6 +2663,8 @@ def run_cycle() -> None:
             persist_history(settings.closed_trades_file, closed_trades)
             for closed_trade in newly_closed_trades:
                 _notify_safe(notifier, logger, "trade_close", _format_trade_close_message(closed_trade))
+                # Distribute PnL to all PAMM investors atomically via the portal.
+                _fire_pamm_webhook(closed_trade, settings, logger)
         persist_history(settings.open_positions_file, open_positions)
 
         # 2b) DYNAMIC AI TRADE MONITOR — evaluacion IA de posiciones abiertas.

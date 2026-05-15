@@ -78,6 +78,12 @@ class Settings:
     bailout_max_ob_imbalance: float
     bailout_max_flow_score: float
     bailout_min_hold_minutes: int
+    # ---- PAMM Webhook ----
+    # URL of the Next.js PAMM allocation endpoint.
+    # e.g. https://tradingdiegomao.datovatenexuspro.com/api/webhooks/trade-closed
+    pamm_webhook_url: str
+    # Shared secret — must match WEBHOOK_SECRET in Coolify (Next.js env).
+    webhook_secret: str
     logs_dir: Path
     state_file: Path
     log_file: Path
@@ -188,6 +194,8 @@ def load_settings() -> Settings:
         bailout_max_ob_imbalance=float(os.getenv("BAILOUT_MAX_OB_IMBALANCE", "0.20")),
         bailout_max_flow_score=float(os.getenv("BAILOUT_MAX_FLOW_SCORE", "0.30")),
         bailout_min_hold_minutes=int(os.getenv("BAILOUT_MIN_HOLD_MINUTES", "10")),
+        pamm_webhook_url=os.getenv("PAMM_WEBHOOK_URL", "").strip(),
+        webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
         logs_dir=logs_dir,
         state_file=logs_dir / "bot_state.json",
         log_file=logs_dir / "bot.log",

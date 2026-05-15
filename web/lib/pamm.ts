@@ -81,23 +81,18 @@ export async function getAdminStats(): Promise<AdminStats> {
     where: { type: "ENTRY_FEE" },
   });
 
-  // ── 3. Performance-fee revenue (raw SQL — bot-owned table, no Prisma model) ──
-  // Reads user_trade_allocations written by the Python bot.
-  // RULE: Read-only. Never mutate this table from the Next.js layer.
-  // Uses a per-user performance_fee_pct join to honour individual fee schedules.
+  // ── 3. Performance-fee revenue (raw SQL — reads user_trade_allocations) ──────
+  // Sums the pre-calculated perf_fee_usdt stored by the PAMM webhook.
+  // RULE: Read-only here. The PAMM webhook is the sole writer.
   const perfFeeRevenue: Prisma.Decimal = await prisma
     .$queryRaw<PerfFeeRow[]>`
       SELECT
-        COALESCE(
-          SUM(uta.net_pnl_usdt * u.performance_fee_pct),
-          0
-        )::numeric AS perf_fees
+        COALESCE(SUM(uta.perf_fee_usdt), 0)::numeric AS perf_fees
       FROM user_trade_allocations uta
-      JOIN users u ON uta.user_id = u.id
-      WHERE uta.net_pnl_usdt > 0
+      WHERE uta.perf_fee_usdt > 0
     `
     .then((rows) => new Prisma.Decimal(rows[0]?.perf_fees ?? 0))
-    .catch(() => new Prisma.Decimal(0)); // table may be empty on a fresh deploy
+    .catch(() => new Prisma.Decimal(0)); // table is empty on a fresh deploy
 
   // ── 4. Investor grid (raw SQL for the DEPOSIT aggregate per user) ────────────
   const investorRows = await prisma.$queryRaw<InvestorQueryRow[]>`

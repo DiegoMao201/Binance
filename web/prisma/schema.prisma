@@ -42,8 +42,9 @@ model User {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at")      @db.Timestamptz(6)
 
-  otpCodes           OtpCode[]
-  ledgerTransactions LedgerTransaction[]
+  otpCodes             OtpCode[]
+  ledgerTransactions   LedgerTransaction[]
+  userTradeAllocations UserTradeAllocation[]
 
   @@index([isActive], map: "idx_users_active")
   @@map("users")
@@ -88,4 +89,46 @@ model LedgerTransaction {
   @@index([userId], map: "idx_ledger_user_id")
   @@index([type],   map: "idx_ledger_type")
   @@map("ledger_transactions")
+}
+
+// ─── user_trade_allocations ──────────────────────────────────────────────────
+// Written atomically by the PAMM webhook (app/api/webhooks/trade-closed) on
+// every trade close. One row per active client per trade.
+//
+// PAMM Math per row:
+//   gross_pnl  = balance_before × pnl_pct
+//   commission = balance_before × fees_pct  (Binance overhead, always ≥ 0)
+//   perf_fee   = max(gross_pnl, 0) × performance_fee_pct  (only on wins)
+//   admin_fee  = commission + perf_fee
+//   net_pnl    = gross_pnl − admin_fee      (credited to client)
+//
+// NEVER delete rows — financial auditing requires immutable history.
+model UserTradeAllocation {
+  id             BigInt   @id @default(autoincrement())
+  userId         String   @map("user_id")         @db.Uuid
+
+  symbol         String   @db.VarChar(32)
+  side           String   @db.VarChar(8)           // 'BUY' | 'SELL'
+  exitReason     String   @default("unknown") @map("exit_reason") @db.VarChar(64)
+
+  // All monetary fields use arbitrary-precision Decimal (NUMERIC in Postgres).
+  pnlPct         Decimal  @map("pnl_pct")          @db.Decimal(12, 8)
+  grossPnlUsdt   Decimal  @map("gross_pnl_usdt")   @db.Decimal(28, 12)
+  commissionUsdt Decimal  @default(0) @map("commission_usdt") @db.Decimal(28, 12)
+  perfFeeUsdt    Decimal  @default(0) @map("perf_fee_usdt")   @db.Decimal(28, 12)
+  adminFeeUsdt   Decimal  @default(0) @map("admin_fee_usdt")  @db.Decimal(28, 12)
+  netPnlUsdt     Decimal  @map("net_pnl_usdt")     @db.Decimal(28, 12)
+
+  // Balance snapshots for point-in-time auditability.
+  balanceBefore  Decimal  @map("balance_before")   @db.Decimal(28, 12)
+  balanceAfter   Decimal  @map("balance_after")    @db.Decimal(28, 12)
+
+  allocatedAt    DateTime @default(now()) @map("allocated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId],      map: "idx_uta_user_id")
+  @@index([allocatedAt], map: "idx_uta_allocated_at")
+  @@index([symbol],      map: "idx_uta_symbol")
+  @@map("user_trade_allocations")
 }
