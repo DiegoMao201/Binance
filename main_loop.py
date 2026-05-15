@@ -19,6 +19,7 @@ from src.execution.trader import TradeExecutor
 from src.safety.risk_manager import RiskManager, RiskSnapshot
 from src.utils.config import Settings, load_settings
 from src.utils.logger import setup_logger
+from src.utils.market_profiles import apply_market_profile, market_profiles_summary
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.state_store import append_history, build_state_snapshot, load_history, load_state, persist_history, persist_state
 
@@ -526,6 +527,12 @@ def _build_guardrails(
     *,
     symbol: str | None = None,
 ) -> dict[str, Any]:
+    # ── PER-MARKET PROFILES ──────────────────────────────────────────────
+    # Apply per-market entry guardrail overrides (RSI bounds, ATR range,
+    # volume ratio, orderbook imbalance, trade flow, AI confidence,
+    # max spread, guardrail relaxation). SL/TP/trailing remain global.
+    settings = apply_market_profile(settings, symbol)
+    # ── /PER-MARKET PROFILES ─────────────────────────────────────────────
     signal = technical_signal["signal"]
     scenario = technical_signal.get("scenario")
     setup_score = float(technical_signal.get("setup_score", 0.0))
@@ -789,7 +796,14 @@ def _build_guardrails(
     }
 
 
-def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any]) -> tuple[bool, str]:
+def _is_pre_signal_candidate(
+    settings: Settings,
+    technical_signal: dict[str, Any],
+    *,
+    symbol: str | None = None,
+) -> tuple[bool, str]:
+    # Apply per-market profile so volume/ATR gates use the right thresholds.
+    settings = apply_market_profile(settings, symbol)
 
     scenario = technical_signal.get("scenario")
     if scenario not in {"A", "B", "C", "D"}:
@@ -832,6 +846,10 @@ def _is_pre_signal_candidate(settings: Settings, technical_signal: dict[str, Any
 
 def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_lock: bool) -> dict[str, Any]:
     """Resumen para el dashboard del estado de cada ticker en el ciclo actual."""
+    # Per-market profile so the dashboard shows the EFFECTIVE thresholds
+    # for this symbol (not the global defaults).
+    sym = scan.get("symbol")
+    market_settings = apply_market_profile(settings, sym)
     ts = scan.get("technical_signal", {})
     candidate = bool(scan.get("candidate"))
     if blocked_by_lock:
@@ -892,6 +910,19 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "rsi_slope": ts.get("rsi_slope"),
         "candle_body_pct": ts.get("candle_body_pct"),
         "volume_acceleration": ts.get("volume_acceleration"),
+        # ── Per-market thresholds (entry profile) ────────────────────────────
+        # Frontend reads these to render "live vs threshold" gauges per market.
+        "thresholds": {
+            "scenario_a_rsi_max": market_settings.scenario_a_rsi_max,
+            "scenario_b_rsi_max": market_settings.scenario_b_rsi_max,
+            "min_atr_pct": market_settings.min_atr_pct,
+            "max_atr_pct": market_settings.max_atr_pct,
+            "min_volume_ratio": market_settings.min_volume_ratio,
+            "min_orderbook_imbalance": market_settings.min_orderbook_imbalance,
+            "min_trade_flow_score": market_settings.min_trade_flow_score,
+            "max_spread_pct": market_settings.max_spread_pct,
+            "ai_confidence_threshold": market_settings.ai_confidence_threshold,
+        },
     }
 
 
@@ -2361,8 +2392,13 @@ def _scan_symbol(
     """Lee OHLCV y construye se\u00f1al tecnica para un simbolo concreto."""
     raw_frame = client.fetch_ohlcv(limit=200, symbol=symbol)
     enriched_frame = compute_indicators(raw_frame)
-    technical_signal = build_technical_signal(enriched_frame, settings)
-    candidate, candidate_reason = _is_pre_signal_candidate(settings, technical_signal)
+    # Apply per-market profile for technical signal building (so RSI bounds /
+    # ATR ranges / volume ratio in build_technical_signal use the right gates).
+    market_settings = apply_market_profile(settings, symbol)
+    technical_signal = build_technical_signal(enriched_frame, market_settings)
+    candidate, candidate_reason = _is_pre_signal_candidate(
+        market_settings, technical_signal, symbol=symbol
+    )
     orderbook: dict[str, Any] = {}
     macro_regime: dict[str, Any] = {}
     ticker_snapshot: dict[str, Any] = {}
@@ -2911,6 +2947,7 @@ def run_cycle() -> None:
                     open_position=_summarize_open_position(open_positions),
                     last_scans=degraded_scans,
                     target_symbols=target_symbols,
+                    market_profiles=market_profiles_summary(target_symbols),
                     global_lock=global_lock,
                     active_symbol=active_symbol,
                     recovery=recovery_report,
@@ -3000,6 +3037,7 @@ def run_cycle() -> None:
                     open_position=_summarize_open_position(open_positions),
                     last_scans=[_build_scan_summary(s, settings, blocked_by_lock=False) for s in scan_results],
                     target_symbols=target_symbols,
+                    market_profiles=market_profiles_summary(target_symbols),
                     global_lock=global_lock,
                     active_symbol=active_symbol,
                     recovery=recovery_report,
@@ -3432,6 +3470,7 @@ def run_cycle() -> None:
                 open_position=_summarize_open_position(open_positions),
                 last_scans=scan_summaries,
                 target_symbols=target_symbols,
+                market_profiles=market_profiles_summary(target_symbols),
                 global_lock=global_lock,
                 active_symbol=active_symbol,
                 recovery=recovery_report,

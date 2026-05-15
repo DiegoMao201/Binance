@@ -612,6 +612,232 @@ function EquityPanel({ equityHistory }) {
   );
 }
 
+// ── Market Profiles · tarjeta por mercado con estrategia de entrada ──────
+// Cada tarjeta muestra: símbolo · perfil · RSI vs umbrales (A/B) ·
+// ATR vs rango · Volume vs piso · Orderbook vs piso · Flow vs piso ·
+// IA confidence vs umbral · estado en vivo · escenario activo.
+//
+// Lee `state.last_scans[*].thresholds` (publicado por _build_scan_summary
+// con apply_market_profile aplicado) y los valores live del mismo scan.
+function MarketProfilesPanel({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
+  const symbols = (targetSymbols && targetSymbols.length)
+    ? targetSymbols
+    : lastScans.map((s) => s.symbol);
+  const scanMap = Object.fromEntries(lastScans.map((s) => [s.symbol, s]));
+
+  // Etiqueta de "carácter" del mercado — refleja la intención del perfil.
+  const PROFILE_TAG = {
+    "BTC/USDT":  { tag: "Oro Digital",        color: B,  desc: "Lento · institucional · convicción alta" },
+    "ETH/USDT":  { tag: "Plata Líquida",      color: B,  desc: "Reactivo · líquido · gates moderados" },
+    "SOL/USDT":  { tag: "Velocista",          color: G,  desc: "Explosivo · ATR alto · flow permisivo" },
+    "BNB/USDT":  { tag: "Nativo Binance",     color: Y,  desc: "Vol moderada · ejecución limpia" },
+    "DOGE/USDT": { tag: "Scalper Salvaje",    color: P,  desc: "Meme · momentum · vol irregular" },
+    "WIF/USDT":  { tag: "Scalper Extremo",    color: R,  desc: "Small-cap · ATR enorme · gates laxos" },
+  };
+
+  return (
+    <Card title={`Estrategias por Mercado · ${symbols.length} perfiles activos`}>
+      <div style={{ fontSize: 11, color: MUTE, marginBottom: 4 }}>
+        Cada mercado opera con su propio perfil de <b style={{ color: TEXT }}>entrada</b> (RSI, ATR, volumen, orderbook, flow, IA).
+        SL/TP/Trailing son globales (T1 +0.5% → T4 +1.6%).
+      </div>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+        gap: 12,
+      }}>
+        {symbols.map((sym) => {
+          const sc = scanMap[sym] || {};
+          const th = sc.thresholds || {};
+          const meta = PROFILE_TAG[sym] || { tag: "Default", color: MUTE, desc: "Sin perfil dedicado" };
+          const isActive = sym === focusSymbol;
+          const status = sc.status || "waiting";
+
+          // Live values vs thresholds
+          const rsi  = Number(sc.rsi || 0);
+          const atr  = Number(sc.atr_pct || 0);
+          const vol  = Number(sc.volume_ratio || 0);
+          const ob   = Number(sc.orderbook_imbalance || 0);
+          const flow = Number(sc.trade_flow_score || 0);
+          const conf = Number(sc.ia_confidence || 0);
+          const spread = Number(sc.spread_pct || 0);
+
+          const rsiAMax = Number(th.scenario_a_rsi_max || 0);
+          const rsiBMax = Number(th.scenario_b_rsi_max || 0);
+          const atrMin  = Number(th.min_atr_pct || 0);
+          const atrMax  = Number(th.max_atr_pct || 0);
+          const volMin  = Number(th.min_volume_ratio || 0);
+          const obMin   = Number(th.min_orderbook_imbalance || 0);
+          const flowMin = Number(th.min_trade_flow_score || 0);
+          const confMin = Number(th.ai_confidence_threshold || 0);
+          const spreadMax = Number(th.max_spread_pct || 0);
+
+          // Bar helper (live/limit) → percentage 0..100
+          const ratio = (v, max) => {
+            if (max <= 0) return 0;
+            return Math.max(0, Math.min(100, (v / max) * 100));
+          };
+
+          // Status pill
+          const statusColor =
+            status === "candidate" ? G :
+            status === "scenario_only" ? Y :
+            status === "locked" ? B :
+            MUTE;
+
+          return (
+            <div
+              key={sym}
+              onClick={() => onSymbol && onSymbol(sym)}
+              style={{
+                background: isActive ? "rgba(87,193,255,0.06)" : "rgba(255,255,255,0.015)",
+                border: `1px solid ${isActive ? `${B}66` : BORD}`,
+                borderRadius: 12,
+                padding: 14,
+                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+                transition: "all 0.2s",
+              }}
+            >
+              {/* Header: símbolo + perfil + estado */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 800, letterSpacing: "0.04em" }}>{sym}</div>
+                  <div style={{ fontSize: 10, color: meta.color, fontWeight: 600, marginTop: 2 }}>{meta.tag}</div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
+                    padding: "3px 8px", borderRadius: 4,
+                    background: status === "candidate" ? "rgba(18,217,139,0.16)" : "rgba(255,255,255,0.04)",
+                    color: statusColor,
+                    textTransform: "uppercase",
+                  }}>{status}</span>
+                  <ScenBadge sc={sc.scenario} size={20} />
+                </div>
+              </div>
+
+              <div style={{ fontSize: 10, color: MUTE, fontStyle: "italic", lineHeight: 1.3 }}>
+                {meta.desc}
+              </div>
+
+              {/* RSI vs umbrales */}
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE }}>
+                  <span>RSI <b style={{ color: TEXT, fontFamily: "monospace" }}>{n(rsi, 1)}</b></span>
+                  <span>A≤{n(rsiAMax, 0)} · B≤{n(rsiBMax, 0)}</span>
+                </div>
+                <div style={{ height: 6, background: "rgba(255,255,255,0.05)", borderRadius: 3, marginTop: 4, position: "relative" }}>
+                  {/* Zone B (oversold target) */}
+                  <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${rsiBMax}%`, background: "rgba(87,193,255,0.18)", borderRadius: "3px 0 0 3px" }} />
+                  {/* Zone A (pullback target) */}
+                  <div style={{ position: "absolute", left: `${rsiBMax}%`, top: 0, height: "100%", width: `${rsiAMax - rsiBMax}%`, background: "rgba(18,217,139,0.16)" }} />
+                  {/* Marker */}
+                  <div style={{ position: "absolute", left: `calc(${Math.min(100, rsi)}% - 1px)`, top: -2, width: 2, height: 10, background: rsi <= rsiBMax ? B : rsi <= rsiAMax ? G : rsi >= 70 ? R : Y }} />
+                </div>
+              </div>
+
+              {/* ATR range */}
+              <Gauge
+                label="ATR%"
+                live={atr * 100}
+                min={atrMin * 100}
+                max={atrMax * 100}
+                unit="%"
+                decimals={2}
+                inRange={atr >= atrMin && atr <= atrMax}
+              />
+
+              {/* Volume ratio */}
+              <Gauge
+                label="Volume×"
+                live={vol}
+                min={volMin}
+                max={2.0}
+                unit=""
+                decimals={2}
+                inRange={vol >= volMin}
+              />
+
+              {/* Orderbook imbalance */}
+              <Gauge
+                label="OB imbalance"
+                live={ob * 100}
+                min={obMin * 100}
+                max={100}
+                unit="%"
+                decimals={0}
+                inRange={ob >= obMin}
+              />
+
+              {/* Trade flow score */}
+              <Gauge
+                label="Trade flow"
+                live={flow * 100}
+                min={flowMin * 100}
+                max={100}
+                unit="%"
+                decimals={0}
+                inRange={flow >= flowMin}
+              />
+
+              {/* IA confidence (only if consulted) */}
+              <Gauge
+                label="IA conf"
+                live={conf * 100}
+                min={confMin * 100}
+                max={100}
+                unit="%"
+                decimals={0}
+                inRange={conf >= confMin}
+                muted={!sc.ia_consulted}
+              />
+
+              {/* Spread (lower-is-better; show as `live ≤ max`) */}
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE }}>
+                <span>Spread <b style={{ color: spread > 0 && spread <= spreadMax ? G : spread > spreadMax ? R : MUTE, fontFamily: "monospace" }}>{(spread * 100).toFixed(3)}%</b></span>
+                <span>≤{(spreadMax * 100).toFixed(3)}%</span>
+              </div>
+
+              {/* Reason */}
+              <div style={{
+                fontSize: 10, color: MUTE, marginTop: 4,
+                paddingTop: 8, borderTop: `1px dashed ${BORD}`,
+                lineHeight: 1.4,
+              }}>
+                {sc.candidate_reason || sc.rejection_reason || "Sin pre-señal — esperando setup"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ── Gauge: live value vs [min..max] with in-range coloring ────────────────
+function Gauge({ label, live, min, max, unit = "", decimals = 2, inRange = false, muted = false }) {
+  const ratio = max > 0 ? Math.max(0, Math.min(100, (live / max) * 100)) : 0;
+  const minRatio = max > 0 ? Math.max(0, Math.min(100, (min / max) * 100)) : 0;
+  const liveColor = muted ? MUTE : inRange ? G : R;
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MUTE }}>
+        <span>{label} <b style={{ color: liveColor, fontFamily: "monospace" }}>{Number(live || 0).toFixed(decimals)}{unit}</b></span>
+        <span style={{ opacity: 0.65 }}>≥{Number(min || 0).toFixed(decimals)}{unit}</span>
+      </div>
+      <div style={{ height: 5, background: "rgba(255,255,255,0.05)", borderRadius: 3, marginTop: 4, position: "relative" }}>
+        {/* In-range zone (min..max) */}
+        <div style={{ position: "absolute", left: `${minRatio}%`, top: 0, height: "100%", width: `${100 - minRatio}%`, background: "rgba(18,217,139,0.12)", borderRadius: "0 3px 3px 0" }} />
+        {/* Live marker */}
+        <div style={{ position: "absolute", left: `calc(${ratio}% - 1px)`, top: -1, width: 2, height: 7, background: liveColor }} />
+      </div>
+    </div>
+  );
+}
+
 // ── Scanner Matrix ────────────────────────────────────────────────
 function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
   const symbols = targetSymbols.length ? targetSymbols : lastScans.map((s) => s.symbol);
@@ -1306,6 +1532,14 @@ export default function DashboardClient({ initialData }) {
 
         {/* Monitor IA de trade activo */}
         <TradeMonitorPanel tradeMonitorLog={tradeMonitorLog} tradeMonitor={tradeMonitor} />
+
+        {/* Estrategias por mercado · perfiles de entrada en vivo */}
+        <MarketProfilesPanel
+          lastScans={lastScans}
+          targetSymbols={targetSymbols}
+          focusSymbol={focusSymbol}
+          onSymbol={setFocusSymbol}
+        />
 
         {/* Scanner completo */}
         <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} />
