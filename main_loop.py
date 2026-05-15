@@ -508,16 +508,25 @@ def _build_guardrails(
         ai_setup_ready = setup_quality in {"medium", "high"}
         ai_risk_clear = len(critical_flags_present) == 0
     elif scenario == "C":
-        ai_setup_ready = bool(
-            setup_quality == "high"
-            or (
-                setup_quality == "medium"
-                and ai_confidence >= max(ai_conf_threshold, 0.58 if is_technical_fallback else 0.60)
-                and len(critical_flags_present) == 0
-                and (strong_micro or orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.52))
+        # ── 15m alignment veto for Scenario C (continuation/FOMO killer) ──
+        # V3 cohort: Scenario C win rate = 16.7% because the bot was buying
+        # tops into 15m downtrends. If macro_slope_pct < -0.0015 (15m EMA50
+        # falling at >0.15% per 6 candles) we block the entry outright.
+        macro_slope_pct = float(technical_signal.get("macro_slope_pct") or 0.0)
+        if macro_slope_pct < -0.0015:
+            ai_setup_ready = False
+            ai_risk_clear = False
+        else:
+            ai_setup_ready = bool(
+                setup_quality == "high"
+                or (
+                    setup_quality == "medium"
+                    and ai_confidence >= max(ai_conf_threshold, 0.58 if is_technical_fallback else 0.60)
+                    and len(critical_flags_present) == 0
+                    and (strong_micro or orderbook_imbalance >= max(settings.min_orderbook_imbalance, 0.52))
+                )
             )
-        )
-        ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
+            ai_risk_clear = len(critical_flags_present) == 0 and non_critical_flags_count <= 1
     else:
         high_ready = setup_quality == "high" and len(critical_flags_present) == 0
         fallback_medium_floor = 0.55 if is_technical_fallback else 0.62
@@ -2142,6 +2151,40 @@ def _load_ai_signals_by_symbol(settings) -> dict[str, dict[str, Any]]:
     return out
 
 
+# Tactical AI cache: price-delta below this triggers reuse even if TTL expired.
+# 0.15% matches the FOMO threshold used for Scenario C limit-sniping.
+_AI_PRICE_DELTA_REUSE_PCT = 0.0015
+
+# Scenario C micro-pullback ("Limit Sniping"): the bot will NOT chase a continuation
+# unless the candle has already retraced this much from its close. "Compramos barato
+# o no compramos". Empirically tuned: V3 cohort showed Scenario C win rate 16.7% with
+# market entries; waiting for a 0.15% pullback should restore positive expectancy.
+_SCENARIO_C_PULLBACK_PCT = 0.0015
+
+
+def _can_reuse_ai_for_price(
+    cache_entry: dict[str, Any],
+    current_price: float,
+) -> bool:
+    """Tactical cache: if price has not moved enough, reuse the previous AI verdict.
+
+    Saves OpenRouter quota and avoids the 429 spiral when 4 symbols all churn
+    sub-tick movements. Returns True only when the previous decision is still
+    statistically valid (price drift < 0.15%).
+    """
+    if not cache_entry or current_price <= 0:
+        return False
+    price_at_consult = cache_entry.get("price_at_consult")
+    try:
+        ref_price = float(price_at_consult) if price_at_consult is not None else 0.0
+    except (TypeError, ValueError):
+        return False
+    if ref_price <= 0:
+        return False
+    delta = abs(current_price - ref_price) / ref_price
+    return delta < _AI_PRICE_DELTA_REUSE_PCT
+
+
 def _get_cached_ai_signal_for_symbol(
     cache: dict[str, dict[str, Any]],
     symbol: str,
@@ -2949,6 +2992,22 @@ def run_cycle() -> None:
                 cached_signal = _get_cached_ai_signal_for_symbol(
                     ai_signals_by_symbol, symbol, settings.ai_min_interval_seconds
                 )
+                # Tactical price-delta cache: if TTL expired but price barely moved,
+                # reuse the verdict anyway. Critical to survive 429 storms.
+                if cached_signal is None:
+                    stale_entry = ai_signals_by_symbol.get(symbol)
+                    if stale_entry and _can_reuse_ai_for_price(
+                        stale_entry, float(technical_signal.get("close") or 0.0)
+                    ):
+                        cached_signal = dict(stale_entry)
+                        cached_signal["cached"] = True
+                        cached_signal["cached_reason"] = "price_delta_below_threshold"
+                        cached_signal["symbol"] = symbol
+                        logger.info(
+                            "IA price-delta cache hit para %s (delta < %.2f%%, ahorro de cuota).",
+                            symbol,
+                            _AI_PRICE_DELTA_REUSE_PCT * 100,
+                        )
                 if cached_signal is not None:
                     symbol_ai_signal = cached_signal
                     logger.info(
@@ -2970,6 +3029,10 @@ def run_cycle() -> None:
                     symbol_ai_signal["cached"] = False
                     symbol_ai_signal["cached_age_seconds"] = 0.0
                     symbol_ai_signal["cached_at"] = datetime.now(timezone.utc).isoformat()
+                    # Anchor the price at the moment of the consult so the next
+                    # cycle can decide whether the cached verdict is still valid
+                    # (see _can_reuse_ai_for_price).
+                    symbol_ai_signal["price_at_consult"] = float(technical_signal.get("close") or 0.0)
                     ai_signals_by_symbol[symbol] = dict(symbol_ai_signal)
                     logger.info(
                         "IA evaluada en vivo para %s. signal=%s confidence=%.3f approved=%s setup=%s flags=%s",
@@ -3015,6 +3078,53 @@ def run_cycle() -> None:
         if chosen_scan is None and best_candidate_scan is not None:
             ai_signal = best_candidate_ai or ai_signal
             ai_consulted_symbol = best_candidate_scan["symbol"]
+
+        if chosen_scan and chosen_guardrails:
+            symbol = chosen_scan["symbol"]
+            technical_signal = chosen_scan["technical_signal"]
+            # ── Scenario C "Limit Sniping" gate (FOMO killer) ──────────────────
+            # V3 cohort: Scenario C market entries had 16.7% win rate (chasing
+            # tops). Rule: do NOT execute a market buy on a continuation signal
+            # unless the current candle has already retraced >= 0.15% from its
+            # close. We approximate the retrace using the candle low vs close:
+            # if low <= close*(1 - 0.0015), the pullback already happened and
+            # we can buy at a better price. Otherwise we wait. Compramos barato
+            # o no compramos.
+            if technical_signal.get("scenario") == "C":
+                latest_candle = chosen_scan.get("latest_candle") or {}
+                _close = float(technical_signal.get("close") or 0.0)
+                _low = float(latest_candle.get("low") or _close)
+                _required_low = _close * (1.0 - _SCENARIO_C_PULLBACK_PCT)
+                if _close > 0 and _low > _required_low:
+                    logger.info(
+                        "Scenario C bloqueado por pullback insuficiente | %s low=%.6f need<=%.6f "
+                        "(close=%.6f, retroceso requerido=%.2f%%). Esperando precio mejor.",
+                        symbol, _low, _required_low, _close,
+                        _SCENARIO_C_PULLBACK_PCT * 100,
+                    )
+                    # Persist a synthetic decision so the dashboard knows why we
+                    # didn't fire. No order is sent; cooldown is NOT triggered.
+                    decision = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "side": "buy",
+                        "amount": 0.0,
+                        "price": round(_close, 6),
+                        "signal_price": round(_close, 6),
+                        "notional_usdt": 0.0,
+                        "slippage_pct": 0.0,
+                        "mode": "dry_run" if settings.dry_run else "live",
+                        "status": "deferred_pullback",
+                        "reason": (
+                            f"Scenario C: esperando pullback >= {_SCENARIO_C_PULLBACK_PCT*100:.2f}% "
+                            f"(low={_low:.6f}, target<={_required_low:.6f})"
+                        ),
+                        "scenario": "C",
+                        "entry_logic_tag": "scenario_c_pullback_pending",
+                    }
+                    append_history(settings.order_history_file, decision)
+                    order_history = load_history(settings.order_history_file)
+                    chosen_scan = None  # block the executor branch below
 
         if chosen_scan and chosen_guardrails:
             symbol = chosen_scan["symbol"]

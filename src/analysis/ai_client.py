@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -11,9 +12,69 @@ from src.utils.config import Settings
 
 
 class OpenRouterAnalyzer:
+    # 429 backoff config (tactical cache + exponential wait)
+    _MIN_BACKOFF_SECONDS = 60
+    _MAX_BACKOFF_SECONDS = 600  # 10 min cap
+
     def __init__(self, settings: Settings, logger: logging.Logger) -> None:
         self.settings = settings
         self.logger = logger
+        # Rate-limit state shared across all symbols (OpenRouter quota is per-key).
+        self._rate_limit_until: datetime | None = None
+        self._consecutive_429: int = 0
+
+    # ─── 429 helpers ────────────────────────────────────────────────────────
+    def _is_in_429_backoff(self) -> tuple[bool, float]:
+        if self._rate_limit_until is None:
+            return False, 0.0
+        remaining = (self._rate_limit_until - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            self._rate_limit_until = None
+            self._consecutive_429 = 0
+            return False, 0.0
+        return True, remaining
+
+    def _trigger_429_backoff(self, retry_after_header: str | None) -> float:
+        """Exponential backoff respecting Retry-After header when present."""
+        self._consecutive_429 += 1
+        # Honour Retry-After if the API gave us one (seconds, integer).
+        explicit: float | None = None
+        if retry_after_header:
+            try:
+                explicit = float(retry_after_header)
+            except (TypeError, ValueError):
+                explicit = None
+        backoff = explicit if explicit is not None else min(
+            self._MAX_BACKOFF_SECONDS,
+            self._MIN_BACKOFF_SECONDS * (2 ** (self._consecutive_429 - 1)),
+        )
+        backoff = max(backoff, self._MIN_BACKOFF_SECONDS)
+        self._rate_limit_until = datetime.now(timezone.utc) + timedelta(seconds=backoff)
+        return backoff
+
+    @staticmethod
+    def _normalize_payload(parsed: dict[str, Any], model_name: str) -> dict[str, Any]:
+        parsed.setdefault("signal", "hold")
+        parsed.setdefault("confidence", 0.0)
+        parsed.setdefault("rationale", "Sin explicación.")
+        parsed.setdefault("model", model_name)
+        parsed.setdefault("timed_out", False)
+        parsed.setdefault("approved", False)
+        parsed.setdefault("direction_alignment", "misaligned")
+        parsed.setdefault("setup_quality", "low")
+        parsed.setdefault("risk_flags", [])
+        try:
+            parsed["confidence"] = float(parsed["confidence"])
+        except (TypeError, ValueError):
+            parsed["confidence"] = 0.0
+        parsed["approved"] = bool(parsed.get("approved", False))
+        if parsed.get("direction_alignment") not in {"aligned", "misaligned"}:
+            parsed["direction_alignment"] = "misaligned"
+        if parsed.get("setup_quality") not in {"low", "medium", "high"}:
+            parsed["setup_quality"] = "low"
+        if not isinstance(parsed.get("risk_flags"), list):
+            parsed["risk_flags"] = [str(parsed.get("risk_flags"))]
+        return parsed
 
     def _build_payload(
         self,
@@ -146,6 +207,25 @@ class OpenRouterAnalyzer:
                 "risk_flags": ["openrouter_not_configured"],
             }
 
+        # ─── 429 backoff guard ───────────────────────────────────────────────
+        # If we recently got a 429, do NOT hammer the API again. Skip directly to
+        # the local technical fallback so the bot keeps trading without burning quota.
+        in_backoff, remaining = self._is_in_429_backoff()
+        if in_backoff:
+            self.logger.warning(
+                "OpenRouter en 429-backoff (%.0fs restantes). Usando fallback técnico para %s.",
+                remaining,
+                symbol or self.settings.trading_symbol,
+            )
+            fb = self._technical_fallback_analyze(technical_signal)
+            flags = list(fb.get("risk_flags") or [])
+            if "openrouter_rate_limited" not in flags:
+                flags.append("openrouter_rate_limited")
+            fb["risk_flags"] = flags
+            fb["rate_limited"] = True
+            fb["rate_limit_remaining_s"] = round(remaining, 1)
+            return self._normalize_payload(fb, fb.get("model", "technical_fallback"))
+
         payload = self._build_payload(frame, symbol=symbol, technical_signal=technical_signal)
 
         # Cadena de modelos para ENTRADAS:
@@ -164,27 +244,7 @@ class OpenRouterAnalyzer:
                 models_to_try.append(candidate)
 
         def _normalize(parsed: dict[str, Any], model_name: str) -> dict[str, Any]:
-            parsed.setdefault("signal", "hold")
-            parsed.setdefault("confidence", 0.0)
-            parsed.setdefault("rationale", "Sin explicación.")
-            parsed.setdefault("model", model_name)
-            parsed.setdefault("timed_out", False)
-            parsed.setdefault("approved", False)
-            parsed.setdefault("direction_alignment", "misaligned")
-            parsed.setdefault("setup_quality", "low")
-            parsed.setdefault("risk_flags", [])
-            try:
-                parsed["confidence"] = float(parsed["confidence"])
-            except (TypeError, ValueError):
-                parsed["confidence"] = 0.0
-            parsed["approved"] = bool(parsed.get("approved", False))
-            if parsed.get("direction_alignment") not in {"aligned", "misaligned"}:
-                parsed["direction_alignment"] = "misaligned"
-            if parsed.get("setup_quality") not in {"low", "medium", "high"}:
-                parsed["setup_quality"] = "low"
-            if not isinstance(parsed.get("risk_flags"), list):
-                parsed["risk_flags"] = [str(parsed.get("risk_flags"))]
-            return parsed
+            return self._normalize_payload(parsed, model_name)
 
         last_error = "unknown_error"
         for model_name in models_to_try:
@@ -279,9 +339,25 @@ class OpenRouterAnalyzer:
                     },
                     timeout=30.0,
                 )
+                # Detect 429 BEFORE raise_for_status so we can backoff gracefully.
+                if response.status_code == 429:
+                    backoff_s = self._trigger_429_backoff(response.headers.get("Retry-After"))
+                    self.logger.error(
+                        "OpenRouter 429 Too Many Requests para %s (modelo=%s). Backoff %.0fs (consecutivos=%d).",
+                        symbol or self.settings.trading_symbol,
+                        model_name,
+                        backoff_s,
+                        self._consecutive_429,
+                    )
+                    last_error = f"rate_limited:{backoff_s:.0f}s"
+                    # Do NOT try further models — quota is per-key, all will 429.
+                    break
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
+                # Reset 429 counter on first successful response.
+                self._consecutive_429 = 0
+                self._rate_limit_until = None
                 if model_name != self.settings.openrouter_entry_model:
                     parsed["fallback_used"] = True
                     parsed["fallback_from"] = self.settings.openrouter_entry_model
