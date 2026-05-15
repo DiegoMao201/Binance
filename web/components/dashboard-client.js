@@ -393,6 +393,187 @@ function PositionPanel({ openPosition, openPositions }) {
   );
 }
 
+// ── Panel: Auditoría multi-posición (todas las operaciones abiertas) ─────────
+function AllPositionsPanel({ openPositions, onFocus }) {
+  const [closeStates, setCloseStates] = useState({});
+
+  if (!openPositions || openPositions.length === 0) return null;
+
+  const handleClose = async (symbol) => {
+    setCloseStates((s) => ({ ...s, [symbol]: "sending" }));
+    try {
+      const res = await fetch("/api/manual-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCloseStates((s) => ({ ...s, [symbol]: "done" }));
+    } catch {
+      setCloseStates((s) => ({ ...s, [symbol]: "idle" }));
+    }
+  };
+
+  const totalPnl = openPositions.reduce((acc, p) => acc + Number(p.unrealized_pnl_usdt || 0), 0);
+  const pnlCol = totalPnl >= 0 ? G : R;
+
+  return (
+    <div style={{
+      background: CARD, border: `1px solid ${BORD}`, borderRadius: 12, padding: "14px 18px",
+      display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 24, height: 24, borderRadius: 6, background: `${G}22`, border: `1px solid ${G}44`,
+            color: G, fontWeight: 700, fontSize: 13,
+          }}>{openPositions.length}</span>
+          <span style={{ fontSize: 11, color: MUTE, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>
+            Posiciones abiertas
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span style={{ fontSize: 9, color: MUTE, textTransform: "uppercase" }}>P&L Total</span>
+          <span style={{ fontSize: 15, fontWeight: 700, fontFamily: "monospace", color: pnlCol }}>
+            {totalPnl >= 0 ? "+" : ""}{Number(totalPnl).toFixed(4)} USDT
+          </span>
+        </div>
+      </div>
+
+      {/* Cards row */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {openPositions.map((raw) => {
+          const pos = buildPos(raw, openPositions);
+          if (!pos) return null;
+          const pnlC = pos.pnl >= 0 ? G : R;
+          const slRisk = pos.sl > 0 && pos.entry > 0 ? Math.abs(pos.sl - pos.entry) / pos.entry : 0;
+          const tpRange = pos.tp > 0 && pos.entry > 0 ? Math.abs(pos.tp - pos.entry) / pos.entry : 0;
+          const cs = closeStates[pos.symbol] || "idle";
+          const meta = ENTRY_TAG_META[pos.entryTag] || ENTRY_TAG_META.standard_ai;
+          // Progress toward TP (0–1)
+          const tpProgress = tpRange > 0 ? Math.max(0, Math.min(1, pos.pnlP / tpRange)) : 0;
+
+          return (
+            <div
+              key={pos.symbol}
+              onClick={() => onFocus && onFocus(pos.symbol)}
+              style={{
+                flex: "1 1 220px", minWidth: 220, maxWidth: 280,
+                background: "rgba(255,255,255,0.025)", border: `1px solid ${pnlC}33`,
+                borderRadius: 10, padding: "12px 14px",
+                display: "flex", flexDirection: "column", gap: 8,
+                cursor: "pointer", transition: "border-color 0.2s",
+              }}
+            >
+              {/* Symbol + scenario + hold */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 15, fontWeight: 700 }}>{pos.symbol.replace("USDT", "")}</span>
+                  <ScenBadge sc={pos.scenario} size={18} />
+                </div>
+                <span style={{ fontSize: 10, color: MUTE }}>{Math.round(pos.holdM)}m</span>
+              </div>
+
+              {/* Entry tag */}
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                background: `${meta.color}15`, border: `1px solid ${meta.color}33`,
+                borderRadius: 4, padding: "2px 6px", fontSize: 9, color: meta.color, fontWeight: 700,
+              }}>
+                {meta.icon} {meta.label}
+              </div>
+
+              {/* Entry / Mark / PnL */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                <div>
+                  <div style={{ fontSize: 8, color: MUTE, textTransform: "uppercase" }}>Entrada</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>{Number(pos.entry).toPrecision(5)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 8, color: MUTE, textTransform: "uppercase" }}>Mark</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "monospace", color: pos.mark >= pos.entry ? G : R }}>{Number(pos.mark).toPrecision(5)}</div>
+                </div>
+              </div>
+
+              {/* PnL badge */}
+              <div style={{ background: `${pnlC}10`, border: `1px solid ${pnlC}25`, borderRadius: 6, padding: "5px 8px", textAlign: "center" }}>
+                <span style={{ fontSize: 16, fontWeight: 700, color: pnlC, fontFamily: "monospace" }}>
+                  {pos.pnl >= 0 ? "+" : ""}{pos.pnl.toFixed(4)}
+                </span>
+                <span style={{ fontSize: 11, color: pnlC, opacity: 0.8, marginLeft: 6 }}>
+                  ({pos.pnlP >= 0 ? "+" : ""}{(pos.pnlP * 100).toFixed(2)}%)
+                </span>
+              </div>
+
+              {/* Progress toward TP */}
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8, color: MUTE, marginBottom: 2 }}>
+                  <span style={{ color: R }}>SL −{(slRisk * 100).toFixed(2)}%</span>
+                  <span style={{ color: G }}>TP +{(tpRange * 100).toFixed(2)}%</span>
+                </div>
+                <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 3, height: 5, overflow: "hidden" }}>
+                  <div style={{ background: pnlC, width: `${tpProgress * 100}%`, height: "100%", transition: "width 0.4s ease" }} />
+                </div>
+              </div>
+
+              {/* Trailing tier pips */}
+              <div style={{ display: "flex", gap: 3 }}>
+                {TIERS.map((t) => (
+                  <div key={t.tier} title={t.label} style={{
+                    flex: 1, height: 4, borderRadius: 2,
+                    background: pos.tier >= t.tier ? (t.tier === 1 ? Y : G) : "rgba(255,255,255,0.07)",
+                  }} />
+                ))}
+                <span style={{ fontSize: 8, color: MUTE, marginLeft: 4, alignSelf: "center" }}>
+                  {pos.tier > 0 ? `T${pos.tier}` : "T0"}
+                </span>
+              </div>
+
+              {/* MFE / MAE */}
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: MUTE }}>
+                <span>MFE <span style={{ color: G }}>{(pos.mfe * 100).toFixed(2)}%</span></span>
+                <span>MAE <span style={{ color: R }}>{(pos.mae * 100).toFixed(2)}%</span></span>
+              </div>
+
+              {/* Close button */}
+              {cs === "idle" && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setCloseStates((s) => ({ ...s, [pos.symbol]: "confirming" })); }}
+                  style={{
+                    width: "100%", padding: "6px 0", borderRadius: 6, border: `1px solid ${Y}44`,
+                    background: `${Y}10`, color: Y, fontWeight: 700, fontSize: 10,
+                    cursor: "pointer", letterSpacing: "0.03em",
+                  }}
+                >⟳ Rotar</button>
+              )}
+              {cs === "confirming" && (
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button onClick={(e) => { e.stopPropagation(); handleClose(pos.symbol); }} style={{
+                    flex: 1, padding: "6px 0", borderRadius: 6, border: `1px solid ${R}55`,
+                    background: `${R}20`, color: R, fontWeight: 700, fontSize: 10, cursor: "pointer",
+                  }}>✓ Confirmar</button>
+                  <button onClick={(e) => { e.stopPropagation(); setCloseStates((s) => ({ ...s, [pos.symbol]: "idle" })); }} style={{
+                    flex: 1, padding: "6px 0", borderRadius: 6, border: `1px solid ${BORD}`,
+                    background: "transparent", color: MUTE, fontSize: 10, cursor: "pointer",
+                  }}>✗</button>
+                </div>
+              )}
+              {cs === "sending" && (
+                <div style={{ textAlign: "center", fontSize: 10, color: Y, padding: "5px 0", opacity: 0.8 }}>Enviando…</div>
+              )}
+              {cs === "done" && (
+                <div style={{ textAlign: "center", fontSize: 10, color: G, padding: "5px 0" }}>✓ Orden enviada</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Panel: Centro de decisión IA ──────────────────────────────────
 function AiPanel({ ai, scan, decision }) {
   const conf     = Number(ai?.confidence || 0);
@@ -1711,6 +1892,9 @@ export default function DashboardClient({ initialData }) {
             </button>
           </div>
         )}
+
+        {/* Panel de auditoría: todas las posiciones abiertas (visible cuando hay ≥1) */}
+        <AllPositionsPanel openPositions={openPositions} onFocus={setFocusSymbol} />
 
         {/* Tres paneles principales */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
