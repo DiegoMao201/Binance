@@ -64,23 +64,38 @@ CREATE INDEX IF NOT EXISTS idx_uta_symbol       ON user_trade_allocations(symbol
 -- ─── Extend ledger_transactions CHECK constraint ──────────────────────────────
 -- PostgreSQL does not support in-place modification of named CHECK constraints.
 -- Drop and recreate is the standard approach; it does not affect existing data.
-
-ALTER TABLE ledger_transactions
-    DROP CONSTRAINT IF EXISTS ledger_type_check;
-
-ALTER TABLE ledger_transactions
-    ADD CONSTRAINT ledger_type_check
-        CHECK (type IN (
-            'DEPOSIT',
-            'ENTRY_FEE',
-            'PERFORMANCE_FEE',
-            'BINANCE_COMMISSION',
-            'WITHDRAWAL'
-        ));
+-- Wrapped in DO $$ EXCEPTION $$ so a non-superuser app role (bot_admin) that
+-- does NOT own ledger_transactions can still run this migration without failing.
+DO $$
+BEGIN
+    ALTER TABLE ledger_transactions DROP CONSTRAINT IF EXISTS ledger_type_check;
+    ALTER TABLE ledger_transactions
+        ADD CONSTRAINT ledger_type_check
+            CHECK (type IN (
+                'DEPOSIT',
+                'ENTRY_FEE',
+                'PERFORMANCE_FEE',
+                'BINANCE_COMMISSION',
+                'WITHDRAWAL'
+            ));
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'Skipped ledger_type_check update: bot_admin does not own ledger_transactions. A superuser must run this step manually.';
+END;
+$$;
 
 -- ─── Permissions ─────────────────────────────────────────────────────────────
 -- bot_admin is the application role used by Next.js (DATABASE_URL in Coolify).
-GRANT SELECT, INSERT ON user_trade_allocations TO bot_admin;
-GRANT USAGE, SELECT ON SEQUENCE user_trade_allocations_id_seq TO bot_admin;
+-- If bot_admin created user_trade_allocations it is already the owner (all
+-- privileges implicit). Wrapped in exception handler for safety.
+DO $$
+BEGIN
+    GRANT SELECT, INSERT ON user_trade_allocations TO bot_admin;
+    GRANT USAGE, SELECT ON SEQUENCE user_trade_allocations_id_seq TO bot_admin;
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'Skipped grants on user_trade_allocations: already owner or insufficient privilege.';
+END;
+$$;
 
 COMMIT;
