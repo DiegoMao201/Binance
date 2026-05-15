@@ -57,9 +57,18 @@ CREATE TABLE IF NOT EXISTS user_trade_allocations (
     allocated_at     TIMESTAMPTZ(6) NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_uta_user_id      ON user_trade_allocations(user_id);
-CREATE INDEX IF NOT EXISTS idx_uta_allocated_at ON user_trade_allocations(allocated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_uta_symbol       ON user_trade_allocations(symbol);
+-- NOTE: CREATE INDEX requires table ownership; wrap to avoid crashing if
+-- the table was pre-created under a different DB role (e.g. postgres).
+DO $$
+BEGIN
+    CREATE INDEX IF NOT EXISTS idx_uta_user_id      ON user_trade_allocations(user_id);
+    CREATE INDEX IF NOT EXISTS idx_uta_allocated_at ON user_trade_allocations(allocated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_uta_symbol       ON user_trade_allocations(symbol);
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'Skipped index creation on user_trade_allocations: not the table owner.';
+END;
+$$;
 
 -- ─── Extend ledger_transactions CHECK constraint ──────────────────────────────
 -- PostgreSQL does not support in-place modification of named CHECK constraints.
