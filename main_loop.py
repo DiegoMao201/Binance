@@ -675,13 +675,29 @@ def _build_guardrails(
     # approved=false / direction_alignment=misaligned because Veto V1 fires
     # on bearish macro + low volume_ratio. That veto is correct for random
     # counter-trend bets but WRONG for Scenario A where being counter-trend
-    # is the entire point (oversold rebound from support). Bypass both flags
-    # when: confidence is above threshold, setup is acceptable, and no
-    # critical risk flags are present.
+    # is the entire point (oversold rebound from support). Bypass approved,
+    # alignment AND setup_quality when: confidence >= threshold, no critical
+    # risk flags. The Python technical gates (volatility_ready, score_ready,
+    # spread, flow) are the real safety net for Scenario A — not the AI's
+    # regime classification which can fire chop_regime for DOGE ATR=0.27%
+    # even though the Python min_atr_pct for DOGE is only 0.0015.
+    # Scenario B also gets this override for deep oversold with strong microstructure
+    # (flow >= 0.60 AND ob >= 0.55): the AI's V5 vol_accel veto is irrelevant when
+    # the orderbook and tape are already showing accumulation at RSI <= 35.
+    _rsi_for_b  = float(technical_signal.get("rsi", 99.0))
+    _flow_for_b = float(technical_signal.get("trade_flow_score", 0.0))
+    _ob_for_b   = float(technical_signal.get("orderbook_imbalance", 0.0))
     scenario_a_override = (
         scenario == "A"
         and ai_confident
-        and ai_setup_ready
+        and len(critical_flags_present) == 0
+    )
+    scenario_b_micro_override = (
+        scenario == "B"
+        and ai_confident
+        and _rsi_for_b <= 35.0
+        and _flow_for_b >= 0.60
+        and _ob_for_b >= 0.55
         and len(critical_flags_present) == 0
     )
     # AI correction override: the Python correction layer proved the AI applied
@@ -695,9 +711,9 @@ def _build_guardrails(
     ai_gate_ready = all([
         ai_confident,
         same_direction,
-        ai_approved or scenario_a_override or ai_correction_override,
-        ai_alignment or scenario_a_override or ai_correction_override,
-        ai_setup_ready or ai_correction_override,
+        ai_approved or scenario_a_override or scenario_b_micro_override or ai_correction_override,
+        ai_alignment or scenario_a_override or scenario_b_micro_override or ai_correction_override,
+        ai_setup_ready or scenario_a_override or scenario_b_micro_override or ai_correction_override,
         scenario == "A" or ai_risk_clear,
     ])
 
