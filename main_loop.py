@@ -3199,6 +3199,36 @@ def run_cycle() -> None:
             for scan in scan_results:
                 technical_signal = scan["technical_signal"]
                 symbol = scan["symbol"]
+
+                # ── ONE-TRADE-PER-SYMBOL LOCK ──────────────────────────────────────────
+                # Si ya hay una posicion abierta en este simbolo, no abrimos otra.
+                # Se comprueba ANTES de pre_guards para ahorrar CPU y creditos IA.
+                # Esta regla es independiente del global_lock (MAX_GLOBAL_POSITIONS):
+                # el global_lock limita el total del portfolio, este lock evita la
+                # "Correlated Risk" donde WIF colapsa con 2 posiciones abiertas en WIF.
+                if any(str(p.get("symbol") or "") == symbol for p in open_positions):
+                    logger.debug(
+                        "ONE-TRADE-PER-SYMBOL: %s ya tiene una posicion abierta — saltando.",
+                        symbol,
+                    )
+                    continue
+                # ── /ONE-TRADE-PER-SYMBOL LOCK ────────────────────────────────────────
+
+
+                # ── ONE-TRADE-PER-SYMBOL LOCK ──────────────────────────────────────────
+                # Si ya hay una posicion abierta en este simbolo, no abrimos otra.
+                # Se comprueba ANTES de pre_guards para ahorrar CPU y creditos IA.
+                # Esta regla es independiente del global_lock (MAX_GLOBAL_POSITIONS):
+                # el global_lock limita el total del portfolio, este lock evita la
+                # "Correlated Risk" donde WIF colapsa con 2 posiciones abiertas en WIF.
+                if any(str(p.get("symbol") or "") == symbol for p in open_positions):
+                    logger.debug(
+                        "ONE-TRADE-PER-SYMBOL: %s ya tiene una posicion abierta — saltando.",
+                        symbol,
+                    )
+                    continue
+                # ── /ONE-TRADE-PER-SYMBOL LOCK ────────────────────────────────────────
+
                 # Pre-gate barato por simbolo (sin gastar tokens IA).
                 pre_guards = _build_guardrails(settings, technical_signal, AI_NOT_CONSULTED, order_history, symbol=symbol)
                 if not (
