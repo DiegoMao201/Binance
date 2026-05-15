@@ -13,8 +13,10 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { verifyJWT } from "@/lib/auth";
 import { getAdminStats } from "@/lib/pamm";
+import { prisma } from "@/lib/db";
 import { OnboardingForm } from "./_components/OnboardingForm";
 import { InvestorTable } from "./_components/InvestorTable";
+import { GlobalOpsLog, type LedgerRow } from "./_components/GlobalOpsLog";
 
 export const dynamic = "force-dynamic";
 
@@ -52,8 +54,30 @@ export default async function AdminDashboardPage() {
     redirect("/portal/login?next=/admin/dashboard");
   }
 
-  // ── Fetch KPIs and investor list ─────────────────────────────────────────────
-  const stats = await getAdminStats();
+  // ── Fetch KPIs, investor list, and full ledger log ────────────────────────────
+  const [stats, rawLedger] = await Promise.all([
+    getAdminStats(),
+    // Fetch last 2 000 ledger entries (all users, DESC) for the Ops Log.
+    // Joined with users to get a display alias without a second query.
+    prisma.ledgerTransaction.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 2000,
+      include: { user: { select: { email: true, name: true } } },
+    }),
+  ]);
+
+  // Serialise Decimal + Date + BigInt → plain strings (Server → Client boundary).
+  const ledgerRows: LedgerRow[] = rawLedger.map((row) => ({
+    id:          row.id.toString(),
+    userId:      row.userId,
+    userAlias:   row.user.name ?? row.user.email,
+    type:        row.type,
+    amount:      row.amountUsdt.toFixed(8),
+    description: row.description ?? null,
+    createdAt:   row.createdAt instanceof Date
+                   ? row.createdAt.toISOString()
+                   : String(row.createdAt),
+  }));
 
   const kpis: KpiCardData[] = [
     {
@@ -155,11 +179,24 @@ export default async function AdminDashboardPage() {
           gridTemplateColumns: "320px 1fr",
           gap: 20,
           alignItems: "start",
+          marginBottom: 32,
         }}
       >
         <OnboardingForm />
         <InvestorTable investors={stats.investors} />
       </div>
+
+      {/* ── Global Operations Log ── */}
+      <section
+        style={{
+          background: CARD,
+          border: `1px solid ${BORD}`,
+          borderRadius: 16,
+          padding: "24px 22px",
+        }}
+      >
+        <GlobalOpsLog rows={ledgerRows} />
+      </section>
     </div>
   );
 }

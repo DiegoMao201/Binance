@@ -107,6 +107,11 @@ model UserTradeAllocation {
   id             BigInt   @id @default(autoincrement())
   userId         String   @map("user_id")         @db.Uuid
 
+  // Idempotency key: the bot's own opaque trade ID (e.g. Binance orderId or
+  // a UUID generated before the close webhook fires). Combined with userId,
+  // guarantees exactly-once allocation even on retry/network-error scenarios.
+  tradeId        String   @map("trade_id")         @db.VarChar(128)
+
   symbol         String   @db.VarChar(32)
   side           String   @db.VarChar(8)           // 'BUY' | 'SELL'
   exitReason     String   @default("unknown") @map("exit_reason") @db.VarChar(64)
@@ -127,6 +132,7 @@ model UserTradeAllocation {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([tradeId, userId], name: "unique_trade_per_user", map: "uq_uta_trade_user")
   @@index([userId],      map: "idx_uta_user_id")
   @@index([allocatedAt], map: "idx_uta_allocated_at")
   @@index([symbol],      map: "idx_uta_symbol")

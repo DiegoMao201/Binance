@@ -223,6 +223,23 @@ export default async function ClientDashboardPage() {
   const kpiPerfFee      = (perfFeePct.mul(100).toFixed(1)) + "%";
   const roiPositive     = roi.gte(0);
 
+  // ── Metrics: cumulative profits + total fees paid ───────────────────────────
+  // Cumulative Profits = sum of every net-positive allocation (closed wins only).
+  // Total Fees Paid    = sum of all admin_fee_usdt entries (Binance fee + perf fee).
+  const cumulativeProfits = trades.reduce(
+    (acc, t) => {
+      const n = new Prisma.Decimal(t.netPnl);
+      return n.gt(0) ? acc.add(n) : acc;
+    },
+    new Prisma.Decimal(0),
+  );
+  const totalFeesPaid = trades.reduce(
+    (acc, t) => acc.add(new Prisma.Decimal(t.adminFee)),
+    new Prisma.Decimal(0),
+  );
+  const kpiCumProfits  = fmtUSDT(cumulativeProfits.toFixed(2));
+  const kpiTotalFees   = fmtUSDT(totalFeesPaid.toFixed(2));
+
   return (
     <div
       style={{
@@ -358,6 +375,52 @@ export default async function ClientDashboardPage() {
                 </p>
                 <p style={{ color: MUTE, fontSize: 12 }}>
                   Historial completo de asignaciones
+                </p>
+              </div>
+
+              {/* ── Cumulative Profits card ── */}
+              {/* Sum of every net-positive allocation in absolute USDT. */}
+              <div
+                className="kpi-hover kpi-hover-green"
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 20px",
+                  borderLeft: `3px solid ${GREEN}`,
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Ganancias Acumuladas
+                </p>
+                <p style={{ color: GREEN, fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                  {kpiCumProfits}
+                </p>
+                <p style={{ color: MUTE, fontSize: 12 }}>
+                  Solo operaciones ganadoras (neto post-comisión)
+                </p>
+              </div>
+
+              {/* ── Total Fees Paid card ── */}
+              {/* adminFee = binanceFee + performanceFee across all trades. */}
+              <div
+                className="kpi-hover"
+                style={{
+                  background: CARD,
+                  border: `1px solid ${BORD}`,
+                  borderRadius: 20,
+                  padding: "24px 24px 20px",
+                  borderLeft: "3px solid #a78bfa",
+                }}
+              >
+                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Comisiones Pagadas
+                </p>
+                <p style={{ color: "#a78bfa", fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                  {kpiTotalFees}
+                </p>
+                <p style={{ color: MUTE, fontSize: 12 }}>
+                  Binance fee + comisión de rendimiento
                 </p>
               </div>
             </div>

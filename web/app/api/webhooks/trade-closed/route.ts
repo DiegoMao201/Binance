@@ -1,35 +1,41 @@
 /**
  * POST /api/webhooks/trade-closed
  *
- * ─── PAMM Allocation Engine ──────────────────────────────────────────────────
+ * ─── PAMM Allocation Engine v2 — Asymmetric Single-Client ────────────────────
  *
- * Called by the Python trading bot after every trade closes. Performs the full
- * PAMM (Percentage Allocation Management Module) distribution atomically:
+ * Called by the Python trading bot after every trade closes. Performs an
+ * exact, auditable PAMM distribution for one specific client atomically.
  *
- *   1. Auth guard — Bearer <WEBHOOK_SECRET> required.
- *   2. Zod validation — typed payload from the Python bot.
- *   3. Prisma $transaction — for every active CLIENT:
- *        gross_pnl   = balance_before × pnl_pct          (can be negative)
- *        commission  = balance_before × fees_pct          (always ≥ 0, recovered by admin)
- *        perf_fee    = max(gross_pnl, 0) × performance_fee_pct  (5%, only on wins)
- *        admin_fee   = commission + perf_fee
- *        net_pnl     = gross_pnl − admin_fee              (credited to client)
- *        new_balance = balance_before + net_pnl
+ * ── Business Rules ─────────────────────────────────────────────────────────
  *
- *      Writes atomically:
- *        • users.balance_usdt          ← new_balance
- *        • user_trade_allocations      ← immutable allocation record
- *        • ledger_transactions         ← PERFORMANCE_FEE row (if fee > 0)
- *        • ledger_transactions         ← BINANCE_COMMISSION row (always)
+ *   Input:  tradeId, userId, rawPnl (USDT), binanceFee (USDT), symbol,
+ *           side, exitReason
  *
- *   4. Fire-and-forget email to clients whose net_pnl > 0.
+ *   Step 1 — Idempotency guard:
+ *     If (tradeId, userId) already exists in user_trade_allocations →
+ *     return 200 OK { status: "skipped", reason: "duplicate" }.
+ *     This prevents double-charging/crediting on network retries.
  *
- * Rule: The bot NEVER waits for email delivery. HTTP 200 is returned as soon
- * as the DB transaction commits, typically < 300 ms.
+ *   Step 2 — PAMM Math (Decimal-only, no floats):
+ *     netBaseline     = rawPnl − binanceFee
+ *     performanceFee  = netBaseline > 0  ?  netBaseline × userPerfFeePct  : 0
+ *     clientNetShare  = rawPnl − binanceFee − performanceFee
+ *                     = netBaseline × (1 − userPerfFeePct)   [if WIN]
+ *                     = netBaseline                           [if LOSS]
+ *     adminTotalShare = binanceFee + performanceFee
+ *
+ *   Step 3 — ACID $transaction:
+ *     (a) users.balance_usdt  += clientNetShare        (client row)
+ *     (b) users.balance_usdt  += adminTotalShare       (admin row)
+ *     (c) user_trade_allocations  ← allocation record
+ *     (d) ledger_transactions ← TRADE_PNL             (client)
+ *     (e) ledger_transactions ← BINANCE_FEE_REIMBURSEMENT  (client)
+ *     (f) ledger_transactions ← PERFORMANCE_FEE       (client, only on wins)
  *
  * Security:
- *   • Timing-safe token comparison via crypto.timingSafeEqual.
- *   • Returns 401 on any auth failure without leaking which check failed.
+ *   • Timing-safe Bearer token via crypto.timingSafeEqual.
+ *   • Returns 401 on auth failure without leaking which check failed.
+ *   • Idempotency prevents replay-attack double-credits.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -39,45 +45,32 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { sendPammAllocationEmail } from "@/lib/email";
 
-// ─── Performance fee constant ─────────────────────────────────────────────────
-// Matches the default in prisma/schema.prisma (User.performanceFeePct = 0.05).
-// Per-user fee schedules are read from the DB; this constant is only used to
-// label the ledger row description.
-const PERF_FEE_LABEL = "5% performance fee";
-
 // ─── Payload schema ───────────────────────────────────────────────────────────
 const TradeClosedSchema = z.object({
+  /** Bot-generated opaque trade identifier. Used for idempotency. */
+  tradeId: z.string().min(1).max(128),
+  /** UUID of the client user this allocation belongs to. */
+  userId: z.string().uuid(),
+  /**
+   * Raw (gross) PnL in absolute USDT.
+   * Positive = WIN, negative = LOSS. Precision up to 8 decimal places.
+   */
+  rawPnl: z.number(),
+  /**
+   * Binance execution fee in absolute USDT (always >= 0).
+   * Admin paid this upfront at the exchange level; it is deducted from the
+   * client and reimbursed to the admin on every trade, WIN or LOSS.
+   */
+  binanceFee: z.number().min(0),
   /** Trading pair, e.g. "SOL/USDT". */
   symbol: z.string().min(3).max(32),
-  /**
-   * Net P&L as a decimal fraction of the position size.
-   * e.g. 0.015 = +1.5%   |  -0.008 = -0.8%
-   */
-  pnl_pct: z.number(),
   /** "BUY" | "SELL" (Binance Spot convention). */
   side: z.string().min(2).max(8),
   /** Human-readable close trigger, e.g. "trailing_stop". */
-  exit_reason: z.string().min(1).max(64).default("unknown"),
-  /**
-   * Binance commission as a fraction of position notional.
-   * e.g. 0.001 = 0.1% standard maker/taker fee.
-   * Defaults to 0.001 when not supplied.
-   */
-  fees_pct: z.number().min(0).max(0.02).default(0.001),
+  exitReason: z.string().min(1).max(64).default("unknown"),
 });
 
 type TradeClosedPayload = z.infer<typeof TradeClosedSchema>;
-
-// ─── Per-client allocation result (for email dispatch) ────────────────────────
-interface ClientAllocation {
-  userId:     string;
-  email:      string;
-  name:       string | null;
-  symbol:     string;
-  netPnlUsdt: Prisma.Decimal;
-  balanceBefore: Prisma.Decimal;
-  balanceAfter:  Prisma.Decimal;
-}
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 /** Constant-time token comparison — prevents timing-oracle attacks. */
@@ -85,7 +78,6 @@ function verifyBearer(authHeader: string, secret: string): boolean {
   const parts = authHeader.split(" ");
   if (parts.length !== 2 || parts[0] !== "Bearer") return false;
   try {
-    // Pad both to the same length before comparing to avoid length leaks.
     const a = createHash("sha256").update(parts[1]).digest();
     const b = createHash("sha256").update(secret).digest();
     return timingSafeEqual(a, b);
@@ -123,199 +115,214 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 422 },
     );
   }
-  const payload: TradeClosedPayload = parsed.data;
+  const p: TradeClosedPayload = parsed.data;
 
-  // ── 3. PAMM Allocation Transaction ────────────────────────────────────────
-  // All Decimal arithmetic uses Prisma.Decimal (decimal.js) for exact
-  // fixed-point math. No `number` type is used for monetary values.
-  let allocations: ClientAllocation[];
+  // ── 3. Idempotency guard ───────────────────────────────────────────────────
+  // Check BEFORE opening the transaction to avoid unnecessary DB locks.
+  const existing = await prisma.userTradeAllocation.findFirst({
+    where: { tradeId: p.tradeId, userId: p.userId },
+    select: { id: true },
+  });
+  if (existing) {
+    return NextResponse.json(
+      { status: "skipped", reason: "duplicate" },
+      { status: 200 },
+    );
+  }
+
+  // ── 4. Resolve client + admin users ───────────────────────────────────────
+  const [client, admin] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: p.userId },
+      select: { id: true, email: true, name: true, balanceUsdt: true, performanceFeePct: true, isActive: true },
+    }),
+    prisma.user.findFirst({
+      where: { role: "admin", isActive: true },
+      select: { id: true, balanceUsdt: true },
+    }),
+  ]);
+
+  if (!client || !client.isActive) {
+    return NextResponse.json({ error: "Client user not found or inactive." }, { status: 404 });
+  }
+  if (!admin) {
+    console.error("[pamm-webhook] No active admin user found in DB.");
+    return NextResponse.json({ error: "Admin user not configured." }, { status: 500 });
+  }
+
+  // ── 5. PAMM Math — Decimal-only, zero float contamination ─────────────────
+  //
+  //   netBaseline     = rawPnl − binanceFee
+  //   ┌─ WIN  (netBaseline > 0) ──────────────────────────────────────────────
+  //   │   performanceFee  = netBaseline × performanceFeePct      (e.g. 5%)
+  //   │   clientNetShare  = netBaseline − performanceFee          (95%)
+  //   └─ LOSS (netBaseline ≤ 0) ──────────────────────────────────────────────
+  //       performanceFee  = 0            (admin takes NOTHING on losses)
+  //       clientNetShare  = netBaseline  (client absorbs 100% of the loss)
+  //
+  //   adminTotalShare = binanceFee + performanceFee  (always ≥ binanceFee)
+  //
+  const rawPnlD      = new Prisma.Decimal(p.rawPnl);
+  const binanceFeeD  = new Prisma.Decimal(p.binanceFee);
+  const perfFeePct   = new Prisma.Decimal(client.performanceFeePct);
+
+  const netBaseline     = rawPnlD.sub(binanceFeeD);
+  const isWin           = netBaseline.gt(0);
+  const performanceFee  = isWin ? netBaseline.mul(perfFeePct) : new Prisma.Decimal(0);
+  const clientNetShare  = netBaseline.sub(performanceFee);
+  const adminTotalShare = binanceFeeD.add(performanceFee);
+
+  const clientBalanceBefore = new Prisma.Decimal(client.balanceUsdt);
+  const adminBalanceBefore  = new Prisma.Decimal(admin.balanceUsdt);
+  const clientBalanceAfter  = clientBalanceBefore.add(clientNetShare);
+  const adminBalanceAfter   = adminBalanceBefore.add(adminTotalShare);
+
+  const symbolLabel = `${p.symbol} [${p.side.toUpperCase()}] — ${p.exitReason}`;
+
+  // ── 6. ACID $transaction — all-or-nothing ──────────────────────────────────
+  // A DB crash at any point rolls back every write automatically (Postgres).
+  // Order matters: balance updates first, then immutable audit records.
   try {
-    allocations = await runPammTransaction(payload);
+    await prisma.$transaction([
+      // (a) Update CLIENT balance
+      prisma.user.update({
+        where: { id: client.id },
+        data:  { balanceUsdt: clientBalanceAfter },
+      }),
+
+      // (b) Update ADMIN balance (Binance fee reimbursement + performance fee)
+      prisma.user.update({
+        where: { id: admin.id },
+        data:  { balanceUsdt: adminBalanceAfter },
+      }),
+
+      // (c) Immutable allocation record — idempotency key stored here
+      prisma.userTradeAllocation.create({
+        data: {
+          tradeId:        p.tradeId,
+          userId:         client.id,
+          symbol:         p.symbol,
+          side:           p.side,
+          exitReason:     p.exitReason,
+          // Map absolute USDT amounts to schema columns:
+          //   pnlPct         → 0 (not percentage-based in this model)
+          //   grossPnlUsdt   → rawPnl (pre-fee gross)
+          //   commissionUsdt → binanceFee
+          //   perfFeeUsdt    → performanceFee
+          //   adminFeeUsdt   → adminTotalShare
+          //   netPnlUsdt     → clientNetShare
+          pnlPct:         new Prisma.Decimal(0),
+          grossPnlUsdt:   rawPnlD,
+          commissionUsdt: binanceFeeD,
+          perfFeeUsdt:    performanceFee,
+          adminFeeUsdt:   adminTotalShare,
+          netPnlUsdt:     clientNetShare,
+          balanceBefore:  clientBalanceBefore,
+          balanceAfter:   clientBalanceAfter,
+        },
+      }),
+
+      // (d) TRADE_PNL — net amount credited/debited to the client
+      //     Amount stored as absolute (positive). Sign is conveyed by type + description.
+      prisma.ledgerTransaction.create({
+        data: {
+          userId:      client.id,
+          type:        "TRADE_PNL",
+          amountUsdt:  clientNetShare.abs(),
+          description: `Net PnL (${clientNetShare.gte(0) ? "WIN" : "LOSS"}) — ${symbolLabel} | raw: ${rawPnlD.toFixed(8)} USDT`,
+        },
+      }),
+
+      // (e) BINANCE_FEE_REIMBURSEMENT — Binance fee deducted from client, credited to admin
+      //     Always created regardless of WIN/LOSS outcome.
+      prisma.ledgerTransaction.create({
+        data: {
+          userId:      client.id,
+          type:        "BINANCE_FEE_REIMBURSEMENT",
+          amountUsdt:  binanceFeeD,
+          description: `Binance execution fee — ${symbolLabel} | reimbursed to admin`,
+        },
+      }),
+
+      // (f) PERFORMANCE_FEE — only charged on wins (netBaseline > 0)
+      //     Not created on LOSS trades.
+      ...(isWin
+        ? [
+            prisma.ledgerTransaction.create({
+              data: {
+                userId:      client.id,
+                type:        "PERFORMANCE_FEE",
+                amountUsdt:  performanceFee,
+                description: `${(perfFeePct.mul(100).toFixed(1))}% performance fee — ${symbolLabel} | net baseline: ${netBaseline.toFixed(8)} USDT`,
+              },
+            }),
+          ]
+        : []),
+    ]);
   } catch (err) {
+    // If the unique constraint fires (race condition after idempotency check),
+    // treat it as a duplicate rather than an internal error.
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      return NextResponse.json(
+        { status: "skipped", reason: "duplicate" },
+        { status: 200 },
+      );
+    }
     console.error("[pamm-webhook] Transaction failed:", err);
     return NextResponse.json({ error: "PAMM transaction failed." }, { status: 500 });
   }
 
   console.info(
-    "[pamm-webhook] Allocated %s (%s%%) to %d clients.",
-    payload.symbol,
-    (payload.pnl_pct * 100).toFixed(4),
-    allocations.length,
+    "[pamm-webhook] Allocated %s | rawPnl %s | fee %s | clientNet %s | adminGain %s",
+    p.symbol,
+    rawPnlD.toFixed(8),
+    binanceFeeD.toFixed(8),
+    clientNetShare.toFixed(8),
+    adminTotalShare.toFixed(8),
   );
 
-  // ── 4. Fire-and-forget emails for net-positive clients ─────────────────────
-  dispatchWinEmails(allocations, payload.symbol).catch((err) =>
-    console.error("[pamm-webhook] Email dispatch error:", err),
-  );
+  // ── 7. Fire-and-forget email for client (WIN only) ─────────────────────────
+  if (isWin) {
+    dispatchWinEmail(
+      client.email,
+      client.name,
+      p.symbol,
+      clientNetShare,
+      clientBalanceAfter,
+    ).catch((err) =>
+      console.error("[pamm-webhook] Email dispatch error:", err),
+    );
+  }
 
   return NextResponse.json({
-    success:    true,
-    symbol:     payload.symbol,
-    pnl_pct:    payload.pnl_pct,
-    fees_pct:   payload.fees_pct,
-    allocated:  allocations.length,
+    success:        true,
+    tradeId:        p.tradeId,
+    symbol:         p.symbol,
+    rawPnl:         rawPnlD.toFixed(8),
+    binanceFee:     binanceFeeD.toFixed(8),
+    performanceFee: performanceFee.toFixed(8),
+    clientNetShare: clientNetShare.toFixed(8),
+    adminTotalShare: adminTotalShare.toFixed(8),
   });
 }
 
-// ─── PAMM Transaction ─────────────────────────────────────────────────────────
-/**
- * Executes the full PAMM allocation atomically.
- *
- * Uses Prisma.$transaction with a Prisma.Decimal-only arithmetic pipeline.
- * If the server crashes mid-transaction, Postgres rolls back automatically —
- * no client balance is partially updated.
- *
- * @returns The list of per-client allocation results (for email dispatch).
- */
-async function runPammTransaction(
-  payload: TradeClosedPayload,
-): Promise<ClientAllocation[]> {
-  const pnlPct  = new Prisma.Decimal(payload.pnl_pct);
-  const feesPct = new Prisma.Decimal(payload.fees_pct);
-
-  // Fetch all active clients with their individual fee schedules.
-  const clients = await prisma.user.findMany({
-    where:  { role: "client", isActive: true },
-    select: { id: true, email: true, name: true, balanceUsdt: true, performanceFeePct: true },
-  });
-
-  if (clients.length === 0) {
-    console.info("[pamm-webhook] No active clients — skipping allocation.");
-    return [];
-  }
-
-  // ── Build all DB operations in Decimal arithmetic ──────────────────────────
-  type AllocationOp = {
-    client:      typeof clients[number];
-    grossPnl:    Prisma.Decimal;
-    commission:  Prisma.Decimal;
-    perfFee:     Prisma.Decimal;
-    adminFee:    Prisma.Decimal;
-    netPnl:      Prisma.Decimal;
-    newBalance:  Prisma.Decimal;
-  };
-
-  const ops: AllocationOp[] = clients.map((client) => {
-    const balance    = new Prisma.Decimal(client.balanceUsdt);
-    const perfFeePct = new Prisma.Decimal(client.performanceFeePct);
-
-    // ── PAMM Math ────────────────────────────────────────────────────────────
-    // grossPnl can be negative (loss trade).
-    const grossPnl   = balance.mul(pnlPct);
-    // Commission is always positive — admin recovers Binance overhead per trade.
-    const commission = balance.mul(feesPct).abs();
-    // Performance fee is charged ONLY on wins. Zero on losses.
-    const perfFee    = grossPnl.gt(0) ? grossPnl.mul(perfFeePct) : new Prisma.Decimal(0);
-    const adminFee   = commission.add(perfFee);
-    const netPnl     = grossPnl.sub(adminFee);
-    const newBalance = balance.add(netPnl);
-
-    return { client, grossPnl, commission, perfFee, adminFee, netPnl, newBalance };
-  });
-
-  // ── Execute atomically ─────────────────────────────────────────────────────
-  await prisma.$transaction(
-    ops.flatMap(({ client, grossPnl, commission, perfFee, adminFee, netPnl, newBalance }) => {
-      const base = {
-        userId:      client.id,
-        symbol:      payload.symbol,
-        side:        payload.side,
-        exitReason:  payload.exit_reason,
-        pnlPct:      pnlPct,
-        grossPnlUsdt:   grossPnl,
-        commissionUsdt: commission,
-        perfFeeUsdt:    perfFee,
-        adminFeeUsdt:   adminFee,
-        netPnlUsdt:     netPnl,
-        balanceBefore:  new Prisma.Decimal(client.balanceUsdt),
-        balanceAfter:   newBalance,
-      };
-
-      const writes: Prisma.PrismaPromise<unknown>[] = [
-        // 1. Update client balance.
-        prisma.user.update({
-          where: { id: client.id },
-          data:  { balanceUsdt: newBalance },
-        }),
-        // 2. Immutable allocation record.
-        prisma.userTradeAllocation.create({ data: base }),
-        // 3. Binance commission ledger row (always, even on losses).
-        prisma.ledgerTransaction.create({
-          data: {
-            userId:      client.id,
-            type:        "BINANCE_COMMISSION",
-            amountUsdt:  commission,
-            description: `Binance commission share — ${payload.symbol} (${(payload.fees_pct * 100).toFixed(3)}% of position)`,
-          },
-        }),
-      ];
-
-      // 4. Performance fee ledger row — only when a fee was charged.
-      if (perfFee.gt(0)) {
-        writes.push(
-          prisma.ledgerTransaction.create({
-            data: {
-              userId:      client.id,
-              type:        "PERFORMANCE_FEE",
-              amountUsdt:  perfFee,
-              description: `${PERF_FEE_LABEL} — ${payload.symbol} gross +${grossPnl.toFixed(4)} USDT`,
-            },
-          }),
-        );
-      }
-
-      return writes;
-    }),
-  );
-
-  // Return allocation results for email dispatch.
-  return ops.map(({ client, netPnl, newBalance }) => ({
-    userId:        client.id,
-    email:         client.email,
-    name:          client.name,
-    symbol:        payload.symbol,
-    netPnlUsdt:    netPnl,
-    balanceBefore: new Prisma.Decimal(client.balanceUsdt),
-    balanceAfter:  newBalance,
-  }));
-}
-
-// ─── Fire-and-forget email dispatch ───────────────────────────────────────────
-/**
- * Sends "trade closed — WIN" emails to every client whose net PnL > 0.
- * Each send is individually wrapped so one failure does not block the rest.
- * This function is intentionally NOT awaited by the route handler.
- */
-async function dispatchWinEmails(
-  allocations: ClientAllocation[],
+// ─── Fire-and-forget win email ─────────────────────────────────────────────────
+async function dispatchWinEmail(
+  email: string,
+  name: string | null,
   symbol: string,
+  netPnlUsdt: Prisma.Decimal,
+  balanceAfter: Prisma.Decimal,
 ): Promise<void> {
-  const winners = allocations.filter((a) => a.netPnlUsdt.gt(0));
-  if (winners.length === 0) return;
-
-  console.info(
-    "[pamm-webhook] Dispatching win emails for %s to %d client(s).",
+  await sendPammAllocationEmail(
+    email,
+    name,
     symbol,
-    winners.length,
+    parseFloat(netPnlUsdt.toFixed(8)),
+    parseFloat(balanceAfter.toFixed(2)),
   );
-
-  const results = await Promise.allSettled(
-    winners.map((a) =>
-      sendPammAllocationEmail(
-        a.email,
-        a.name,
-        a.symbol,
-        parseFloat(a.netPnlUsdt.toFixed(4)),
-        parseFloat(a.balanceAfter.toFixed(2)),
-      ),
-    ),
-  );
-
-  let sent = 0;
-  let failed = 0;
-  for (const r of results) {
-    if (r.status === "fulfilled") { sent++; }
-    else { failed++; console.error("[pamm-webhook] Email failed:", r.reason); }
-  }
-  console.info("[pamm-webhook] Emails: %d sent, %d failed.", sent, failed);
 }
+
