@@ -1488,7 +1488,7 @@ function TerminalHeader({ status, isOnline, control, risk, portfolio, payload, c
 }
 
 // ── KPI Strip ─────────────────────────────────────────────────────
-function KpiStrip({ risk, portfolio, lastScans, control, preFlight, isOnline }) {
+function KpiStrip({ risk, portfolio, lastScans, control, preFlight, isOnline, cohort }) {
   const pnl    = Number(portfolio?.realized_pnl_usdt || 0);
   const equity = Number(risk?.equity_usd || 0);
   const winRate = Number(portfolio?.win_rate_pct || 0);
@@ -1496,21 +1496,31 @@ function KpiStrip({ risk, portfolio, lastScans, control, preFlight, isOnline }) 
   const candidates = lastScans.filter((s) => s.status === "candidate").length;
   const total  = (portfolio?.wins || 0) + (portfolio?.losses || 0);
 
+  // V3 cohort sub-info (from /api/cohort-analytics fetched at parent level)
+  const v3Total = cohort?.summary?.total_v3 ?? null;
+  const v3WR    = cohort?.v3?.win_rate_pct ?? null;
+  const v3PnL   = cohort?.v3?.net_pnl_usdt ?? null;
+  const v3Wins  = cohort?.v3?.wins ?? null;
+  const v3Loss  = cohort?.v3?.losses ?? null;
+
   const kpis = [
-    { label: "Equity USDT",     value: `${n(equity)} $`,    color: TEXT },
-    { label: "PnL realizado",   value: `${pnl >= 0 ? "+" : ""}${n(pnl)} $`,  color: tone(pnl) },
-    { label: "Win Rate",        value: `${n(winRate)}%`,     color: winRate >= 50 ? G : R, sub: `${portfolio?.wins || 0}W / ${portfolio?.losses || 0}L` },
-    { label: "Max Drawdown",    value: pct(dd),              color: dd >= 0.03 ? R : dd >= 0.015 ? Y : G },
-    { label: "Total trades",    value: String(total),        color: MUTE },
-    { label: "Candidatas",      value: String(candidates),   color: candidates > 0 ? G : MUTE },
-    { label: "Pre-flight",      value: preFlight?.ok ? "VERDE" : "BLOQUEADO", color: preFlight?.ok ? G : R },
-    { label: "Estado",          value: (control?.desired_state || "running").toUpperCase(), color: control?.desired_state === "running" ? G : R },
+    { label: "Equity USDT",     value: `${n(equity)} $`,    color: TEXT, sub: "live balance" },
+    { label: "PnL realizado",   value: `${pnl >= 0 ? "+" : ""}${n(pnl)} $`,  color: tone(pnl),
+      sub: v3PnL !== null ? `V3: ${v3PnL >= 0 ? "+" : ""}${n(v3PnL)} $` : "all-time" },
+    { label: "WR all-time",     value: `${n(winRate)}%`,     color: winRate >= 50 ? G : R,
+      sub: v3WR !== null ? `V3: ${n(v3WR)}% (${v3Wins}W/${v3Loss}L)` : `${portfolio?.wins || 0}W / ${portfolio?.losses || 0}L` },
+    { label: "Max Drawdown",    value: pct(dd),              color: dd >= 0.03 ? R : dd >= 0.015 ? Y : G, sub: "vs HWM" },
+    { label: "Trades all-time", value: String(total),        color: MUTE,
+      sub: v3Total !== null ? `V3: ${v3Total} · Legacy: ${(cohort?.summary?.total_legacy ?? 0)}` : "" },
+    { label: "Candidatas",      value: String(candidates),   color: candidates > 0 ? G : MUTE, sub: "scan actual" },
+    { label: "Pre-flight",      value: preFlight?.ok ? "VERDE" : "BLOQUEADO", color: preFlight?.ok ? G : R, sub: preFlight?.ok ? "go-live" : "veto" },
+    { label: "Estado",          value: (control?.desired_state || "running").toUpperCase(), color: control?.desired_state === "running" ? G : R, sub: "control" },
   ];
 
   return (
     <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
       {kpis.map((k, i) => (
-        <div key={i} style={{ background: CARD, border: `1px solid ${BORD}`, borderRadius: 12, padding: "10px 16px", flexShrink: 0, minWidth: 110 }}>
+        <div key={i} style={{ background: CARD, border: `1px solid ${BORD}`, borderRadius: 12, padding: "10px 16px", flexShrink: 0, minWidth: 130 }}>
           <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em" }}>{k.label}</div>
           <div style={{ fontSize: 14, fontWeight: 700, fontFamily: "monospace", color: k.color, marginTop: 2 }}>{k.value}</div>
           {k.sub && <div style={{ fontSize: 10, color: MUTE }}>{k.sub}</div>}
@@ -1525,6 +1535,7 @@ export default function DashboardClient({ initialData }) {
   const [payload, setPayload]       = useState(initialData);
   const [controlBusy, setControlBusy] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [cohort, setCohort]         = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -1539,10 +1550,28 @@ export default function DashboardClient({ initialData }) {
     }
   }, []);
 
+  // Fetch cohort metrics (separate cadence — 30s — from main /api/state poll)
+  const refreshCohort = useCallback(async () => {
+    try {
+      const res = await fetch("/api/cohort-analytics", { cache: "no-store" });
+      if (!res.ok) return;
+      const next = await res.json();
+      setCohort(next);
+    } catch (err) {
+      console.warn("[DashboardClient] cohort fetch error:", err);
+    }
+  }, []);
+
   useEffect(() => {
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
   }, [refresh]);
+
+  useEffect(() => {
+    refreshCohort();
+    const id = setInterval(refreshCohort, 30000);
+    return () => clearInterval(id);
+  }, [refreshCohort]);
 
   // ── Extraer estado ──────────────────────────────────────────────
   const state          = payload?.state        || {};
@@ -1635,7 +1664,7 @@ export default function DashboardClient({ initialData }) {
 
       <div style={body}>
         {/* KPI strip */}
-        <KpiStrip risk={risk} portfolio={portfolio} lastScans={lastScans} control={control} preFlight={preFlight} isOnline={isOnline} />
+        <KpiStrip risk={risk} portfolio={portfolio} lastScans={lastScans} control={control} preFlight={preFlight} isOnline={isOnline} cohort={cohort} />
 
         {/* Alert banner — bot offline / kill switch / stopped */}
         {showAlert && (
