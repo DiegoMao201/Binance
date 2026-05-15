@@ -28,9 +28,13 @@ COPY --from=builder /app/lib ./lib
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/jsconfig.json ./jsconfig.json
 COPY --from=builder /app/prisma ./prisma
+# Raw SQL migrations — executed at startup via prisma db execute (idempotent).
+COPY --from=builder /app/db ./db
 
 RUN mkdir -p /data/logs
 
 EXPOSE 3000
 HEALTHCHECK --interval=60s --timeout=10s --start-period=45s --retries=3 CMD ["wget", "-qO-", "http://127.0.0.1:3000/api/state"]
-CMD ["npm", "run", "start"]
+# Run pending raw SQL migrations before starting the server.
+# prisma db execute is idempotent (SQL uses IF NOT EXISTS / DROP IF EXISTS).
+CMD ["sh", "-c", "npx prisma db execute --schema ./prisma/schema.prisma --file ./db/migrations/004_pamm_trade_allocations.sql && npm run start"]
