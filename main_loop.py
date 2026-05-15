@@ -19,7 +19,12 @@ from src.execution.trader import TradeExecutor
 from src.safety.risk_manager import RiskManager, RiskSnapshot
 from src.utils.config import Settings, load_settings
 from src.utils.logger import setup_logger
-from src.utils.market_profiles import apply_market_profile, market_profiles_summary
+from src.utils.market_profiles import (
+    apply_market_profile,
+    get_market_cadence,
+    market_profiles_summary,
+    sort_symbols_by_priority,
+)
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.state_store import append_history, build_state_snapshot, load_history, load_state, persist_history, persist_state
 
@@ -898,6 +903,8 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
         "rejection_reason": rejection_reason,
         "ia_consulted": bool(scan.get("ia_consulted")),
         "ia_confidence": float(scan.get("ia_confidence") or 0.0),
+        "ia_cached": bool(scan.get("ia_cached", False)),
+        "ia_cached_age_seconds": float(scan.get("ia_cached_age_seconds") or 0.0),
         "ai_signal": scan.get("ia_signal"),
         "guardrails": scan.get("guardrails"),
         "blocked_by_lock": blocked_by_lock,
@@ -923,6 +930,11 @@ def _build_scan_summary(scan: dict[str, Any], settings: Settings, *, blocked_by_
             "max_spread_pct": market_settings.max_spread_pct,
             "ai_confidence_threshold": market_settings.ai_confidence_threshold,
         },
+        # ── Cadence per-market (TTL IA, prioridad, label, tag) ───────────────
+        # Permite al frontend mostrar badges de velocidad ("turbo 30s",
+        # "institucional 180s") y al operador entender por qué WIF se
+        # re-evalúa antes que BTC.
+        "cadence": get_market_cadence(scan["symbol"]),
     }
 
 
@@ -2274,12 +2286,14 @@ _SCENARIO_C_PULLBACK_PCT = 0.0015
 def _can_reuse_ai_for_price(
     cache_entry: dict[str, Any],
     current_price: float,
+    *,
+    threshold_pct: float | None = None,
 ) -> bool:
     """Tactical cache: if price has not moved enough, reuse the previous AI verdict.
 
     Saves OpenRouter quota and avoids the 429 spiral when 4 symbols all churn
     sub-tick movements. Returns True only when the previous decision is still
-    statistically valid (price drift < 0.15%).
+    statistically valid (price drift < threshold_pct, default 0.15%).
     """
     if not cache_entry or current_price <= 0:
         return False
@@ -2291,7 +2305,8 @@ def _can_reuse_ai_for_price(
     if ref_price <= 0:
         return False
     delta = abs(current_price - ref_price) / ref_price
-    return delta < _AI_PRICE_DELTA_REUSE_PCT
+    limit = float(threshold_pct) if threshold_pct is not None else _AI_PRICE_DELTA_REUSE_PCT
+    return delta < limit
 
 
 def _get_cached_ai_signal_for_symbol(
@@ -2451,6 +2466,10 @@ def run_cycle() -> None:
     ai_analyzer = OpenRouterAnalyzer(settings, logger)
 
     target_symbols = list(settings.target_symbols) or [settings.trading_symbol]
+    # Priorizar mercados volatiles: WIF (1) -> DOGE (2) -> SOL (3) -> ETH/BNB (4) -> BTC (5).
+    # Asegura que en cada ciclo los scalpers se escaneen y consulten IA primero,
+    # antes de que un 429 backoff o latencia de OHLCV los deje sin turno.
+    target_symbols = sort_symbols_by_priority(target_symbols)
     logger.info(
         "Iniciando ciclo multi-ticker (%s) en %s. MAX_OPEN=%s",
         ", ".join(target_symbols),
@@ -3108,16 +3127,26 @@ def run_cycle() -> None:
                 ):
                     continue
 
-                # Consulta IA por simbolo, con cache por simbolo.
+                # Cadencia per-market: WIF/DOGE refrescan IA cada 30-45s,
+                # BTC/ETH cada 120-180s. Reduce latencia en mercados volatiles
+                # sin disparar la cuota OpenRouter en mercados lentos.
+                _cadence = get_market_cadence(symbol)
+                _per_market_ttl = _cadence.get("ai_cache_ttl_seconds")
+                _ttl_seconds = int(_per_market_ttl) if _per_market_ttl else int(settings.ai_min_interval_seconds)
+                _per_market_delta = _cadence.get("price_delta_reuse_pct") or _AI_PRICE_DELTA_REUSE_PCT
+
+                # Consulta IA por simbolo, con cache por simbolo (TTL adaptativo).
                 cached_signal = _get_cached_ai_signal_for_symbol(
-                    ai_signals_by_symbol, symbol, settings.ai_min_interval_seconds
+                    ai_signals_by_symbol, symbol, _ttl_seconds
                 )
                 # Tactical price-delta cache: if TTL expired but price barely moved,
                 # reuse the verdict anyway. Critical to survive 429 storms.
                 if cached_signal is None:
                     stale_entry = ai_signals_by_symbol.get(symbol)
                     if stale_entry and _can_reuse_ai_for_price(
-                        stale_entry, float(technical_signal.get("close") or 0.0)
+                        stale_entry,
+                        float(technical_signal.get("close") or 0.0),
+                        threshold_pct=_per_market_delta,
                     ):
                         cached_signal = dict(stale_entry)
                         cached_signal["cached"] = True
@@ -3126,7 +3155,7 @@ def run_cycle() -> None:
                         logger.info(
                             "IA price-delta cache hit para %s (delta < %.2f%%, ahorro de cuota).",
                             symbol,
-                            _AI_PRICE_DELTA_REUSE_PCT * 100,
+                            float(_per_market_delta) * 100,
                         )
                 if cached_signal is not None:
                     symbol_ai_signal = cached_signal
@@ -3214,13 +3243,15 @@ def run_cycle() -> None:
                 latest_candle = chosen_scan.get("latest_candle") or {}
                 _close = float(technical_signal.get("close") or 0.0)
                 _low = float(latest_candle.get("low") or _close)
-                _required_low = _close * (1.0 - _SCENARIO_C_PULLBACK_PCT)
+                # Pullback per-market: WIF/DOGE 0.08-0.10% (turbo), BTC 0.20% (estricto).
+                _pullback_pct = float(get_market_cadence(symbol).get("scenario_c_pullback_pct") or _SCENARIO_C_PULLBACK_PCT)
+                _required_low = _close * (1.0 - _pullback_pct)
                 if _close > 0 and _low > _required_low:
                     logger.info(
                         "Scenario C bloqueado por pullback insuficiente | %s low=%.6f need<=%.6f "
                         "(close=%.6f, retroceso requerido=%.2f%%). Esperando precio mejor.",
                         symbol, _low, _required_low, _close,
-                        _SCENARIO_C_PULLBACK_PCT * 100,
+                        _pullback_pct * 100,
                     )
                     # Persist a synthetic decision so the dashboard knows why we
                     # didn't fire. No order is sent; cooldown is NOT triggered.
@@ -3236,7 +3267,7 @@ def run_cycle() -> None:
                         "mode": "dry_run" if settings.dry_run else "live",
                         "status": "deferred_pullback",
                         "reason": (
-                            f"Scenario C: esperando pullback >= {_SCENARIO_C_PULLBACK_PCT*100:.2f}% "
+                            f"Scenario C: esperando pullback >= {_pullback_pct*100:.2f}% "
                             f"(low={_low:.6f}, target<={_required_low:.6f})"
                         ),
                         "scenario": "C",
@@ -3440,6 +3471,8 @@ def run_cycle() -> None:
                     "ia_consulted": scan["symbol"] in per_symbol_ai,
                     "ia_confidence": float(per_symbol_ai.get(scan["symbol"], {}).get("confidence", 0.0)),
                     "ia_signal": per_symbol_ai.get(scan["symbol"]),
+                    "ia_cached": bool(per_symbol_ai.get(scan["symbol"], {}).get("cached", False)),
+                    "ia_cached_age_seconds": float(per_symbol_ai.get(scan["symbol"], {}).get("cached_age_seconds", 0.0) or 0.0),
                     "guardrails": per_symbol_guardrails.get(scan["symbol"]),
                 },
                 settings,

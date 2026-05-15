@@ -30,3 +30,4 @@ logs/recovery_status.json
 /pre_flight.json
 web/node_modules/
 web/.next/
+.coolify_creds

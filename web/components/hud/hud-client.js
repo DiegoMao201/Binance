@@ -242,11 +242,27 @@ export default function HudClient({ initialData }) {
         <div className="hud-controlbar-left">
           <span className="hud-control-label">SYMBOL</span>
           <div className="hud-symbol-tabs">
-            {(targetSymbols.length ? targetSymbols : lastScans.map(s => s.symbol)).map((sym) => (
-              <button key={sym} onClick={() => setFocusSymbol(sym)} className={`hud-symbol-tab ${sym === focusSymbol ? "active" : ""}`}>
-                {sym}
-              </button>
-            ))}
+            {(targetSymbols.length ? targetSymbols : lastScans.map(s => s.symbol)).map((sym) => {
+              const scanForSym = lastScans.find((s) => s.symbol === sym) || {};
+              const cad = scanForSym.cadence || {};
+              const ttl = Number(cad.ai_cache_ttl_seconds || 0);
+              const tag = String(cad.cadence_tag || "");
+              const tagColor = tag === "turbo" ? "#ef4444" : tag === "rapida" ? "#22c55e" : tag === "institucional" ? "#22d3ee" : "#facc15";
+              return (
+                <button key={sym} onClick={() => setFocusSymbol(sym)} className={`hud-symbol-tab ${sym === focusSymbol ? "active" : ""}`}>
+                  <span>{sym}</span>
+                  {ttl > 0 && (
+                    <span style={{
+                      marginLeft: 6, fontSize: 8, padding: "1px 5px", borderRadius: 3,
+                      background: "rgba(0,0,0,0.4)", color: tagColor, fontWeight: 800,
+                      letterSpacing: "0.06em",
+                    }}>
+                      {ttl}s
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
         <div className="hud-controlbar-right">

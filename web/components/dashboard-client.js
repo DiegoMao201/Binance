@@ -719,6 +719,44 @@ function MarketProfilesPanel({ lastScans, targetSymbols, focusSymbol, onSymbol }
                 </div>
               </div>
 
+              {/* Cadence badge: latencia/prioridad real del mercado */}
+              {(() => {
+                const cad = sc.cadence || {};
+                const ttl = Number(cad.ai_cache_ttl_seconds || 0);
+                const prio = Number(cad.priority || 5);
+                const tag = String(cad.cadence_tag || "estandar");
+                const tagColor = tag === "turbo" ? R : tag === "rapida" ? G : tag === "institucional" ? B : Y;
+                const aiAge = Number(sc.ia_cached_age_seconds || 0);
+                const aiCached = Boolean(sc.ia_cached);
+                const ageColor = ttl > 0 && aiAge > ttl * 0.8 ? Y : MUTE;
+                return (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 6, fontSize: 9,
+                    padding: "4px 8px",
+                    background: "rgba(0,0,0,0.25)",
+                    border: `1px solid ${BORD}`,
+                    borderRadius: 6,
+                    fontFamily: "monospace",
+                  }}>
+                    <span style={{ color: tagColor, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      {tag}
+                    </span>
+                    <span style={{ color: MUTE }}>·</span>
+                    <span style={{ color: TEXT }}>IA cada <b>{ttl || "—"}s</b></span>
+                    <span style={{ color: MUTE }}>·</span>
+                    <span style={{ color: MUTE }}>prio <b style={{ color: TEXT }}>{prio}</b></span>
+                    {ttl > 0 && (
+                      <>
+                        <span style={{ color: MUTE }}>·</span>
+                        <span style={{ color: ageColor }}>
+                          {aiCached ? `cache ${Math.round(aiAge)}s` : "● fresh"}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div style={{ fontSize: 10, color: MUTE, fontStyle: "italic", lineHeight: 1.3 }}>
                 {meta.desc}
               </div>

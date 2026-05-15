@@ -43,6 +43,19 @@ _OVERRIDABLE_FIELDS: tuple[str, ...] = (
     "min_bb_width_pct",
 )
 
+# Campos de CADENCIA / LATENCIA por mercado. NO se aplican a Settings (no
+# existen como campos del dataclass), se consultan via get_market_cadence().
+# Permiten que mercados volatiles (WIF/DOGE) refresquen IA cada 30-45s mientras
+# que BTC/ETH conservan TTL alto y ahorran cuota OpenRouter.
+_CADENCE_FIELDS: tuple[str, ...] = (
+    "ai_cache_ttl_seconds",      # TTL del cache IA por mercado (override AI_MIN_INTERVAL_SECONDS)
+    "price_delta_reuse_pct",     # umbral de drift de precio para reusar verdict cacheado
+    "scenario_c_pullback_pct",   # pullback minimo exigido en escenario C
+    "priority",                  # menor = se escanea/consulta IA primero (1=alta urgencia)
+    "label",                     # tag visible en frontend ("Scalper Salvaje", etc.)
+    "cadence_tag",               # tag de velocidad ("turbo", "rapida", "estandar", "institucional")
+)
+
 
 # Per-market entry profiles. Keys are normalised symbols (uppercase, '/').
 # Comments next to each value explain the empirical/structural reason.
@@ -65,6 +78,13 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.60,
         "guardrail_relaxation": 0.06,
         "min_bb_width_pct": 0.0,
+        # Cadencia institucional: BTC se mueve lento, IA cada 3 min basta.
+        "ai_cache_ttl_seconds": 180,
+        "price_delta_reuse_pct": 0.0020,    # 0.20% drift permitido para reuso
+        "scenario_c_pullback_pct": 0.0020,  # pullback estricto
+        "priority": 5,
+        "label": "Oro Digital",
+        "cadence_tag": "institucional",
     },
     "ETH/USDT": {
         # Plata líquida. Reactivo pero ordenado; defaults moderados.
@@ -79,6 +99,12 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.55,
         "guardrail_relaxation": 0.08,
         "min_bb_width_pct": 0.0,
+        "ai_cache_ttl_seconds": 120,
+        "price_delta_reuse_pct": 0.0018,
+        "scenario_c_pullback_pct": 0.0018,
+        "priority": 4,
+        "label": "Plata Líquida",
+        "cadence_tag": "estandar",
     },
     "SOL/USDT": {
         # Velocista. Pullbacks shallower y movimientos explosivos: aceptamos
@@ -94,6 +120,12 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.55,
         "guardrail_relaxation": 0.10,
         "min_bb_width_pct": 0.0,
+        "ai_cache_ttl_seconds": 75,
+        "price_delta_reuse_pct": 0.0015,
+        "scenario_c_pullback_pct": 0.0015,
+        "priority": 3,
+        "label": "Velocista",
+        "cadence_tag": "rapida",
     },
     "BNB/USDT": {
         # Activo nativo del exchange — buena ejecución, vol moderada.
@@ -108,6 +140,12 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.53,
         "guardrail_relaxation": 0.08,
         "min_bb_width_pct": 0.0,
+        "ai_cache_ttl_seconds": 90,
+        "price_delta_reuse_pct": 0.0015,
+        "scenario_c_pullback_pct": 0.0015,
+        "priority": 4,
+        "label": "Nativo Binance",
+        "cadence_tag": "estandar",
     },
     "DOGE/USDT": {
         # Scalper salvaje. Memes sobreextienden RSI sin ser techo;
@@ -123,6 +161,12 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.52,
         "guardrail_relaxation": 0.12,
         "min_bb_width_pct": 0.0,
+        "ai_cache_ttl_seconds": 45,
+        "price_delta_reuse_pct": 0.0010,    # mas estricto: re-evaluar antes
+        "scenario_c_pullback_pct": 0.0010,
+        "priority": 2,
+        "label": "Scalper Salvaje",
+        "cadence_tag": "turbo",
     },
     "WIF/USDT": {
         # Scalper extremo. Small-cap meme: RSI extendido antes de corregir,
@@ -138,7 +182,23 @@ MARKET_PROFILES: dict[str, dict[str, float]] = {
         "ai_confidence_threshold": 0.50,
         "guardrail_relaxation": 0.15,
         "min_bb_width_pct": 0.0,
+        "ai_cache_ttl_seconds": 30,         # MAXIMA velocidad: meme volatil
+        "price_delta_reuse_pct": 0.0008,    # cualquier movimiento >0.08% re-evalua
+        "scenario_c_pullback_pct": 0.0008,
+        "priority": 1,                      # PRIMERO en cada ciclo
+        "label": "Scalper Extremo",
+        "cadence_tag": "turbo",
     },
+}
+
+# Defaults para mercados sin perfil (usar globales del Settings).
+_DEFAULT_CADENCE: dict[str, Any] = {
+    "ai_cache_ttl_seconds": None,        # None => usar settings.ai_min_interval_seconds
+    "price_delta_reuse_pct": 0.0015,     # default global historico
+    "scenario_c_pullback_pct": 0.0015,
+    "priority": 5,
+    "label": "Default",
+    "cadence_tag": "estandar",
 }
 
 
@@ -174,19 +234,46 @@ def apply_market_profile(settings: Settings, symbol: str | None) -> Settings:
     return replace(settings, **overrides)
 
 
+def get_market_cadence(symbol: str | None) -> dict[str, Any]:
+    """Return cadence metadata for a market (TTL, priority, tag, label).
+
+    Always returns a fully-populated dict (defaults applied for missing keys).
+    """
+    profile = get_market_profile(symbol) or {}
+    out = dict(_DEFAULT_CADENCE)
+    for field in _CADENCE_FIELDS:
+        if field in profile:
+            out[field] = profile[field]
+    return out
+
+
+def sort_symbols_by_priority(symbols: list[str] | tuple[str, ...]) -> list[str]:
+    """Return symbols sorted by priority (lower = scanned first).
+
+    Garantiza que WIF/DOGE se escaneen y consulten IA ANTES que BTC/ETH
+    en cada ciclo, para que mercados volatiles no esperen a los lentos.
+    """
+    def _key(sym: str) -> tuple[int, str]:
+        cad = get_market_cadence(sym)
+        return (int(cad.get("priority") or 5), _normalise(sym))
+    return sorted(list(symbols), key=_key)
+
+
 def market_profiles_summary(target_symbols: tuple[str, ...] | list[str]) -> dict[str, dict[str, Any]]:
     """Build the per-market summary published to the dashboard.
 
-    Includes both the configured overrides AND a list of fields that are
-    actually being overridden, so the frontend can render a clean table.
+    Incluye overrides de gating + metadata de cadencia (TTL IA, priority,
+    label, cadence_tag) para que el frontend muestre badges de velocidad.
     """
     out: dict[str, dict[str, Any]] = {}
     for sym in target_symbols:
         profile = get_market_profile(sym) or {}
+        cadence = get_market_cadence(sym)
         out[_normalise(sym)] = {
             "symbol": _normalise(sym),
             "has_profile": bool(profile),
-            "overrides": dict(profile),
+            "overrides": {k: v for k, v in profile.items() if k in _OVERRIDABLE_FIELDS},
+            "cadence": cadence,
         }
     return out
 
@@ -195,5 +282,7 @@ __all__ = [
     "MARKET_PROFILES",
     "apply_market_profile",
     "get_market_profile",
+    "get_market_cadence",
+    "sort_symbols_by_priority",
     "market_profiles_summary",
 ]
