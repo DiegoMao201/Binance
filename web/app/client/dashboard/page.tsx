@@ -44,14 +44,14 @@ type TradeQueryRow = {
 };
 
 // ─── Colour tokens (Server-side layout) ──────────────────────────────────────
-const BG    = "#080e16";
-const CARD  = "#0a1018";
-const BORD  = "#1a2b3c";
+const BG    = "#04070c";
+const CARD  = "rgba(10,15,22,0.72)";
+const BORD  = "rgba(63,87,114,0.28)";
 const TEXT  = "#dce7f5";
 const MUTE  = "#6b8299";
-const GREEN = "#12d98b";
-const RED   = "#eb4b61";
-const BLUE  = "#57c1ff";
+const GREEN = "#10b981";
+const RED   = "#fb7185";
+const BLUE  = "#22d3ee";
 
 function fmtUSDT(v: string, showSign = false): string {
   const n = Number(v);
@@ -244,16 +244,21 @@ export default async function ClientDashboardPage() {
     <div
       style={{
         minHeight: "100vh",
-        background: BG,
+        background:
+          `radial-gradient(900px 600px at 8% -8%, rgba(16,185,129,0.09), transparent 60%),` +
+          `radial-gradient(900px 600px at 100% 0%, rgba(6,182,212,0.07), transparent 65%),` +
+          BG,
         color: TEXT,
-        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace",
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
         boxSizing: "border-box",
       }}
     >
       {/* ── Top navigation bar ── */}
       <nav
         style={{
-          background: CARD,
+          background: "rgba(4,7,12,0.88)",
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
           borderBottom: `1px solid ${BORD}`,
           padding: "0 24px",
           height: 56,
@@ -265,12 +270,12 @@ export default async function ClientDashboardPage() {
           zIndex: 10,
         }}
       >
-        <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.02em" }}>
+        <span style={{ fontWeight: 800, fontSize: 16, letterSpacing: "-0.02em" }}>
           ◈ OptiFerre
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <LiveBadge active={isBotActive} />
-          <span style={{ color: MUTE, fontSize: 12 }}>
+          <span style={{ color: MUTE, fontSize: 12, fontFamily: "ui-monospace, Menlo, monospace" }}>
             {userProfile.name ?? userProfile.email}
           </span>
         </div>
@@ -302,24 +307,29 @@ export default async function ClientDashboardPage() {
             >
               {/* Balance hero card */}
               <div
-                className="kpi-card kpi-hover kpi-hover-green"
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: "2px solid #22d3ee",
                   borderRadius: 20,
                   padding: "24px 24px 20px",
                   gridColumn: "span 2",
-                  borderLeft: `3px solid ${GREEN}`,
                   minWidth: 0,
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px rgba(34,211,238,0.35)",
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                <div style={{ position: "absolute", top: -30, right: -30, width: 120, height: 120, borderRadius: "50%", background: "radial-gradient(circle, rgba(34,211,238,0.13), transparent 70%)", pointerEvents: "none" }} />
+                <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Balance Actual
                 </p>
-                <p style={{ color: TEXT, fontSize: 36, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                <p style={{ position: "relative", color: "#22d3ee", fontSize: 36, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(34,211,238,0.5)", lineHeight: 1.05 }}>
                   {kpiBalance}
                 </p>
-                <p style={{ color: MUTE, fontSize: 12 }}>
+                <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Capital neto inicial:{" "}
                   <span style={{ color: TEXT }}>{kpiDeposited}</span>
                 </p>
@@ -327,53 +337,54 @@ export default async function ClientDashboardPage() {
 
               {/* ROI card */}
               <div
-                className={`kpi-hover ${roiPositive ? "kpi-hover-green" : "kpi-hover-red"}`}
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: `2px solid ${roiPositive ? "#10b981" : "#fb7185"}`,
                   borderRadius: 20,
                   padding: "24px 24px 20px",
-                  borderLeft: `3px solid ${roiPositive ? GREEN : RED}`,
+                  boxShadow: `0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px ${roiPositive ? "rgba(16,185,129,0.35)" : "rgba(251,113,133,0.35)"}`,
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                <div style={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", background: `radial-gradient(circle, ${roiPositive ? "rgba(16,185,129,0.13)" : "rgba(251,113,133,0.13)"}, transparent 70%)`, pointerEvents: "none" }} />
+                <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Retorno Neto Total
                 </p>
-                <p
-                  style={{
-                    color: roiPositive ? GREEN : RED,
-                    fontSize: 32,
-                    fontWeight: 800,
-                    fontFamily: "monospace",
-                    letterSpacing: "-0.03em",
-                    marginBottom: 4,
-                  }}
-                >
+                <p style={{ position: "relative", color: roiPositive ? "#34d399" : "#fb7185", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: `0 0 14px ${roiPositive ? "rgba(52,211,153,0.5)" : "rgba(251,113,133,0.5)"}`, lineHeight: 1.05 }}>
                   {kpiRoi}
                 </p>
-                <p style={{ color: MUTE, fontSize: 12 }}>
+                <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Comisión de gestión: <span style={{ color: TEXT }}>{kpiPerfFee}</span> sobre ganancias
                 </p>
               </div>
 
               {/* Trades count card */}
               <div
-                className="kpi-hover kpi-hover-blue"
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: "2px solid #c084fc",
                   borderRadius: 20,
                   padding: "24px 24px 20px",
-                  borderLeft: `3px solid ${BLUE}`,
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px rgba(192,132,252,0.35)",
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                <div style={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", background: "radial-gradient(circle, rgba(192,132,252,0.13), transparent 70%)", pointerEvents: "none" }} />
+                <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Operaciones
                 </p>
-                <p style={{ color: TEXT, fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                <p style={{ position: "relative", color: "#c084fc", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(192,132,252,0.5)", lineHeight: 1.05 }}>
                   {trades.length}
                 </p>
-                <p style={{ color: MUTE, fontSize: 12 }}>
+                <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Historial completo de asignaciones
                 </p>
               </div>
@@ -381,22 +392,27 @@ export default async function ClientDashboardPage() {
               {/* ── Cumulative Profits card ── */}
               {/* Sum of every net-positive allocation in absolute USDT. */}
               <div
-                className="kpi-hover kpi-hover-green"
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: `2px solid #10b981`,
                   borderRadius: 20,
                   padding: "24px 24px 20px",
-                  borderLeft: `3px solid ${GREEN}`,
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px rgba(16,185,129,0.35)",
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                <div style={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", background: "radial-gradient(circle, rgba(16,185,129,0.15), transparent 70%)", pointerEvents: "none" }} />
+                <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Ganancias Acumuladas
                 </p>
-                <p style={{ color: GREEN, fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                <p style={{ position: "relative", color: "#34d399", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(52,211,153,0.5)", lineHeight: 1.05 }}>
                   {kpiCumProfits}
                 </p>
-                <p style={{ color: MUTE, fontSize: 12 }}>
+                <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Solo operaciones ganadoras (neto post-comisión)
                 </p>
               </div>
@@ -404,22 +420,27 @@ export default async function ClientDashboardPage() {
               {/* ── Total Fees Paid card ── */}
               {/* adminFee = binanceFee + performanceFee across all trades. */}
               <div
-                className="kpi-hover"
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: "2px solid #fbbf24",
                   borderRadius: 20,
                   padding: "24px 24px 20px",
-                  borderLeft: "3px solid #a78bfa",
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px rgba(251,191,36,0.3)",
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 10 }}>
+                <div style={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", background: "radial-gradient(circle, rgba(251,191,36,0.15), transparent 70%)", pointerEvents: "none" }} />
+                <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Comisiones Pagadas
                 </p>
-                <p style={{ color: "#a78bfa", fontSize: 32, fontWeight: 800, fontFamily: "monospace", letterSpacing: "-0.03em", marginBottom: 4 }}>
+                <p style={{ position: "relative", color: "#fbbf24", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(251,191,36,0.5)", lineHeight: 1.05 }}>
                   {kpiTotalFees}
                 </p>
-                <p style={{ color: MUTE, fontSize: 12 }}>
+                <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Binance fee + comisión de rendimiento
                 </p>
               </div>
@@ -431,13 +452,19 @@ export default async function ClientDashboardPage() {
             <MotionCard>
               <div
                 style={{
+                  position: "relative",
+                  overflow: "hidden",
                   background: CARD,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
                   border: `1px solid ${BORD}`,
+                  borderLeft: "2px solid #06b6d4",
                   borderRadius: 20,
                   padding: "24px 24px 16px",
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px rgba(6,182,212,0.35)",
                 }}
               >
-                <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
+                <p style={{ color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20, fontFamily: "ui-monospace, Menlo, monospace" }}>
                   Curva de Capital
                 </p>
                 <EquityCurveChart points={chartPoints} />
@@ -449,14 +476,20 @@ export default async function ClientDashboardPage() {
           <MotionCard>
             <div
               style={{
+                position: "relative",
+                overflow: "hidden",
                 background: CARD,
+                backdropFilter: "blur(12px)",
+                WebkitBackdropFilter: "blur(12px)",
                 border: `1px solid ${BORD}`,
+                borderLeft: "2px solid rgba(99,135,178,0.5)",
                 borderRadius: 20,
                 padding: "24px 24px 8px",
-                marginBottom: 80, // room for FAB
+                marginBottom: 80,
+                boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset",
               }}
             >
-              <p style={{ color: MUTE, fontSize: 10, fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
+              <p style={{ color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20, fontFamily: "ui-monospace, Menlo, monospace" }}>
                 Historial de Operaciones
               </p>
               <TradeHistoryTable trades={trades} />

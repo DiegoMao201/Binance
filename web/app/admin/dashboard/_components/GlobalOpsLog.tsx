@@ -12,14 +12,13 @@
 import { useState, useMemo } from "react";
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
-const BORD  = "#1a2b3c";
+const BORD  = "rgba(63,87,114,0.28)";
 const TEXT  = "#dce7f5";
 const MUTE  = "#6b8299";
-const CARD  = "#0a1018";
-const GREEN = "#12d98b";
-const RED   = "#eb4b61";
-const BLUE  = "#57c1ff";
-const PURP  = "#a78bfa";
+const GREEN = "#34d399";
+const RED   = "#fb7185";
+const BLUE  = "#60a5fa";
+const PURP  = "#c084fc";
 
 // ─── Public type ─────────────────────────────────────────────────────────────
 /** One ledger row as serialised strings (Server → Client safe). */
@@ -48,18 +47,22 @@ interface Props {
 }
 
 // ─── Colour per ledger type ───────────────────────────────────────────────────
-function typeColor(type: string): string {
+type BadgeStyle = { color: string; bg: string; border: string };
+
+function typeBadge(type: string): BadgeStyle {
   switch (type) {
-    case "DEPOSIT":                    return BLUE;
-    case "WITHDRAWAL":                 return RED;
-    case "TRADE_PNL":                  return GREEN;
-    case "PERFORMANCE_FEE":            return PURP;
+    case "DEPOSIT":                    return { color: "#60a5fa",  bg: "rgba(23,37,84,0.5)",   border: "rgba(59,130,246,0.3)" };
+    case "WITHDRAWAL":                 return { color: "#fb7185",  bg: "rgba(69,10,10,0.5)",   border: "rgba(239,68,68,0.3)" };
+    case "TRADE_PNL":                  return { color: "#34d399",  bg: "rgba(2,44,34,0.5)",    border: "rgba(16,185,129,0.3)" };
+    case "PERFORMANCE_FEE":            return { color: "#c084fc",  bg: "rgba(46,16,101,0.5)",  border: "rgba(168,85,247,0.3)" };
     case "BINANCE_FEE_REIMBURSEMENT":
-    case "BINANCE_COMMISSION":         return "#f59e0b"; // amber
-    case "ENTRY_FEE":                  return "#fb923c"; // orange
-    default:                           return MUTE;
+    case "BINANCE_COMMISSION":         return { color: "#fbbf24",  bg: "rgba(69,26,3,0.5)",    border: "rgba(245,158,11,0.3)" };
+    case "ENTRY_FEE":                  return { color: "#fbbf24",  bg: "rgba(69,26,3,0.5)",    border: "rgba(245,158,11,0.3)" };
+    default:                           return { color: MUTE,        bg: "rgba(30,40,50,0.5)",   border: BORD };
   }
 }
+
+function typeColor(type: string): string { return typeBadge(type).color; }
 
 // ─── Short type label ─────────────────────────────────────────────────────────
 function typeLabel(type: string): string {
@@ -155,7 +158,8 @@ export function GlobalOpsLog({ rows }: Props) {
           onChange={handleFilterChange}
           placeholder="Filtrar por usuario, tipo o descripción…"
           style={{
-            background: "#0d1821",
+            background: "rgba(4,7,12,0.85)",
+            backdropFilter: "blur(8px)",
             border: `1px solid ${BORD}`,
             borderRadius: 10,
             padding: "8px 14px",
@@ -163,6 +167,7 @@ export function GlobalOpsLog({ rows }: Props) {
             fontSize: 12,
             outline: "none",
             width: 280,
+            fontFamily: "ui-monospace, Menlo, monospace",
           }}
         />
       </div>
@@ -228,7 +233,7 @@ export function GlobalOpsLog({ rows }: Props) {
                     transition: "background 0.15s",
                   }}
                   onMouseEnter={(e) =>
-                    ((e.currentTarget as HTMLTableRowElement).style.background = "#0e1923")
+                    ((e.currentTarget as HTMLTableRowElement).style.background = "rgba(34,211,238,0.05)")
                   }
                   onMouseLeave={(e) =>
                     ((e.currentTarget as HTMLTableRowElement).style.background = "transparent")
@@ -256,37 +261,44 @@ export function GlobalOpsLog({ rows }: Props) {
                     </span>
                   </td>
 
-                  {/* Type badge */}
+                  {/* Type badge — exact design tokens */}
                   <td style={{ padding: "10px 12px" }}>
-                    <span
-                      style={{
-                        background: `${typeColor(row.type)}18`,
-                        border: `1px solid ${typeColor(row.type)}44`,
-                        color: typeColor(row.type),
-                        borderRadius: 6,
-                        padding: "3px 8px",
-                        fontSize: 10,
-                        fontWeight: 700,
-                        letterSpacing: "0.06em",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {typeLabel(row.type)}
-                    </span>
+                    {(() => {
+                      const b = typeBadge(row.type);
+                      return (
+                        <span
+                          style={{
+                            display: "inline-block",
+                            background: b.bg,
+                            border: `1px solid ${b.border}`,
+                            color: b.color,
+                            borderRadius: 999,
+                            padding: "3px 10px",
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: "0.08em",
+                            whiteSpace: "nowrap",
+                            fontFamily: "ui-monospace, Menlo, monospace",
+                          }}
+                        >
+                          {typeLabel(row.type)}
+                        </span>
+                      );
+                    })()}
                   </td>
 
                   {/* Amount — 8 decimal places for full auditability */}
                   <td
                     style={{
                       padding: "10px 12px",
-                      fontFamily: "monospace",
+                      fontFamily: "ui-monospace, Menlo, monospace",
                       fontWeight: 700,
-                      color: TEXT,
+                      color: typeColor(row.type),
                       whiteSpace: "nowrap",
                     }}
                   >
                     {Number(row.amount).toFixed(8)}
-                    <span style={{ color: MUTE, fontWeight: 400, marginLeft: 4 }}>
+                    <span style={{ color: MUTE, fontWeight: 400, marginLeft: 4, fontSize: 10 }}>
                       USDT
                     </span>
                   </td>

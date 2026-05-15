@@ -21,12 +21,13 @@ import { GlobalOpsLog, type LedgerRow } from "./_components/GlobalOpsLog";
 export const dynamic = "force-dynamic";
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
-const BG    = "#080e16";
-const CARD  = "#0a1018";
-const BORD  = "#1a2b3c";
-const TEXT  = "#dce7f5";
-const MUTE  = "#6b8299";
-const GREEN = "#12d98b";
+const BG     = "#04070c";
+const CARD   = "rgba(10,15,22,0.72)";
+const BORD   = "rgba(63,87,114,0.28)";
+const TEXT   = "#dce7f5";
+const MUTE   = "#6b8299";
+const GREEN  = "#10b981";
+const GLASSB = "rgba(4,7,12,0.72)";
 
 function fmtUSDT(v: string): string {
   return "$" + Number(v).toLocaleString("en-US", {
@@ -104,10 +105,13 @@ export default async function AdminDashboardPage() {
     <div
       style={{
         minHeight: "100vh",
-        background: BG,
+        background:
+          `radial-gradient(900px 600px at 12% -10%, rgba(168,85,247,0.09), transparent 60%),` +
+          `radial-gradient(900px 600px at 100% 0%, rgba(6,182,212,0.07), transparent 65%),` +
+          BG,
         color: TEXT,
         fontFamily:
-          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace",
+          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
         padding: "28px 24px",
         boxSizing: "border-box",
       }}
@@ -124,35 +128,37 @@ export default async function AdminDashboardPage() {
         <div>
           <h1
             style={{
-              fontSize: 20,
-              fontWeight: 700,
+              fontSize: 22,
+              fontWeight: 800,
               margin: 0,
               letterSpacing: "-0.02em",
             }}
           >
-            Admin Backoffice
+            ◈ OptiFerre{" "}
+            <span style={{ color: "#c084fc" }}>Mission Control</span>
           </h1>
-          <p style={{ color: MUTE, fontSize: 12, margin: "4px 0 0" }}>
-            OptiFerre PAMM — Panel de Control
+          <p style={{ color: MUTE, fontSize: 11, margin: "4px 0 0", letterSpacing: "0.08em" }}>
+            PAMM ADMIN · v2.0
           </p>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span
             style={{
-              background: `${GREEN}1a`,
-              border: `1px solid ${GREEN}44`,
+              background: `rgba(16,185,129,0.12)`,
+              border: `1px solid rgba(16,185,129,0.35)`,
               color: GREEN,
-              fontSize: 11,
-              fontWeight: 600,
-              padding: "4px 12px",
+              fontSize: 10,
+              fontWeight: 700,
+              padding: "5px 14px",
               borderRadius: 20,
-              letterSpacing: "0.04em",
+              letterSpacing: "0.14em",
+              boxShadow: `0 0 10px rgba(16,185,129,0.25)`,
             }}
           >
             ● LIVE
           </span>
-          <span style={{ color: MUTE, fontSize: 12 }}>
+          <span style={{ color: MUTE, fontSize: 12, fontFamily: "ui-monospace, Menlo, monospace" }}>
             {payload.sub.slice(0, 8)}…
           </span>
         </div>
@@ -190,9 +196,12 @@ export default async function AdminDashboardPage() {
       <section
         style={{
           background: CARD,
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
           border: `1px solid ${BORD}`,
-          borderRadius: 16,
+          borderRadius: 20,
           padding: "24px 22px",
+          boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 16px 40px -20px rgba(6,182,212,0.25)",
         }}
       >
         <GlobalOpsLog rows={ledgerRows} />
@@ -201,43 +210,66 @@ export default async function AdminDashboardPage() {
   );
 }
 
-// ─── KPI Card (pure presentational — no interactivity needed) ─────────────────
+// ─── KPI Card (glassmorphism neon — cyberpunk terminal) ──────────────────────
 function KpiCard({ label, value, sub, accent }: KpiCardData) {
   return (
     <div
       style={{
+        position: "relative",
         background: CARD,
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
         border: `1px solid ${BORD}`,
-        borderRadius: 16,
+        borderLeft: `2px solid ${accent}`,
+        borderRadius: 18,
         padding: "20px 22px",
-        borderLeft: `3px solid ${accent}`,
+        boxShadow: `0 0 0 1px rgba(255,255,255,0.02) inset, 0 12px 36px -16px ${accent}66`,
+        overflow: "hidden",
       }}
     >
+      {/* Ambient glow blob */}
+      <div
+        style={{
+          position: "absolute",
+          top: -30,
+          right: -30,
+          width: 100,
+          height: 100,
+          borderRadius: "50%",
+          background: `radial-gradient(circle, ${accent}18, transparent 70%)`,
+          pointerEvents: "none",
+        }}
+      />
       <p
         style={{
+          position: "relative",
           color: MUTE,
-          fontSize: 10,
-          fontWeight: 600,
-          letterSpacing: "0.12em",
+          fontSize: 9.5,
+          fontWeight: 700,
+          letterSpacing: "0.18em",
           textTransform: "uppercase",
-          marginBottom: 8,
+          marginBottom: 12,
+          fontFamily: "ui-monospace, Menlo, monospace",
         }}
       >
         {label}
       </p>
       <p
         style={{
-          color: TEXT,
-          fontSize: 26,
-          fontWeight: 700,
-          fontFamily: "monospace",
+          position: "relative",
+          color: accent,
+          fontSize: 30,
+          fontWeight: 800,
+          fontFamily: "ui-monospace, Menlo, monospace",
           letterSpacing: "-0.02em",
-          marginBottom: 6,
+          marginBottom: 8,
+          textShadow: `0 0 14px ${accent}88`,
+          lineHeight: 1.05,
         }}
       >
         {value}
       </p>
-      <p style={{ color: MUTE, fontSize: 11 }}>{sub}</p>
+      <p style={{ position: "relative", color: MUTE, fontSize: 11, letterSpacing: "0.04em" }}>{sub}</p>
     </div>
   );
 }
