@@ -574,6 +574,42 @@ def _build_guardrails(
     ai_approved = bool(ai_signal.get("approved", False))
     ai_alignment = ai_signal.get("direction_alignment") == "aligned"
     setup_quality = str(ai_signal.get("setup_quality", "low")).lower()
+
+    # ── Python AI Veto Correction Layer ─────────────────────────────────────
+    # Detects AI model hallucinations: the model cites correct values in its
+    # rationale but still applies hard vetoes whose conditions are provably
+    # NOT met by the actual technical data. Override approved/alignment/quality
+    # only when we can confirm the veto trigger condition is false.
+    _vol_ratio_for_corr = float(technical_signal.get("volume_ratio", 0.0))
+    _ob_for_corr        = float(technical_signal.get("orderbook_imbalance", 0.0))
+    _rsi_slope_for_corr = float(technical_signal.get("rsi_slope", 0.0))
+    _ai_correction_applied = False
+    _corrected_flags = list(risk_flags)
+    # V1: macro_trend=bearish AND volume_ratio < 1.5 — if actual >= 1.5, veto invalid
+    if "counter_trend_no_volume" in _corrected_flags and _vol_ratio_for_corr >= 1.5:
+        _corrected_flags = [f for f in _corrected_flags if f != "counter_trend_no_volume"]
+        _ai_correction_applied = True
+    # V2: macro_trend=bearish AND ob_imbalance < 0.55 — if actual >= 0.55, veto invalid
+    if "counter_trend_weak_book" in _corrected_flags and _ob_for_corr >= 0.55:
+        _corrected_flags = [f for f in _corrected_flags if f != "counter_trend_weak_book"]
+        _ai_correction_applied = True
+    # V4: macro_trend=bearish AND rsi_slope <= 0 — if actual > 0, veto invalid
+    if "downtrend_rsi_still_falling" in _corrected_flags and _rsi_slope_for_corr > 0:
+        _corrected_flags = [f for f in _corrected_flags if f != "downtrend_rsi_still_falling"]
+        _ai_correction_applied = True
+    if _ai_correction_applied:
+        _hard_veto_flags = {
+            "counter_trend_no_volume", "counter_trend_weak_book",
+            "dual_microstructure_bearish", "downtrend_rsi_still_falling", "volume_exhaustion",
+        }
+        _remaining_hard = [f for f in _corrected_flags if f in _hard_veto_flags]
+        if not _remaining_hard:
+            ai_approved   = True
+            ai_alignment  = True
+            setup_quality = "medium" if setup_quality == "low" else setup_quality
+            risk_flags    = _corrected_flags
+    # ── /Python AI Veto Correction Layer ────────────────────────────────────
+
     # risk_flags ya fue extraido arriba para detectar fallback_mode antes del threshold
 
     critical_risk_flags = {
@@ -648,12 +684,20 @@ def _build_guardrails(
         and ai_setup_ready
         and len(critical_flags_present) == 0
     )
+    # AI correction override: the Python correction layer proved the AI applied
+    # one or more hard vetoes incorrectly (actual data contradicts veto condition).
+    # In this case trust the technical gates over the AI's flawed reasoning.
+    ai_correction_override = (
+        _ai_correction_applied
+        and ai_confident
+        and len(critical_flags_present) == 0
+    )
     ai_gate_ready = all([
         ai_confident,
         same_direction,
-        ai_approved or scenario_a_override,
-        ai_alignment or scenario_a_override,
-        ai_setup_ready,
+        ai_approved or scenario_a_override or ai_correction_override,
+        ai_alignment or scenario_a_override or ai_correction_override,
+        ai_setup_ready or ai_correction_override,
         scenario == "A" or ai_risk_clear,
     ])
 
