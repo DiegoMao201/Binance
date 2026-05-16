@@ -28,6 +28,8 @@ export type TradeRow = {
   adminFee: string;
   /** user_net_pnl_usdt — toFixed(2) string. Post-fee. */
   netPnl: string;
+  /** Source broker — "binance" (default for legacy rows) or "deriv". */
+  broker?: string;
 };
 
 /** One data point for the equity curve chart. */

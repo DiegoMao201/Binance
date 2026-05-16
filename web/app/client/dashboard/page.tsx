@@ -41,6 +41,7 @@ type TradeQueryRow = {
   admin_fee_usdt:        string;
   user_net_pnl_usdt:     string;
   allocated_at:          Date;
+  broker:                string | null;
 };
 
 // ─── Colour tokens (Server-side layout) ──────────────────────────────────────
@@ -120,7 +121,8 @@ export default async function ClientDashboardPage() {
           uta.gross_user_pnl_usdt::text                AS gross_user_pnl_usdt,
           uta.admin_fee_usdt::text                     AS admin_fee_usdt,
           uta.user_net_pnl_usdt::text                  AS user_net_pnl_usdt,
-          uta.allocated_at
+          uta.allocated_at,
+          COALESCE(uta.broker, 'binance')              AS broker
         FROM user_trade_allocations uta
         JOIN master_trades mt ON mt.id = uta.master_trade_id
         WHERE uta.user_id = ${userId}::uuid
@@ -185,6 +187,7 @@ export default async function ClientDashboardPage() {
     grossPnl:    new Prisma.Decimal(row.gross_user_pnl_usdt).toFixed(2),
     adminFee:    new Prisma.Decimal(row.admin_fee_usdt).toFixed(2),
     netPnl:      new Prisma.Decimal(row.user_net_pnl_usdt).toFixed(2),
+    broker:      (row.broker ?? "binance").toLowerCase(),
   }));
 
   // ── 7. Equity curve: running balance from oldest trade to newest ─────────────

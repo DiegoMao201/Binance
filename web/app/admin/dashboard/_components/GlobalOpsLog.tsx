@@ -40,6 +40,8 @@ export type LedgerRow = {
   description: string | null;
   /** ISO 8601 timestamp — e.g. "2026-05-15T10:23:45.000Z". */
   createdAt: string;
+  /** Source broker — "binance" (default for legacy rows) or "deriv". */
+  broker?: string;
 };
 
 interface Props {
@@ -285,6 +287,27 @@ export function GlobalOpsLog({ rows }: Props) {
                         </span>
                       );
                     })()}
+                    {row.broker && (
+                      <span
+                        title={`Broker: ${row.broker}`}
+                        style={{
+                          display: "inline-block",
+                          marginLeft: 6,
+                          padding: "2px 7px",
+                          borderRadius: 4,
+                          fontSize: 9,
+                          fontWeight: 700,
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          background: row.broker === "deriv" ? "rgba(87,193,255,0.12)" : "rgba(245,179,0,0.12)",
+                          color:      row.broker === "deriv" ? "#57c1ff" : "#f5b300",
+                          border:     `1px solid ${row.broker === "deriv" ? "rgba(87,193,255,0.4)" : "rgba(245,179,0,0.4)"}`,
+                          fontFamily: "ui-monospace, Menlo, monospace",
+                        }}
+                      >
+                        {row.broker}
+                      </span>
+                    )}
                   </td>
 
                   {/* Amount — 8 decimal places for full auditability */}

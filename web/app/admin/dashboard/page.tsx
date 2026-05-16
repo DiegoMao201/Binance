@@ -78,6 +78,7 @@ export default async function AdminDashboardPage() {
     createdAt:   row.createdAt instanceof Date
                    ? row.createdAt.toISOString()
                    : String(row.createdAt),
+    broker:      ((row as { broker?: string | null }).broker ?? "binance").toLowerCase(),
   }));
 
   const kpis: KpiCardData[] = [

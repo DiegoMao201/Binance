@@ -150,7 +150,26 @@ export function TradeHistoryTable({ trades }: Props) {
 
                   {/* Par */}
                   <td style={{ color: TEXT, fontWeight: 600, padding: "11px 16px 11px 0", whiteSpace: "nowrap" }}>
-                    {trade.symbol}
+                    <span>{trade.symbol}</span>
+                    {trade.broker && (
+                      <span
+                        title={`Broker: ${trade.broker}`}
+                        style={{
+                          marginLeft: 8,
+                          padding: "1px 6px",
+                          borderRadius: 4,
+                          fontSize: 9,
+                          fontWeight: 700,
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          background: trade.broker === "deriv" ? "rgba(87,193,255,0.12)" : "rgba(245,179,0,0.12)",
+                          color:      trade.broker === "deriv" ? "#57c1ff" : "#f5b300",
+                          border:     `1px solid ${trade.broker === "deriv" ? "rgba(87,193,255,0.4)" : "rgba(245,179,0,0.4)"}`,
+                        }}
+                      >
+                        {trade.broker}
+                      </span>
+                    )}
                   </td>
 
                   {/* Lado */}

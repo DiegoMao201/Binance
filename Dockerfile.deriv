@@ -1,0 +1,31 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    LOGS_DIR=/data/logs
+
+WORKDIR /app
+
+COPY requirements.txt ./
+# Imagen minima: el daemon Deriv solo necesita websockets/aiohttp/dotenv/numpy.
+# Excluimos streamlit/plotly/scikit-learn/ccxt para reducir tamano y superficie.
+RUN pip install --upgrade pip --no-cache-dir && \
+    grep -v -E '^(streamlit|plotly|scikit-learn|ccxt)' requirements.txt > /tmp/requirements.deriv.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.deriv.txt
+
+COPY . .
+
+RUN mkdir -p /data/logs && chmod 777 /data/logs
+
+RUN printf '#!/bin/sh\n\
+set -e\n\
+mkdir -p "${LOGS_DIR:-/data/logs}"\n\
+chmod 777 "${LOGS_DIR:-/data/logs}" 2>/dev/null || true\n\
+find "${LOGS_DIR:-/data/logs}" -name "*.tmp" -delete 2>/dev/null || true\n\
+echo "[entrypoint] DERIV daemon | LOGS_DIR=${LOGS_DIR:-/data/logs}"\n\
+exec python -m src.main_deriv\n\
+' > /app/entrypoint.deriv.sh && chmod +x /app/entrypoint.deriv.sh
+
+CMD ["/app/entrypoint.deriv.sh"]

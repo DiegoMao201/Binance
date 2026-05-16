@@ -68,6 +68,12 @@ const TradeClosedSchema = z.object({
   side: z.string().min(2).max(8),
   /** Human-readable close trigger, e.g. "trailing_stop". */
   exitReason: z.string().min(1).max(64).default("unknown"),
+  /**
+   * Originating broker. Defaults to 'binance' for backwards compatibility
+   * with the existing Binance Spot pipeline. The Deriv async daemon sends
+   * 'deriv' so the audit trail can attribute PnL per broker.
+   */
+  broker: z.enum(["binance", "deriv"]).default("binance"),
 });
 
 type TradeClosedPayload = z.infer<typeof TradeClosedSchema>;
@@ -204,6 +210,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           symbol:         p.symbol,
           side:           p.side,
           exitReason:     p.exitReason,
+          broker:         p.broker,
           // Map absolute USDT amounts to schema columns:
           //   pnlPct         → 0 (not percentage-based in this model)
           //   grossPnlUsdt   → rawPnl (pre-fee gross)
@@ -228,6 +235,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         data: {
           userId:      client.id,
           type:        "TRADE_PNL",
+          broker:      p.broker,
           amountUsdt:  clientNetShare.abs(),
           description: `Net PnL (${clientNetShare.gte(0) ? "WIN" : "LOSS"}) — ${symbolLabel} | raw: ${rawPnlD.toFixed(8)} USDT`,
         },
@@ -239,8 +247,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         data: {
           userId:      client.id,
           type:        "BINANCE_FEE_REIMBURSEMENT",
+          broker:      p.broker,
           amountUsdt:  binanceFeeD,
-          description: `Binance execution fee — ${symbolLabel} | reimbursed to admin`,
+          description: `${p.broker === "deriv" ? "Deriv" : "Binance"} execution fee — ${symbolLabel} | reimbursed to admin`,
         },
       }),
 
@@ -252,6 +261,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               data: {
                 userId:      client.id,
                 type:        "PERFORMANCE_FEE",
+                broker:      p.broker,
                 amountUsdt:  performanceFee,
                 description: `${(perfFeePct.mul(100).toFixed(1))}% performance fee — ${symbolLabel} | net baseline: ${netBaseline.toFixed(8)} USDT`,
               },

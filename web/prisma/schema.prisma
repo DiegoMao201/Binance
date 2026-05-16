@@ -77,6 +77,10 @@ model LedgerTransaction {
   // Transaction type — constrained at DB level via CHECK (see migration 003).
   type        String   @db.VarChar(32)
 
+  // Broker discriminator — 'binance' | 'deriv' (see migration 005).
+  // Defaults to 'binance' for backwards compatibility with existing rows.
+  broker      String   @default("binance") @db.VarChar(20)
+
   // Always positive. The sign is implicit in `type`:
   // DEPOSIT → inflow to client; ENTRY_FEE / PERFORMANCE_FEE → fee retained by admin.
   amountUsdt  Decimal  @map("amount_usdt") @db.Decimal(28, 12)
@@ -88,6 +92,7 @@ model LedgerTransaction {
 
   @@index([userId], map: "idx_ledger_user_id")
   @@index([type],   map: "idx_ledger_type")
+  @@index([broker], map: "idx_ledger_transactions_broker")
   @@map("ledger_transactions")
 }
 
@@ -116,6 +121,10 @@ model UserTradeAllocation {
   side           String   @db.VarChar(8)           // 'BUY' | 'SELL'
   exitReason     String   @default("unknown") @map("exit_reason") @db.VarChar(64)
 
+  // Broker discriminator — 'binance' | 'deriv' (see migration 005).
+  // Defaults to 'binance' so historical Binance allocations stay valid.
+  broker         String   @default("binance") @db.VarChar(20)
+
   // All monetary fields use arbitrary-precision Decimal (NUMERIC in Postgres).
   pnlPct         Decimal  @map("pnl_pct")          @db.Decimal(12, 8)
   grossPnlUsdt   Decimal  @map("gross_pnl_usdt")   @db.Decimal(28, 12)
@@ -136,5 +145,7 @@ model UserTradeAllocation {
   @@index([userId],      map: "idx_uta_user_id")
   @@index([allocatedAt], map: "idx_uta_allocated_at")
   @@index([symbol],      map: "idx_uta_symbol")
+  @@index([broker],      map: "idx_user_trade_allocations_broker")
+  @@index([userId, broker], map: "idx_user_trade_allocations_user_broker")
   @@map("user_trade_allocations")
 }
