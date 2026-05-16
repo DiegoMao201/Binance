@@ -2233,10 +2233,15 @@ def _clear_stale_kill_switch_stop(settings: Settings) -> None:
         return
 
     if previous_state:
+        # Al auto-recuperar, también reseteamos el HWM al equity actual para que el
+        # kill switch no se dispare inmediatamente en el primer ciclo post-recuperación.
+        persisted_equity = float(previous_risk.get("equity_usd") or 0.0)
         sanitized_risk = {
             **previous_risk,
             "kill_switch_triggered": False,
         }
+        if persisted_equity > 0:
+            sanitized_risk["high_water_mark"] = persisted_equity
         persist_state(
             settings.state_file,
             {
@@ -2622,6 +2627,36 @@ def run_cycle() -> None:
         closed_trades = load_history(settings.closed_trades_file)
         equity_history = load_history(settings.equity_history_file)
         live_mode = not settings.dry_run
+
+        # ── Detección de reanudación manual post-kill-switch ──────────────────────────
+        # Si el estado persistido tiene kill_switch_triggered=True pero el control fue
+        # actualizado por el operador (updated_by=dashboard), significa que se reanudó
+        # manualmente. En ese caso reseteamos el HWM al equity de la pausa para que el
+        # kill switch no se dispare inmediatamente en el primer ciclo.
+        _prev_ks_risk = previous_state.get("risk") or {}
+        _ks_was_triggered = bool(_prev_ks_risk.get("kill_switch_triggered"))
+        _post_ks_manual_resume = False
+        if _ks_was_triggered:
+            _ctrl_now = load_state(settings.control_file)
+            if _ctrl_now.get("updated_by") == "dashboard":
+                _eq_at_ks = float(_prev_ks_risk.get("equity_usd") or 0)
+                _old_hwm = float(_prev_ks_risk.get("high_water_mark") or 0)
+                if _eq_at_ks > 0 and _old_hwm > _eq_at_ks:
+                    logger.warning(
+                        "Reanudación manual post-kill-switch detectada. "
+                        "Reseteando HWM %.4f → %.4f USDT (reconocimiento de pérdida operativa).",
+                        _old_hwm,
+                        _eq_at_ks,
+                    )
+                    _post_ks_manual_resume = True
+                    _sanitized_ks_risk = {
+                        **_prev_ks_risk,
+                        "kill_switch_triggered": False,
+                        "high_water_mark": _eq_at_ks,
+                    }
+                    previous_state = {**previous_state, "risk": _sanitized_ks_risk}
+                    persist_state(settings.state_file, previous_state)
+
         open_positions, recovery_report = _recover_unmanaged_exchange_positions(
             open_positions, settings, client, logger, order_history,
             closed_trades=closed_trades,
@@ -3117,6 +3152,9 @@ def run_cycle() -> None:
         mark_prices = {sym: float(c.get("close") or 0.0) for sym, c in candles_by_symbol.items()}
         equity_usd = _compute_equity(balance_usd, open_positions, mark_prices)
         reset_hwm = _should_reset_high_water_mark(open_positions, newly_closed_trades)
+        # Forzar reset de HWM si fue una reanudación manual post-kill-switch.
+        if _post_ks_manual_resume:
+            reset_hwm = True
         new_hwm, equity_history = _update_high_water_mark(
             equity_history,
             equity_usd,
@@ -3878,6 +3916,21 @@ def main() -> None:
         if desired_state == "stopped":
             logger.warning("Bot detenido por control remoto. Queda en espera hasta nueva orden.")
             write_heartbeat("offline", control.get("reason", "Detenci\u00f3n remota"))
+            # ── Gestión de emergencia de posiciones abiertas ──────────────────────
+            # Si el bot fue detenido por kill switch y hay posiciones abiertas,
+            # ejecutamos un ciclo completo para que el settler actualice OCO/trailing.
+            # El ciclo re-activa el kill switch al llegar al check de KS (paso 5),
+            # pero las posiciones son asentadas en el paso anterior — evitando que
+            # queden huérfanas sin actualización de stop loss mientras el bot duerme.
+            if control.get("updated_by") == "kill_switch":
+                _ks_open_pos = load_history(settings.open_positions_file)
+                if _ks_open_pos:
+                    logger.warning(
+                        "Kill switch activo con %d posición(es) abierta(s) — "
+                        "ejecutando ciclo de gestión para proteger capital.",
+                        len(_ks_open_pos),
+                    )
+                    run_cycle()
             time.sleep(max(5, settings.poll_interval_seconds))
             continue
 

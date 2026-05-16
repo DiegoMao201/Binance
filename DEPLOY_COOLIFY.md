@@ -57,23 +57,29 @@ Este documento describe el entorno live canónico. El bot local no debe correr e
 - `SCENARIO_A_RSI_MAX=45`
 - `SCENARIO_B_RSI_MAX=32`
 - `TRADE_COOLDOWN_MINUTES=10`
-- `KILL_SWITCH_DRAWDOWN=0.07`
+- `KILL_SWITCH_DRAWDOWN=0.10`
 - `STOP_LOSS_PCT=0.01`
 - `TAKE_PROFIT_PCT=0.02`
 - `BOT_HEALTH_MAX_AGE_SECONDS=180`
 - `LOG_LEVEL=INFO`
 
-### Ajuste live recomendado tras el incidente del 2026-05-07
+### Ajuste live recomendado tras los 3 paros por kill switch (2026-05-16)
 
-El halt observado en producción fue legítimo: el bot quedó con `drawdown_pct` de `0.05475` contra un `KILL_SWITCH_DRAWDOWN=0.05` mientras seguía usando `POSITION_SIZE_PCT=0.95`.
+El bot se detuvo 3 veces porque `KILL_SWITCH_DRAWDOWN=0.07` (7%) con un HWM histórico de ~$41.47 dejaba el umbral real de disparo en $38.57. Con equity real de $35.38 el drawdown era 14.58% >> 7%, por lo que el kill switch se disparaba inmediatamente al reiniciar.
 
-Para no maquillar pérdidas ni ampliar el riesgo de forma agresiva, el ajuste recomendado es:
+**Raíz de los bucles de stop:**
+- HWM nunca se reseteaba: solo se reiniciaba en exits `external_reconcile`, no en stop-loss normales.
+- Al reiniciar manualmente el bot vía dashboard, HWM seguía en el pico histórico → kill switch disparaba de nuevo en el primer ciclo.
+- Con `desired_state=stopped`, `run_cycle()` nunca era llamado → posiciones abiertas quedaban huérfanas sin gestión de SL/TP.
 
-- bajar `POSITION_SIZE_PCT` a `0.60`
-- subir `KILL_SWITCH_DRAWDOWN` solo a `0.07`
-- mantener `STOP_LOSS_PCT=0.01` y `TAKE_PROFIT_PCT=0.02`
+**Cambios aplicados en el código (commit kill-switch-hardening):**
+- `KILL_SWITCH_DRAWDOWN` por defecto: 5% → **10%** (código)
+- Eliminado el override agresivo de cuentas pequeñas (<$25 → 4%): era contraproducente y causaba disparos falsos.
+- HWM se resetea al equity actual cuando: (a) `_clear_stale_kill_switch_stop` auto-recupera, (b) operador reanuda manualmente desde el dashboard tras un kill switch.
+- Bot en estado `stopped` por kill switch ahora ejecuta un ciclo de gestión si hay posiciones abiertas → OCO/trailing se actualizan aunque el bot esté detenido.
 
-Esto desbloquea el arranque sin saltar directamente a `0.10` de drawdown y, sobre todo, reduce la exposición por operación para poder llegar a una muestra más útil sin que dos o tres eventos mediocres apaguen el bot.
+**Env var en Coolify a actualizar:**
+- `KILL_SWITCH_DRAWDOWN=0.10` (era 0.07)
 
 ## Servicio frontend
 

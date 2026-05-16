@@ -175,7 +175,7 @@ def load_settings() -> Settings:
         dry_run=_get_bool("DRY_RUN", True),
         initial_capital_usd=float(os.getenv("INITIAL_CAPITAL_USD", "20")),
         max_risk_per_trade=float(os.getenv("MAX_RISK_PER_TRADE", "0.10")),
-        kill_switch_drawdown=float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.05")),
+        kill_switch_drawdown=float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10")),
         stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "0.02")),
         take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "0.03")),
         max_position_hold_minutes=int(os.getenv("MAX_POSITION_HOLD_MINUTES", "0")),
