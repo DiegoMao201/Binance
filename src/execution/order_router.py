@@ -137,6 +137,7 @@ class OrderRouter:
             stop_loss_pct=float(payload["stop_loss_pct"]),
             take_profit_pct=float(payload["take_profit_pct"]),
             intent_id=str(payload.get("intent_id") or ""),
+            score_breakdown=payload.get("score_breakdown"),
         )
 
     # ─────────────────────────────────────────────────────────────────────────

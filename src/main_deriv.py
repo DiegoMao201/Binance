@@ -266,6 +266,8 @@ class DerivDaemon:
             "multiplier": snap.suggested_multiplier,
             "stop_loss_pct": self._settings.stop_loss_pct,
             "take_profit_pct": self._settings.take_profit_pct,
+            # score_breakdown flows to DerivOrder → PAMM webhook → deriv_contracts.score_breakdown
+            "score_breakdown": snap.score_breakdown,
             "_analyst_context": {
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr_lag1": analysis.autocorr_lag1 if analysis else None,
@@ -397,8 +399,9 @@ class DerivDaemon:
     # ─────────────────────────────────────────────────────────────────────────
     async def _snapshot_ttl_loop(self) -> None:
         import os as _os
-        _db_url   = _os.getenv("DATABASE_URL", "")
-        _retain   = int(_os.getenv("DERIV_SNAPSHOT_RETENTION_DAYS", "7"))
+        _db_url = _os.getenv("DATABASE_URL", "")
+        _retain = int(_os.getenv("DERIV_SNAPSHOT_RETENTION_DAYS", "7"))
+        _batch  = int(_os.getenv("DERIV_SNAPSHOT_PURGE_BATCH", "5000"))
         if not _db_url:
             _LOGGER.debug("[deriv-ttl] DATABASE_URL not set — snapshot TTL loop idle")
             return
@@ -410,15 +413,30 @@ class DerivDaemon:
                 import asyncpg  # optional dep
                 conn = await asyncio.wait_for(asyncpg.connect(_db_url), timeout=8.0)
                 try:
-                    deleted = await conn.fetchval(
-                        "DELETE FROM deriv_tick_snapshots "
-                        "WHERE captured_at < NOW() - INTERVAL '1 day' * $1 "
-                        "RETURNING COUNT(*)",
-                        _retain,
-                    )
+                    total = 0
+                    # Batch deletion: delete _batch rows at a time with a brief yield
+                    # between each batch to prevent PostgreSQL from holding a long-lived
+                    # exclusive lock that blocks inserts from the live tick writer.
+                    while True:
+                        status = await conn.execute(
+                            "DELETE FROM deriv_tick_snapshots "
+                            "WHERE id IN ("
+                            "    SELECT id FROM deriv_tick_snapshots "
+                            "    WHERE captured_at < NOW() - INTERVAL '1 day' * $1 "
+                            "    LIMIT $2"
+                            ")",
+                            _retain, _batch,
+                        )
+                        # asyncpg execute() returns a CommandComplete tag: "DELETE N"
+                        n = int(status.split()[-1]) if status else 0
+                        total += n
+                        if n < _batch:
+                            break  # last batch — done
+                        # Yield briefly so other queries can proceed between batches
+                        await asyncio.sleep(0.2)
                     _LOGGER.info(
-                        "[deriv-ttl] purged %s tick_snapshots older than %d days",
-                        deleted or 0, _retain,
+                        "[deriv-ttl] purged %d tick_snapshots older than %d days (batch=%d)",
+                        total, _retain, _batch,
                     )
                 finally:
                     await conn.close()

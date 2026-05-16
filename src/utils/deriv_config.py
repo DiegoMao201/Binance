@@ -170,7 +170,7 @@ def load_deriv_settings() -> DerivSettings:
         bankroll_usdt=_get_float("DERIV_BANKROLL_USDT", 50.0),
         risk_per_trade_pct=_get_float("DERIV_RISK_PER_TRADE_PCT", 0.01),
         max_open_contracts=_get_int("DERIV_MAX_OPEN_CONTRACTS", 1),
-        min_score=_get_float("DERIV_MIN_SCORE", 7.5),
+        min_score=_get_float("DERIV_MIN_SCORE", 6.0),
         max_daily_dd_pct=_get_float("DERIV_MAX_DAILY_DD_PCT", 0.02),
         loss_streak_lockout=_get_int("DERIV_LOSS_STREAK_LOCKOUT", 3),
         lockout_hours=_get_int("DERIV_LOCKOUT_HOURS", 12),

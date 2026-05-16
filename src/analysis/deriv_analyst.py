@@ -62,7 +62,7 @@ _LOGGER = logging.getLogger("deriv.analyst")
 
 # ── Env knobs ────────────────────────────────────────────────────────────────
 _AI_GATE_ENABLED    = os.getenv("DERIV_AI_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
-_AI_MIN_CONFIDENCE  = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.65"))
+_AI_MIN_CONFIDENCE  = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.55"))
 _OPENROUTER_KEY     = os.getenv("OPENROUTER_API_KEY", "")
 _OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 _HISTORY_COUNT      = int(os.getenv("DERIV_HISTORY_TICKS", "1000"))  # ticks fetched on startup
@@ -410,10 +410,17 @@ class DerivAnalyst:
             return None
         return entry["result"]
 
-    def _ai_cache_set(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
-        """Store AI result in memory cache and append to rolling log file."""
+    async def _ai_cache_set(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
+        """Store AI result in memory cache and dispatch log write to a thread.
+
+        The in-memory update is instant (μs). The disk write is offloaded to the
+        thread-pool executor so synchronous file I/O never blocks the event loop.
+        """
         self._ai_cache[symbol] = {"ts": time.time(), "result": result}
-        self._append_ai_log(symbol, result, context)
+        # Fire-and-forget: schedule disk write without blocking the tick loop.
+        asyncio.get_event_loop().run_in_executor(
+            None, self._append_ai_log, symbol, result, context
+        )
 
     def _append_ai_log(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
         """Append one AI decision to the rolling JSON log (bounded at _AI_LOG_MAX_ENTRIES)."""
@@ -539,7 +546,7 @@ class DerivAnalyst:
             analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
             analysis.ai_reason     = str(ai_result.get("reason", ""))
             analysis.ai_model      = str(ai_result.get("model", ""))
-            self._ai_cache_set(symbol, ai_result, {
+            await self._ai_cache_set(symbol, ai_result, {
                 "hurst": hurst, "autocorr": autocorr, "score": score, "vol_regime": vr,
             })
         except asyncio.TimeoutError:

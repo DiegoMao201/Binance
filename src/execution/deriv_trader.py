@@ -43,6 +43,7 @@ class DerivOrder:
     stop_loss_pct: float
     take_profit_pct: float
     intent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    score_breakdown: dict | None = field(default=None)
 
 
 @dataclass(slots=True)
@@ -55,6 +56,7 @@ class DerivOpenContract:
     multiplier: int
     entry_price: float
     opened_at_ts: float
+    score_breakdown: dict | None = field(default=None)
 
 
 class DerivTradeExecutor:
@@ -135,6 +137,7 @@ class DerivTradeExecutor:
             multiplier=order.multiplier,
             entry_price=entry_price,
             opened_at_ts=time.time(),
+            score_breakdown=order.score_breakdown,
         )
         async with self._lock:
             self._open[contract_id] = oc
@@ -220,6 +223,7 @@ class DerivTradeExecutor:
                 "exit_reason": exit_reason,
                 "opened_at_ts": oc.opened_at_ts,
                 "closed_at_ts": time.time(),
+                "score_breakdown": oc.score_breakdown,
             }
             self._append_closed(record)
             await self._post_pamm_webhook(record)
@@ -292,6 +296,7 @@ class DerivTradeExecutor:
                 "multiplier": oc.multiplier,
                 "entry_price": oc.entry_price,
                 "opened_at_ts": oc.opened_at_ts,
+                "score_breakdown": oc.score_breakdown,
             }
             for oc in self._open.values()
         ]
@@ -335,6 +340,8 @@ class DerivTradeExecutor:
             "side": "BUY" if record["side"] == "MULTUP" else "SELL",
             "exitReason": record["exit_reason"],
             "broker": "deriv",
+            # Entry context — backend stores in deriv_contracts.score_breakdown JSONB
+            "score_breakdown": record.get("score_breakdown"),
         }
         try:
             timeout = aiohttp.ClientTimeout(total=15)
