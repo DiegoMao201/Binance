@@ -23,11 +23,14 @@ Lifecycle
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import sys
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.data.deriv_client import DerivClient, NormalisedTick
@@ -76,6 +79,7 @@ class DerivDaemon:
 
         # Spawn the reaper as a background task; cancel on shutdown.
         reaper_task = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
+        status_task = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
         ws_task = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
@@ -83,7 +87,7 @@ class DerivDaemon:
 
         try:
             done, _pending = await asyncio.wait(
-                {ws_task, reaper_task, stop_task},
+                {ws_task, reaper_task, stop_task, status_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in done:
@@ -91,10 +95,11 @@ class DerivDaemon:
                     _LOGGER.exception("[deriv-daemon] task crashed: %s", t.get_name(),
                                       exc_info=t.exception())
         finally:
-            for t in (ws_task, reaper_task, stop_task):
+            for t in (ws_task, reaper_task, stop_task, status_task):
                 t.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await t
+            self._write_status(connected=False)
             await self._client.close()
             _LOGGER.info("[deriv-daemon] shutdown complete")
 
@@ -141,6 +146,38 @@ class DerivDaemon:
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Status writer — writes deriv_status.json every 10s so the frontend panel
+    # can show connection status, account, balance, and PnL.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _status_writer_loop(self) -> None:
+        self._write_status(connected=True)   # immediate first write
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+            self._write_status(connected=not self._stop_event.is_set())
+
+    def _write_status(self, *, connected: bool) -> None:
+        path: Path = self._settings.status_file
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "status": "running" if connected else "stopped",
+                "connected": connected,
+                "account_id": self._settings.account_id,
+                "dry_run": self._settings.dry_run,
+                "symbols": list(self._settings.symbols),
+                "bankroll_usdt": self._settings.bankroll_usdt,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(path)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("[deriv-daemon] failed to write status file")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Reaper — periodically settle closed contracts
