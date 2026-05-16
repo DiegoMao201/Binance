@@ -1255,8 +1255,41 @@ function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol, aiSign
                       return <span style={{ color: MUTE, fontSize: 10 }}>–</span>;
                     })()}
                   </td>
-                  <td style={{ padding: "8px 8px", color: MUTE, fontSize: 11, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {sc.rejection_reason || sc.candidate_reason || "–"}
+                  <td style={{ padding: "8px 8px", color: MUTE, fontSize: 11, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {(() => {
+                      // Para candidatos: si la IA ya rechazó por setup/approved, mostrar el motivo real
+                      // en vez del genérico "esperando validacion IA/ejecucion".
+                      const cached = aiSignalsBySymbol?.[sym];
+                      const aiSetup = (cached?.setup_quality || "").toLowerCase();
+                      const aiApproved = Boolean(cached?.approved);
+                      const aiFlags = Array.isArray(cached?.risk_flags) ? cached.risk_flags : [];
+                      const hardFlags = ["counter_trend_no_volume", "counter_trend_weak_book", "dual_microstructure_bearish", "downtrend_rsi_still_falling", "volume_exhaustion"];
+                      const firstHard = aiFlags.find((f) => hardFlags.includes(String(f).toLowerCase()));
+                      if (isCandidate && cached) {
+                        if (!aiApproved && aiSetup === "low") {
+                          return (
+                            <span title={aiFlags.join(", ") || "setup_quality=LOW"}>
+                              <span style={{ color: R, fontWeight: 700 }}>IA ✗ </span>
+                              <span style={{ color: MUTE }}>setup LOW</span>
+                              {firstHard && <span style={{ color: R, marginLeft: 4 }}>· {String(firstHard).replace(/_/g, " ")}</span>}
+                            </span>
+                          );
+                        }
+                        if (!aiApproved) {
+                          return (
+                            <span title={aiFlags.join(", ") || "approved=false"}>
+                              <span style={{ color: Y, fontWeight: 700 }}>IA ⚠ </span>
+                              <span style={{ color: MUTE }}>{aiSetup || "med"} · no aprobado</span>
+                              {firstHard && <span style={{ color: R, marginLeft: 4 }}>· {String(firstHard).replace(/_/g, " ")}</span>}
+                            </span>
+                          );
+                        }
+                        if (aiApproved) {
+                          return <span style={{ color: G, fontWeight: 700 }}>IA ✓ esperando ejecución</span>;
+                        }
+                      }
+                      return sc.rejection_reason || sc.candidate_reason || "–";
+                    })()}
                   </td>
                 </tr>
               );

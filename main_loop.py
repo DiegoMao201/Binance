@@ -2400,12 +2400,18 @@ def _can_reuse_ai_for_price(
     current_price: float,
     *,
     threshold_pct: float | None = None,
+    max_age_seconds: float | None = None,
 ) -> bool:
     """Tactical cache: if price has not moved enough, reuse the previous AI verdict.
 
     Saves OpenRouter quota and avoids the 429 spiral when 4 symbols all churn
     sub-tick movements. Returns True only when the previous decision is still
-    statistically valid (price drift < threshold_pct, default 0.15%).
+    statistically valid:
+      * price drift < threshold_pct (default 0.15%) AND
+      * cache age <= max_age_seconds (default 600s) — beyond that we force a
+        fresh consult even on perfectly flat price, otherwise a "low setup"
+        verdict during a quiet window would freeze the bot for hours and the
+        operator UI would show the same IA confidence indefinitely.
     """
     if not cache_entry or current_price <= 0:
         return False
@@ -2416,6 +2422,16 @@ def _can_reuse_ai_for_price(
         return False
     if ref_price <= 0:
         return False
+    # Hard cap on staleness regardless of price delta
+    age_cap = float(max_age_seconds) if max_age_seconds is not None else 600.0
+    cached_at = cache_entry.get("cached_at")
+    if cached_at:
+        try:
+            age = max(0.0, time.time() - float(cached_at))
+            if age > age_cap:
+                return False
+        except (TypeError, ValueError):
+            pass
     delta = abs(current_price - ref_price) / ref_price
     limit = float(threshold_pct) if threshold_pct is not None else _AI_PRICE_DELTA_REUSE_PCT
     return delta < limit
@@ -3283,12 +3299,19 @@ def run_cycle() -> None:
                 )
                 # Tactical price-delta cache: if TTL expired but price barely moved,
                 # reuse the verdict anyway. Critical to survive 429 storms.
+                # BUT: if the cached verdict is older than _max_stale_for_candidate
+                # we force a refresh even on flat price — otherwise a "LOW setup"
+                # verdict during a quiet window would never get re-evaluated and
+                # the dashboard would show the same 57% IA forever.
+                _is_candidate = bool((technical_signal or {}).get("candidate") or False)
+                _max_stale = 240.0 if _is_candidate else 900.0
                 if cached_signal is None:
                     stale_entry = ai_signals_by_symbol.get(symbol)
                     if stale_entry and _can_reuse_ai_for_price(
                         stale_entry,
                         float(technical_signal.get("close") or 0.0),
                         threshold_pct=_per_market_delta,
+                        max_age_seconds=_max_stale,
                     ):
                         cached_signal = dict(stale_entry)
                         cached_signal["cached"] = True

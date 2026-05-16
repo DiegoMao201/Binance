@@ -102,7 +102,13 @@ class DerivClientError(RuntimeError):
 class DerivClient:
     """Async Deriv WebSocket client (data + execution gateway)."""
 
-    # New Deriv API (2026+): OTP-based authentication
+    # Legacy public WebSocket endpoint — supports the FULL Deriv API
+    # (ticks, proposal, buy with proposal_id, sell, balance, transactions,
+    # Multipliers, Options, etc.). The newer `/trading/v1/options/ws/` OTP
+    # endpoint only supports binary Options (CALL/PUT) and rejects Multiplier
+    # contract requests with "Properties not allowed: symbol".
+    _LEGACY_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+    # Kept as fallback in case we ever need OTP-only access
     _OTP_REST_URL = "https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp"
 
     # Reconnection backoff bounds
@@ -138,19 +144,21 @@ class DerivClient:
     # Connection lifecycle
     # ─────────────────────────────────────────────────────────────────────────
     async def connect(self) -> None:
-        """Open WS via OTP auth and start the background reader task.
+        """Open the legacy Deriv WS endpoint and authorize with the API token.
 
-        New Deriv API flow (2026):
-          1. POST /trading/v1/options/accounts/{id}/otp  → returns WS URL with OTP
-          2. Connect to that URL — authentication is embedded in the URL, no
-             'authorize' message needed.
+        Flow:
+          1. Connect to wss://ws.derivws.com/websockets/v3?app_id=<id>
+          2. Send {"authorize": "<api_token>"} as the first message
+          3. Start the background reader task; subsequent calls use req_id
+             correlation for proposal / buy / sell / balance / etc.
         """
         if self._ws is not None:
             return
 
-        ws_url = await self._get_otp_ws_url()
-        _LOGGER.info("[deriv] Connecting to authenticated WS (account=%s)",
-                     self._settings.account_id)
+        app_id = str(self._settings.app_id or "1089")
+        ws_url = self._LEGACY_WS_URL.format(app_id=app_id)
+        _LOGGER.info("[deriv] Connecting to legacy WS (app_id=%s, account=%s)",
+                     app_id, self._settings.account_id)
         self._ws_ctx = websockets.connect(
             ws_url,
             ping_interval=self._PING_INTERVAL,
@@ -161,7 +169,13 @@ class DerivClient:
         self._ws = await self._ws_ctx.__aenter__()
         self.connected_at = time.time()
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-reader")
-        _LOGGER.info("[deriv] WS connected as account=%s", self._settings.account_id)
+
+        # Authorize before any other call
+        auth_resp = await self._request({"authorize": self._settings.api_token})
+        if "error" in auth_resp:
+            raise DerivClientError(f"authorize failed: {auth_resp['error']}")
+        loginid = (auth_resp.get("authorize") or {}).get("loginid")
+        _LOGGER.info("[deriv] WS connected and authorized as account=%s", loginid or self._settings.account_id)
 
     async def close(self) -> None:
         """Graceful shutdown — cancels reader and closes the WS."""
@@ -284,35 +298,44 @@ class DerivClient:
         if contract_type not in {"MULTUP", "MULTDOWN"}:
             raise DerivClientError(f"unsupported contract_type: {contract_type}")
 
-        # Single-shot "buy" with embedded parameters: avoids the proposal step
-        # entirely (Deriv's schema now rejects `symbol` inside `proposal` for
-        # certain Multiplier accounts → `Properties not allowed: symbol`).
-        # `price` is the maximum the client is willing to pay; for Multipliers
-        # the actual buy price equals stake. We pad +5 % as slippage cap so the
-        # order is never refused by a few cents of micro-spread.
         stake = round(float(stake_usdt), 2)
-        max_price = round(stake * 1.05, 2)
 
-        buy_req: dict[str, Any] = {
-            "buy": 1,
-            "price": max_price,
-            "parameters": {
-                "amount": stake,
-                "basis": "stake",
-                "contract_type": contract_type,
-                "currency": "USD",
-                "symbol": symbol,
-                "multiplier": int(multiplier),
-                "limit_order": {
-                    "stop_loss": round(stake * float(stop_loss_pct), 2),
-                    "take_profit": round(stake * float(take_profit_pct), 2),
-                },
+        # Step 1: get a price proposal for this exact contract. The legacy
+        # endpoint (wss://ws.derivws.com/websockets/v3) accepts the full
+        # Multipliers schema including `symbol`, `multiplier` and
+        # `limit_order`. This returns an `id` we then pass to `buy`.
+        proposal_req: dict[str, Any] = {
+            "proposal": 1,
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": contract_type,
+            "currency": "USD",
+            "symbol": symbol,
+            "multiplier": int(multiplier),
+            "limit_order": {
+                "stop_loss": round(stake * float(stop_loss_pct), 2),
+                "take_profit": round(stake * float(take_profit_pct), 2),
             },
+        }
+        proposal_resp = await self._request(proposal_req)
+        if "error" in proposal_resp:
+            raise DerivClientError(f"proposal error: {proposal_resp['error']}")
+        proposal = proposal_resp.get("proposal") or {}
+        proposal_id = proposal.get("id")
+        ask_price = float(proposal.get("ask_price", stake) or stake)
+        if not proposal_id:
+            raise DerivClientError(f"proposal missing id: {proposal_resp}")
+
+        # Step 2: buy at the quoted price (+1% slippage pad as max cap).
+        max_price = round(max(ask_price, stake) * 1.01, 2)
+        buy_req: dict[str, Any] = {
+            "buy": proposal_id,
+            "price": max_price,
         }
         result = await self._request(buy_req)
         if "error" in result:
             raise DerivClientError(f"buy error: {result['error']}")
-        return result
+        return result.get("buy") or result
 
     async def sell(self, contract_id: int) -> dict[str, Any]:
         """Close an open contract at market."""
