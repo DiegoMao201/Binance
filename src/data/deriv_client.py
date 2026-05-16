@@ -102,14 +102,12 @@ class DerivClientError(RuntimeError):
 class DerivClient:
     """Async Deriv WebSocket client (data + execution gateway)."""
 
-    # Legacy public WebSocket endpoint — supports the FULL Deriv API
-    # (ticks, proposal, buy with proposal_id, sell, balance, transactions,
-    # Multipliers, Options, etc.). The newer `/trading/v1/options/ws/` OTP
-    # endpoint only supports binary Options (CALL/PUT) and rejects Multiplier
-    # contract requests with "Properties not allowed: symbol".
-    _LEGACY_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id={app_id}"
-    # Kept as fallback in case we ever need OTP-only access
+    # OTP REST endpoint: POST here with PAT token → get ready-to-use WS URL.
+    # This WS URL supports FULL Deriv API: ticks, proposal (MULTUP/MULTDOWN),
+    # buy, sell, balance, etc. The `symbol` field is `underlying_symbol` here.
     _OTP_REST_URL = "https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp"
+    # Legacy WS kept for reference only — rejected with 401 for alphanumeric app_ids
+    _LEGACY_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id={app_id}"
 
     # Reconnection backoff bounds
     _BACKOFF_INITIAL = 1.0
@@ -144,21 +142,21 @@ class DerivClient:
     # Connection lifecycle
     # ─────────────────────────────────────────────────────────────────────────
     async def connect(self) -> None:
-        """Open the legacy Deriv WS endpoint and authorize with the API token.
+        """Open Deriv WS via OTP flow (PAT token → WS URL → connect).
 
         Flow:
-          1. Connect to wss://ws.derivws.com/websockets/v3?app_id=<id>
-          2. Send {"authorize": "<api_token>"} as the first message
-          3. Start the background reader task; subsequent calls use req_id
+          1. POST to /trading/v1/options/accounts/{accountId}/otp with PAT
+          2. Extract data.url → pre-authenticated WS URL
+          3. Connect to that URL (no separate `authorize` message needed)
+          4. Start the background reader task; subsequent calls use req_id
              correlation for proposal / buy / sell / balance / etc.
         """
         if self._ws is not None:
             return
 
-        app_id = str(self._settings.app_id or "1089")
-        ws_url = self._LEGACY_WS_URL.format(app_id=app_id)
-        _LOGGER.info("[deriv] Connecting to legacy WS (app_id=%s, account=%s)",
-                     app_id, self._settings.account_id)
+        ws_url = await self._get_otp_ws_url()
+        _LOGGER.info("[deriv] Connecting via OTP WS (account=%s)",
+                     self._settings.account_id)
         self._ws_ctx = websockets.connect(
             ws_url,
             ping_interval=self._PING_INTERVAL,
@@ -169,13 +167,7 @@ class DerivClient:
         self._ws = await self._ws_ctx.__aenter__()
         self.connected_at = time.time()
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-reader")
-
-        # Authorize before any other call
-        auth_resp = await self._request({"authorize": self._settings.api_token})
-        if "error" in auth_resp:
-            raise DerivClientError(f"authorize failed: {auth_resp['error']}")
-        loginid = (auth_resp.get("authorize") or {}).get("loginid")
-        _LOGGER.info("[deriv] WS connected and authorized as account=%s", loginid or self._settings.account_id)
+        _LOGGER.info("[deriv] WS connected (OTP) for account=%s", self._settings.account_id)
 
     async def close(self) -> None:
         """Graceful shutdown — cancels reader and closes the WS."""
@@ -300,17 +292,16 @@ class DerivClient:
 
         stake = round(float(stake_usdt), 2)
 
-        # Step 1: get a price proposal for this exact contract. The legacy
-        # endpoint (wss://ws.derivws.com/websockets/v3) accepts the full
-        # Multipliers schema including `symbol`, `multiplier` and
-        # `limit_order`. This returns an `id` we then pass to `buy`.
+        # Step 1: get a price proposal for this exact contract.
+        # The OTP WS endpoint uses `underlying_symbol` (not `symbol`) for
+        # Multiplier contracts. limit_order values are in USD (not % of stake).
         proposal_req: dict[str, Any] = {
             "proposal": 1,
             "amount": stake,
             "basis": "stake",
             "contract_type": contract_type,
             "currency": "USD",
-            "symbol": symbol,
+            "underlying_symbol": symbol,
             "multiplier": int(multiplier),
             "limit_order": {
                 "stop_loss": round(stake * float(stop_loss_pct), 2),
