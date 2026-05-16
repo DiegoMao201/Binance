@@ -267,6 +267,10 @@ class DerivDaemon:
             )
             if not snap2.hurst_ai_override:
                 reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+                _LOGGER.warning(
+                    "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
+                    tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
+                )
                 self._record_decision(
                     symbol=tick.symbol, allowed=False, side=snap.side,
                     score=snap.score, reason=reason,

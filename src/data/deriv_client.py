@@ -290,18 +290,20 @@ class DerivClient:
         stake = max(round(float(stake_usdt), 2), 1.0)  # Deriv demo minimum is $1
         dt = max(1, int(duration_ticks))
 
-        # Direct-buy format: "buy":1 + "parameters" block.
-        # The "price":100 field is required by the protocol but ignored when
-        # basis="stake" — Deriv fills it from the quote internally.
+        # Direct-buy format: buy="1" (string) + parameters block.
+        # Schema: buy_request.schema.json requires buy to be a STRING matching
+        # ^(?:[\w-]{32,128}|1)$ — the integer 1 is rejected.
+        # parameters.underlying_symbol is REQUIRED ("symbol" does not exist).
+        # "price" is required but ignored when basis="stake".
         buy_req: dict[str, Any] = {
-            "buy": 1,
+            "buy": "1",
             "price": 100,
             "parameters": {
                 "amount": stake,
                 "basis": "stake",
                 "contract_type": ct,
                 "currency": "USD",
-                "symbol": symbol,
+                "underlying_symbol": symbol,
                 "duration": dt,
                 "duration_unit": "t",
             },
@@ -353,18 +355,21 @@ class DerivClient:
         sl_usd = round(max(stake * float(stop_loss_pct), 0.50), 2)
         tp_usd = round(max(stake * float(take_profit_pct), 1.00), 2)
 
-        # Direct-buy format: "buy":1 + "parameters" block.
-        # Use `symbol` (NOT `underlying_symbol` — that field belongs to the
-        # legacy proposal flow and is rejected by the direct-buy endpoint).
+        # Direct-buy format: buy="1" (string) + parameters block.
+        # Schema: buy_request.schema.json requires:
+        #   - buy: STRING "1" (not integer 1)
+        #   - parameters.underlying_symbol: REQUIRED (not "symbol")
+        #   - parameters.contract_type, currency: REQUIRED
+        # limit_order stop_loss/take_profit are absolute USD P&L amounts.
         buy_req: dict[str, Any] = {
-            "buy": 1,
+            "buy": "1",
             "price": 100,
             "parameters": {
                 "amount": stake,
                 "basis": "stake",
                 "contract_type": ct,
                 "currency": "USD",
-                "symbol": symbol,
+                "underlying_symbol": symbol,
                 "multiplier": mult,
                 "limit_order": {
                     "stop_loss": sl_usd,
