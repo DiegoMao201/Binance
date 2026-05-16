@@ -73,6 +73,10 @@ class DerivTradeExecutor:
         self._telemetry = telemetry
         self._open: dict[int, DerivOpenContract] = {}
         self._lock = asyncio.Lock()
+        # Running per-symbol stats (updated on each contract close)
+        self._sym_stats: dict[str, dict[str, Any]] = {}
+        self._session_pnl: float = 0.0
+        self._session_trades: int = 0
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API consumed by the OrderRouter
@@ -97,6 +101,14 @@ class DerivTradeExecutor:
         if len(self._open) >= self._settings.max_open_contracts:
             raise DerivClientError(
                 f"max_open_contracts={self._settings.max_open_contracts} reached"
+            )
+
+        # Also block a second contract on the same symbol — synthetic indices are
+        # independent but doubling up on the same underlying adds no edge.
+        open_on_symbol = sum(1 for oc in self._open.values() if oc.symbol == order.symbol)
+        if open_on_symbol >= 1:
+            raise DerivClientError(
+                f"already have an open contract on {order.symbol} — skipping duplicate"
             )
 
         result = await self._client.buy(
@@ -212,9 +224,56 @@ class DerivTradeExecutor:
             self._append_closed(record)
             await self._post_pamm_webhook(record)
             self._notify("close", record)
+            self._update_sym_stats(record)
             closed_now.append(record)
 
         return closed_now
+
+    def _update_sym_stats(self, record: dict[str, Any]) -> None:
+        sym = record.get("symbol", "unknown")
+        pnl = float(record.get("realized_pnl_usdt") or 0)
+        if sym not in self._sym_stats:
+            self._sym_stats[sym] = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "best": None, "worst": None}
+        s = self._sym_stats[sym]
+        s["trades"] += 1
+        s["pnl"] = round(s["pnl"] + pnl, 6)
+        if pnl > 0:
+            s["wins"] += 1
+        elif pnl < 0:
+            s["losses"] += 1
+        if s["best"] is None or pnl > s["best"]:
+            s["best"] = pnl
+        if s["worst"] is None or pnl < s["worst"]:
+            s["worst"] = pnl
+        self._session_pnl = round(self._session_pnl + pnl, 6)
+        self._session_trades += 1
+
+    def get_per_symbol_stats(self) -> dict[str, Any]:
+        """Return a snapshot of per-symbol performance and session totals."""
+        result: dict[str, Any] = {}
+        for sym, s in self._sym_stats.items():
+            wr = round(s["wins"] / s["trades"], 4) if s["trades"] > 0 else 0.0
+            result[sym] = {**s, "win_rate": wr}
+        result["_session"] = {
+            "pnl": self._session_pnl,
+            "trades": self._session_trades,
+        }
+        return result
+
+    def get_open_contracts_for_status(self) -> list[dict[str, Any]]:
+        """Return a safe serialisable snapshot of all open contracts."""
+        return [
+            {
+                "contract_id": oc.contract_id,
+                "symbol": oc.symbol,
+                "side": oc.side,
+                "stake_usdt": oc.stake_usdt,
+                "multiplier": oc.multiplier,
+                "entry_price": oc.entry_price,
+                "opened_at_ts": oc.opened_at_ts,
+            }
+            for oc in self._open.values()
+        ]
 
     # ─────────────────────────────────────────────────────────────────────────
     # Persistence (atomic writes, broker-scoped)

@@ -166,7 +166,7 @@ _RADAR_ALERT_COOLDOWN_SECONDS: int = 3600  # 1 hour per symbol
 # RequestException / pre-flight degraded events happen in a burst (e.g. container restart,
 # transient proxy issue, or OpenRouter outage). Prevents Telegram spam.
 _ALERTA_RED_STATE: dict[str, float] = {"last_sent": 0.0}
-_ALERTA_RED_COOLDOWN_SECONDS: int = 600  # 10 minutes
+_ALERTA_RED_COOLDOWN_SECONDS: int = 1800  # 30 minutes — prevent alert fatigue
 
 
 def _alerta_red_load_persisted(logs_dir: Path) -> None:

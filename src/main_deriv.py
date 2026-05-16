@@ -80,6 +80,11 @@ class DerivDaemon:
             "orders_ok": 0,
             "orders_failed": 0,
         }
+        # Balance cache — refreshed by _balance_refresh_loop every 30 s.
+        self._balance_usd: float | None = None
+        self._balance_currency: str = "USD"
+        # Rolling equity snapshots (last 200) for the analytics page.
+        self._equity_history: list[dict[str, Any]] = []
 
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
                          score: float, reason: str) -> None:
@@ -106,6 +111,7 @@ class DerivDaemon:
         # Spawn the reaper as a background task; cancel on shutdown.
         reaper_task = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         status_task = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
+        balance_task = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
         ws_task = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
@@ -113,7 +119,7 @@ class DerivDaemon:
 
         try:
             done, _pending = await asyncio.wait(
-                {ws_task, reaper_task, stop_task, status_task},
+                {ws_task, reaper_task, stop_task, status_task, balance_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in done:
@@ -121,7 +127,7 @@ class DerivDaemon:
                     _LOGGER.exception("[deriv-daemon] task crashed: %s", t.get_name(),
                                       exc_info=t.exception())
         finally:
-            for t in (ws_task, reaper_task, stop_task, status_task):
+            for t in (ws_task, reaper_task, stop_task, status_task, balance_task):
                 t.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await t
@@ -196,6 +202,36 @@ class DerivDaemon:
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Balance refresh — polls Deriv API every 30 s and caches the result so
+    # _write_status() can include it without blocking the sync writer.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _balance_refresh_loop(self) -> None:
+        # Wait briefly for the WS to be established before the first call.
+        await asyncio.sleep(5)
+        while not self._stop_event.is_set():
+            try:
+                resp = await self._client.balance()
+                # Deriv WS returns: {"balance": {"balance": 10000.0, "currency": "USD", ...}, ...}
+                bal_obj = resp.get("balance") or {}
+                if isinstance(bal_obj, dict):
+                    self._balance_usd = float(bal_obj.get("balance") or 0.0)
+                    self._balance_currency = str(bal_obj.get("currency") or "USD")
+                    # Snapshot for rolling equity history
+                    self._equity_history.append({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "balance": self._balance_usd,
+                        "currency": self._balance_currency,
+                    })
+                    if len(self._equity_history) > 200:
+                        self._equity_history = self._equity_history[-200:]
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("[deriv-daemon] balance fetch failed (non-fatal, will retry in 30s)")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Status writer — writes deriv_status.json every 10s so the frontend panel
     # can show connection status, account, balance, and PnL.
     # ─────────────────────────────────────────────────────────────────────────
@@ -212,6 +248,9 @@ class DerivDaemon:
         path: Path = self._settings.status_file
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Per-symbol stats from the executor (closed contract history)
+            per_sym = self._executor.get_per_symbol_stats()
+            open_contracts = self._executor.get_open_contracts_for_status()
             data = {
                 "status": "running" if connected else "stopped",
                 "connected": connected,
@@ -219,11 +258,16 @@ class DerivDaemon:
                 "dry_run": self._settings.dry_run,
                 "symbols": list(self._settings.symbols),
                 "bankroll_usdt": self._settings.bankroll_usdt,
+                "balance": self._balance_usd,
+                "balance_currency": self._balance_currency,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 # ── Telemetría rica para auditoría visual ─────────────────
                 "counters": dict(self._counters),
                 "last_ticks": dict(self._last_ticks),
                 "last_decisions": list(self._last_decisions[-15:]),
+                "per_symbol_stats": per_sym,
+                "open_contracts_live": open_contracts,
+                "equity_history": list(self._equity_history[-50:]),  # last 50 snapshots
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2))
