@@ -52,7 +52,12 @@ fi
 echo "[startup] Running migration 005 (trade_id + broker columns)..."
 npx prisma db execute --schema ./prisma/schema.prisma \
   --file ./db/migrations/005_add_trade_id_broker.sql || \
-  echo "[startup] WARN: migration 005 failed — webhook /api/webhooks/trade-closed may return 500. Bot trades are saved locally."
+  echo "[startup] WARN: migration 005 failed — continuing."
+
+echo "[startup] Running migration 007 (add missing UTA columns)..."
+npx prisma db execute --schema ./prisma/schema.prisma \
+  --file ./db/migrations/007_add_missing_uta_columns.sql || \
+  echo "[startup] WARN: migration 007 failed — symbol column may be missing."
 
 echo "[startup] Starting Next.js server..."
 exec npm run start

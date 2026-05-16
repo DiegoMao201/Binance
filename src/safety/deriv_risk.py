@@ -208,6 +208,15 @@ class DerivRiskManager:
         self._MAX_ATR_HISTORY = 50
         # Force-test-trades tick counter (DERIV_FORCE_TEST_TRADES mode)
         self._force_tick_count: dict[str, int] = {}
+        # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
+        if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
+            lf = settings.lockout_file
+            if lf.exists():
+                try:
+                    lf.unlink()
+                    _LOGGER.warning("[risk] DERIV_RESET_LOCKOUT=true — lockout file cleared on startup")
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router

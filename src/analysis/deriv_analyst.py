@@ -120,36 +120,33 @@ class DerivAnalysis:
     ai_skipped: bool = False        # True if AI gate disabled or timed out
 
 
-# ── Helpers: Hurst exponent via log-returns diff-std method ─────────────────
+# ── Helpers: Hurst exponent via log-prices variance-at-scale method ─────────
 def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
-    """Estimate the Hurst exponent using the log-returns variance-at-scale method.
+    """Estimate the Hurst exponent using the log-prices variance-at-scale method.
 
-    Works on log-returns (not raw prices) to eliminate price-scale bias that
-    causes the classic R/S method to saturate near 1.0 on synthetic indices.
-
-    Uses sub-window lag regression: H = slope / 2 where slope is the OLS fit
-    of log(std(diff_at_lag)) vs log(lag).
+    std(log_price[t+L] - log_price[t]) ~ L^H
+    → OLS slope of log(std) vs log(lag) equals H directly (no ×2 factor).
 
     Returns H in [0.05, 0.95]:
       H ≈ 0.5  → random walk / no edge
-      H > 0.57 → persistent trend
+      H > 0.57 → persistent trend (momentum)
       H < 0.43 → mean-reverting
     """
     n = len(prices)
     if n < min_n:
         return 0.5  # insufficient data → neutral
 
-    log_returns = np.diff(np.log(np.array(prices, dtype=float) + 1e-12))
+    log_prices = np.log(np.array(prices, dtype=float) + 1e-12)
 
-    if np.std(log_returns) == 0:
+    if np.std(log_prices) == 0:
         return 0.5
 
     lags = [2, 4, 8, 16, 32]
     tau = []
     for lag in lags:
-        if lag >= len(log_returns):
+        if lag >= len(log_prices):
             continue
-        diff = log_returns[lag:] - log_returns[:-lag]
+        diff = log_prices[lag:] - log_prices[:-lag]
         std_diff = float(np.std(diff))
         tau.append(max(std_diff, 1e-12))
 
@@ -158,7 +155,7 @@ def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
 
     used_lags = lags[:len(tau)]
     poly = np.polyfit(np.log(used_lags), np.log(tau), 1)
-    hurst = poly[0] * 2.0
+    hurst = float(poly[0])  # slope = H directly — no ×2
 
     # Hard guardrails — real market values never exceed these bounds
     return float(max(0.05, min(hurst, 0.95)))
