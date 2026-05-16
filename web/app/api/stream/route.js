@@ -22,6 +22,10 @@ const WATCHED = [
   "pre_flight.json",
   "equity_history.json",
   "recovery_status.json",
+  // Deriv bot files
+  "deriv_status.json",
+  "deriv_open_contracts.json",
+  "deriv_closed_contracts.json",
 ];
 
 export async function GET() {

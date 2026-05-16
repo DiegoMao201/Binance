@@ -1267,82 +1267,165 @@ function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol, aiSign
   );
 }
 
-// ── Panel Deriv Demo ─────────────────────────────────────────────
+// ── Panel Deriv Demo (completo) ───────────────────────────────────
 function DerivDemoPanel({ derivStatus, derivOpenContracts, derivClosedContracts }) {
-  const open   = derivOpenContracts  || [];
-  const closed = [...(derivClosedContracts || [])].reverse().slice(0, 8);
-  const st     = derivStatus || {};
-  const isUp   = st.status === "running" || st.connected === true;
-  const account= st.account_id || st.loginid || "–";
-  const balance= st.balance != null ? Number(st.balance).toFixed(2) : "–";
-  const pnlTotal = closed.reduce((s, c) => s + (Number(c.pnl ?? c.profit ?? 0)), 0);
-  const wins  = closed.filter(c => (c.pnl ?? c.profit ?? 0) > 0).length;
-  const wr    = closed.length ? Math.round(wins / closed.length * 100) : 0;
-  const tone  = v => v > 0 ? G : v < 0 ? R : MUTE;
+  const open    = derivOpenContracts  || [];
+  const allClosed = [...(derivClosedContracts || [])].reverse();
+  const closed  = allClosed.slice(0, 20);
+  const st      = derivStatus || {};
+  const isUp    = st.status === "running" || st.connected === true;
+  const isDry   = st.dry_run === true;
+  const account = st.account_id || st.loginid || "–";
+  const balance = st.balance != null ? Number(st.balance).toFixed(2) : "–";
+  const symbols = st.symbols || [];
+
+  // PnL stats
+  const pnlAll   = allClosed.reduce((s, c) => s + Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0), 0);
+  const winsAll  = allClosed.filter(c => Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0) > 0).length;
+  const wrAll    = allClosed.length ? Math.round(winsAll / allClosed.length * 100) : 0;
+  const avgPnl   = allClosed.length ? pnlAll / allClosed.length : 0;
+  const tone     = v => v > 0 ? G : v < 0 ? R : MUTE;
+
+  // Per-symbol breakdown
+  const bySymbol = {};
+  for (const c of allClosed) {
+    const sym = c.symbol || c.underlying || "–";
+    if (!bySymbol[sym]) bySymbol[sym] = { trades: 0, wins: 0, pnl: 0 };
+    const p = Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0);
+    bySymbol[sym].trades++;
+    bySymbol[sym].pnl += p;
+    if (p > 0) bySymbol[sym].wins++;
+  }
+  const symRows = Object.entries(bySymbol).sort((a, b) => b[1].trades - a[1].trades);
+
+  const fmtTs = ts => {
+    if (!ts) return "–";
+    const d = new Date(typeof ts === "number" ? ts * 1000 : ts);
+    return isNaN(d) ? "–" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
 
   return (
-    <Card
-      title={<span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ width: 7, height: 7, borderRadius: "50%", background: isUp ? G : MUTE, display: "inline-block" }} />
-        Deriv Demo · {account}
-      </span>}
-      right={<span style={{ fontSize: 10, color: isUp ? G : MUTE }}>{isUp ? "CONECTADO" : "offline"}</span>}
-    >
-      {/* KPIs rápidos */}
-      <div style={{ display: "flex", gap: 14, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 9, color: MUTE }}>SALDO</div>
-          <div style={{ fontWeight: 700, fontFamily: "monospace", color: B }}>{balance} USD</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: MUTE }}>PnL (últimas 8)</div>
-          <div style={{ fontWeight: 700, fontFamily: "monospace", color: tone(pnlTotal) }}>{pnlTotal >= 0 ? "+" : ""}{pnlTotal.toFixed(2)} USD</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: MUTE }}>WIN RATE</div>
-          <div style={{ fontWeight: 700, color: wr >= 50 ? G : R }}>{wr}%</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 9, color: MUTE }}>CONTRATOS</div>
-          <div style={{ fontWeight: 700, color: TEXT }}>{open.length} abiertos</div>
-        </div>
+    <div style={{ marginTop: 14 }}>
+      {/* Header separador */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: isUp ? G : MUTE, display: "inline-block", boxShadow: isUp ? `0 0 6px ${G}` : "none" }} />
+        <span style={{ fontSize: 11, fontWeight: 700, color: TEXT, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+          Deriv Bot · {account}
+        </span>
+        {isDry && <span style={{ fontSize: 9, background: `${Y}22`, color: Y, border: `1px solid ${Y}44`, borderRadius: 4, padding: "1px 6px" }}>DEMO</span>}
+        <span style={{ fontSize: 9, color: isUp ? G : MUTE, marginLeft: "auto" }}>{isUp ? "CONECTADO" : "offline"}</span>
       </div>
 
-      {/* Posiciones abiertas */}
-      {open.length > 0 && (
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Posiciones abiertas</div>
-          {open.map((c, i) => (
-            <div key={c.contract_id || i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${BORD}` }}>
-              <span style={{ fontWeight: 600 }}>{c.symbol || c.underlying || "–"}</span>
-              <span style={{ color: MUTE }}>{c.contract_type || c.direction || "–"}</span>
-              <span style={{ fontFamily: "monospace", color: B }}>{Number(c.buy_price || c.stake || 0).toFixed(2)}</span>
-              <span style={{ fontSize: 10, color: MUTE }}>{c.score != null ? `score=${Number(c.score).toFixed(2)}` : ""}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* KPI Strip */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8, marginBottom: 12 }}>
+        {[
+          { label: "SALDO", val: `${balance} USD`, color: B },
+          { label: "PnL TOTAL", val: `${pnlAll >= 0 ? "+" : ""}${pnlAll.toFixed(3)} USD`, color: tone(pnlAll) },
+          { label: "WIN RATE", val: `${wrAll}%`, color: wrAll >= 50 ? G : R },
+          { label: "TRADES", val: allClosed.length, color: TEXT },
+          { label: "ABIERTOS", val: open.length, color: open.length > 0 ? G : MUTE },
+        ].map(k => (
+          <div key={k.label} style={{ background: BG2, borderRadius: 8, padding: "8px 10px", border: `1px solid ${BORD}` }}>
+            <div style={{ fontSize: 9, color: MUTE, marginBottom: 3 }}>{k.label}</div>
+            <div style={{ fontWeight: 700, fontFamily: "monospace", color: k.color, fontSize: 13 }}>{k.val}</div>
+          </div>
+        ))}
+      </div>
 
-      {/* Historial reciente */}
-      {closed.length === 0 ? (
-        <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "10px 0" }}>Sin contratos cerrados aún.</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Últimas operaciones</div>
-          {closed.map((c, i) => {
-            const pnl = Number(c.pnl ?? c.profit ?? 0);
-            return (
-              <div key={c.contract_id || i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${BORD}` }}>
-                <span style={{ fontWeight: 600, color: TEXT }}>{c.symbol || c.underlying || "–"}</span>
-                <span style={{ color: MUTE, fontSize: 10 }}>{c.contract_type || c.direction || "–"}</span>
-                <span style={{ fontFamily: "monospace", color: pnl >= 0 ? G : R, fontWeight: 700 }}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span>
-                <span style={{ fontSize: 10, color: MUTE }}>{(c.close_time || c.sold_time || "").slice(11, 16)}</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {/* Col izquierda: posiciones abiertas + por símbolo */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {/* Contratos abiertos */}
+          <Card title={`Contratos abiertos · ${open.length}`}>
+            {open.length === 0 ? (
+              <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "14px 0" }}>Sin contratos abiertos</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {open.map((c, i) => {
+                  const isUp2 = c.side === "MULTUP";
+                  const sideColor = isUp2 ? G : R;
+                  const heldSec = c.opened_at_ts ? Math.round(Date.now() / 1000 - c.opened_at_ts) : 0;
+                  const heldMin = Math.floor(heldSec / 60);
+                  return (
+                    <div key={c.contract_id || i} style={{ background: `${sideColor}0a`, border: `1px solid ${sideColor}22`, borderRadius: 8, padding: "8px 10px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <span style={{ fontWeight: 700, color: TEXT }}>{c.symbol || "–"}</span>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: sideColor }}>{isUp2 ? "▲ SUBE" : "▼ BAJA"}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                        <span style={{ color: MUTE }}>Entrada</span>
+                        <span style={{ fontFamily: "monospace", color: TEXT }}>{Number(c.entry_price || 0).toFixed(5)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                        <span style={{ color: MUTE }}>Stake</span>
+                        <span style={{ fontFamily: "monospace", color: B }}>{Number(c.stake_usdt || 0).toFixed(2)} USD × {c.multiplier}x</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                        <span style={{ color: MUTE }}>Hold</span>
+                        <span style={{ fontFamily: "monospace", color: heldMin > 4 ? Y : MUTE }}>{heldMin > 0 ? `${heldMin}m` : `${heldSec}s`}</span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
+            )}
+          </Card>
+
+          {/* Por símbolo */}
+          {symRows.length > 0 && (
+            <Card title="Rendimiento por símbolo">
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ color: MUTE, fontSize: 9 }}>
+                    <th style={{ textAlign: "left", padding: "3px 6px" }}>SÍMBOLO</th>
+                    <th style={{ textAlign: "center", padding: "3px 6px" }}>TRADES</th>
+                    <th style={{ textAlign: "center", padding: "3px 6px" }}>WIN%</th>
+                    <th style={{ textAlign: "right", padding: "3px 6px" }}>PnL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {symRows.map(([sym, d]) => {
+                    const wr2 = Math.round(d.wins / d.trades * 100);
+                    return (
+                      <tr key={sym} style={{ borderTop: `1px solid ${BORD}` }}>
+                        <td style={{ padding: "4px 6px", fontWeight: 600, color: TEXT }}>{sym}</td>
+                        <td style={{ padding: "4px 6px", textAlign: "center", color: MUTE }}>{d.trades}</td>
+                        <td style={{ padding: "4px 6px", textAlign: "center", color: wr2 >= 50 ? G : R, fontWeight: 700 }}>{wr2}%</td>
+                        <td style={{ padding: "4px 6px", textAlign: "right", fontFamily: "monospace", color: tone(d.pnl), fontWeight: 700 }}>{d.pnl >= 0 ? "+" : ""}{d.pnl.toFixed(3)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </Card>
+          )}
         </div>
-      )}
-    </Card>
+
+        {/* Col derecha: historial de contratos cerrados */}
+        <Card title={`Historial Deriv · ${allClosed.length} contratos`}>
+          {closed.length === 0 ? (
+            <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "20px 0" }}>Sin contratos cerrados aún.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {closed.map((c, i) => {
+                const pnl   = Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0);
+                const pc    = pnl >= 0 ? G : R;
+                const isUp2 = c.side === "MULTUP";
+                return (
+                  <div key={c.contract_id || i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: 6, background: `${pc}09`, border: `1px solid ${pc}1e` }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: isUp2 ? G : R }}>{isUp2 ? "▲" : "▼"}</span>
+                    <span style={{ fontWeight: 600, fontSize: 11, color: TEXT, flex: 1 }}>{c.symbol || "–"}</span>
+                    <span style={{ fontSize: 10, color: MUTE }}>{c.exit_reason || "–"}</span>
+                    <span style={{ fontFamily: "monospace", fontWeight: 700, color: pc, fontSize: 12 }}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(3)}</span>
+                    <span style={{ fontSize: 10, color: MUTE, minWidth: 38, textAlign: "right" }}>{fmtTs(c.closed_at_ts)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+    </div>
   );
 }
 
@@ -1804,7 +1887,9 @@ export default function DashboardClient({ initialData }) {
   const [controlBusy, setControlBusy] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [cohort, setCohort]         = useState(null);
+  const [sseStatus, setSseStatus]   = useState("connecting"); // connecting | live | fallback
 
+  // ── Fallback HTTP poll (fires only when SSE is dead) ─────────────
   const refresh = useCallback(async () => {
     try {
       const res  = await fetch("/api/state", { cache: "no-store" });
@@ -1812,13 +1897,11 @@ export default function DashboardClient({ initialData }) {
       setPayload(next);
       setLastRefresh(new Date());
     } catch (err) {
-      // BUG FIX: was silent — now logs to console so the "ghost trade" cause
-      // is visible in DevTools without requiring backend changes.
       console.error("[DashboardClient] /api/state refresh error:", err);
     }
   }, []);
 
-  // Fetch cohort metrics (separate cadence — 30s — from main /api/state poll)
+  // ── Cohort metrics (separate 30s cadence) ────────────────────────
   const refreshCohort = useCallback(async () => {
     try {
       const res = await fetch("/api/cohort-analytics", { cache: "no-store" });
@@ -1830,9 +1913,64 @@ export default function DashboardClient({ initialData }) {
     }
   }, []);
 
+  // ── SSE connection: push updates when bot files change ───────────
   useEffect(() => {
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    let es = null;
+    let fallbackId = null;
+    let reconnectDelay = 1000;
+    let alive = true;
+
+    const startFallback = () => {
+      if (fallbackId) return;
+      setSseStatus("fallback");
+      fallbackId = setInterval(refresh, 5000);
+    };
+    const stopFallback = () => {
+      if (fallbackId) { clearInterval(fallbackId); fallbackId = null; }
+    };
+
+    const connect = () => {
+      if (!alive) return;
+      try {
+        es = new EventSource("/api/stream");
+        setSseStatus("connecting");
+
+        const onMsg = (e) => {
+          try {
+            const next = JSON.parse(e.data);
+            setPayload(next);
+            setLastRefresh(new Date());
+            reconnectDelay = 1000;
+            setSseStatus("live");
+            stopFallback();
+          } catch { /* ignore parse errors */ }
+        };
+
+        es.addEventListener("state", onMsg);
+        es.onmessage = onMsg; // legacy fallback
+
+        es.onerror = () => {
+          es.close();
+          startFallback();
+          setSseStatus("fallback");
+          if (alive) setTimeout(connect, Math.min(reconnectDelay, 30000));
+          reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+        };
+      } catch {
+        startFallback();
+        if (alive) setTimeout(connect, 5000);
+      }
+    };
+
+    connect();
+    // Always do one immediate fetch so initial SSE delay shows fresh data
+    refresh();
+
+    return () => {
+      alive = false;
+      if (es) es.close();
+      stopFallback();
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -2045,7 +2183,11 @@ export default function DashboardClient({ initialData }) {
 
         {/* Footer */}
         <div style={{ fontSize: 10, color: MUTE, textAlign: "center", paddingBottom: 12 }}>
-          OptiFerre Terminal v2.0 · Refresh automático 5s · Último: {lastRefresh ? lastRefresh.toLocaleTimeString() : "–"}
+          OptiFerre Terminal v2.0 ·{" "}
+          <span style={{ color: sseStatus === "live" ? G : sseStatus === "fallback" ? Y : MUTE }}>
+            {sseStatus === "live" ? "● LIVE" : sseStatus === "fallback" ? "● poll 5s" : "● conectando…"}
+          </span>
+          {" "}· Último: {lastRefresh ? lastRefresh.toLocaleTimeString() : "–"}
           &nbsp;·&nbsp;
           <Link href="/matriz" style={{ color: MUTE, textDecoration: "underline" }}>Ver Matriz completa</Link>
           &nbsp;·&nbsp;
