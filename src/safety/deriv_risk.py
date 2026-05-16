@@ -299,8 +299,10 @@ class DerivRiskManager:
             return snap
 
         ticks = self._ticks.get(symbol, [])
-        if len(ticks) < 30:
-            snap.reasons.append(f"insufficient ticks ({len(ticks)}/30)")
+        _force_test_active = os.getenv("DERIV_FORCE_TEST_TRADES", "").lower() in ("1", "true", "yes")
+        _warmup_needed = 5 if _force_test_active else 30
+        if len(ticks) < _warmup_needed:
+            snap.reasons.append(f"insufficient ticks ({len(ticks)}/{_warmup_needed})")
             return snap
 
         # ── Compute factors ────────────────────────────────────────────────

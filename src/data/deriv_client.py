@@ -278,13 +278,8 @@ class DerivClient:
           RISE  — bet that the next spike fires UP   (use on BOOM* symbols)
           FALL  — bet that the next spike fires DOWN (use on CRASH* symbols)
 
-        Deriv measures "duration" in ticks (unit "t"), not seconds.  A 10-tick
-        contract means the bot is exposed for exactly 10 incoming price ticks;
-        if the spike does not fire within that window the payout is based on the
-        final tick price vs entry, so it expires with a partial gain/loss.
-
-        The proposal/buy flow uses `symbol` (not `underlying_symbol`) and
-        has no `multiplier` or `limit_order` fields.
+        Uses the Deriv v3 direct-buy format ("buy":1, "price":100, "parameters":{…})
+        so no prior proposal call is needed — the API handles the quote internally.
 
         Returns the raw `buy` response dict (contains contract_id, buy_price…).
         """
@@ -292,36 +287,33 @@ class DerivClient:
         if ct not in {"RISE", "FALL"}:
             raise DerivClientError(f"buy_spike: unsupported contract_type '{ct}' — expected RISE or FALL")
 
-        stake = round(float(stake_usdt), 2)
+        stake = max(round(float(stake_usdt), 2), 1.0)  # Deriv demo minimum is $1
         dt = max(1, int(duration_ticks))
 
-        proposal_req: dict[str, Any] = {
-            "proposal": 1,
-            "amount": stake,
-            "basis": "stake",
-            "contract_type": ct,
-            "currency": "USD",
-            "duration": dt,
-            "duration_unit": "t",
-            "symbol": symbol,
-        }
-        proposal_resp = await self._request(proposal_req)
-        if "error" in proposal_resp:
-            raise DerivClientError(f"buy_spike proposal error ({symbol} {ct}): {proposal_resp['error']}")
-        proposal = proposal_resp.get("proposal") or {}
-        proposal_id = proposal.get("id")
-        ask_price = float(proposal.get("ask_price", stake) or stake)
-        if not proposal_id:
-            raise DerivClientError(f"buy_spike proposal missing id: {proposal_resp}")
-
-        max_price = round(max(ask_price, stake) * 1.01, 2)
+        # Direct-buy format: "buy":1 + "parameters" block.
+        # The "price":100 field is required by the protocol but ignored when
+        # basis="stake" — Deriv fills it from the quote internally.
         buy_req: dict[str, Any] = {
-            "buy": proposal_id,
-            "price": max_price,
+            "buy": 1,
+            "price": 100,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": ct,
+                "currency": "USD",
+                "symbol": symbol,
+                "duration": dt,
+                "duration_unit": "t",
+            },
         }
         result = await self._request(buy_req)
         if "error" in result:
-            raise DerivClientError(f"buy_spike buy error ({symbol} {ct}): {result['error']}")
+            err = result["error"]
+            _LOGGER.critical(
+                "[RECHAZO BROKER] Símbolo: %s | Código: %s | Mensaje: %s",
+                symbol, err.get("code", "?"), err.get("message", str(err)),
+            )
+            raise DerivClientError(f"buy_spike error ({symbol} {ct}): {err}")
         return result.get("buy") or result
 
     async def buy(
@@ -334,59 +326,60 @@ class DerivClient:
         take_profit_pct: float,
     ) -> dict[str, Any]:
         """
-        Buy a multiplier contract (synthetic spot-equivalent with built-in OCO).
+        Buy a MULTUP/MULTDOWN multiplier contract (synthetic indices, e.g. R_100).
 
-        Args:
-          symbol         Deriv symbol, e.g. "R_100"
-          contract_type  "MULTUP" (long) or "MULTDOWN" (short)
-          stake_usdt     amount to risk in account currency (USDT-equivalent)
-          multiplier     leverage band (10/30/50/100/...). Higher = riskier.
-          stop_loss_pct  price-distance stop, e.g. 0.008 = 0.8 %
-          take_profit_pct  price-distance take-profit, e.g. 0.012 = 1.2 %
+        Uses the Deriv v3 direct-buy format ("buy":1, "price":100, "parameters":{…})
+        instead of the legacy two-step proposal→buy flow.  This fixes silent
+        rejections caused by the deprecated `underlying_symbol` field and the
+        incorrect limit_order scaling of the old implementation.
 
-        Returns the raw `buy` response dict (contains contract_id, buy_price...).
+        limit_order values are absolute USD P&L amounts:
+          stop_loss   = stake * stop_loss_pct  (minimum $0.50 for demo accounts)
+          take_profit = stake * take_profit_pct (minimum $1.00)
+
+        The "price":100 field is required by the WS protocol but is ignored by
+        Deriv when basis="stake" — the actual price is calculated server-side.
+
+        Returns the raw `buy` response dict (contains contract_id, buy_price…).
         """
-        contract_type = contract_type.upper()
-        if contract_type not in {"MULTUP", "MULTDOWN"}:
-            raise DerivClientError(f"unsupported contract_type: {contract_type}")
+        ct = contract_type.upper()
+        if ct not in {"MULTUP", "MULTDOWN"}:
+            raise DerivClientError(f"unsupported contract_type: {ct}")
 
-        stake = round(float(stake_usdt), 2)
+        stake = max(round(float(stake_usdt), 2), 1.0)  # Deriv demo minimum is $1
+        mult = int(multiplier)
 
-        # Step 1: get a price proposal for this exact contract.
-        # The OTP WS endpoint uses `underlying_symbol` (not `symbol`) for
-        # Multiplier contracts. limit_order values are in USD (not % of stake).
-        proposal_req: dict[str, Any] = {
-            "proposal": 1,
-            "amount": stake,
-            "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",
-            "underlying_symbol": symbol,
-            "multiplier": int(multiplier),
-            "limit_order": {
-                # Deriv enforces a hard minimum of $0.10 per limit-order leg.
-                "stop_loss": round(max(stake * float(stop_loss_pct), 0.10), 2),
-                "take_profit": round(max(stake * float(take_profit_pct), 0.10), 2),
-            },
-        }
-        proposal_resp = await self._request(proposal_req)
-        if "error" in proposal_resp:
-            raise DerivClientError(f"proposal error: {proposal_resp['error']}")
-        proposal = proposal_resp.get("proposal") or {}
-        proposal_id = proposal.get("id")
-        ask_price = float(proposal.get("ask_price", stake) or stake)
-        if not proposal_id:
-            raise DerivClientError(f"proposal missing id: {proposal_resp}")
+        # SL/TP as absolute USD P&L amounts (Deriv API requirement for limit_order).
+        sl_usd = round(max(stake * float(stop_loss_pct), 0.50), 2)
+        tp_usd = round(max(stake * float(take_profit_pct), 1.00), 2)
 
-        # Step 2: buy at the quoted price (+1% slippage pad as max cap).
-        max_price = round(max(ask_price, stake) * 1.01, 2)
+        # Direct-buy format: "buy":1 + "parameters" block.
+        # Use `symbol` (NOT `underlying_symbol` — that field belongs to the
+        # legacy proposal flow and is rejected by the direct-buy endpoint).
         buy_req: dict[str, Any] = {
-            "buy": proposal_id,
-            "price": max_price,
+            "buy": 1,
+            "price": 100,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": ct,
+                "currency": "USD",
+                "symbol": symbol,
+                "multiplier": mult,
+                "limit_order": {
+                    "stop_loss": sl_usd,
+                    "take_profit": tp_usd,
+                },
+            },
         }
         result = await self._request(buy_req)
         if "error" in result:
-            raise DerivClientError(f"buy error: {result['error']}")
+            err = result["error"]
+            _LOGGER.critical(
+                "[RECHAZO BROKER] Símbolo: %s | Código: %s | Mensaje: %s",
+                symbol, err.get("code", "?"), err.get("message", str(err)),
+            )
+            raise DerivClientError(f"buy error ({symbol} {ct}): {err}")
         return result.get("buy") or result
 
     async def sell(self, contract_id: int) -> dict[str, Any]:
