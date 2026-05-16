@@ -47,9 +47,13 @@ try:
         ConnectionClosed,
         ConnectionClosedError,
         ConnectionClosedOK,
-        InvalidStatusCode,
         WebSocketException,
     )
+    # InvalidStatusCode was removed in websockets 14.0; import conditionally.
+    try:
+        from websockets.exceptions import InvalidStatusCode
+    except ImportError:
+        InvalidStatusCode = WebSocketException  # type: ignore[misc,assignment]
 except ImportError as exc:  # pragma: no cover — import-time guard
     raise ImportError(
         "The 'websockets' package is required for the Deriv pipeline. "
@@ -117,6 +121,7 @@ class DerivClient:
         self._settings = settings
         self._url = self._URL_TEMPLATE.format(app_id=settings.app_id or "1089")
         self._ws: Optional[Any] = None
+        self._ws_ctx: Optional[Any] = None
         self._req_id: int = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()           # serialises send()
@@ -130,16 +135,20 @@ class DerivClient:
     # ─────────────────────────────────────────────────────────────────────────
     async def connect(self) -> None:
         """Open WS, authorize and start the background reader task."""
-        if self._ws is not None and not getattr(self._ws, "closed", True):
+        if self._ws is not None and getattr(self._ws, "open", False):
             return
         _LOGGER.info("[deriv] Connecting to %s", self._url)
-        self._ws = await websockets.connect(
+        # Use __aenter__ directly so we hold the actual ClientConnection
+        # object regardless of which websockets API variant (legacy vs asyncio)
+        # is installed (avoids __await__ removal in websockets ≥ 14).
+        self._ws_ctx = websockets.connect(
             self._url,
             ping_interval=self._PING_INTERVAL,
             ping_timeout=self._PING_TIMEOUT,
             close_timeout=5.0,
             max_size=2 ** 20,
         )
+        self._ws = await self._ws_ctx.__aenter__()
         self.connected_at = time.time()
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-reader")
 
@@ -160,8 +169,13 @@ class DerivClient:
             self._reader_task = None
         if self._ws is not None:
             with suppress(Exception):
-                await self._ws.close()
+                ctx = getattr(self, "_ws_ctx", None)
+                if ctx is not None:
+                    await ctx.__aexit__(None, None, None)
+                else:
+                    await self._ws.close()
             self._ws = None
+            self._ws_ctx = None
         # Cancel all pending futures so callers do not hang forever.
         for fut in self._pending.values():
             if not fut.done():
@@ -182,7 +196,7 @@ class DerivClient:
         backoff = self._BACKOFF_INITIAL
         while not self._stopped:
             try:
-                if self._ws is None or getattr(self._ws, "closed", True):
+                if self._ws is None or not getattr(self._ws, "open", False):
                     await self.connect()
 
                 # Subscribe (tick-stream) for every symbol we care about.
@@ -193,7 +207,7 @@ class DerivClient:
                 )
 
                 # Sit on the queue and dispatch ticks until the reader closes.
-                while not self._stopped and self._ws is not None and not getattr(self._ws, "closed", True):
+                while not self._stopped and self._ws is not None and getattr(self._ws, "open", False):
                     tick = await self._tick_queue.get()
                     if tick is None:  # sentinel from reader on disconnect
                         break
@@ -314,7 +328,7 @@ class DerivClient:
 
     async def _request(self, payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         """Send a request and await its single matching response."""
-        if self._ws is None or getattr(self._ws, "closed", True):
+        if self._ws is None or not getattr(self._ws, "open", False):
             raise DerivClientError("websocket not connected")
 
         async with self._lock:
@@ -429,8 +443,13 @@ class DerivClient:
             self._reader_task = None
         if self._ws is not None:
             with suppress(Exception):
-                await self._ws.close()
+                ctx = getattr(self, "_ws_ctx", None)
+                if ctx is not None:
+                    await ctx.__aexit__(None, None, None)
+                else:
+                    await self._ws.close()
             self._ws = None
+            self._ws_ctx = None
         # Cancel pending RPCs so callers do not deadlock.
         for fut in list(self._pending.values()):
             if not fut.done():
