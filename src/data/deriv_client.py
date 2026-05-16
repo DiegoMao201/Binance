@@ -264,6 +264,66 @@ class DerivClient:
     async def balance(self) -> dict[str, Any]:
         return await self._request({"balance": 1})
 
+    async def buy_spike(
+        self,
+        symbol: str,
+        contract_type: str,
+        stake_usdt: float,
+        duration_ticks: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Buy a duration-based RISE/FALL contract for Boom/Crash spike indices.
+
+        Boom/Crash do NOT support MULTUP/MULTDOWN.  The correct contract type is:
+          RISE  — bet that the next spike fires UP   (use on BOOM* symbols)
+          FALL  — bet that the next spike fires DOWN (use on CRASH* symbols)
+
+        Deriv measures "duration" in ticks (unit "t"), not seconds.  A 10-tick
+        contract means the bot is exposed for exactly 10 incoming price ticks;
+        if the spike does not fire within that window the payout is based on the
+        final tick price vs entry, so it expires with a partial gain/loss.
+
+        The proposal/buy flow uses `symbol` (not `underlying_symbol`) and
+        has no `multiplier` or `limit_order` fields.
+
+        Returns the raw `buy` response dict (contains contract_id, buy_price…).
+        """
+        ct = contract_type.upper()
+        if ct not in {"RISE", "FALL"}:
+            raise DerivClientError(f"buy_spike: unsupported contract_type '{ct}' — expected RISE or FALL")
+
+        stake = round(float(stake_usdt), 2)
+        dt = max(1, int(duration_ticks))
+
+        proposal_req: dict[str, Any] = {
+            "proposal": 1,
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": ct,
+            "currency": "USD",
+            "duration": dt,
+            "duration_unit": "t",
+            "symbol": symbol,
+        }
+        proposal_resp = await self._request(proposal_req)
+        if "error" in proposal_resp:
+            raise DerivClientError(f"buy_spike proposal error ({symbol} {ct}): {proposal_resp['error']}")
+        proposal = proposal_resp.get("proposal") or {}
+        proposal_id = proposal.get("id")
+        ask_price = float(proposal.get("ask_price", stake) or stake)
+        if not proposal_id:
+            raise DerivClientError(f"buy_spike proposal missing id: {proposal_resp}")
+
+        max_price = round(max(ask_price, stake) * 1.01, 2)
+        buy_req: dict[str, Any] = {
+            "buy": proposal_id,
+            "price": max_price,
+        }
+        result = await self._request(buy_req)
+        if "error" in result:
+            raise DerivClientError(f"buy_spike buy error ({symbol} {ct}): {result['error']}")
+        return result.get("buy") or result
+
     async def buy(
         self,
         symbol: str,

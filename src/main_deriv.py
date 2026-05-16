@@ -88,6 +88,8 @@ class DerivDaemon:
         self._balance_currency: str = "USD"
         # Rolling equity snapshots (last 200) for the analytics page.
         self._equity_history: list[dict[str, Any]] = []
+        # Per-symbol tick counter for periodic diagnostic logs
+        self._diag_tick_count: dict[str, int] = {}
 
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
                          score: float, reason: str,
@@ -177,6 +179,19 @@ class DerivDaemon:
         # Feed ingest buffers inline — pure in-memory, μs cost.
         self._risk.ingest_tick(tick.symbol, tick.price)
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
+
+        # Periodic diagnostic log every 10 ticks per symbol (visible in Coolify).
+        self._diag_tick_count[tick.symbol] = self._diag_tick_count.get(tick.symbol, 0) + 1
+        if self._diag_tick_count[tick.symbol] % 10 == 0:
+            _summary = self._analyst.get_history_summary().get(tick.symbol) or {}
+            _hurst_val = float(_summary.get("hurst") or 0.0)
+            _vol_regime = str(_summary.get("vol_regime") or _summary.get("regime") or "?")
+            _LOGGER.info(
+                "[DIAGNÓSTICO] Símbolo: %s | Hurst Actual: %.2f | Régimen: %s | "
+                "Ticks_ingesta: %d",
+                tick.symbol, _hurst_val, _vol_regime,
+                self._diag_tick_count[tick.symbol],
+            )
 
         # Dispatch the full evaluation pipeline as a per-symbol task so that
         # concurrent symbols (e.g. BOOM500 + CRASH500) never block each other.

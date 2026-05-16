@@ -26,6 +26,7 @@ from typing import Any
 import aiohttp
 
 from src.data.deriv_client import DerivClient, DerivClientError
+from src.strategies.deriv_signals import is_spike_market, spike_contract_type
 from src.utils.deriv_config import DerivSettings
 from src.utils.telegram_telemetry import TelegramTelemetry
 
@@ -117,16 +118,26 @@ class DerivTradeExecutor:
                 f"already have an open contract on {order.symbol} — skipping duplicate"
             )
 
-        result = await self._client.buy(
-            symbol=order.symbol,
-            contract_type=order.side,
-            stake_usdt=order.stake_usdt,
-            multiplier=order.multiplier,
-            stop_loss_pct=order.stop_loss_pct,
-            take_profit_pct=order.take_profit_pct,
-        )
-        # deriv_client.buy() already extracts the "buy" sub-dict from the WS
-        # message, so `result` IS the buy dict (has contract_id, buy_price, etc.)
+        # Spike markets (BOOM*/CRASH*) use RISE/FALL duration-based contracts.
+        # All other synthetics (R_*, etc.) use MULTUP/MULTDOWN multiplier contracts.
+        if is_spike_market(order.symbol):
+            ct = spike_contract_type(order.symbol, order.side)
+            result = await self._client.buy_spike(
+                symbol=order.symbol,
+                contract_type=ct,
+                stake_usdt=order.stake_usdt,
+                duration_ticks=int(order.max_hold_seconds) if order.max_hold_seconds else 10,
+            )
+        else:
+            result = await self._client.buy(
+                symbol=order.symbol,
+                contract_type=order.side,
+                stake_usdt=order.stake_usdt,
+                multiplier=order.multiplier,
+                stop_loss_pct=order.stop_loss_pct,
+                take_profit_pct=order.take_profit_pct,
+            )
+        # `result` IS the buy dict (has contract_id, buy_price, etc.)
         contract_id = int(result.get("contract_id") or 0)
         entry_price = float(result.get("buy_price") or 0)
         if contract_id <= 0:

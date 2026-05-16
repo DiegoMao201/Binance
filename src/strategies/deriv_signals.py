@@ -116,3 +116,23 @@ def spike_timeout_sec(symbol: str) -> int:
         return 0
     # Re-read env each call so ops can tune it without a redeploy
     return int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", str(_SPIKE_TIMEOUT_SEC)))
+
+
+def spike_contract_type(symbol: str, multside: str) -> str:
+    """Map a MULTUP/MULTDOWN side to the correct Deriv contract type for BOOM/CRASH.
+
+    Boom/Crash do NOT accept MULTUP/MULTDOWN — they only accept RISE/FALL
+    duration-based contracts.  Non-spike markets return the original multside
+    unchanged so the multiplier path is unaffected.
+
+    BOOM  + MULTUP   → "RISE"
+    CRASH + MULTDOWN → "FALL"
+    Other            → multside as-is (MULTUP/MULTDOWN for R_* indices)
+    """
+    su = symbol.upper()
+    ms = multside.upper()
+    if "BOOM" in su:
+        return "RISE"
+    if "CRASH" in su:
+        return "FALL"
+    return ms

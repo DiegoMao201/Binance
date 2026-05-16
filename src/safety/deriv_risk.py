@@ -37,7 +37,11 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Iterable
 
-from src.strategies.deriv_signals import direction_veto as _spike_direction_veto
+from src.strategies.deriv_signals import (
+    direction_veto as _spike_direction_veto,
+    forced_side as _spike_forced_side,
+    is_spike_market as _is_spike_market,
+)
 from src.utils.deriv_config import DerivSettings
 
 
@@ -202,6 +206,8 @@ class DerivRiskManager:
         # Per-symbol rolling ATR history (last 50 ATR values for percentile)
         self._atr_history: dict[str, list[float]] = {}
         self._MAX_ATR_HISTORY = 50
+        # Force-test-trades tick counter (DERIV_FORCE_TEST_TRADES mode)
+        self._force_tick_count: dict[str, int] = {}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router
@@ -240,6 +246,32 @@ class DerivRiskManager:
         """
         snap = DerivRiskSnapshot(allowed=False, score=0.0, side=None, spread_pct=spread_pct)
         snap.effective_min_score = self._settings.min_score
+
+        # ── FORCE-TEST-TRADES bypass (demo / integration testing only) ─────────
+        # Set DERIV_FORCE_TEST_TRADES=true to skip all scoring gates and inject a
+        # forced test order every 60 ticks on BOOM/CRASH symbols.  This is purely
+        # for verifying the WS buy path works on a virtual (VRTC) account — it
+        # must NEVER be enabled in live environments.
+        _force_test = os.getenv("DERIV_FORCE_TEST_TRADES", "").lower() in ("1", "true", "yes")
+        if _force_test and _is_spike_market(symbol):
+            self._force_tick_count[symbol] = self._force_tick_count.get(symbol, 0) + 1
+            tick_n = self._force_tick_count[symbol]
+            if tick_n % 60 == 0:
+                _fs = _spike_forced_side(symbol) or "MULTUP"
+                snap.allowed = True
+                snap.side = _fs
+                snap.score = 6.0
+                snap.effective_min_score = 6.0
+                snap.suggested_stake_usdt = max(1.0, self._settings.min_stake_usdt if hasattr(self._settings, "min_stake_usdt") else 1.0)
+                snap.suggested_multiplier = 1
+                snap.reasons.append(f"FORCE_TEST_TRADE tick={tick_n} side={_fs}")
+                _LOGGER.warning(
+                    "[force-test] AUTO-APPROVE %s | side=%s | tick=%d (DERIV_FORCE_TEST_TRADES=true)",
+                    symbol, _fs, tick_n,
+                )
+                return snap
+            snap.reasons.append(f"FORCE_TEST waiting tick {tick_n % 60}/60")
+            return snap
 
         # Hard veto: lockout active?
         lockout = self._read_lockout()
