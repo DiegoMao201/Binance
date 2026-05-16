@@ -637,6 +637,34 @@ class ActiveTradeMonitor:
                 # Caso 1: time limit superado, flow neutral/positivo → UPDATE_SL a atomic breakeven
                 elif _entry_p > 0:
                     _atomic_be_price = _entry_p * (1.0 + _atomic_be_pct)
+                    _mark_now = float(state.get("mark_price") or state.get("current_price") or 0.0)
+                    # Si el precio actual cayo POR DEBAJO del BE objetivo, no podemos
+                    # colocar un SL ahi (Binance -2010). El time-decay ya expiro y el
+                    # precio nos abandona: salir por mercado (Hit & Run forzado).
+                    if _mark_now > 0 and _mark_now <= _atomic_be_price * 1.0001:
+                        _td_md_verdict: dict[str, Any] = {
+                            "action": "EMERGENCY_CLOSE",
+                            "exit_reason": "time_decay_be_unreachable",
+                            "rationale": (
+                                f"[TIME-DECAY] {symbol} hold={_hold_now:.1f}min >= {_time_limit:.0f}min "
+                                f"| mark={_mark_now:.6f} <= atomic_BE={_atomic_be_price:.6f} "
+                                f"(precio abandonado el colchón, cierre por mercado)"
+                            ),
+                            "model": "time_decay_kill_switch",
+                            "consulted": False,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "symbol": symbol,
+                            "state": state,
+                            "new_sl_price": None,
+                            "new_sl_pct": None,
+                            "memory_window": 0,
+                        }
+                        self._persist_verdict(_td_md_verdict)
+                        self.logger.critical(
+                            "TIME-DECAY KILL-SWITCH [BE UNREACHABLE] %s hold=%.1fmin mark=%.6f <= BE=%.6f — cerrando",
+                            symbol, _hold_now, _mark_now, _atomic_be_price,
+                        )
+                        return _td_md_verdict
                     # Solo emitir UPDATE_SL si el SL actual todavia esta por debajo del atomic BE
                     if _stop_now < _atomic_be_price * 0.9999:
                         _td_be_verdict: dict[str, Any] = {
