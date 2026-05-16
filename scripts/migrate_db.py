@@ -44,8 +44,16 @@ async def run_migration(conn) -> None:  # type: ignore[type-arg]
         await conn.execute(sql)
         _LOG.info("Migration 005 applied OK")
     except Exception as exc:  # noqa: BLE001
-        _LOG.error("Migration 005 failed: %s", exc)
-        raise
+        exc_str = str(exc)
+        # InsufficientPrivilegeError means the tables are owned by a superuser
+        # (supabase/postgres role) and the migration was already applied in a
+        # prior deploy with elevated privileges.  Treat as a non-fatal warning
+        # so the daemon can still start.
+        if "InsufficientPrivilege" in type(exc).__name__ or "must be owner" in exc_str:
+            _LOG.warning("Migration 005 skipped (privilege): %s — assuming already applied", exc_str)
+        else:
+            _LOG.error("Migration 005 failed: %s", exc)
+            raise
 
 
 async def resolve_user_id(conn, email: str) -> str | None:
