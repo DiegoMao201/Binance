@@ -107,9 +107,10 @@ class DerivTradeExecutor:
             stop_loss_pct=order.stop_loss_pct,
             take_profit_pct=order.take_profit_pct,
         )
-        buy = result.get("buy") or {}
-        contract_id = int(buy.get("contract_id") or 0)
-        entry_price = float(buy.get("buy_price") or 0)
+        # deriv_client.buy() already extracts the "buy" sub-dict from the WS
+        # message, so `result` IS the buy dict (has contract_id, buy_price, etc.)
+        contract_id = int(result.get("contract_id") or 0)
+        entry_price = float(result.get("buy_price") or 0)
         if contract_id <= 0:
             raise DerivClientError(f"buy returned no contract_id: {result}")
 

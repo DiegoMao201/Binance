@@ -32,7 +32,7 @@ OPTIONAL safety knobs (all have defensive defaults):
   DERIV_LOCKOUT_HOURS            default 12
   DERIV_MAX_SPREAD_PCT           default 0.0010 (0.10 %)
   DERIV_CONTRACT_DURATION_SEC    default 300 (5 min)
-  DERIV_MULTIPLIER               default 100 (lowest-risk multiplier band)
+  DERIV_MULTIPLIER               default 200 (minimum in common Deriv range: 80,200,400,600,800)
   DERIV_TAKE_PROFIT_PCT          default 0.012 (1.2 %)
   DERIV_STOP_LOSS_PCT            default 0.008 (0.8 %)
   DERIV_POLL_SECONDS             default 1.0 — how often the engine evaluates
@@ -176,7 +176,7 @@ def load_deriv_settings() -> DerivSettings:
         lockout_hours=_get_int("DERIV_LOCKOUT_HOURS", 12),
         max_spread_pct=_get_float("DERIV_MAX_SPREAD_PCT", 0.0010),
         contract_duration_sec=_get_int("DERIV_CONTRACT_DURATION_SEC", 300),
-        multiplier=_get_int("DERIV_MULTIPLIER", 100),
+        multiplier=_get_int("DERIV_MULTIPLIER", 200),
         take_profit_pct=_get_float("DERIV_TAKE_PROFIT_PCT", 0.012),
         stop_loss_pct=_get_float("DERIV_STOP_LOSS_PCT", 0.008),
         poll_seconds=_get_float("DERIV_POLL_SECONDS", 1.0),
