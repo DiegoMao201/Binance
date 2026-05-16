@@ -226,7 +226,7 @@ def load_settings() -> Settings:
                 if sym.strip()
             )
         ),
-        sniper_ob_imbalance_min=float(os.getenv("SNIPER_OB_IMBALANCE_MIN", "0.62")),
+        sniper_ob_imbalance_min=float(os.getenv("SNIPER_OB_IMBALANCE_MIN", "0.55")),
         sniper_liq_spike_usd=float(os.getenv("SNIPER_LIQ_SPIKE_USD", "300000.0")),
         sniper_liq_window_seconds=int(os.getenv("SNIPER_LIQ_WINDOW_SECONDS", "30")),
         sniper_dynamic_sl_atr_mult=float(os.getenv("SNIPER_DYNAMIC_SL_ATR_MULT", "1.5")),

@@ -290,8 +290,8 @@ def _compute_scan_proximity(scan: dict[str, Any]) -> tuple[float, str, float, fl
         ("vol_accel", float(ts.get("volume_acceleration") or 0.0),       _vol_accel_thr),
         ("atr_c1",    float(ts.get("atr_pct") or 0.0),                   0.003),
         ("bb_c2",     float(ts.get("bb_width_pct") or 0.0),              0.005),
-        ("flow_mga",  float(ts.get("order_flow_imbalance") or 0.0),     0.62),
-        ("ob_mga",    float(ts.get("orderbook_pressure") or 0.0),        0.57),
+        ("flow_mga",  float(ts.get("order_flow_imbalance") or 0.0),     0.55),
+        ("ob_mga",    float(ts.get("orderbook_pressure") or 0.0),        0.55),
     ]
 
     best_name, best_val, best_thr, best_prox = "n/d", 0.0, 0.0, 0.0

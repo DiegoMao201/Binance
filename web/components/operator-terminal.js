@@ -1259,6 +1259,85 @@ function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
   );
 }
 
+// ── Panel Deriv Demo ─────────────────────────────────────────────
+function DerivDemoPanel({ derivStatus, derivOpenContracts, derivClosedContracts }) {
+  const open   = derivOpenContracts  || [];
+  const closed = [...(derivClosedContracts || [])].reverse().slice(0, 8);
+  const st     = derivStatus || {};
+  const isUp   = st.status === "running" || st.connected === true;
+  const account= st.account_id || st.loginid || "–";
+  const balance= st.balance != null ? Number(st.balance).toFixed(2) : "–";
+  const pnlTotal = closed.reduce((s, c) => s + (Number(c.pnl ?? c.profit ?? 0)), 0);
+  const wins  = closed.filter(c => (c.pnl ?? c.profit ?? 0) > 0).length;
+  const wr    = closed.length ? Math.round(wins / closed.length * 100) : 0;
+  const tone  = v => v > 0 ? G : v < 0 ? R : MUTE;
+
+  return (
+    <Card
+      title={<span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ width: 7, height: 7, borderRadius: "50%", background: isUp ? G : MUTE, display: "inline-block" }} />
+        Deriv Demo · {account}
+      </span>}
+      right={<span style={{ fontSize: 10, color: isUp ? G : MUTE }}>{isUp ? "CONECTADO" : "offline"}</span>}
+    >
+      {/* KPIs rápidos */}
+      <div style={{ display: "flex", gap: 14, marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE }}>SALDO</div>
+          <div style={{ fontWeight: 700, fontFamily: "monospace", color: B }}>{balance} USD</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE }}>PnL (últimas 8)</div>
+          <div style={{ fontWeight: 700, fontFamily: "monospace", color: tone(pnlTotal) }}>{pnlTotal >= 0 ? "+" : ""}{pnlTotal.toFixed(2)} USD</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE }}>WIN RATE</div>
+          <div style={{ fontWeight: 700, color: wr >= 50 ? G : R }}>{wr}%</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 9, color: MUTE }}>CONTRATOS</div>
+          <div style={{ fontWeight: 700, color: TEXT }}>{open.length} abiertos</div>
+        </div>
+      </div>
+
+      {/* Posiciones abiertas */}
+      {open.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Posiciones abiertas</div>
+          {open.map((c, i) => (
+            <div key={c.contract_id || i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${BORD}` }}>
+              <span style={{ fontWeight: 600 }}>{c.symbol || c.underlying || "–"}</span>
+              <span style={{ color: MUTE }}>{c.contract_type || c.direction || "–"}</span>
+              <span style={{ fontFamily: "monospace", color: B }}>{Number(c.buy_price || c.stake || 0).toFixed(2)}</span>
+              <span style={{ fontSize: 10, color: MUTE }}>{c.score != null ? `score=${Number(c.score).toFixed(2)}` : ""}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Historial reciente */}
+      {closed.length === 0 ? (
+        <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "10px 0" }}>Sin contratos cerrados aún.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ fontSize: 9, color: MUTE, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Últimas operaciones</div>
+          {closed.map((c, i) => {
+            const pnl = Number(c.pnl ?? c.profit ?? 0);
+            return (
+              <div key={c.contract_id || i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${BORD}` }}>
+                <span style={{ fontWeight: 600, color: TEXT }}>{c.symbol || c.underlying || "–"}</span>
+                <span style={{ color: MUTE, fontSize: 10 }}>{c.contract_type || c.direction || "–"}</span>
+                <span style={{ fontFamily: "monospace", color: pnl >= 0 ? G : R, fontWeight: 700 }}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}</span>
+                <span style={{ fontSize: 10, color: MUTE }}>{(c.close_time || c.sold_time || "").slice(11, 16)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── Historial de trades ───────────────────────────────────────────
 function TradeHistoryPanel({ closedTrades }) {
   const trades = [...(closedTrades || [])].reverse().slice(0, 10);
@@ -1779,6 +1858,9 @@ export default function DashboardClient({ initialData }) {
   const tradeMonitorLog = payload?.tradeMonitorLog || [];
   const tradeMonitor   = state?.trade_monitor    || {};
   const recoveryStatus = payload?.recoveryStatus  || {};
+  const derivStatus    = payload?.derivStatus     || {};
+  const derivOpenContracts   = payload?.derivOpenContracts   || [];
+  const derivClosedContracts = payload?.derivClosedContracts || [];
 
   const [focusSymbol, setFocusSymbol] = useState("");
   const activeSymbol = state?.active_symbol || null;
@@ -1944,6 +2026,13 @@ export default function DashboardClient({ initialData }) {
 
         {/* Guardrails detallados */}
         <GuardrailsPanel guardrails={focusGuardrails} scan={focusScan} />
+
+        {/* Panel Deriv Demo */}
+        <DerivDemoPanel
+          derivStatus={derivStatus}
+          derivOpenContracts={derivOpenContracts}
+          derivClosedContracts={derivClosedContracts}
+        />
 
         {/* Footer */}
         <div style={{ fontSize: 10, color: MUTE, textAlign: "center", paddingBottom: 12 }}>

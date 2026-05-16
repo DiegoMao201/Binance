@@ -19,7 +19,7 @@ async function readJson(fileName, fallback) {
 
 
 export async function readDashboardState() {
-  const [state, status, control, orderHistory, signalHistory, scanHistory, openPositions, closedTrades, equityHistory, preFlight, tradeMonitorLog, recoveryStatus] = await Promise.all([
+  const [state, status, control, orderHistory, signalHistory, scanHistory, openPositions, closedTrades, equityHistory, preFlight, tradeMonitorLog, recoveryStatus, derivStatus, derivOpenContracts, derivClosedContracts] = await Promise.all([
     readJson("bot_state.json", {}),
     readJson("status.json", {}),
     readJson("control.json", {}),
@@ -32,6 +32,9 @@ export async function readDashboardState() {
     readJson("pre_flight.json", {}),
     readJson("trade_monitor_log.json", []),
     readJson("recovery_status.json", {}),
+    readJson("deriv_status.json", {}),
+    readJson("deriv_open_contracts.json", []),
+    readJson("deriv_closed_contracts.json", []),
   ]);
 
   return {
@@ -47,6 +50,9 @@ export async function readDashboardState() {
     preFlight,
     tradeMonitorLog,
     recoveryStatus,
+    derivStatus,
+    derivOpenContracts,
+    derivClosedContracts,
     serverTime: new Date().toISOString(),
   };
 }
