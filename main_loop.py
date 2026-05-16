@@ -169,6 +169,31 @@ _ALERTA_RED_STATE: dict[str, float] = {"last_sent": 0.0}
 _ALERTA_RED_COOLDOWN_SECONDS: int = 600  # 10 minutes
 
 
+def _alerta_red_load_persisted(logs_dir: Path) -> None:
+    """Restore the in-memory ALERTA RED timestamp from disk so restarts don't reset
+    the cooldown.  Called once at startup after settings.logs_dir is available."""
+    try:
+        p = logs_dir / "alerta_red_cooldown.json"
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            ts = float(data.get("last_sent", 0.0))
+            if ts > _ALERTA_RED_STATE["last_sent"]:
+                _ALERTA_RED_STATE["last_sent"] = ts
+    except Exception:  # noqa: BLE001
+        pass  # never block startup
+
+
+def _alerta_red_persist(logs_dir: Path) -> None:
+    """Write the current last_sent timestamp to disk (atomic)."""
+    try:
+        p = logs_dir / "alerta_red_cooldown.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"last_sent": _ALERTA_RED_STATE["last_sent"]}), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:  # noqa: BLE001
+        pass  # persistence failure must never crash the bot
+
+
 def _maybe_notify_balance_backoff(settings: Settings, logger: logging.Logger, failures: int) -> None:
     """Avisa por Telegram cuando el bot entra en backoff por saldo insuficiente.
 
@@ -3754,6 +3779,7 @@ def run_cycle() -> None:
         _now = time.time()
         if _now - _ALERTA_RED_STATE["last_sent"] >= _ALERTA_RED_COOLDOWN_SECONDS:
             _ALERTA_RED_STATE["last_sent"] = _now
+            _alerta_red_persist(settings.logs_dir)
             _notify_safe(_build_notifier(settings, logger), logger, "sys", {"title": "ALERTA RED", "detail": str(exc)[:300]})
     except Exception as exc:  # noqa: BLE001
         write_heartbeat("offline", f"Fallo inesperado: {exc}")
@@ -3776,6 +3802,8 @@ def main() -> None:
         ) from exc
     logger = setup_logger(settings)
     notifier = _build_notifier(settings, logger)
+    # Restore ALERTA RED cooldown from disk so container restarts don't bypass the rate-limit.
+    _alerta_red_load_persisted(settings.logs_dir)
     ensure_control_file()
     logger.info("OptiFerre-Trader iniciado. DRY_RUN=%s LOGS_DIR=%s", settings.dry_run, settings.logs_dir)
 
@@ -3792,6 +3820,7 @@ def main() -> None:
             _now = time.time()
             if _now - _ALERTA_RED_STATE["last_sent"] >= _ALERTA_RED_COOLDOWN_SECONDS:
                 _ALERTA_RED_STATE["last_sent"] = _now
+                _alerta_red_persist(settings.logs_dir)
                 _notify_safe(notifier, logger, "sys", {"title": "ALERTA RED", "detail": pre_flight["detail"][:300]})
         else:
             logger.critical("Pre-flight fall\u00f3: %s. Forzando pausa.", pre_flight["detail"])
