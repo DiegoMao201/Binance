@@ -102,7 +102,8 @@ class DerivClientError(RuntimeError):
 class DerivClient:
     """Async Deriv WebSocket client (data + execution gateway)."""
 
-    _URL_TEMPLATE = "wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+    # New Deriv API (2026+): OTP-based authentication
+    _OTP_REST_URL = "https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp"
 
     # Reconnection backoff bounds
     _BACKOFF_INITIAL = 1.0
@@ -118,8 +119,11 @@ class DerivClient:
             raise DerivClientError(
                 "DERIV_API_TOKEN is empty. Set it in the .env before starting the daemon."
             )
+        if not settings.account_id:
+            raise DerivClientError(
+                "DERIV_ACCOUNT_ID is empty. Set it to your Deriv loginid (e.g. DOT92114701)."
+            )
         self._settings = settings
-        self._url = self._URL_TEMPLATE.format(app_id=settings.app_id or "1089")
         self._ws: Optional[Any] = None
         self._ws_ctx: Optional[Any] = None
         self._req_id: int = 0
@@ -134,15 +138,21 @@ class DerivClient:
     # Connection lifecycle
     # ─────────────────────────────────────────────────────────────────────────
     async def connect(self) -> None:
-        """Open WS, authorize and start the background reader task."""
+        """Open WS via OTP auth and start the background reader task.
+
+        New Deriv API flow (2026):
+          1. POST /trading/v1/options/accounts/{id}/otp  → returns WS URL with OTP
+          2. Connect to that URL — authentication is embedded in the URL, no
+             'authorize' message needed.
+        """
         if self._ws is not None:
             return
-        _LOGGER.info("[deriv] Connecting to %s", self._url)
-        # Use __aenter__ directly so we hold the actual ClientConnection
-        # object regardless of which websockets API variant (legacy vs asyncio)
-        # is installed (avoids __await__ removal in websockets ≥ 14).
+
+        ws_url = await self._get_otp_ws_url()
+        _LOGGER.info("[deriv] Connecting to authenticated WS (account=%s)",
+                     self._settings.account_id)
         self._ws_ctx = websockets.connect(
-            self._url,
+            ws_url,
             ping_interval=self._PING_INTERVAL,
             ping_timeout=self._PING_TIMEOUT,
             close_timeout=5.0,
@@ -150,21 +160,8 @@ class DerivClient:
         )
         self._ws = await self._ws_ctx.__aenter__()
         self.connected_at = time.time()
-        _LOGGER.info(
-            "[deriv] ws acquired: type=%s open=%s closed=%s close_code=%s",
-            type(self._ws).__name__,
-            getattr(self._ws, "open", "N/A"),
-            getattr(self._ws, "closed", "N/A"),
-            getattr(self._ws, "close_code", "N/A"),
-        )
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-reader")
-
-        # Authorize so private endpoints (buy / sell / balance) become available.
-        auth = await self._request({"authorize": self._settings.api_token})
-        if "error" in auth:
-            raise DerivClientError(f"authorize failed: {auth['error']}")
-        loginid = auth.get("authorize", {}).get("loginid", "<unknown>")
-        _LOGGER.info("[deriv] Authorized as loginid=%s", loginid)
+        _LOGGER.info("[deriv] WS connected as account=%s", self._settings.account_id)
 
     async def close(self) -> None:
         """Graceful shutdown — cancels reader and closes the WS."""
@@ -362,12 +359,39 @@ class DerivClient:
             await self._send_no_wait({"ticks": sym, "subscribe": 1})
 
     async def _send_no_wait(self, payload: dict[str, Any]) -> None:
-        if self._ws is None or getattr(self._ws, "closed", True):
+        if self._ws is None:
             raise DerivClientError("websocket not connected")
         async with self._lock:
             self._req_id += 1
             payload = {**payload, "req_id": self._req_id}
             await self._ws.send(json.dumps(payload))
+
+    async def _get_otp_ws_url(self) -> str:
+        """Call the Deriv REST OTP endpoint, return the ready-to-use WS URL."""
+        import aiohttp  # optional dep — only needed at runtime
+
+        account_id = self._settings.account_id
+        url = self._OTP_REST_URL.format(account_id=account_id)
+        headers = {
+            "Deriv-App-ID": str(self._settings.app_id or "1089"),
+            "Authorization": f"Bearer {self._settings.api_token}",
+            "Content-Type": "application/json",
+        }
+        _LOGGER.info("[deriv] Requesting OTP for account=%s", account_id)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise DerivClientError(
+                        f"OTP endpoint returned {resp.status}: {text[:300]}"
+                    )
+                data = await resp.json()
+
+        ws_url = data.get("data", {}).get("url")
+        if not ws_url:
+            raise DerivClientError(f"OTP response missing 'data.url': {data}")
+        _LOGGER.info("[deriv] OTP obtained, WS URL ready")
+        return ws_url
 
     async def _reader_loop(self) -> None:
         """Background task that demultiplexes WS messages."""
