@@ -125,10 +125,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // ── 3. Idempotency guard ───────────────────────────────────────────────────
   // Check BEFORE opening the transaction to avoid unnecessary DB locks.
-  const existing = await prisma.userTradeAllocation.findFirst({
-    where: { tradeId: p.tradeId, userId: p.userId },
-    select: { id: true },
-  });
+  let existing: { id: bigint } | null;
+  try {
+    existing = await prisma.userTradeAllocation.findFirst({
+      where: { tradeId: p.tradeId, userId: p.userId },
+      select: { id: true },
+    });
+  } catch (err) {
+    console.error("[pamm-webhook] Idempotency check failed:", err);
+    return NextResponse.json({ error: "Database error during idempotency check." }, { status: 500 });
+  }
   if (existing) {
     return NextResponse.json(
       { status: "skipped", reason: "duplicate" },
@@ -137,16 +143,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // ── 4. Resolve client + admin users ───────────────────────────────────────
-  const [client, admin] = await Promise.all([
-    prisma.user.findUnique({
-      where: { id: p.userId },
-      select: { id: true, email: true, name: true, balanceUsdt: true, performanceFeePct: true, isActive: true },
-    }),
-    prisma.user.findFirst({
-      where: { role: "admin", isActive: true },
-      select: { id: true, balanceUsdt: true },
-    }),
-  ]);
+  let client: { id: string; email: string; name: string; balanceUsdt: Prisma.Decimal; performanceFeePct: Prisma.Decimal; isActive: boolean } | null = null;
+  let admin: { id: string; balanceUsdt: Prisma.Decimal } | null = null;
+  try {
+    [client, admin] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: p.userId },
+        select: { id: true, email: true, name: true, balanceUsdt: true, performanceFeePct: true, isActive: true },
+      }),
+      prisma.user.findFirst({
+        where: { role: "admin", isActive: true },
+        select: { id: true, balanceUsdt: true },
+      }),
+    ]);
+  } catch (err) {
+    console.error("[pamm-webhook] User lookup failed:", err);
+    return NextResponse.json({ error: "Database error during user lookup." }, { status: 500 });
+  }
 
   if (!client || !client.isActive) {
     return NextResponse.json({ error: "Client user not found or inactive." }, { status: 404 });
