@@ -82,11 +82,14 @@ _REFRESH_INTERVAL   = int(os.getenv("DERIV_HISTORY_REFRESH_SEC", "300"))  # 5 mi
 _AI_CACHE_TTL_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "900"))   # 15 min default
 _AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
 
-# Model preference order (all via OpenRouter)
+# Model preference order (all via OpenRouter — cheap paid, fast, reliable)
+# google/gemini-flash-1.5:   ~$0.075/M tokens — fastest, cheapest
+# openai/gpt-4o-mini:        ~$0.15/M  tokens — reliable backup
+# anthropic/claude-3-haiku:  ~$0.25/M  tokens — third fallback
 _AI_MODELS = [
-    "deepseek/deepseek-chat-v3-0324:free",
+    "google/gemini-flash-1.5",
     "openai/gpt-4o-mini",
-    "anthropic/claude-haiku-20240307",
+    "anthropic/claude-3-haiku",
 ]
 
 
@@ -250,7 +253,6 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
             "max_tokens": 200,
-            "response_format": {"type": "json_object"},
         }
         try:
             async with aiohttp.ClientSession() as session:
@@ -268,6 +270,12 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
                         continue
                     data = await resp.json()
                     raw = data["choices"][0]["message"]["content"]
+                    # Strip markdown code fences if present
+                    raw = raw.strip()
+                    if raw.startswith("```"):
+                        raw = raw.split("```")[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
                     parsed = json.loads(raw)
                     parsed["model"] = model
                     return _normalize_ai(parsed)
@@ -551,6 +559,16 @@ class DerivAnalyst:
                 analysis.ai_skipped  = True
                 analysis.ai_approved = True
                 analysis.ai_reason   = "no_api_key_skipped"
+                return analysis
+            # All models failed (HTTP 4xx/5xx) — treat same as timeout: don't veto.
+            if ai_result.get("reason") == "all_models_failed":
+                _LOGGER.warning(
+                    "[deriv-analyst] All AI models failed for %s — gate bypassed (treating as skipped)",
+                    symbol,
+                )
+                analysis.ai_skipped  = True
+                analysis.ai_approved = True
+                analysis.ai_reason   = "all_models_failed_skipped"
                 return analysis
             analysis.ai_approved   = bool(ai_result.get("approved", False)) and ai_result.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
             analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
