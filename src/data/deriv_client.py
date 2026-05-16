@@ -304,8 +304,9 @@ class DerivClient:
             "underlying_symbol": symbol,
             "multiplier": int(multiplier),
             "limit_order": {
-                "stop_loss": round(stake * float(stop_loss_pct), 2),
-                "take_profit": round(stake * float(take_profit_pct), 2),
+                # Deriv enforces a hard minimum of $0.10 per limit-order leg.
+                "stop_loss": round(max(stake * float(stop_loss_pct), 0.10), 2),
+                "take_profit": round(max(stake * float(take_profit_pct), 0.10), 2),
             },
         }
         proposal_resp = await self._request(proposal_req)
