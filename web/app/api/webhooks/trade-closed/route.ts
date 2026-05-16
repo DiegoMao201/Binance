@@ -143,7 +143,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // ── 4. Resolve client + admin users ───────────────────────────────────────
-  let client: { id: string; email: string; name: string; balanceUsdt: Prisma.Decimal; performanceFeePct: Prisma.Decimal; isActive: boolean } | null = null;
+  let client: { id: string; email: string; name: string | null; balanceUsdt: Prisma.Decimal; performanceFeePct: Prisma.Decimal; isActive: boolean } | null = null;
   let admin: { id: string; balanceUsdt: Prisma.Decimal } | null = null;
   try {
     [client, admin] = await Promise.all([
