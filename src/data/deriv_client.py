@@ -342,6 +342,81 @@ class DerivClient:
             {"proposal_open_contract": 1, "contract_id": contract_id}
         )
 
+    async def ticks_history(
+        self,
+        symbol: str,
+        count: int = 1000,
+    ) -> dict[str, Any]:
+        """Fetch the last `count` ticks for `symbol`.
+
+        Returns:
+          {"prices": [float, ...], "times": [int, ...]}
+          where times are Unix seconds.
+
+        Raises DerivClientError on any API error.
+        """
+        resp = await self._request(
+            {
+                "ticks_history": symbol,
+                "adjust_start_time": 1,
+                "count": max(1, min(count, 5000)),
+                "end": "latest",
+                "start": 1,
+                "style": "ticks",
+            },
+            timeout=30.0,
+        )
+        if "error" in resp:
+            raise DerivClientError(f"ticks_history error ({symbol}): {resp['error']}")
+        hist = resp.get("history") or {}
+        prices = [float(p) for p in (hist.get("prices") or [])]
+        times  = [int(t)   for t in (hist.get("times")  or [])]
+        return {"prices": prices, "times": times, "symbol": symbol}
+
+    async def active_symbols(self, product_type: str = "basic") -> list[dict[str, Any]]:
+        """Return the full Deriv active-symbols catalogue.
+
+        product_type: "basic" (lightweight) or "full" (all fields).
+        Useful for discovering available synthetic indices and their pip sizes.
+        """
+        resp = await self._request(
+            {"active_symbols": product_type},
+            timeout=20.0,
+        )
+        if "error" in resp:
+            raise DerivClientError(f"active_symbols error: {resp['error']}")
+        return resp.get("active_symbols") or []
+
+    async def profit_table(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Return closed contracts with realised P&L from Deriv's own records.
+
+        Useful as a secondary source of truth to reconcile with local JSON logs.
+        """
+        resp = await self._request(
+            {"profit_table": 1, "description": 1, "limit": limit, "offset": offset},
+            timeout=20.0,
+        )
+        if "error" in resp:
+            raise DerivClientError(f"profit_table error: {resp['error']}")
+        return (resp.get("profit_table") or {}).get("transactions") or []
+
+    async def statement(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Full account statement (deposits, withdrawals, trades).
+
+        Returns a list of transaction dicts ordered newest-first.
+        """
+        resp = await self._request(
+            {"statement": 1, "description": 1, "limit": limit, "offset": offset},
+            timeout=20.0,
+        )
+        if "error" in resp:
+            raise DerivClientError(f"statement error: {resp['error']}")
+        return (resp.get("statement") or {}).get("transactions") or []
+
     # ─────────────────────────────────────────────────────────────────────────
     # Internal: request/response correlation
     # ─────────────────────────────────────────────────────────────────────────

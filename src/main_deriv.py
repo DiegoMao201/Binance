@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.analysis.deriv_analyst import DerivAnalyst
 from src.data.deriv_client import DerivClient, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
@@ -66,6 +67,7 @@ class DerivDaemon:
         self._telemetry = self._build_telemetry()
         self._executor = DerivTradeExecutor(settings, self._client, self._telemetry)
         self._risk = DerivRiskManager(settings)
+        self._analyst = DerivAnalyst(settings, self._client)
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(seconds=max(60, int(settings.contract_duration_sec)))
         self._stop_event = asyncio.Event()
@@ -87,8 +89,9 @@ class DerivDaemon:
         self._equity_history: list[dict[str, Any]] = []
 
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
-                         score: float, reason: str) -> None:
-        rec = {
+                         score: float, reason: str,
+                         extra: dict | None = None) -> None:
+        rec: dict[str, Any] = {
             "symbol": symbol,
             "allowed": bool(allowed),
             "side": side,
@@ -96,6 +99,8 @@ class DerivDaemon:
             "reason": reason,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        if extra:
+            rec.update({k: v for k, v in extra.items() if v is not None})
         self._last_decisions.append(rec)
         if len(self._last_decisions) > 30:
             self._last_decisions = self._last_decisions[-30:]
@@ -108,18 +113,28 @@ class DerivDaemon:
             self._settings.symbols, self._settings.dry_run, self._settings.bankroll_usdt,
         )
 
+        # Preload tick history so the risk engine + analyst are warm from tick 1
+        try:
+            await asyncio.wait_for(self._analyst.preload_history(), timeout=30.0)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("[deriv-daemon] history preload timed out — continuing cold")
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[deriv-daemon] history preload error: %s — continuing cold", exc)
+
         # Spawn the reaper as a background task; cancel on shutdown.
-        reaper_task = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
-        status_task = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
-        balance_task = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
-        ws_task = asyncio.create_task(
+        reaper_task   = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
+        status_task   = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
+        balance_task  = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
+        history_task  = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
+        ws_task       = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
-        stop_task = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
+        stop_task     = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
+        all_tasks = {ws_task, reaper_task, stop_task, status_task, balance_task, history_task}
         try:
             done, _pending = await asyncio.wait(
-                {ws_task, reaper_task, stop_task, status_task, balance_task},
+                all_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in done:
@@ -127,7 +142,7 @@ class DerivDaemon:
                     _LOGGER.exception("[deriv-daemon] task crashed: %s", t.get_name(),
                                       exc_info=t.exception())
         finally:
-            for t in (ws_task, reaper_task, stop_task, status_task, balance_task):
+            for t in all_tasks:
                 t.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await t
@@ -153,8 +168,9 @@ class DerivDaemon:
             "spread": float(tick.metrics.get("spread") or 0.0),
         }
 
-        # 1. Feed risk engine.
+        # 1. Feed risk engine AND analyst history buffer.
         self._risk.ingest_tick(tick.symbol, tick.price)
+        self._analyst.ingest_live_tick(tick.symbol, tick.price)
 
         # 2. Cool-down between attempts on the same symbol.
         if not self._cooldown.can_fire(tick.symbol):
@@ -163,15 +179,49 @@ class DerivDaemon:
         # 3. Score.
         spread_pct = float(tick.metrics.get("spread") or 0.0)
         snap = self._risk.evaluate(tick.symbol, spread_pct)
+
+        # Record decision with full breakdown for telemetry
+        decision_extra = {
+            "score_breakdown": snap.score_breakdown,
+            "regime": snap.regime,
+        }
         if not snap.allowed or snap.side is None:
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
                 score=getattr(snap, "score", 0.0),
-                reason=getattr(snap, "reason", "risk_rejected") or "risk_rejected",
+                reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
+                extra=decision_extra,
             )
             return
 
-        # 4. Build broker-agnostic payload and route.
+        # 4. AI gate — run pandas + OpenRouter analysis as second opinion.
+        try:
+            analysis = await self._analyst.analyze(
+                symbol=tick.symbol,
+                score=snap.score,
+                side=snap.side,
+                score_breakdown=snap.score_breakdown,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[deriv-daemon] analyst error for %s: %s — proceeding", tick.symbol, exc)
+            analysis = None
+
+        if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
+            reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score, reason=reason,
+                extra={
+                    **decision_extra,
+                    "hurst": analysis.hurst,
+                    "autocorr": analysis.autocorr_lag1,
+                    "vol_regime": analysis.vol_regime,
+                    "ai_model": analysis.ai_model,
+                },
+            )
+            return
+
+        # 5. Build broker-agnostic payload and route.
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,
@@ -180,19 +230,43 @@ class DerivDaemon:
             "multiplier": snap.suggested_multiplier,
             "stop_loss_pct": self._settings.stop_loss_pct,
             "take_profit_pct": self._settings.take_profit_pct,
+            # Pass analyst context for DB persistence in deriv_trader.py
+            "_analyst_context": {
+                "hurst": analysis.hurst if analysis else None,
+                "autocorr_lag1": analysis.autocorr_lag1 if analysis else None,
+                "vol_regime": analysis.vol_regime if analysis else None,
+                "rolling_vol": analysis.rolling_vol if analysis else None,
+                "trend_slope": analysis.trend_slope_1000 if analysis else None,
+                "r_squared": analysis.r_squared_1000 if analysis else None,
+                "ai_approved": analysis.ai_approved if analysis else None,
+                "ai_confidence": analysis.ai_confidence if analysis else None,
+                "ai_model": analysis.ai_model if analysis else None,
+                "ai_reason": analysis.ai_reason if analysis else None,
+            } if analysis else {},
         }
         self._cooldown.mark(tick.symbol)
+
+        ai_note = "" if analysis is None or analysis.ai_skipped else f" ai={analysis.ai_confidence:.2f}"
+        hurst_note = f" H={analysis.hurst:.3f}" if analysis and analysis.hurst != 0.5 else ""
         self._record_decision(
             symbol=tick.symbol, allowed=True, side=snap.side,
-            score=snap.score, reason="firing_order",
+            score=snap.score,
+            reason=f"GO{ai_note}{hurst_note} score={snap.score:.2f} regime={snap.regime}",
+            extra={
+                **decision_extra,
+                "hurst": analysis.hurst if analysis else None,
+                "autocorr": analysis.autocorr_lag1 if analysis else None,
+                "vol_regime": analysis.vol_regime if analysis else None,
+                "ai_confidence": analysis.ai_confidence if analysis else None,
+            },
         )
         self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
             self._counters["orders_ok"] += 1
             _LOGGER.info(
-                "[deriv-daemon] ORDER %s | score=%.2f | %s",
-                tick.symbol, snap.score, result,
+                "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
+                tick.symbol, snap.score, ai_note, hurst_note, result,
             )
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
@@ -268,6 +342,8 @@ class DerivDaemon:
                 "per_symbol_stats": per_sym,
                 "open_contracts_live": open_contracts,
                 "equity_history": list(self._equity_history[-50:]),  # last 50 snapshots
+                # ── Analyst statistics (Hurst, vol regime, AI gate) ───────
+                "analyst_summary": self._analyst.get_history_summary(),
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2))
