@@ -1299,6 +1299,18 @@ function DerivDemoPanel({ derivStatus, derivOpenContracts, derivClosedContracts 
   }
   const symRows = Object.entries(bySymbol).sort((a, b) => b[1].trades - a[1].trades);
 
+  // Telemetría de mercado y decisiones
+  const counters    = st.counters || {};
+  const lastTicks   = st.last_ticks || {};
+  const decisions   = [...(st.last_decisions || [])].reverse();
+  const tickSymbols = Object.entries(lastTicks);
+  const ageSec      = ts => {
+    if (!ts) return null;
+    const t = new Date(ts).getTime();
+    if (isNaN(t)) return null;
+    return Math.max(0, Math.round((Date.now() - t) / 1000));
+  };
+
   const fmtTs = ts => {
     if (!ts) return "–";
     const d = new Date(typeof ts === "number" ? ts * 1000 : ts);
@@ -1313,7 +1325,9 @@ function DerivDemoPanel({ derivStatus, derivOpenContracts, derivClosedContracts 
         <span style={{ fontSize: 11, fontWeight: 700, color: TEXT, textTransform: "uppercase", letterSpacing: "0.1em" }}>
           Deriv Bot · {account}
         </span>
-        {isDry && <span style={{ fontSize: 9, background: `${Y}22`, color: Y, border: `1px solid ${Y}44`, borderRadius: 4, padding: "1px 6px" }}>DEMO</span>}
+        {isDry
+          ? <span style={{ fontSize: 9, background: `${Y}22`, color: Y, border: `1px solid ${Y}44`, borderRadius: 4, padding: "1px 6px" }}>DRY-RUN</span>
+          : <span style={{ fontSize: 9, background: `${G}22`, color: G, border: `1px solid ${G}44`, borderRadius: 4, padding: "1px 6px" }}>LIVE DEMO</span>}
         <span style={{ fontSize: 9, color: isUp ? G : MUTE, marginLeft: "auto" }}>{isUp ? "CONECTADO" : "offline"}</span>
       </div>
 
@@ -1419,6 +1433,91 @@ function DerivDemoPanel({ derivStatus, derivOpenContracts, derivClosedContracts 
                     <span style={{ fontSize: 10, color: MUTE }}>{c.exit_reason || "–"}</span>
                     <span style={{ fontFamily: "monospace", fontWeight: 700, color: pc, fontSize: 12 }}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(3)}</span>
                     <span style={{ fontSize: 10, color: MUTE, minWidth: 38, textAlign: "right" }}>{fmtTs(c.closed_at_ts)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ── Mercado en vivo + Decisiones (full width, 2 columnas) ─────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 12, marginTop: 12 }}>
+        <Card title={`Mercado en vivo · ${tickSymbols.length} símbolos`} right={
+          <span style={{ fontSize: 9, color: MUTE, fontFamily: "monospace" }}>
+            ticks {counters.ticks_total ?? 0} · decisions {counters.decisions_total ?? 0} · orders {counters.orders_sent ?? 0}
+          </span>
+        }>
+          {tickSymbols.length === 0 ? (
+            <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "14px 0" }}>
+              Aún sin ticks recibidos del WebSocket de Deriv
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+              <thead>
+                <tr style={{ color: MUTE, fontSize: 9 }}>
+                  <th style={{ textAlign: "left",   padding: "3px 6px" }}>SÍMBOLO</th>
+                  <th style={{ textAlign: "right",  padding: "3px 6px" }}>PRECIO</th>
+                  <th style={{ textAlign: "right",  padding: "3px 6px" }}>SPREAD</th>
+                  <th style={{ textAlign: "right",  padding: "3px 6px" }}>EDAD</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tickSymbols.map(([sym, t]) => {
+                  const age = ageSec(t.ts);
+                  const alive = age != null && age < 10;
+                  return (
+                    <tr key={sym} style={{ borderTop: `1px solid ${BORD}` }}>
+                      <td style={{ padding: "4px 6px", fontWeight: 600, color: TEXT }}>
+                        <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: alive ? G : MUTE, marginRight: 6 }} />
+                        {sym}
+                      </td>
+                      <td style={{ padding: "4px 6px", textAlign: "right", fontFamily: "monospace", color: TEXT }}>
+                        {Number(t.price || 0).toFixed(5)}
+                      </td>
+                      <td style={{ padding: "4px 6px", textAlign: "right", fontFamily: "monospace", color: MUTE }}>
+                        {t.spread ? `${(t.spread * 100).toFixed(3)}%` : "–"}
+                      </td>
+                      <td style={{ padding: "4px 6px", textAlign: "right", fontFamily: "monospace", color: alive ? G : Y, fontWeight: 700 }}>
+                        {age != null ? `${age}s` : "–"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </Card>
+
+        <Card title={`Decisiones recientes · últimas ${decisions.length}`} right={
+          <span style={{ fontSize: 9, color: MUTE, fontFamily: "monospace" }}>
+            ok {counters.orders_ok ?? 0} · fail {counters.orders_failed ?? 0}
+          </span>
+        }>
+          {decisions.length === 0 ? (
+            <div style={{ color: MUTE, fontSize: 12, textAlign: "center", padding: "14px 0" }}>
+              Aún sin decisiones evaluadas
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 260, overflowY: "auto" }}>
+              {decisions.map((d, i) => {
+                const c = d.allowed ? G : MUTE;
+                return (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 4, background: `${c}07`, border: `1px solid ${c}1e`, fontSize: 11 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: c }} />
+                    <span style={{ fontWeight: 600, color: TEXT, minWidth: 56 }}>{d.symbol}</span>
+                    {d.side && (
+                      <span style={{ fontSize: 9, color: d.side === "MULTUP" ? G : R, fontWeight: 700 }}>
+                        {d.side === "MULTUP" ? "▲" : "▼"} {d.side}
+                      </span>
+                    )}
+                    <span style={{ fontFamily: "monospace", color: B, fontSize: 10 }}>score {Number(d.score || 0).toFixed(2)}</span>
+                    <span style={{ flex: 1, color: d.allowed ? G : MUTE, fontSize: 10, fontStyle: d.allowed ? "normal" : "italic" }}>
+                      {d.reason}
+                    </span>
+                    <span style={{ fontSize: 9, color: MUTE, fontFamily: "monospace" }}>
+                      {d.ts ? new Date(d.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–"}
+                    </span>
                   </div>
                 );
               })}

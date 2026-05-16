@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 const ROOT = path.join(/*turbopackIgnore: true*/ process.cwd(), "..");
 const LOGS = process.env.BOT_STATE_DIR || path.join(/*turbopackIgnore: true*/ ROOT, "logs");
+const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 
 const WATCHED = [
   "status.json",
@@ -22,7 +23,8 @@ const WATCHED = [
   "pre_flight.json",
   "equity_history.json",
   "recovery_status.json",
-  // Deriv bot files
+];
+const WATCHED_DERIV = [
   "deriv_status.json",
   "deriv_open_contracts.json",
   "deriv_closed_contracts.json",
@@ -66,7 +68,10 @@ export async function GET() {
       await send();
 
       const watcher = chokidar.watch(
-        WATCHED.map((f) => path.join(LOGS, f)),
+        [
+          ...WATCHED.map((f) => path.join(LOGS, f)),
+          ...WATCHED_DERIV.map((f) => path.join(DERIV_LOGS, f)),
+        ],
         { ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 30 } }
       );
       watcher.on("change", schedule).on("add", schedule);

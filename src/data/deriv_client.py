@@ -284,29 +284,31 @@ class DerivClient:
         if contract_type not in {"MULTUP", "MULTDOWN"}:
             raise DerivClientError(f"unsupported contract_type: {contract_type}")
 
-        # Step 1 — get a fresh proposal (price valid for ~1 s).
-        proposal_req = {
-            "proposal": 1,
-            "amount": round(stake_usdt, 2),
-            "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",  # Deriv synthetic accounts settle in USD
-            "symbol": symbol,
-            "multiplier": multiplier,
-            "limit_order": {
-                "stop_loss": round(stake_usdt * stop_loss_pct, 2),
-                "take_profit": round(stake_usdt * take_profit_pct, 2),
+        # Single-shot "buy" with embedded parameters: avoids the proposal step
+        # entirely (Deriv's schema now rejects `symbol` inside `proposal` for
+        # certain Multiplier accounts → `Properties not allowed: symbol`).
+        # `price` is the maximum the client is willing to pay; for Multipliers
+        # the actual buy price equals stake. We pad +5 % as slippage cap so the
+        # order is never refused by a few cents of micro-spread.
+        stake = round(float(stake_usdt), 2)
+        max_price = round(stake * 1.05, 2)
+
+        buy_req: dict[str, Any] = {
+            "buy": 1,
+            "price": max_price,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": contract_type,
+                "currency": "USD",
+                "symbol": symbol,
+                "multiplier": int(multiplier),
+                "limit_order": {
+                    "stop_loss": round(stake * float(stop_loss_pct), 2),
+                    "take_profit": round(stake * float(take_profit_pct), 2),
+                },
             },
         }
-        proposal = await self._request(proposal_req)
-        if "error" in proposal:
-            raise DerivClientError(f"proposal error: {proposal['error']}")
-
-        proposal_id = proposal["proposal"]["id"]
-        ask_price = float(proposal["proposal"]["ask_price"])
-
-        # Step 2 — execute the buy at the quoted ask.
-        buy_req = {"buy": proposal_id, "price": ask_price}
         result = await self._request(buy_req)
         if "error" in result:
             raise DerivClientError(f"buy error: {result['error']}")

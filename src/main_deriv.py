@@ -69,6 +69,32 @@ class DerivDaemon:
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(seconds=max(60, int(settings.contract_duration_sec)))
         self._stop_event = asyncio.Event()
+        # Telemetría in-memory (anillos) para que el frontend audite por qué
+        # entra (o no entra) el bot. Se serializa junto al status cada 10s.
+        self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
+        self._last_decisions: list[dict[str, Any]] = []     # ring (max 30)
+        self._counters: dict[str, int] = {
+            "ticks_total": 0,
+            "decisions_total": 0,
+            "orders_sent": 0,
+            "orders_ok": 0,
+            "orders_failed": 0,
+        }
+
+    def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
+                         score: float, reason: str) -> None:
+        rec = {
+            "symbol": symbol,
+            "allowed": bool(allowed),
+            "side": side,
+            "score": round(float(score or 0.0), 3),
+            "reason": reason,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        self._last_decisions.append(rec)
+        if len(self._last_decisions) > 30:
+            self._last_decisions = self._last_decisions[-30:]
+        self._counters["decisions_total"] += 1
 
     # ─────────────────────────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -112,6 +138,15 @@ class DerivDaemon:
     # Tick handler — single hot path
     # ─────────────────────────────────────────────────────────────────────────
     async def _handle_tick(self, tick: NormalisedTick) -> None:
+        # Telemetría: registrar último tick por símbolo (para que el frontend
+        # demuestre que el stream WS está vivo aunque no haya entradas).
+        self._counters["ticks_total"] += 1
+        self._last_ticks[tick.symbol] = {
+            "price": float(tick.price),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "spread": float(tick.metrics.get("spread") or 0.0),
+        }
+
         # 1. Feed risk engine.
         self._risk.ingest_tick(tick.symbol, tick.price)
 
@@ -123,6 +158,11 @@ class DerivDaemon:
         spread_pct = float(tick.metrics.get("spread") or 0.0)
         snap = self._risk.evaluate(tick.symbol, spread_pct)
         if not snap.allowed or snap.side is None:
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=getattr(snap, "score", 0.0),
+                reason=getattr(snap, "reason", "risk_rejected") or "risk_rejected",
+            )
             return
 
         # 4. Build broker-agnostic payload and route.
@@ -136,15 +176,23 @@ class DerivDaemon:
             "take_profit_pct": self._settings.take_profit_pct,
         }
         self._cooldown.mark(tick.symbol)
+        self._record_decision(
+            symbol=tick.symbol, allowed=True, side=snap.side,
+            score=snap.score, reason="firing_order",
+        )
+        self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
+            self._counters["orders_ok"] += 1
             _LOGGER.info(
                 "[deriv-daemon] ORDER %s | score=%.2f | %s",
                 tick.symbol, snap.score, result,
             )
         except OrderRouterError as exc:
+            self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
         except Exception:  # noqa: BLE001
+            self._counters["orders_failed"] += 1
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -172,6 +220,10 @@ class DerivDaemon:
                 "symbols": list(self._settings.symbols),
                 "bankroll_usdt": self._settings.bankroll_usdt,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                # ── Telemetría rica para auditoría visual ─────────────────
+                "counters": dict(self._counters),
+                "last_ticks": dict(self._last_ticks),
+                "last_decisions": list(self._last_decisions[-15:]),
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2))

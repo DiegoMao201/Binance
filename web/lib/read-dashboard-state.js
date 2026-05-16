@@ -4,11 +4,14 @@ import path from "node:path";
 
 const ROOT = path.join(process.cwd(), "..");
 const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
+// Deriv corre como app separada en Coolify con su propio volumen → leer de allí
+// si está montado, si no caer al mismo dir que Binance (modo dev local).
+const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 
 
-async function readJson(fileName, fallback) {
+async function readJson(fileName, fallback, baseDir = LOGS) {
   try {
-    const fullPath = path.join(LOGS, fileName);
+    const fullPath = path.join(baseDir, fileName);
     const content = await fs.readFile(fullPath, "utf8");
     return JSON.parse(content);
   } catch (error) {
@@ -32,9 +35,9 @@ export async function readDashboardState() {
     readJson("pre_flight.json", {}),
     readJson("trade_monitor_log.json", []),
     readJson("recovery_status.json", {}),
-    readJson("deriv_status.json", {}),
-    readJson("deriv_open_contracts.json", []),
-    readJson("deriv_closed_contracts.json", []),
+    readJson("deriv_status.json", {}, DERIV_LOGS),
+    readJson("deriv_open_contracts.json", [], DERIV_LOGS),
+    readJson("deriv_closed_contracts.json", [], DERIV_LOGS),
   ]);
 
   return {
