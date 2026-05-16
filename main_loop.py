@@ -162,6 +162,11 @@ _BALANCE_BACKOFF_ALERT_STATE: dict[str, float] = {"last_sent": 0.0}
 # 1-hour silence per symbol: prevents alert fatigue when a coin lingers near a gate.
 _RADAR_ALERT_STATE: dict[str, float] = {}
 _RADAR_ALERT_COOLDOWN_SECONDS: int = 3600  # 1 hour per symbol
+# ALERTA RED rate-limit: max 1 notification per 10 minutes regardless of how many
+# RequestException / pre-flight degraded events happen in a burst (e.g. container restart,
+# transient proxy issue, or OpenRouter outage). Prevents Telegram spam.
+_ALERTA_RED_STATE: dict[str, float] = {"last_sent": 0.0}
+_ALERTA_RED_COOLDOWN_SECONDS: int = 600  # 10 minutes
 
 
 def _maybe_notify_balance_backoff(settings: Settings, logger: logging.Logger, failures: int) -> None:
@@ -3746,7 +3751,10 @@ def run_cycle() -> None:
     except RequestException as exc:
         write_heartbeat("offline", f"Error de red: {exc}")
         logger.exception("Error de red en OpenRouter o Binance: %s", exc)
-        _notify_safe(_build_notifier(settings, logger), logger, "sys", {"title": "ALERTA RED", "detail": str(exc)})
+        _now = time.time()
+        if _now - _ALERTA_RED_STATE["last_sent"] >= _ALERTA_RED_COOLDOWN_SECONDS:
+            _ALERTA_RED_STATE["last_sent"] = _now
+            _notify_safe(_build_notifier(settings, logger), logger, "sys", {"title": "ALERTA RED", "detail": str(exc)[:300]})
     except Exception as exc:  # noqa: BLE001
         write_heartbeat("offline", f"Fallo inesperado: {exc}")
         logger.exception("Fallo inesperado en el ciclo principal: %s", exc)
@@ -3781,7 +3789,10 @@ def main() -> None:
         if _is_degradable_preflight_failure(pre_flight):
             logger.error("Pre-flight degradado: %s. El bot seguira en modo observacional.", pre_flight["detail"])
             write_heartbeat("degraded", f"Pre-flight degradado: {pre_flight['detail']}")
-            _notify_safe(notifier, logger, "sys", {"title": "ALERTA RED", "detail": pre_flight["detail"]})
+            _now = time.time()
+            if _now - _ALERTA_RED_STATE["last_sent"] >= _ALERTA_RED_COOLDOWN_SECONDS:
+                _ALERTA_RED_STATE["last_sent"] = _now
+                _notify_safe(notifier, logger, "sys", {"title": "ALERTA RED", "detail": pre_flight["detail"][:300]})
         else:
             logger.critical("Pre-flight fall\u00f3: %s. Forzando pausa.", pre_flight["detail"])
             _set_control_state(settings, "paused", f"Pre-flight: {pre_flight['detail']}")

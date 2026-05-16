@@ -1187,7 +1187,7 @@ function MarketAuditPanel({ closedTrades, targetSymbols, focusSymbol, onSymbol }
 }
 
 // ── Scanner Matrix ────────────────────────────────────────────────
-function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
+function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol, aiSignalsBySymbol }) {
   const symbols = targetSymbols.length ? targetSymbols : lastScans.map((s) => s.symbol);
   const scanMap = Object.fromEntries(lastScans.map((s) => [s.symbol, s]));
 
@@ -1240,11 +1240,19 @@ function ScannerMatrix({ lastScans, targetSymbols, focusSymbol, onSymbol }) {
                   <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: flow >= 0.55 ? G : flow < 0.44 ? R : Y }}>{Math.round(flow * 100)}%</td>
                   <td style={{ padding: "8px 8px", textAlign: "center", fontFamily: "monospace", color: ob >= 0.55 ? G : ob < 0.45 ? R : MUTE }}>{Math.round(ob * 100)}%</td>
                   <td style={{ padding: "8px 8px", textAlign: "center" }}>
-                    {sc.ia_consulted ? (
-                      <span style={{ color: conf >= 0.55 ? G : conf >= 0.45 ? Y : R, fontFamily: "monospace", fontWeight: 700 }}>{Math.round(conf * 100)}%</span>
-                    ) : (
-                      <span style={{ color: MUTE, fontSize: 10 }}>–</span>
-                    )}
+                    {(() => {
+                      // If current cycle consulted AI → show live confidence
+                      if (sc.ia_consulted && conf > 0) {
+                        return <span style={{ color: conf >= 0.55 ? G : conf >= 0.45 ? Y : R, fontFamily: "monospace", fontWeight: 700 }}>{Math.round(conf * 100)}%</span>;
+                      }
+                      // Fallback: use cached ai_signals_by_symbol from previous cycle
+                      const cached = aiSignalsBySymbol?.[sym];
+                      const cachedConf = cached ? Number(cached.confidence || 0) : 0;
+                      if (cachedConf > 0) {
+                        return <span style={{ color: cachedConf >= 0.55 ? G : cachedConf >= 0.45 ? Y : R, fontFamily: "monospace", opacity: 0.65 }} title="Valor cacheado del ciclo anterior">{Math.round(cachedConf * 100)}%●</span>;
+                      }
+                      return <span style={{ color: MUTE, fontSize: 10 }}>–</span>;
+                    })()}
                   </td>
                   <td style={{ padding: "8px 8px", color: MUTE, fontSize: 11, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {sc.rejection_reason || sc.candidate_reason || "–"}
@@ -1860,6 +1868,7 @@ export default function DashboardClient({ initialData }) {
   const recoveryStatus = payload?.recoveryStatus  || {};
   const derivStatus    = payload?.derivStatus     || {};
   const derivOpenContracts   = payload?.derivOpenContracts   || [];
+  const aiSignalsBySymbol    = state?.ai_signals_by_symbol   || {};
   const derivClosedContracts = payload?.derivClosedContracts || [];
 
   const [focusSymbol, setFocusSymbol] = useState("");
@@ -2012,7 +2021,7 @@ export default function DashboardClient({ initialData }) {
         />
 
         {/* Scanner completo */}
-        <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} />
+        <ScannerMatrix lastScans={lastScans} targetSymbols={targetSymbols} focusSymbol={focusSymbol} onSymbol={setFocusSymbol} aiSignalsBySymbol={aiSignalsBySymbol} />
 
         {/* Micro-Gate Radar: distancia a los gates V3 del símbolo enfocado */}
         <MicroGateRadar scan={focusScan} />

@@ -433,9 +433,14 @@ class BinanceDataClient:
                 "http": self.settings.binance_proxy_url,
                 "https": self.settings.binance_proxy_url,
             }
-        response = _req.get(f"{base_url}{endpoint}", params=params, proxies=proxies, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response = _req.get(f"{base_url}{endpoint}", params=params, proxies=proxies, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except _req.RequestException as exc:
+            # Wrap raw requests errors so they don't propagate as RequestException
+            # to the top-level run_cycle() handler and trigger spurious ALERTA RED.
+            raise BinanceClientError(f"futures_get {endpoint}: {exc}", category="network") from exc
 
     @staticmethod
     def _spot_to_futures_symbol(symbol: str) -> str:
