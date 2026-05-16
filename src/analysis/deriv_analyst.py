@@ -44,11 +44,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -78,18 +78,24 @@ _REFRESH_INTERVAL   = int(os.getenv("DERIV_HISTORY_REFRESH_SEC", "300"))  # 5 mi
 #
 # Solution: the AI analyses each symbol once every 15 minutes (configurable).
 # Between AI cycles we reuse the last result. The cached result is also persisted
+
+# ── AI circuit breaker ───────────────────────────────────────────────────────
+# If ALL models respond with 403/404 (credential/route failures), disable AI
+# calls for 30 minutes to avoid blocking the tick pipeline with I/O wait.
+_AI_CIRCUIT_BREAKER_DURATION = int(os.getenv("DERIV_AI_CB_DURATION_SEC", "1800"))  # 30 min
+_ai_circuit_open_until: float = 0.0  # module-level; set to time.time()+1800 on trip
 # to a JSON log so decisions are auditable and survive restarts.
 _AI_CACHE_TTL_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "900"))   # 15 min default
 _AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
 
-# Model preference order (all via OpenRouter — cheap paid, fast, reliable)
-# google/gemini-flash-1.5:   ~$0.075/M tokens — fastest, cheapest
-# openai/gpt-4o-mini:        ~$0.15/M  tokens — reliable backup
-# anthropic/claude-3-haiku:  ~$0.25/M  tokens — third fallback
+# Model preference order (all via OpenRouter — verified production model IDs)
+# google/gemini-2.5-flash-preview:05-20  — fastest, cheapest (~$0.15/M)
+# openai/gpt-4.1-mini                    — reliable backup (~$0.40/M)
+# anthropic/claude-3-5-haiku             — third fallback (~$0.80/M)
 _AI_MODELS = [
-    "google/gemini-flash-1.5",
-    "openai/gpt-4o-mini",
-    "anthropic/claude-3-haiku",
+    "google/gemini-2.5-flash-preview-05-20",
+    "openai/gpt-4.1-mini",
+    "anthropic/claude-3-5-haiku",
 ]
 
 
@@ -114,51 +120,48 @@ class DerivAnalysis:
     ai_skipped: bool = False        # True if AI gate disabled or timed out
 
 
-# ── Helpers: Hurst exponent via R/S analysis ────────────────────────────────
-def _hurst_rs(series: np.ndarray, min_n: int = 10) -> float:
-    """Estimate the Hurst exponent via Rescaled Range (R/S) analysis.
+# ── Helpers: Hurst exponent via log-returns diff-std method ─────────────────
+def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
+    """Estimate the Hurst exponent using the log-returns variance-at-scale method.
 
-    Returns a value in [0, 1]:
-      H ≈ 0.5  → random walk (no edge)
-      H > 0.5  → persistent trend (positive autocorrelation)
-      H < 0.5  → mean-reverting (negative autocorrelation)
+    Works on log-returns (not raw prices) to eliminate price-scale bias that
+    causes the classic R/S method to saturate near 1.0 on synthetic indices.
 
-    Uses log-log regression of R/S on lag sizes.
+    Uses sub-window lag regression: H = slope / 2 where slope is the OLS fit
+    of log(std(diff_at_lag)) vs log(lag).
+
+    Returns H in [0.05, 0.95]:
+      H ≈ 0.5  → random walk / no edge
+      H > 0.57 → persistent trend
+      H < 0.43 → mean-reverting
     """
-    n = len(series)
-    if n < 20:
-        return 0.5  # insufficient data → assume random walk
+    n = len(prices)
+    if n < min_n:
+        return 0.5  # insufficient data → neutral
 
-    lags = []
-    rs_vals = []
-    for lag in [max(min_n, n // 10), max(min_n, n // 5), max(min_n, n // 3), n // 2, n]:
-        if lag > n:
-            continue
-        # Compute R/S over sub-series of length `lag`
-        segments = n // lag
-        if segments == 0:
-            continue
-        rs_list = []
-        for i in range(segments):
-            sub = series[i * lag: (i + 1) * lag]
-            m   = sub.mean()
-            dev = np.cumsum(sub - m)
-            r   = dev.max() - dev.min()
-            s   = sub.std(ddof=0)
-            if s > 0:
-                rs_list.append(r / s)
-        if rs_list:
-            lags.append(math.log(lag))
-            rs_vals.append(math.log(np.mean(rs_list)))
+    log_returns = np.diff(np.log(np.array(prices, dtype=float) + 1e-12))
 
-    if len(lags) < 2:
+    if np.std(log_returns) == 0:
         return 0.5
 
-    # Linear regression in log-log space
-    x = np.array(lags)
-    y = np.array(rs_vals)
-    coef = np.polyfit(x, y, 1)
-    return float(np.clip(coef[0], 0.0, 1.0))
+    lags = [2, 4, 8, 16, 32]
+    tau = []
+    for lag in lags:
+        if lag >= len(log_returns):
+            continue
+        diff = log_returns[lag:] - log_returns[:-lag]
+        std_diff = float(np.std(diff))
+        tau.append(max(std_diff, 1e-12))
+
+    if len(tau) < 3:
+        return 0.5
+
+    used_lags = lags[:len(tau)]
+    poly = np.polyfit(np.log(used_lags), np.log(tau), 1)
+    hurst = poly[0] * 2.0
+
+    # Hard guardrails — real market values never exceed these bounds
+    return float(max(0.05, min(hurst, 0.95)))
 
 
 def _autocorr_lag1(prices: np.ndarray) -> float:
@@ -235,9 +238,22 @@ def _vol_regime(prices: np.ndarray) -> tuple[str, float]:
 
 # ── AI gate ──────────────────────────────────────────────────────────────────
 async def _call_openrouter(prompt: str) -> dict[str, Any]:
-    """Call OpenRouter with model cascade. Returns parsed AI result dict."""
+    """Call OpenRouter with model cascade. Returns parsed AI result dict.
+
+    Includes a circuit breaker: if all models return 403/404 (credential or
+    routing failures), the breaker trips for _AI_CIRCUIT_BREAKER_DURATION
+    seconds to avoid burning I/O budget on every tick.
+    """
+    global _ai_circuit_open_until
+
     if not _OPENROUTER_KEY:
         return {"approved": False, "confidence": 0.0, "reason": "no_api_key", "model": ""}
+
+    # Circuit breaker: skip remote calls if tripped
+    if time.time() < _ai_circuit_open_until:
+        remaining = int(_ai_circuit_open_until - time.time())
+        _LOGGER.debug("[deriv-analyst] AI circuit open — skipping remote call (%ds remaining)", remaining)
+        return {"approved": False, "confidence": 0.0, "reason": "circuit_breaker_open", "model": ""}
 
     import aiohttp  # inline import — avoids hard dep at module level
 
@@ -247,6 +263,7 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
         "HTTP-Referer": "https://optiferre.app",
         "X-Title": "OptiFerre-Deriv",
     }
+    hard_fail_count = 0  # 403 / 404 — credential/route failures
     for model in _AI_MODELS:
         payload = {
             "model": model,
@@ -265,6 +282,10 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
                     if resp.status == 429:
                         _LOGGER.warning("[deriv-analyst] AI 429 on %s — skip", model)
                         continue
+                    if resp.status in (403, 404):
+                        _LOGGER.warning("[deriv-analyst] AI %s HTTP %s (hard fail)", model, resp.status)
+                        hard_fail_count += 1
+                        continue
                     if resp.status != 200:
                         _LOGGER.warning("[deriv-analyst] AI %s HTTP %s", model, resp.status)
                         continue
@@ -278,6 +299,8 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
                             raw = raw[4:]
                     parsed = json.loads(raw)
                     parsed["model"] = model
+                    # Successful call — ensure circuit is closed
+                    _ai_circuit_open_until = 0.0
                     return _normalize_ai(parsed)
         except asyncio.TimeoutError:
             _LOGGER.warning("[deriv-analyst] AI timeout on %s", model)
@@ -285,6 +308,14 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("[deriv-analyst] AI error on %s: %s", model, exc)
             continue
+
+    # All models failed — check if all failures were hard (403/404)
+    if hard_fail_count == len(_AI_MODELS):
+        _ai_circuit_open_until = time.time() + _AI_CIRCUIT_BREAKER_DURATION
+        _LOGGER.warning(
+            "[deriv-analyst] All AI models returned 403/404 — circuit breaker OPEN for %d min",
+            _AI_CIRCUIT_BREAKER_DURATION // 60,
+        )
     return {"approved": False, "confidence": 0.0, "reason": "all_models_failed", "model": ""}
 
 
@@ -596,12 +627,21 @@ class DerivAnalyst:
         for sym, buf in self._history.items():
             if not buf:
                 continue
-            arr = np.array(buf[-100:])
+            arr = np.array(buf)
+            h = round(_hurst_rs(arr), 4)
+            # Regime mapping based on corrected Hurst (replaces '?' in diagnostic logs)
+            if h > 0.57:
+                regime = "trending"
+            elif h < 0.43:
+                regime = "mean_reverting"
+            else:
+                regime = "normal"
             out[sym] = {
                 "n_ticks": len(buf),
                 "last_price": round(float(buf[-1]), 6),
                 "fetched_at": self._history_ts.get(sym),
-                "hurst": round(_hurst_rs(np.array(buf)), 4),
-                "autocorr_lag1": round(_autocorr_lag1(np.array(buf)), 4),
+                "hurst": h,
+                "autocorr_lag1": round(_autocorr_lag1(arr), 4),
+                "vol_regime": regime,
             }
         return out

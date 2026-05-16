@@ -391,7 +391,7 @@ class DerivTradeExecutor:
             "score_breakdown": record.get("score_breakdown"),
         }
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
+            timeout = aiohttp.ClientTimeout(total=8)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     url,
@@ -399,18 +399,29 @@ class DerivTradeExecutor:
                     headers={"Authorization": f"Bearer {secret}"},
                 ) as resp:
                     text = await resp.text()
-                    if resp.status >= 300:
-                        _LOGGER.error(
+                    if resp.status == 500:
+                        _LOGGER.warning(
+                            "[deriv-trader] webhook %s -> HTTP 500 (frontend DB issue) "
+                            "contract_id=%s saved locally — trade audit intact",
+                            url, record["contract_id"],
+                        )
+                    elif resp.status >= 300:
+                        _LOGGER.warning(
                             "[deriv-trader] webhook %s -> HTTP %s: %s",
-                            url, resp.status, text[:300],
+                            url, resp.status, text[:200],
                         )
                     else:
                         _LOGGER.info(
                             "[deriv-trader] webhook OK — contract_id=%s pnl=%.4f",
                             record["contract_id"], payload["rawPnl"],
                         )
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("[deriv-trader] webhook POST failed")
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "[deriv-trader] webhook timeout (>8s) contract_id=%s — continuing",
+                record["contract_id"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[deriv-trader] webhook POST failed: %s — trade saved locally", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
