@@ -542,6 +542,16 @@ class DerivAnalyst:
         try:
             _LOGGER.info("[deriv-analyst] consulting AI for %s (cache expired / first call)", symbol)
             ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=8.0)
+            # No API key configured — skip gate entirely, don't veto the trade.
+            if ai_result.get("reason") == "no_api_key":
+                _LOGGER.warning(
+                    "[deriv-analyst] No OPENROUTER_API_KEY set — AI gate bypassed for %s "
+                    "(set key in Coolify to enable full AI filtering)", symbol,
+                )
+                analysis.ai_skipped  = True
+                analysis.ai_approved = True
+                analysis.ai_reason   = "no_api_key_skipped"
+                return analysis
             analysis.ai_approved   = bool(ai_result.get("approved", False)) and ai_result.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
             analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
             analysis.ai_reason     = str(ai_result.get("reason", ""))
