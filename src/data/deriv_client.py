@@ -135,7 +135,7 @@ class DerivClient:
     # ─────────────────────────────────────────────────────────────────────────
     async def connect(self) -> None:
         """Open WS, authorize and start the background reader task."""
-        if self._ws is not None and getattr(self._ws, "open", False):
+        if self._ws is not None:
             return
         _LOGGER.info("[deriv] Connecting to %s", self._url)
         # Use __aenter__ directly so we hold the actual ClientConnection
@@ -150,6 +150,13 @@ class DerivClient:
         )
         self._ws = await self._ws_ctx.__aenter__()
         self.connected_at = time.time()
+        _LOGGER.info(
+            "[deriv] ws acquired: type=%s open=%s closed=%s close_code=%s",
+            type(self._ws).__name__,
+            getattr(self._ws, "open", "N/A"),
+            getattr(self._ws, "closed", "N/A"),
+            getattr(self._ws, "close_code", "N/A"),
+        )
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-reader")
 
         # Authorize so private endpoints (buy / sell / balance) become available.
@@ -196,7 +203,7 @@ class DerivClient:
         backoff = self._BACKOFF_INITIAL
         while not self._stopped:
             try:
-                if self._ws is None or not getattr(self._ws, "open", False):
+                if self._ws is None:
                     await self.connect()
 
                 # Subscribe (tick-stream) for every symbol we care about.
@@ -207,7 +214,7 @@ class DerivClient:
                 )
 
                 # Sit on the queue and dispatch ticks until the reader closes.
-                while not self._stopped and self._ws is not None and getattr(self._ws, "open", False):
+                while not self._stopped and self._ws is not None:
                     tick = await self._tick_queue.get()
                     if tick is None:  # sentinel from reader on disconnect
                         break
@@ -328,7 +335,7 @@ class DerivClient:
 
     async def _request(self, payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         """Send a request and await its single matching response."""
-        if self._ws is None or not getattr(self._ws, "open", False):
+        if self._ws is None:
             raise DerivClientError("websocket not connected")
 
         async with self._lock:
@@ -337,6 +344,7 @@ class DerivClient:
             payload = {**payload, "req_id": req_id}
             future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._pending[req_id] = future
+            # Let websockets raise ConnectionClosed naturally if the socket is gone
             await self._ws.send(json.dumps(payload))
 
         try:
