@@ -38,6 +38,7 @@ from src.data.deriv_client import DerivClient, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
+from src.strategies.deriv_signals import is_spike_market, spike_timeout_sec
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 
@@ -160,39 +161,50 @@ class DerivDaemon:
             self._stop_event.set()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Tick handler — single hot path
-    # ─────────────────────────────────────────────────────────────────────────
+    # Tick handler — fan-out dispatcher
+    # Each symbol's full pipeline is spawned as an independent asyncio.Task so
+    # BOOM500 and CRASH500 (or any pair) process concurrently without blocking
+    # each other during the AI cache-check or LLM call.
+    # ───────────────────────────────────────────────────────────────────────────
     async def _handle_tick(self, tick: NormalisedTick) -> None:
-        # Telemetría: registrar último tick por símbolo (para que el frontend
-        # demuestre que el stream WS está vivo aunque no haya entradas).
+        # Lightweight counters and last-price update execute inline (no I/O).
         self._counters["ticks_total"] += 1
         self._last_ticks[tick.symbol] = {
             "price": float(tick.price),
             "ts": datetime.now(timezone.utc).isoformat(),
             "spread": float(tick.metrics.get("spread") or 0.0),
         }
-
-        # 1. Feed risk engine AND analyst history buffer.
+        # Feed ingest buffers inline — pure in-memory, μs cost.
         self._risk.ingest_tick(tick.symbol, tick.price)
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
 
-        # 2. Cool-down between attempts on the same symbol.
+        # Dispatch the full evaluation pipeline as a per-symbol task so that
+        # concurrent symbols (e.g. BOOM500 + CRASH500) never block each other.
+        asyncio.create_task(
+            self._evaluate_and_trade(tick),
+            name=f"eval-{tick.symbol}",
+        )
+
+    async def _evaluate_and_trade(self, tick: NormalisedTick) -> None:
+        """Full signal evaluation + order pipeline for one tick.  Runs concurrently
+        per symbol; never called directly by the WS reader."""
+        try:
+            await self._pipeline(tick)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
+
+    async def _pipeline(self, tick: NormalisedTick) -> None:
+        # ── Cool-down between attempts on the same symbol ──────────────────────
         if not self._cooldown.can_fire(tick.symbol):
             return
 
-        # 3. Compute statistical analysis FIRST (pure math, < 5 ms, no I/O).
-        #    Results are passed to evaluate() so the Hurst calibration and AI
-        #    override rules have the current exponent available immediately.
+        # ── Score: informed by Hurst calibration ───────────────────────────────
         spread_pct = float(tick.metrics.get("spread") or 0.0)
         pre_analysis = self._analyst.get_history_summary().get(tick.symbol) or {}
         pre_hurst    = float(pre_analysis.get("hurst") or 0.5)
         pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
 
-        # 4. Score — now informed by Hurst calibration and potentially AI confidence.
-        #    We pass hurst + autocorr so the risk engine can apply:
-        #      (a) bucket penalty  (WR < 45% → -3 pts)
-        #      (b) threshold boost (H > 0.62 + WR > 60% → min_score → 7.0)
-        #    AI confidence is not available yet — will be supplied after analyze().
+        # ── Score ────────────────────────────────────────────────────────────────
         snap = self._risk.evaluate(
             tick.symbol, spread_pct,
             hurst=pre_hurst,
@@ -215,6 +227,7 @@ class DerivDaemon:
             )
             return
 
+        # ── AI gate ──────────────────────────────────────────────────────────────────
         # 5. Full AI gate — runs analysis (cached up to 15 min) + optional LLM call.
         try:
             analysis = await self._analyst.analyze(
@@ -257,6 +270,7 @@ class DerivDaemon:
                 pre_hurst, pre_autocorr,
             )
 
+        # ── Order payload ──────────────────────────────────────────────────────────────
         # 7. Build broker-agnostic payload and route.
         payload: dict[str, Any] = {
             "broker": "deriv",
@@ -268,6 +282,9 @@ class DerivDaemon:
             "take_profit_pct": self._settings.take_profit_pct,
             # score_breakdown flows to DerivOrder → PAMM webhook → deriv_contracts.score_breakdown
             "score_breakdown": snap.score_breakdown,
+            # Spike timeout: force-close BOOM/CRASH contracts after N seconds if
+            # the spike hasn't fired.  0 = disabled for non-spike markets.
+            "max_hold_seconds": float(spike_timeout_sec(tick.symbol)),
             "_analyst_context": {
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr_lag1": analysis.autocorr_lag1 if analysis else None,

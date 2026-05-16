@@ -25,7 +25,7 @@ OPTIONAL safety knobs (all have defensive defaults):
   DERIV_DRY_RUN                  default true (fail-closed)
   DERIV_BANKROLL_USDT            default 50.0 — capital ring-fenced for Deriv
   DERIV_RISK_PER_TRADE_PCT       default 0.01 (1% of bankroll)
-  DERIV_MAX_OPEN_CONTRACTS       default 1
+  DERIV_MAX_OPEN_CONTRACTS       default 3 (covers BOOM500 + CRASH500 + 1 extra)
   DERIV_MIN_SCORE                default 7.5 (out of 10)
   DERIV_MAX_DAILY_DD_PCT         default 0.02 (2 % daily DD lockout)
   DERIV_LOSS_STREAK_LOCKOUT      default 3 consecutive losses → 12 h lockout
@@ -169,7 +169,7 @@ def load_deriv_settings() -> DerivSettings:
         dry_run=_get_bool("DERIV_DRY_RUN", True),
         bankroll_usdt=_get_float("DERIV_BANKROLL_USDT", 50.0),
         risk_per_trade_pct=_get_float("DERIV_RISK_PER_TRADE_PCT", 0.01),
-        max_open_contracts=_get_int("DERIV_MAX_OPEN_CONTRACTS", 1),
+        max_open_contracts=_get_int("DERIV_MAX_OPEN_CONTRACTS", 3),
         min_score=_get_float("DERIV_MIN_SCORE", 6.0),
         max_daily_dd_pct=_get_float("DERIV_MAX_DAILY_DD_PCT", 0.02),
         loss_streak_lockout=_get_int("DERIV_LOSS_STREAK_LOCKOUT", 3),

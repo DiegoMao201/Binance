@@ -37,6 +37,7 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Iterable
 
+from src.strategies.deriv_signals import direction_veto as _spike_direction_veto
 from src.utils.deriv_config import DerivSettings
 
 
@@ -356,6 +357,15 @@ class DerivRiskManager:
 
         side = "MULTUP" if trend_dir > 0 else "MULTDOWN"
         snap.side = side
+
+        # ── Spike asymmetry veto (BOOM/CRASH hard rule) ───────────────────
+        # BOOM indices only allow MULTUP; CRASH indices only allow MULTDOWN.
+        # This is a deterministic hard gate — no score can override it.
+        _spike_vetoed, _spike_reason = _spike_direction_veto(symbol, side)
+        if _spike_vetoed:
+            snap.reasons.append(_spike_reason)
+            snap.allowed = False
+            return snap
 
         # ── AI confidence guardrail + math override ───────────────────────
         # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned

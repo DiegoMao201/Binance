@@ -44,6 +44,9 @@ class DerivOrder:
     take_profit_pct: float
     intent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     score_breakdown: dict | None = field(default=None)
+    # Time-based spike guardrail: force-close after N seconds (0 = disabled).
+    # Set to BOOM_CRASH_SPIKE_TIMEOUT_SEC for BOOM/CRASH symbols.
+    max_hold_seconds: float = field(default=0.0)
 
 
 @dataclass(slots=True)
@@ -57,6 +60,7 @@ class DerivOpenContract:
     entry_price: float
     opened_at_ts: float
     score_breakdown: dict | None = field(default=None)
+    max_hold_seconds: float = field(default=0.0)
 
 
 class DerivTradeExecutor:
@@ -138,6 +142,7 @@ class DerivTradeExecutor:
             entry_price=entry_price,
             opened_at_ts=time.time(),
             score_breakdown=order.score_breakdown,
+            max_hold_seconds=order.max_hold_seconds,
         )
         async with self._lock:
             self._open[contract_id] = oc
@@ -189,6 +194,27 @@ class DerivTradeExecutor:
             ids = list(self._open.keys())
 
         for cid in ids:
+            # ── Spike timeout: force-close BOOM/CRASH contracts past their max hold ──
+            # This caps inter-spike drift losses. The sell() call makes Deriv close
+            # the contract; the subsequent proposal_open_contract() poll then sees
+            # is_sold=True and records the final outcome normally.
+            async with self._lock:
+                oc_check = self._open.get(cid)
+            if oc_check is not None and oc_check.max_hold_seconds > 0:
+                held = time.time() - oc_check.opened_at_ts
+                if held >= oc_check.max_hold_seconds:
+                    _LOGGER.info(
+                        "[deriv-trader] spike_timeout: force-selling %s (%s held=%.1fs limit=%.0fs)",
+                        cid, oc_check.symbol, held, oc_check.max_hold_seconds,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[deriv-trader] spike_timeout sell failed for %s: %s", cid, exc
+                        )
+                        # Contract may already be closed; continue to poll below
+
             try:
                 resp = await self._client.proposal_open_contract(cid)
             except DerivClientError as exc:
@@ -202,7 +228,15 @@ class DerivTradeExecutor:
 
             realized = float(poc.get("profit") or 0)
             exit_price = float(poc.get("sell_price") or poc.get("current_spot") or 0)
-            exit_reason = self._classify_exit(poc)
+            # Label spike-timeout exits distinctly for analytics
+            if oc_check is not None and oc_check.max_hold_seconds > 0:
+                held = time.time() - oc_check.opened_at_ts
+                if held >= oc_check.max_hold_seconds:
+                    exit_reason = "spike_timeout"
+                else:
+                    exit_reason = self._classify_exit(poc)
+            else:
+                exit_reason = self._classify_exit(poc)
 
             async with self._lock:
                 oc = self._open.pop(cid, None)
@@ -224,6 +258,7 @@ class DerivTradeExecutor:
                 "opened_at_ts": oc.opened_at_ts,
                 "closed_at_ts": time.time(),
                 "score_breakdown": oc.score_breakdown,
+                "max_hold_seconds": oc.max_hold_seconds,
             }
             self._append_closed(record)
             await self._post_pamm_webhook(record)
@@ -297,6 +332,7 @@ class DerivTradeExecutor:
                 "entry_price": oc.entry_price,
                 "opened_at_ts": oc.opened_at_ts,
                 "score_breakdown": oc.score_breakdown,
+                "max_hold_seconds": oc.max_hold_seconds,
             }
             for oc in self._open.values()
         ]
