@@ -25,6 +25,13 @@ mkdir -p "${LOGS_DIR:-/data/logs}"\n\
 chmod 777 "${LOGS_DIR:-/data/logs}" 2>/dev/null || true\n\
 find "${LOGS_DIR:-/data/logs}" -name "*.tmp" -delete 2>/dev/null || true\n\
 echo "[entrypoint] DERIV daemon | LOGS_DIR=${LOGS_DIR:-/data/logs}"\n\
+echo "[entrypoint] Applying DB migration + resolving user UUID..."\n\
+python scripts/migrate_db.py || echo "[entrypoint] Migration warning (continuing)"\n\
+# If DERIV_USER_ID not set, try to read it from the file written by migrate_db.py\n\
+if [ -z "${DERIV_USER_ID}" ] && [ -f "${LOGS_DIR:-/data/logs}/deriv_user_id.txt" ]; then\n\
+  export DERIV_USER_ID=$(cat "${LOGS_DIR:-/data/logs}/deriv_user_id.txt")\n\
+  echo "[entrypoint] DERIV_USER_ID resolved: ${DERIV_USER_ID}"\n\
+fi\n\
 exec python -m src.main_deriv\n\
 ' > /app/entrypoint.deriv.sh && chmod +x /app/entrypoint.deriv.sh
 
