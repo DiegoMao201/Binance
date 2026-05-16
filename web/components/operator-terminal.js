@@ -21,6 +21,7 @@ const Y = "#f4b942"; // yellow warn
 const B = "#57c1ff"; // blue   info
 const P = "#a78bfa"; // purple scenario D
 const BG   = "#080e16";
+const BG2  = "#0d1622";
 const CARD = "rgba(10,18,28,0.96)";
 const BORD = "#1a2b3c";
 const TEXT = "#dce7f5";
