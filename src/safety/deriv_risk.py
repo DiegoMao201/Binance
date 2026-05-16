@@ -25,20 +25,135 @@ Score factors v2 (weighted out of 10):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Iterable
+from typing import Any, Iterable
 
 from src.utils.deriv_config import DerivSettings
 
 
 _LOGGER = logging.getLogger(__name__)
+
+# ─── Hurst Calibration from PostgreSQL ────────────────────────────────────────
+# Reads v_deriv_hurst_buckets every hour (async, decoupled from WS hot path).
+# Updates a shared dict that DerivRiskManager reads on every evaluate() call.
+# No asyncpg pool is kept open between calibrations — single short-lived conn.
+
+_HURST_CALIBRATION_INTERVAL = int(os.getenv("DERIV_HURST_CALIBRATION_SEC", "3600"))  # 1 h
+_DERIV_DATABASE_URL          = os.getenv("DATABASE_URL", "")
+
+# Shared calibration state (written by HurstCalibrator, read by DerivRiskManager)
+# Structure:  {round(hurst_bucket,1): {"win_rate": float, "profit_factor": float, "trades": int}}
+_hurst_bucket_stats: dict[float, dict[str, float]] = {}
+_hurst_calibration_ts: float = 0.0   # epoch of last successful refresh
+
+# ── Fine-grained view: win_rate per 0.05-step bucket (computed from DB rows) ──
+# If the DB view only returns 0.1-step buckets we still get useful granularity.
+# Populated alongside _hurst_bucket_stats.
+_hurst_bucket_stats_fine: dict[float, dict[str, float]] = {}
+
+# Profit-factor helper: needed because v_deriv_hurst_buckets does not include
+# a profit_factor column by default (only added if migration is updated).
+# We compute a synthetic proxy: if win_rate >= 0.5 → PF = win_rate / (1 - win_rate).
+def _synthetic_profit_factor(win_rate: float) -> float:
+    if win_rate <= 0:
+        return 0.0
+    if win_rate >= 1.0:
+        return 99.0
+    return round(win_rate / (1.0 - win_rate), 3)
+
+
+class HurstCalibrator:
+    """Background hourly loop that fetches v_deriv_hurst_buckets from PostgreSQL
+    and updates the global _hurst_bucket_stats dict.
+
+    Runs as an independent asyncio Task in main_deriv.py.
+    Uses a single short-lived asyncpg connection per refresh cycle — no
+    persistent pool to maintain, and zero latency impact on the WS hot path.
+    """
+
+    def __init__(self) -> None:
+        self._last_run: float = 0.0
+
+    async def calibration_loop(self) -> None:
+        """Long-running task: calibrate immediately on start, then every hour."""
+        _LOGGER.info("[hurst-calib] starting calibration loop (interval=%ss)", _HURST_CALIBRATION_INTERVAL)
+        while True:
+            try:
+                await self._run_once()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[hurst-calib] refresh failed: %s — using stale cache", exc)
+            await asyncio.sleep(_HURST_CALIBRATION_INTERVAL)
+
+    async def _run_once(self) -> None:
+        global _hurst_bucket_stats, _hurst_calibration_ts, _hurst_bucket_stats_fine
+
+        if not _DERIV_DATABASE_URL:
+            _LOGGER.debug("[hurst-calib] DATABASE_URL not set — calibration skipped")
+            return
+
+        try:
+            import asyncpg  # optional dep — already in requirements.txt
+        except ImportError:
+            _LOGGER.warning("[hurst-calib] asyncpg not installed — calibration skipped")
+            return
+
+        conn = await asyncio.wait_for(
+            asyncpg.connect(_DERIV_DATABASE_URL), timeout=8.0
+        )
+        try:
+            rows = await conn.fetch(
+                "SELECT hurst_bucket, win_rate, profit_factor, trades "
+                "FROM v_deriv_hurst_buckets"
+            )
+        except Exception:
+            # v_deriv_hurst_buckets may not have profit_factor yet — fall back
+            rows = await conn.fetch(
+                "SELECT hurst_bucket, win_rate, trades "
+                "FROM v_deriv_hurst_buckets"
+            )
+        finally:
+            await conn.close()
+
+        new_stats: dict[float, dict[str, float]] = {}
+        for row in rows:
+            bucket = float(row["hurst_bucket"] or 0)
+            win_rate = float(row["win_rate"] or 0)
+            trades = int(row["trades"] or 0)
+            pf = float(row.get("profit_factor") or _synthetic_profit_factor(win_rate))
+            new_stats[round(bucket, 1)] = {
+                "win_rate": win_rate,
+                "profit_factor": pf,
+                "trades": trades,
+            }
+
+        _hurst_bucket_stats = new_stats
+        _hurst_calibration_ts = time.time()
+        _LOGGER.info(
+            "[hurst-calib] refreshed %d buckets | ts=%s",
+            len(new_stats),
+            datetime.now(timezone.utc).strftime("%H:%M UTC"),
+        )
+
+    @staticmethod
+    def get_bucket_stats(hurst: float) -> dict[str, float] | None:
+        """Return stats for the 0.1-step bucket containing `hurst`. Thread-safe read."""
+        bucket = round(round(hurst * 10) / 10, 1)   # snap to nearest 0.1
+        return _hurst_bucket_stats.get(bucket)
+
+    @staticmethod
+    def calibration_age_seconds() -> float:
+        if _hurst_calibration_ts == 0:
+            return float("inf")
+        return time.time() - _hurst_calibration_ts
 
 
 # ─── Snapshot returned to the trader ──────────────────────────────────────────
@@ -54,6 +169,10 @@ class DerivRiskSnapshot:
     synthetic_atr: float = 0.0
     score_breakdown: dict = field(default_factory=dict)
     regime: str = "unknown"   # "trending" | "ranging" | "volatile" | "calm"
+    # Hurst calibration telemetry
+    hurst_score_delta: float = 0.0        # penalty/bonus applied to raw score
+    effective_min_score: float = 0.0      # actual threshold used (may be lowered by H>0.62)
+    hurst_ai_override: bool = False       # True when AI was overridden by strong Hurst math
 
 
 @dataclass(slots=True)
@@ -101,9 +220,25 @@ class DerivRiskManager:
             if len(hist) > self._MAX_ATR_HISTORY:
                 del hist[: len(hist) - self._MAX_ATR_HISTORY]
 
-    def evaluate(self, symbol: str, spread_pct: float) -> DerivRiskSnapshot:
-        """Score the current state for `symbol` and return an actionable snapshot."""
+    def evaluate(
+        self,
+        symbol: str,
+        spread_pct: float,
+        *,
+        hurst: float | None = None,
+        autocorr_lag1: float | None = None,
+        ai_confidence: float | None = None,
+    ) -> DerivRiskSnapshot:
+        """Score the current state for `symbol` and return an actionable snapshot.
+
+        Optional keyword arguments allow the caller (main_deriv) to pass statistical
+        context from DerivAnalyst so calibration rules can be applied:
+          hurst          — Hurst exponent for the current symbol (0–1)
+          autocorr_lag1  — autocorrelation of log-returns at lag 1
+          ai_confidence  — AI gate confidence (0–1); used for the math-override rule
+        """
         snap = DerivRiskSnapshot(allowed=False, score=0.0, side=None, spread_pct=spread_pct)
+        snap.effective_min_score = self._settings.min_score
 
         # Hard veto: lockout active?
         lockout = self._read_lockout()
@@ -167,6 +302,38 @@ class DerivRiskManager:
             + headroom_bonus
         )
         score = max(0.0, min(10.0, score))
+
+        # ── Hurst dynamic calibration ──────────────────────────────────────
+        # Applies score delta and/or threshold adjustment based on the hourly
+        # snapshot from v_deriv_hurst_buckets.  Zero-cost: reads in-process dict.
+        hurst_delta = 0.0
+        effective_min_score = self._settings.min_score
+
+        if hurst is not None and math.isfinite(hurst):
+            bucket_stats = HurstCalibrator.get_bucket_stats(hurst)
+
+            # Rule 1: penalise low-edge bucket (win_rate < 45%)
+            if bucket_stats and int(bucket_stats.get("trades", 0)) >= 5:
+                wr = float(bucket_stats.get("win_rate", 0.5))
+                if wr < 0.45:
+                    hurst_delta = -3.0
+                    snap.reasons.append(
+                        f"hurst_bucket_penalty: H={hurst:.3f} bucket WR={wr:.0%} < 45%"
+                    )
+
+            # Rule 2: lower threshold for high-persistence + confirmed edge
+            if hurst > 0.62 and bucket_stats and int(bucket_stats.get("trades", 0)) >= 5:
+                wr = float(bucket_stats.get("win_rate", 0))
+                if wr > 0.60:
+                    effective_min_score = min(effective_min_score, 7.0)
+                    snap.reasons.append(
+                        f"hurst_high_persist_boost: H={hurst:.3f} WR={wr:.0%} → min_score→7.0"
+                    )
+
+        score = max(0.0, min(10.0, score + hurst_delta))
+        snap.hurst_score_delta = round(hurst_delta, 2)
+        snap.effective_min_score = round(effective_min_score, 2)
+
         snap.score = round(score, 3)
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
@@ -178,6 +345,8 @@ class DerivRiskManager:
             "cooldown": round(cooldown_bonus, 2),
             "headroom": round(headroom_bonus, 2),
             "regime": regime,
+            "hurst_delta": round(hurst_delta, 2),
+            "effective_min_score": round(effective_min_score, 2),
         }
 
         # Veto if trend ambiguous
@@ -187,6 +356,37 @@ class DerivRiskManager:
 
         side = "MULTUP" if trend_dir > 0 else "MULTDOWN"
         snap.side = side
+
+        # ── AI confidence guardrail + math override ───────────────────────
+        # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
+        # with the trade side, the mathematical microstructure signal is
+        # considered more reliable than the qualitative LLM opinion.
+        # This allows a safe override that avoids blocking profitable setups
+        # when the AI model is being conservative or uncertain.
+        _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.65"))
+        snap.hurst_ai_override = False
+        if (
+            ai_confidence is not None
+            and ai_confidence < _ai_min_conf
+            and hurst is not None
+            and hurst > 0.65
+            and autocorr_lag1 is not None
+        ):
+            # Check autocorr alignment with direction (+1 MULTUP needs positive autocorr)
+            autocorr_aligned = (
+                (trend_dir > 0 and autocorr_lag1 > 0.05) or
+                (trend_dir < 0 and autocorr_lag1 < -0.05)
+            )
+            if autocorr_aligned:
+                snap.hurst_ai_override = True
+                snap.reasons.append(
+                    f"hurst_math_override: H={hurst:.3f}>0.65 autocorr={autocorr_lag1:.3f} "
+                    f"(ai_conf={ai_confidence:.2f} < {_ai_min_conf}) — math > LLM"
+                )
+                _LOGGER.info(
+                    "[deriv-risk] AI override by math: H=%.3f autocorr=%.3f ai_conf=%.2f",
+                    hurst, autocorr_lag1, ai_confidence,
+                )
 
         # Sizing — proportional to bankroll, capped by ATR (anti-Martingale).
         risk_usdt = self._settings.bankroll_usdt * self._settings.risk_per_trade_pct
@@ -200,9 +400,9 @@ class DerivRiskManager:
         snap.suggested_stake_usdt = round(stake, 2)
         snap.suggested_multiplier = self._suggest_multiplier(atr, ticks[-1])
 
-        if score < self._settings.min_score:
+        if score < effective_min_score:
             snap.reasons.append(
-                f"score {score:.2f} < min {self._settings.min_score:.2f}"
+                f"score {score:.2f} < min {effective_min_score:.2f}"
             )
             return snap
 

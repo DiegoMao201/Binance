@@ -68,6 +68,20 @@ _OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 _HISTORY_COUNT      = int(os.getenv("DERIV_HISTORY_TICKS", "1000"))  # ticks fetched on startup
 _REFRESH_INTERVAL   = int(os.getenv("DERIV_HISTORY_REFRESH_SEC", "300"))  # 5 min
 
+# ── AI call rate limiting ────────────────────────────────────────────────────
+# Synthetic indices are driven by math, not news. The AI gate is used as a
+# second-opinion filter, NOT as a real-time market reader.
+# Calling the LLM on every qualifying tick would:
+#   (a) cost thousands of USD/month at retail API pricing
+#   (b) add 3-8 s of latency to every order attempt
+#   (c) provide minimal additional value because the regime doesn't change tick-by-tick
+#
+# Solution: the AI analyses each symbol once every 15 minutes (configurable).
+# Between AI cycles we reuse the last result. The cached result is also persisted
+# to a JSON log so decisions are auditable and survive restarts.
+_AI_CACHE_TTL_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "900"))   # 15 min default
+_AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
+
 # Model preference order (all via OpenRouter)
 _AI_MODELS = [
     "deepseek/deepseek-chat-v3-0324:free",
@@ -328,6 +342,13 @@ class DerivAnalyst:
         # Per-symbol tick history cache (populated by preload_history)
         self._history: dict[str, list[float]] = {}
         self._history_ts: dict[str, float] = {}
+        # ── AI response cache ─────────────────────────────────────────────
+        # Per-symbol: {ts: float, result: dict}
+        # The AI is consulted at most once per _AI_CACHE_TTL_SEC window per symbol.
+        # Between consultations, the cached result is returned immediately.
+        self._ai_cache: dict[str, dict[str, Any]] = {}
+        # Path to the AI decision log JSON (last N entries, rolling).
+        self._ai_log_path: Path = settings.logs_dir / "deriv_ai_decisions.json"
 
     # ─────────────────────────────────────────────────────────────────────────
     # Startup preload + background refresh
@@ -376,6 +397,52 @@ class DerivAnalyst:
         # Keep at most 2× the requested history to bound memory
         if len(buf) > _HISTORY_COUNT * 2:
             del buf[: len(buf) - _HISTORY_COUNT]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # AI cache helpers
+    # ─────────────────────────────────────────────────────────────────────────
+    def _ai_cache_get(self, symbol: str) -> dict[str, Any] | None:
+        """Return cached AI result if still fresh, else None."""
+        entry = self._ai_cache.get(symbol)
+        if entry is None:
+            return None
+        if time.time() - entry["ts"] > _AI_CACHE_TTL_SEC:
+            return None
+        return entry["result"]
+
+    def _ai_cache_set(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
+        """Store AI result in memory cache and append to rolling log file."""
+        self._ai_cache[symbol] = {"ts": time.time(), "result": result}
+        self._append_ai_log(symbol, result, context)
+
+    def _append_ai_log(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
+        """Append one AI decision to the rolling JSON log (bounded at _AI_LOG_MAX_ENTRIES)."""
+        try:
+            self._ai_log_path.parent.mkdir(parents=True, exist_ok=True)
+            existing: list[dict] = []
+            if self._ai_log_path.exists():
+                try:
+                    existing = json.loads(self._ai_log_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    existing = []
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "approved": result.get("approved"),
+                "confidence": result.get("confidence"),
+                "reason": result.get("reason"),
+                "model": result.get("model"),
+                **{k: v for k, v in context.items() if k in ("hurst", "autocorr", "score", "vol_regime")},
+            }
+            existing.append(entry)
+            # Rolling: keep last N
+            if len(existing) > _AI_LOG_MAX_ENTRIES:
+                existing = existing[-_AI_LOG_MAX_ENTRIES:]
+            tmp = self._ai_log_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(existing, indent=None, separators=(",", ":")))
+            tmp.replace(self._ai_log_path)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("[deriv-analyst] ai_log write failed: %s", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Core analysis method
@@ -430,12 +497,27 @@ class DerivAnalyst:
         )
 
         # ── AI gate ──────────────────────────────────────────────────────────
+        # Rate-limited: consult the LLM at most once per _AI_CACHE_TTL_SEC (15 min)
+        # per symbol. Intermediate signals reuse the cached result.
+        # This prevents $$$-cost real-time AI calls on a fast synthetic index feed.
         if not _AI_GATE_ENABLED or not side:
             analysis.ai_skipped = True
             analysis.ai_reason  = "ai_gate_disabled" if not _AI_GATE_ENABLED else "no_side"
             analysis.ai_approved = True   # gate disabled → don't block
             return analysis
 
+        # Check cache first
+        cached_ai = self._ai_cache_get(symbol)
+        if cached_ai is not None:
+            analysis.ai_approved   = bool(cached_ai.get("approved", False)) and cached_ai.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
+            analysis.ai_confidence = float(cached_ai.get("confidence", 0.0))
+            analysis.ai_reason     = str(cached_ai.get("reason", "")) + " [cached]"
+            analysis.ai_model      = str(cached_ai.get("model", ""))
+            _LOGGER.debug("[deriv-analyst] AI cache HIT for %s (age %.0fs)", symbol,
+                          time.time() - self._ai_cache[symbol]["ts"])
+            return analysis
+
+        # Cache miss — call the LLM and store result
         prompt = _build_ai_prompt(
             symbol=symbol,
             side=side,
@@ -451,11 +533,15 @@ class DerivAnalyst:
         )
 
         try:
+            _LOGGER.info("[deriv-analyst] consulting AI for %s (cache expired / first call)", symbol)
             ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=8.0)
             analysis.ai_approved   = bool(ai_result.get("approved", False)) and ai_result.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
             analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
             analysis.ai_reason     = str(ai_result.get("reason", ""))
             analysis.ai_model      = str(ai_result.get("model", ""))
+            self._ai_cache_set(symbol, ai_result, {
+                "hurst": hurst, "autocorr": autocorr, "score": score, "vol_regime": vr,
+            })
         except asyncio.TimeoutError:
             _LOGGER.warning("[deriv-analyst] AI gate timed out for %s — allowing trade", symbol)
             analysis.ai_skipped  = True

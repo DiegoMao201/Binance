@@ -37,7 +37,7 @@ from src.analysis.deriv_analyst import DerivAnalyst
 from src.data.deriv_client import DerivClient, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
-from src.safety.deriv_risk import DerivRiskManager
+from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 
@@ -122,16 +122,20 @@ class DerivDaemon:
             _LOGGER.warning("[deriv-daemon] history preload error: %s — continuing cold", exc)
 
         # Spawn the reaper as a background task; cancel on shutdown.
-        reaper_task   = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
-        status_task   = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
-        balance_task  = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
-        history_task  = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
-        ws_task       = asyncio.create_task(
+        reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
+        status_task      = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
+        balance_task     = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
+        history_task     = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
+        calibrator_task  = asyncio.create_task(
+            HurstCalibrator().calibration_loop(), name="deriv-hurst-calib"
+        )
+        ttl_task         = asyncio.create_task(self._snapshot_ttl_loop(), name="deriv-ttl")
+        ws_task          = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
-        stop_task     = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
+        stop_task        = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
-        all_tasks = {ws_task, reaper_task, stop_task, status_task, balance_task, history_task}
+        all_tasks = {ws_task, reaper_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task}
         try:
             done, _pending = await asyncio.wait(
                 all_tasks,
@@ -176,14 +180,31 @@ class DerivDaemon:
         if not self._cooldown.can_fire(tick.symbol):
             return
 
-        # 3. Score.
+        # 3. Compute statistical analysis FIRST (pure math, < 5 ms, no I/O).
+        #    Results are passed to evaluate() so the Hurst calibration and AI
+        #    override rules have the current exponent available immediately.
         spread_pct = float(tick.metrics.get("spread") or 0.0)
-        snap = self._risk.evaluate(tick.symbol, spread_pct)
+        pre_analysis = self._analyst.get_history_summary().get(tick.symbol) or {}
+        pre_hurst    = float(pre_analysis.get("hurst") or 0.5)
+        pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
+
+        # 4. Score — now informed by Hurst calibration and potentially AI confidence.
+        #    We pass hurst + autocorr so the risk engine can apply:
+        #      (a) bucket penalty  (WR < 45% → -3 pts)
+        #      (b) threshold boost (H > 0.62 + WR > 60% → min_score → 7.0)
+        #    AI confidence is not available yet — will be supplied after analyze().
+        snap = self._risk.evaluate(
+            tick.symbol, spread_pct,
+            hurst=pre_hurst,
+            autocorr_lag1=pre_autocorr,
+        )
 
         # Record decision with full breakdown for telemetry
         decision_extra = {
             "score_breakdown": snap.score_breakdown,
             "regime": snap.regime,
+            "hurst_delta": snap.hurst_score_delta,
+            "effective_min_score": snap.effective_min_score,
         }
         if not snap.allowed or snap.side is None:
             self._record_decision(
@@ -194,7 +215,7 @@ class DerivDaemon:
             )
             return
 
-        # 4. AI gate — run pandas + OpenRouter analysis as second opinion.
+        # 5. Full AI gate — runs analysis (cached up to 15 min) + optional LLM call.
         try:
             analysis = await self._analyst.analyze(
                 symbol=tick.symbol,
@@ -206,31 +227,45 @@ class DerivDaemon:
             _LOGGER.warning("[deriv-daemon] analyst error for %s: %s — proceeding", tick.symbol, exc)
             analysis = None
 
+        # 6. AI veto check — but respect the math override flag from risk engine.
+        #    If snap.hurst_ai_override is True, we skip the AI veto for this signal.
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
-            reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=snap.side,
-                score=snap.score, reason=reason,
-                extra={
-                    **decision_extra,
-                    "hurst": analysis.hurst,
-                    "autocorr": analysis.autocorr_lag1,
-                    "vol_regime": analysis.vol_regime,
-                    "ai_model": analysis.ai_model,
-                },
+            # Re-evaluate with the now-known AI confidence so the override is applied
+            snap2 = self._risk.evaluate(
+                tick.symbol, spread_pct,
+                hurst=pre_hurst,
+                autocorr_lag1=pre_autocorr,
+                ai_confidence=analysis.ai_confidence,
             )
-            return
+            if not snap2.hurst_ai_override:
+                reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=reason,
+                    extra={
+                        **decision_extra,
+                        "hurst": analysis.hurst,
+                        "autocorr": analysis.autocorr_lag1,
+                        "vol_regime": analysis.vol_regime,
+                        "ai_model": analysis.ai_model,
+                    },
+                )
+                return
+            # Override applied — log and continue
+            _LOGGER.info(
+                "[deriv-daemon] Hurst math override: AI vetoed but H=%.3f autocorr=%.3f — proceeding",
+                pre_hurst, pre_autocorr,
+            )
 
-        # 5. Build broker-agnostic payload and route.
+        # 7. Build broker-agnostic payload and route.
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,
-            "side": snap.side,                          # MULTUP / MULTDOWN
+            "side": snap.side,
             "stake_usdt": snap.suggested_stake_usdt,
             "multiplier": snap.suggested_multiplier,
             "stop_loss_pct": self._settings.stop_loss_pct,
             "take_profit_pct": self._settings.take_profit_pct,
-            # Pass analyst context for DB persistence in deriv_trader.py
             "_analyst_context": {
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr_lag1": analysis.autocorr_lag1 if analysis else None,
@@ -242,22 +277,25 @@ class DerivDaemon:
                 "ai_confidence": analysis.ai_confidence if analysis else None,
                 "ai_model": analysis.ai_model if analysis else None,
                 "ai_reason": analysis.ai_reason if analysis else None,
+                "hurst_ai_override": snap.hurst_ai_override,
             } if analysis else {},
         }
         self._cooldown.mark(tick.symbol)
 
         ai_note = "" if analysis is None or analysis.ai_skipped else f" ai={analysis.ai_confidence:.2f}"
         hurst_note = f" H={analysis.hurst:.3f}" if analysis and analysis.hurst != 0.5 else ""
+        override_note = " [MATH_OVERRIDE]" if snap.hurst_ai_override else ""
         self._record_decision(
             symbol=tick.symbol, allowed=True, side=snap.side,
             score=snap.score,
-            reason=f"GO{ai_note}{hurst_note} score={snap.score:.2f} regime={snap.regime}",
+            reason=f"GO{ai_note}{hurst_note}{override_note} score={snap.score:.2f} regime={snap.regime}",
             extra={
                 **decision_extra,
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr": analysis.autocorr_lag1 if analysis else None,
                 "vol_regime": analysis.vol_regime if analysis else None,
                 "ai_confidence": analysis.ai_confidence if analysis else None,
+                "hurst_ai_override": snap.hurst_ai_override,
             },
         )
         self._counters["orders_sent"] += 1
@@ -265,8 +303,8 @@ class DerivDaemon:
             result = await self._router.route_order(payload)
             self._counters["orders_ok"] += 1
             _LOGGER.info(
-                "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
-                tick.symbol, snap.score, ai_note, hurst_note, result,
+                "[deriv-daemon] ORDER %s | score=%.2f%s%s%s | %s",
+                tick.symbol, snap.score, ai_note, hurst_note, override_note, result,
             )
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
@@ -346,10 +384,51 @@ class DerivDaemon:
                 "analyst_summary": self._analyst.get_history_summary(),
             }
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
+            tmp.write_text(json.dumps(data, indent=None, separators=(",", ":")))
             tmp.replace(path)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("[deriv-daemon] failed to write status file")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Tick snapshot TTL purge — deletes rows from deriv_tick_snapshots older
+    # than DERIV_SNAPSHOT_RETENTION_DAYS (default 7) once per day.
+    # Prevents unbounded disk growth: R_100 at 1 tick/s = 86400 rows/day/symbol.
+    # With 3 symbols + 7 days = ~1.8M rows — this purge keeps it at ~600k max.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _snapshot_ttl_loop(self) -> None:
+        import os as _os
+        _db_url   = _os.getenv("DATABASE_URL", "")
+        _retain   = int(_os.getenv("DERIV_SNAPSHOT_RETENTION_DAYS", "7"))
+        if not _db_url:
+            _LOGGER.debug("[deriv-ttl] DATABASE_URL not set — snapshot TTL loop idle")
+            return
+
+        # Wait 30s for WS to establish before first purge
+        await asyncio.sleep(30)
+        while not self._stop_event.is_set():
+            try:
+                import asyncpg  # optional dep
+                conn = await asyncio.wait_for(asyncpg.connect(_db_url), timeout=8.0)
+                try:
+                    deleted = await conn.fetchval(
+                        "DELETE FROM deriv_tick_snapshots "
+                        "WHERE captured_at < NOW() - INTERVAL '1 day' * $1 "
+                        "RETURNING COUNT(*)",
+                        _retain,
+                    )
+                    _LOGGER.info(
+                        "[deriv-ttl] purged %s tick_snapshots older than %d days",
+                        deleted or 0, _retain,
+                    )
+                finally:
+                    await conn.close()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[deriv-ttl] snapshot purge failed (non-fatal): %s", exc)
+            # Run once per day
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=86400)
+            except asyncio.TimeoutError:
+                pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Reaper — periodically settle closed contracts
