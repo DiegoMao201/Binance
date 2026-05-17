@@ -563,3 +563,99 @@ class DerivTradeExecutor:
             return
         with suppress(Exception):
             self._telemetry.send_alert_nowait(f"deriv_{level}", payload)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Zombie reconciliation daemon
+    # ─────────────────────────────────────────────────────────────────────────
+    async def reconciliation_loop(self, interval_sec: float = 30.0) -> None:
+        """Background task that hard-reconciles local state against Deriv's portfolio.
+
+        Every *interval_sec* seconds the bot queries Deriv's live ``portfolio``
+        endpoint.  Any contract that is registered as open locally but is NOT
+        present in the broker's response is treated as a ghost and purged:
+          - Its state is removed from self._open and written out immediately.
+          - A synthetic 'lost_or_ghost_closed' record is written to the closed
+            log (PnL = 0 because we cannot recover the final value).
+          - The PAMM webhook is called so the frontend removes the zombie entry.
+
+        The loop is purely additive and does NOT interfere with the normal
+        reap_closed() poller.  It only acts on contracts the poller has
+        already missed.
+        """
+        _LOGGER.info(
+            "[deriv-recon] reconciliation_loop started (interval=%.0fs)", interval_sec
+        )
+        while True:
+            await asyncio.sleep(interval_sec)
+            if self._settings.dry_run:
+                continue
+            try:
+                await self._reconcile_once()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[deriv-recon] reconcile cycle error: %s", exc)
+
+    async def _reconcile_once(self) -> None:
+        """Single reconciliation pass — compare local open set vs broker portfolio."""
+        broker_ids: list[int] = await self._client.portfolio()
+
+        # If portfolio() returned an empty list AND we have open contracts, it
+        # could mean a transient WS error rather than genuine broker-side closure.
+        # Only purge if there is a concrete mismatch (at least one known-live
+        # contract ID that the broker does not report).
+        async with self._lock:
+            local_ids = list(self._open.keys())
+
+        if not local_ids:
+            return  # nothing to reconcile
+
+        broker_set = set(broker_ids)
+        ghost_ids = [cid for cid in local_ids if cid not in broker_set]
+
+        if not ghost_ids:
+            return  # all local contracts confirmed by broker
+
+        # Safety guard: if broker returned zero contracts and all local contracts
+        # look like ghosts, treat it as a portfolio API failure and skip.
+        if len(broker_ids) == 0 and len(ghost_ids) == len(local_ids):
+            _LOGGER.debug(
+                "[deriv-recon] broker portfolio empty while %d local contracts open — "
+                "assuming transient WS failure, skipping purge",
+                len(local_ids),
+            )
+            return
+
+        for cid in ghost_ids:
+            async with self._lock:
+                oc = self._open.pop(cid, None)
+                self._persist_open()
+
+            if oc is None:
+                continue
+
+            _LOGGER.warning(
+                "[deriv-recon] GHOST purged: contract_id=%s symbol=%s side=%s "
+                "stake=%.2f — not found in broker portfolio",
+                cid, oc.symbol, oc.side, oc.stake_usdt,
+            )
+
+            record = {
+                "broker": "deriv",
+                "contract_id": cid,
+                "intent_id": oc.intent_id,
+                "symbol": oc.symbol,
+                "side": oc.side,
+                "stake_usdt": oc.stake_usdt,
+                "entry_price": oc.entry_price,
+                "exit_price": 0.0,
+                "realized_pnl_usdt": 0.0,
+                "exit_reason": "lost_or_ghost_closed",
+                "opened_at_ts": oc.opened_at_ts,
+                "closed_at_ts": time.time(),
+                "score_breakdown": oc.score_breakdown,
+                "max_hold_seconds": oc.max_hold_seconds,
+            }
+            self._append_closed(record)
+            await self._post_pamm_webhook(record)
+            self._notify("ghost_closed", record)
+
+

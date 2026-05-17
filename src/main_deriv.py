@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -38,7 +39,12 @@ from src.data.deriv_client import DerivClient, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
-from src.strategies.deriv_signals import is_spike_market, spike_timeout_sec
+from src.strategies.deriv_signals import (
+    get_asset_profile,
+    is_spike_market,
+    min_score_for,
+    spike_timeout_sec,
+)
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 
@@ -153,6 +159,7 @@ class DerivDaemon:
 
         # Spawn the reaper as a background task; cancel on shutdown.
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
+        recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         status_task      = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
         balance_task     = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
         history_task     = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
@@ -165,7 +172,7 @@ class DerivDaemon:
         )
         stop_task        = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
-        all_tasks = {ws_task, reaper_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task}
+        all_tasks = {ws_task, reaper_task, recon_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task}
         try:
             done, _pending = await asyncio.wait(
                 all_tasks,
@@ -252,6 +259,30 @@ class DerivDaemon:
             hurst=pre_hurst,
             autocorr_lag1=pre_autocorr,
         )
+
+        # ── Per-symbol minimum score gate (ASSET_INTEL_PROFILES) ──────────────
+        # BOOM/CRASH markets require ≥ 7.0. Volatility indices use the profile
+        # default (5.5). This overrides the risk engine's global min_score so
+        # each asset class enforces its own confluency requirements.
+        _profile_min_score = min_score_for(tick.symbol)
+        _asset_profile = get_asset_profile(tick.symbol)
+        if snap.allowed and snap.score < _profile_min_score:
+            _LOGGER.debug(
+                "[deriv-daemon] %s profile_min_score=%.1f not met (score=%.2f type=%s) — skip",
+                tick.symbol, _profile_min_score, snap.score, _asset_profile.get("type", "?"),
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"PROFILE_SCORE_GATE: {_asset_profile.get('type','?')} "
+                       f"requires>={_profile_min_score:.1f} got={snap.score:.2f}",
+                extra={
+                    "score_breakdown": snap.score_breakdown,
+                    "regime": snap.regime,
+                    "profile": _asset_profile,
+                },
+            )
+            return
 
         # Record decision with full breakdown for telemetry
         decision_extra = {

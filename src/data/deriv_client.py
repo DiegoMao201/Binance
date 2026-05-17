@@ -463,6 +463,26 @@ class DerivClient:
             {"proposal_open_contract": 1, "contract_id": contract_id}
         )
 
+    async def portfolio(self) -> list[int]:
+        """Return contract_ids for all currently open contracts on this account.
+
+        Uses Deriv's ``portfolio`` request which returns every open multiplier
+        contract.  The reconciliation loop uses this to detect ghost positions
+        that are no longer alive on the broker side.
+
+        Returns an empty list on any API error rather than raising, so a
+        transient WS glitch never kills the reconciliation daemon.
+        """
+        try:
+            resp = await self._request({"portfolio": 1}, timeout=15.0)
+        except Exception:  # noqa: BLE001
+            return []
+        if "error" in resp:
+            _LOGGER.debug("portfolio error: %s", resp["error"])
+            return []
+        contracts = (resp.get("portfolio") or {}).get("contracts") or []
+        return [int(c["contract_id"]) for c in contracts if "contract_id" in c]
+
     async def ticks_history(
         self,
         symbol: str,

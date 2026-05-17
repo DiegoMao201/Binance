@@ -118,6 +118,145 @@ def spike_timeout_sec(symbol: str) -> int:
     return int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", str(_SPIKE_TIMEOUT_SEC)))
 
 
+# ─── Per-asset intelligence profiles ─────────────────────────────────────────
+# Each entry defines the operational ruleset for its symbol class.  The engine
+# uses this dictionary to avoid cross-contaminating volatility vs spike logic.
+#
+# Volatility indices (R_*): mean-reversion / trend-following on Hurst exponent.
+# Spike indices (BOOM/CRASH): forced directional asymmetry + FVG mitigation.
+ASSET_INTEL_PROFILES: dict[str, dict] = {
+    # ── Pure volatility (bidirectional, continuous) ───────────────────────────
+    "R_10":  {
+        "type": "volatility",
+        "min_hurst": 0.52,
+        "use_mean_reversion": True,
+        "band_sigma": 1.90,
+        "ema_trend_filter": False,
+        "min_score": 5.5,
+    },
+    "R_25":  {
+        "type": "volatility",
+        "min_hurst": 0.53,
+        "use_mean_reversion": True,
+        "band_sigma": 1.92,
+        "ema_trend_filter": False,
+        "min_score": 5.5,
+    },
+    "R_50":  {
+        "type": "volatility",
+        "min_hurst": 0.55,
+        "use_mean_reversion": True,
+        "band_sigma": 1.95,
+        "ema_trend_filter": False,
+        "min_score": 5.5,
+    },
+    "R_75":  {
+        "type": "volatility",
+        "min_hurst": 0.58,
+        "use_mean_reversion": False,
+        "band_sigma": 2.00,
+        "ema_trend_filter": True,
+        "min_score": 5.5,
+    },
+    "R_100": {
+        "type": "volatility",
+        "min_hurst": 0.62,
+        "use_mean_reversion": True,
+        "band_sigma": 2.10,
+        "ema_trend_filter": True,
+        "min_score": 5.5,
+    },
+    # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
+    "BOOM300": {
+        "type": "spike_boom",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 20,
+        "ema_distance_pct": 0.02,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+    "BOOM500": {
+        "type": "spike_boom",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 12,
+        "ema_distance_pct": 0.03,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+    "BOOM1000": {
+        "type": "spike_boom",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 18,
+        "ema_distance_pct": 0.05,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+    # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
+    "CRASH300": {
+        "type": "spike_crash",
+        "forced_side": "MULTDOWN",
+        "max_hold_ticks": 20,
+        "ema_distance_pct": 0.02,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+    "CRASH500": {
+        "type": "spike_crash",
+        "forced_side": "MULTDOWN",
+        "max_hold_ticks": 12,
+        "ema_distance_pct": 0.03,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+    "CRASH1000": {
+        "type": "spike_crash",
+        "forced_side": "MULTDOWN",
+        "max_hold_ticks": 18,
+        "ema_distance_pct": 0.05,
+        "require_fvg_mitigation": True,
+        "min_score": 7.0,
+    },
+}
+
+# Default profile for symbols not explicitly listed.
+_DEFAULT_VOLATILITY_PROFILE: dict = {
+    "type": "volatility",
+    "min_hurst": 0.55,
+    "use_mean_reversion": True,
+    "band_sigma": 2.00,
+    "ema_trend_filter": False,
+    "min_score": 5.5,
+}
+
+
+def get_asset_profile(symbol: str) -> dict:
+    """Return the intelligence profile for *symbol*.
+
+    Normalises the symbol key so that e.g. "1HZ100V" and "R_100" both hit
+    the R_100 profile.  Falls back to the default volatility profile for
+    unknown symbols so the bot never silently drops a market.
+    """
+    su = symbol.upper()
+    # Direct match first
+    if su in ASSET_INTEL_PROFILES:
+        return ASSET_INTEL_PROFILES[su]
+    # Canonical short-name match (BOOM/CRASH numeric suffix)
+    for key in ASSET_INTEL_PROFILES:
+        if key in su:
+            return ASSET_INTEL_PROFILES[key]
+    return _DEFAULT_VOLATILITY_PROFILE
+
+
+def min_score_for(symbol: str) -> float:
+    """Return the minimum entry score required to trade *symbol*.
+
+    Spike markets (BOOM/CRASH) require ≥ 7.0 — no guessing allowed.
+    Volatility markets use their profile value (default 5.5).
+    """
+    profile = get_asset_profile(symbol)
+    return float(profile.get("min_score", 5.5))
+
+
 def spike_contract_type(symbol: str, multside: str) -> str:
     """Map a MULTUP/MULTDOWN side to the correct Deriv contract type for BOOM/CRASH.
 
