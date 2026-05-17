@@ -22,10 +22,17 @@ Public API
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+
+# SMC bonus weight — configurable via env var.
+# Default 2.0 (reduced from 3.5 to prevent SMC from single-handedly dominating the score).
+# At +2.0 a solid base score (5.5-6.5) + SMC = 7.5-8.5 → passes min_score.
+# A weak base (<5.0) + SMC = <7.0 → still fails, requiring genuine edge elsewhere.
+_SMC_BONUS = float(os.getenv("DERIV_SMC_BONUS", "2.0"))
 
 # ── Window sizes (ticks ≈ 1–2 ticks/s on Deriv synthetics) ──────────────────
 WIN_MACRO = 500     # ~M15  (last 500 ticks)
@@ -466,13 +473,13 @@ def compute_geometry(
     smc_reason = ""
     if fvg_active and gap_mitigated and divergence:
         if fvg_dir == "bullish" and divergence == "bullish":
-            smc_side, smc_bonus = "MULTUP", 3.5
+            smc_side, smc_bonus = "MULTUP", _SMC_BONUS
             smc_reason = (
                 f"SMC_Liquidity_Inbound: bull_fvg mid={fvg_mid:.5f} mitigated + "
                 f"bull_divergence → +{smc_bonus}"
             )
         elif fvg_dir == "bearish" and divergence == "bearish":
-            smc_side, smc_bonus = "MULTDOWN", 3.5
+            smc_side, smc_bonus = "MULTDOWN", _SMC_BONUS
             smc_reason = (
                 f"SMC_Liquidity_Inbound: bear_fvg mid={fvg_mid:.5f} mitigated + "
                 f"bear_divergence → +{smc_bonus}"

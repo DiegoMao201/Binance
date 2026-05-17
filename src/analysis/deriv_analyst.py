@@ -71,13 +71,18 @@ _REFRESH_INTERVAL   = int(os.getenv("DERIV_HISTORY_REFRESH_SEC", "300"))  # 5 mi
 # ── AI call rate limiting ────────────────────────────────────────────────────
 # Synthetic indices are driven by math, not news. The AI gate is used as a
 # second-opinion filter, NOT as a real-time market reader.
-# Calling the LLM on every qualifying tick would:
-#   (a) cost thousands of USD/month at retail API pricing
-#   (b) add 3-8 s of latency to every order attempt
-#   (c) provide minimal additional value because the regime doesn't change tick-by-tick
 #
-# Solution: the AI analyses each symbol once every 15 minutes (configurable).
-# Between AI cycles we reuse the last result. The cached result is also persisted
+# Cache strategy: snapshot-aware invalidation prevents stale vetoes.
+# A cached AI decision is INVALIDATED (even within TTL) if the market state
+# has changed significantly: score drift >±0.5, Hurst drift >±0.03, regime
+# change, direction change, setup-type change, or ATR drift >15%.
+# Special rule: a cached VETO is always invalidated when the current score
+# improves by > +0.5 vs the score at veto time.
+#
+# TTL per setup type (max reuse window even without snapshot drift):
+#   micro_scalp : DERIV_AI_CACHE_TTL_SCALP_SEC (default 15 s)
+#   smc/trend   : DERIV_AI_CACHE_TTL_TREND_SEC  (default 45 s)
+#   default     : DERIV_AI_CACHE_TTL_SEC         (default 60 s)
 
 # ── AI circuit breaker ───────────────────────────────────────────────────────
 # If ALL models respond with 403/404 (credential/route failures), disable AI
@@ -85,8 +90,16 @@ _REFRESH_INTERVAL   = int(os.getenv("DERIV_HISTORY_REFRESH_SEC", "300"))  # 5 mi
 _AI_CIRCUIT_BREAKER_DURATION = int(os.getenv("DERIV_AI_CB_DURATION_SEC", "1800"))  # 30 min
 _ai_circuit_open_until: float = 0.0  # module-level; set to time.time()+1800 on trip
 # to a JSON log so decisions are auditable and survive restarts.
-_AI_CACHE_TTL_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "900"))   # 15 min default
+_AI_CACHE_TTL_SEC       = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "60"))       # default 60 s
+_AI_CACHE_TTL_SCALP_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SCALP_SEC", "15")) # scalping
+_AI_CACHE_TTL_TREND_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_TREND_SEC", "45")) # trend/SMC
 _AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
+
+# ── Smart cache invalidation thresholds ─────────────────────────────────────
+_CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5"))   # |Δscore| > 0.5
+_CACHE_HURST_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_HURST_DRIFT", "0.03"))  # |ΔH| > 0.03
+_CACHE_ATR_DRIFT_THRESHOLD     = float(os.getenv("DERIV_CACHE_ATR_DRIFT", "0.15"))    # |ΔATRpct| > 15%
+_CACHE_VETO_SCORE_IMPROVE      = float(os.getenv("DERIV_CACHE_VETO_IMPROVE", "0.5"))  # stale veto threshold
 
 # Model preference order (all via OpenRouter — verified production model IDs)
 # google/gemini-2.5-flash               — fastest, cheapest (~$0.15/M); stable ID (preview-05-20 is deprecated)
@@ -356,6 +369,114 @@ def _normalize_ai(d: dict) -> dict:
     return d
 
 
+# ── Smart cache snapshot helpers ─────────────────────────────────────────────
+
+def _setup_type_from_breakdown(breakdown: dict) -> str:
+    """Classify the setup type from score_breakdown flags."""
+    if breakdown.get("micro_scalp"):
+        return "micro_scalp"
+    if breakdown.get("spike_entry"):
+        return "spike"
+    if breakdown.get("fvg_active"):
+        return "smc"
+    if breakdown.get("mean_rev_mode"):
+        return "mean_rev"
+    return "trend"
+
+
+def _cache_ttl_for_setup(setup_type: str) -> int:
+    """Return the max cache TTL (seconds) for the given setup type."""
+    if setup_type == "micro_scalp":
+        return _AI_CACHE_TTL_SCALP_SEC
+    if setup_type in ("smc", "trend", "spike"):
+        return _AI_CACHE_TTL_TREND_SEC
+    return _AI_CACHE_TTL_SEC
+
+
+def _build_cache_snapshot(
+    score: float,
+    hurst: float,
+    side: str | None,
+    score_breakdown: dict,
+) -> dict:
+    """Build a compact snapshot dict representing the market state at cache time."""
+    atr_pct = float(score_breakdown.get("atr_pct") or score_breakdown.get("atr") or 0.0)
+    regime = str(score_breakdown.get("regime") or "unknown")
+    setup_type = _setup_type_from_breakdown(score_breakdown)
+    return {
+        "score": round(float(score), 3),
+        "score_bucket": round(float(score) * 2) / 2,   # nearest 0.5 bucket
+        "hurst": round(float(hurst), 4),
+        "hurst_bucket": round(round(hurst * 20) / 20, 3),   # nearest 0.05 bucket
+        "side": side or "",
+        "regime": regime,
+        "setup_type": setup_type,
+        "atr_pct": round(atr_pct, 5),
+    }
+
+
+def _should_invalidate_cache(
+    cached_snapshot: dict,
+    current_snapshot: dict,
+    cached_result: dict,
+) -> tuple[bool, str]:
+    """Return (should_invalidate, reason_string).
+
+    Called BEFORE returning a cached AI result. If True, the caller must
+    re-query the AI with the fresh market state.
+    """
+    cs = current_snapshot
+    ps = cached_snapshot  # 'p' = previous (cached)
+
+    # 1. Score drift > threshold
+    score_delta = cs["score"] - ps["score"]
+    if abs(score_delta) > _CACHE_SCORE_DRIFT_THRESHOLD:
+        return True, (
+            f"SCORE_DRIFT: snapshot={ps['score']:.2f} live={cs['score']:.2f} "
+            f"Δ={score_delta:+.2f} (thresh±{_CACHE_SCORE_DRIFT_THRESHOLD})"
+        )
+
+    # 2. Hurst drift > threshold
+    hurst_delta = cs["hurst"] - ps["hurst"]
+    if abs(hurst_delta) > _CACHE_HURST_DRIFT_THRESHOLD:
+        return True, (
+            f"HURST_DRIFT: snapshot={ps['hurst']:.3f} live={cs['hurst']:.3f} "
+            f"Δ={hurst_delta:+.3f} (thresh±{_CACHE_HURST_DRIFT_THRESHOLD})"
+        )
+
+    # 3. Regime changed
+    if cs["regime"] != ps["regime"] and ps["regime"] not in ("unknown", ""):
+        return True, f"REGIME_CHANGE: {ps['regime']}→{cs['regime']}"
+
+    # 4. Direction changed
+    if cs["side"] != ps["side"] and ps["side"] not in ("", None):
+        return True, f"DIRECTION_CHANGE: {ps['side']}→{cs['side']}"
+
+    # 5. Setup type changed
+    if cs["setup_type"] != ps["setup_type"]:
+        return True, f"SETUP_CHANGE: {ps['setup_type']}→{cs['setup_type']}"
+
+    # 6. ATR changed > 15%
+    if ps["atr_pct"] > 1e-8:
+        atr_change = abs(cs["atr_pct"] - ps["atr_pct"]) / ps["atr_pct"]
+        if atr_change > _CACHE_ATR_DRIFT_THRESHOLD:
+            return True, (
+                f"ATR_DRIFT: snapshot={ps['atr_pct']:.4f} live={cs['atr_pct']:.4f} "
+                f"Δ={atr_change:.0%} (thresh={_CACHE_ATR_DRIFT_THRESHOLD:.0%})"
+            )
+
+    # 7. VETO stale: cached was rejected but score improved significantly
+    if not cached_result.get("approved", False):
+        if cs["score"] > ps["score"] + _CACHE_VETO_SCORE_IMPROVE:
+            return True, (
+                f"VETO_STALE_SCORE_IMPROVED: veto_score={ps['score']:.2f} "
+                f"live_score={cs['score']:.2f} Δ={cs['score']-ps['score']:+.2f} "
+                f"(crossed threshold +{_CACHE_VETO_SCORE_IMPROVE})"
+            )
+
+    return False, ""  # cache still valid
+
+
 def _build_ai_prompt(
     symbol: str,
     side: str,
@@ -464,28 +585,95 @@ class DerivAnalyst:
     # ─────────────────────────────────────────────────────────────────────────
     # AI cache helpers
     # ─────────────────────────────────────────────────────────────────────────
-    def _ai_cache_get(self, symbol: str) -> dict[str, Any] | None:
-        """Return cached AI result if still fresh, else None."""
+    def _ai_cache_get(
+        self,
+        symbol: str,
+        current_snapshot: dict | None = None,
+    ) -> dict[str, Any] | None:
+        """Return cached AI result if still fresh AND snapshot is still valid.
+
+        Implements snapshot-aware cache invalidation:
+        - If TTL expired for the setup type → miss
+        - If snapshot drifted beyond thresholds → INVALIDATED (logs reason)
+        - If cached was VETO and score improved > threshold → INVALIDATED
+        """
         entry = self._ai_cache.get(symbol)
         if entry is None:
             return None
-        if time.time() - entry["ts"] > _AI_CACHE_TTL_SEC:
+        age = time.time() - entry["ts"]
+        # TTL based on setup type of the CACHED result
+        cached_result = entry["result"]
+        cached_snapshot = entry.get("snapshot") or {}
+        setup_type = cached_snapshot.get("setup_type", "trend")
+        ttl = _cache_ttl_for_setup(setup_type)
+        if age > ttl:
+            _LOGGER.debug(
+                "[deriv-analyst] CACHE_MISS %s age=%.0fs > ttl=%.0fs setup=%s",
+                symbol, age, ttl, setup_type,
+            )
             return None
-        return entry["result"]
+        # Snapshot drift check (only if current snapshot provided)
+        if current_snapshot and cached_snapshot:
+            should_invalidate, reason = _should_invalidate_cache(
+                cached_snapshot, current_snapshot, cached_result,
+            )
+            if should_invalidate:
+                _LOGGER.info(
+                    "[AI_CACHE] CACHE_INVALIDATED %s | age=%.0fs | reason=%s | "
+                    "cached_score=%.2f live_score=%.2f cached_hurst=%.3f live_hurst=%.3f",
+                    symbol, age, reason,
+                    cached_snapshot.get("score", 0), current_snapshot.get("score", 0),
+                    cached_snapshot.get("hurst", 0), current_snapshot.get("hurst", 0),
+                )
+                del self._ai_cache[symbol]  # evict invalidated entry
+                return None
+        _LOGGER.info(
+            "[AI_CACHE] CACHE_HIT %s | age=%.0fs/ttl=%.0fs | approved=%s conf=%.2f "
+            "snapshot_score=%.2f live_score=%.2f snapshot_hurst=%.3f live_hurst=%.3f",
+            symbol, age, ttl,
+            cached_result.get("approved"), cached_result.get("confidence", 0),
+            cached_snapshot.get("score", 0), current_snapshot.get("score", 0) if current_snapshot else 0,
+            cached_snapshot.get("hurst", 0), current_snapshot.get("hurst", 0) if current_snapshot else 0,
+        )
+        return cached_result
 
-    async def _ai_cache_set(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
-        """Store AI result in memory cache and dispatch log write to a thread.
+    async def _ai_cache_set(
+        self,
+        symbol: str,
+        result: dict[str, Any],
+        context: dict[str, Any],
+        snapshot: dict | None = None,
+    ) -> None:
+        """Store AI result in memory cache with snapshot state and dispatch log write.
 
         The in-memory update is instant (μs). The disk write is offloaded to the
         thread-pool executor so synchronous file I/O never blocks the event loop.
         """
-        self._ai_cache[symbol] = {"ts": time.time(), "result": result}
+        self._ai_cache[symbol] = {
+            "ts": time.time(),
+            "result": result,
+            "snapshot": snapshot or {},
+        }
+        _LOGGER.info(
+            "[AI_CACHE] CACHE_REFRESH %s | approved=%s conf=%.2f model=%s | "
+            "CACHE_REASON=fresh_query | score=%.2f hurst=%.3f regime=%s setup=%s",
+            symbol,
+            result.get("approved"), result.get("confidence", 0), result.get("model", "?"),
+            (snapshot or {}).get("score", 0), (snapshot or {}).get("hurst", 0),
+            (snapshot or {}).get("regime", "?"), (snapshot or {}).get("setup_type", "?"),
+        )
         # Fire-and-forget: schedule disk write without blocking the tick loop.
         asyncio.get_event_loop().run_in_executor(
-            None, self._append_ai_log, symbol, result, context
+            None, self._append_ai_log, symbol, result, context, snapshot,
         )
 
-    def _append_ai_log(self, symbol: str, result: dict[str, Any], context: dict[str, Any]) -> None:
+    def _append_ai_log(
+        self,
+        symbol: str,
+        result: dict[str, Any],
+        context: dict[str, Any],
+        snapshot: dict | None = None,
+    ) -> None:
         """Append one AI decision to the rolling JSON log (bounded at _AI_LOG_MAX_ENTRIES)."""
         try:
             self._ai_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,7 +683,7 @@ class DerivAnalyst:
                     existing = json.loads(self._ai_log_path.read_text())
                 except (json.JSONDecodeError, OSError):
                     existing = []
-            entry = {
+            entry: dict[str, Any] = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "symbol": symbol,
                 "approved": result.get("approved"),
@@ -504,6 +692,8 @@ class DerivAnalyst:
                 "model": result.get("model"),
                 **{k: v for k, v in context.items() if k in ("hurst", "autocorr", "score", "vol_regime")},
             }
+            if snapshot:
+                entry["snapshot"] = snapshot
             existing.append(entry)
             # Rolling: keep last N
             if len(existing) > _AI_LOG_MAX_ENTRIES:
@@ -567,24 +757,25 @@ class DerivAnalyst:
         )
 
         # ── AI gate ──────────────────────────────────────────────────────────
-        # Rate-limited: consult the LLM at most once per _AI_CACHE_TTL_SEC (15 min)
-        # per symbol. Intermediate signals reuse the cached result.
-        # This prevents $$$-cost real-time AI calls on a fast synthetic index feed.
+        # Rate-limited via snapshot-aware cache. Cache is invalidated when the
+        # market state drifts significantly (score, hurst, regime, side, setup, ATR).
+        # Stale vetoes are evicted immediately when score crosses the improve threshold.
         if not _AI_GATE_ENABLED or not side:
             analysis.ai_skipped = True
             analysis.ai_reason  = "ai_gate_disabled" if not _AI_GATE_ENABLED else "no_side"
             analysis.ai_approved = True   # gate disabled → don't block
             return analysis
 
-        # Check cache first
-        cached_ai = self._ai_cache_get(symbol)
+        # Build current snapshot for cache invalidation comparison
+        current_snapshot = _build_cache_snapshot(score, hurst, side, score_breakdown)
+
+        # Check cache first (passes snapshot for drift detection)
+        cached_ai = self._ai_cache_get(symbol, current_snapshot=current_snapshot)
         if cached_ai is not None:
             analysis.ai_approved   = bool(cached_ai.get("approved", False)) and cached_ai.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
             analysis.ai_confidence = float(cached_ai.get("confidence", 0.0))
             analysis.ai_reason     = str(cached_ai.get("reason", "")) + " [cached]"
             analysis.ai_model      = str(cached_ai.get("model", ""))
-            _LOGGER.debug("[deriv-analyst] AI cache HIT for %s (age %.0fs)", symbol,
-                          time.time() - self._ai_cache[symbol]["ts"])
             return analysis
 
         # Cache miss — call the LLM and store result
@@ -603,7 +794,11 @@ class DerivAnalyst:
         )
 
         try:
-            _LOGGER.info("[deriv-analyst] consulting AI for %s (cache expired / first call)", symbol)
+            _LOGGER.info(
+                "[AI_CACHE] CACHE_REFRESH %s | reason=CACHE_MISS/INVALIDATED | "
+                "score=%.2f hurst=%.3f regime=%s setup=%s side=%s",
+                symbol, score, hurst, vr, current_snapshot.get("setup_type", "?"), side,
+            )
             ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=40.0)
             # No API key configured — skip gate entirely, don't veto the trade.
             if ai_result.get("reason") == "no_api_key":
@@ -629,9 +824,11 @@ class DerivAnalyst:
             analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
             analysis.ai_reason     = str(ai_result.get("reason", ""))
             analysis.ai_model      = str(ai_result.get("model", ""))
-            await self._ai_cache_set(symbol, ai_result, {
-                "hurst": hurst, "autocorr": autocorr, "score": score, "vol_regime": vr,
-            })
+            await self._ai_cache_set(
+                symbol, ai_result,
+                {"hurst": hurst, "autocorr": autocorr, "score": score, "vol_regime": vr},
+                snapshot=current_snapshot,
+            )
         except asyncio.TimeoutError:
             _LOGGER.warning("[deriv-analyst] AI gate timed out for %s — allowing trade", symbol)
             analysis.ai_skipped  = True

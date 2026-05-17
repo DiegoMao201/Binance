@@ -128,6 +128,49 @@ class DerivDaemon:
             self._last_decisions = self._last_decisions[-30:]
         self._counters["decisions_total"] += 1
 
+    def _log_entry_block(
+        self,
+        symbol: str,
+        block_reason: str,
+        *,
+        score: float = 0.0,
+        effective_min_score: float = 0.0,
+        side: str | None = None,
+        regime: str = "?",
+        hurst: float = 0.0,
+        ai_veto: bool = False,
+        ai_confidence: float = 0.0,
+        ai_reason: str = "",
+        cooldown: bool = False,
+        cooldown_elapsed: float = 0.0,
+        cooldown_required: float = 0.0,
+        score_breakdown: dict | None = None,
+    ) -> None:
+        """Emit a single unified INFO-level ENTRY_BLOCKED log line with full context.
+
+        Provides complete pipeline observability in one line — no need to
+        aggregate fragmented debug messages to understand why a trade was blocked.
+        """
+        bd = score_breakdown or {}
+        _LOGGER.info(
+            "[PIPELINE] ENTRY_BLOCKED %s | reason=%s | "
+            "score=%.2f effective_min=%.2f | side=%s | regime=%s | H=%.3f | "
+            "ai_veto=%s ai_conf=%.2f ai_reason=%s | "
+            "cooldown=%s elapsed=%.0fs/%.0fs | "
+            "score_breakdown={trend=%.2f mom=%.2f atr=%.2f spread=%.2f stab=%.2f "
+            "streak=%.2f cd=%.2f hd=%.2f smc=%s}",
+            symbol, block_reason,
+            score, effective_min_score,
+            side or "?", regime, hurst,
+            ai_veto, ai_confidence, ai_reason or "—",
+            cooldown, cooldown_elapsed, cooldown_required,
+            bd.get("trend", 0), bd.get("momentum", 0), bd.get("atr", 0),
+            bd.get("spread", 0), bd.get("stability", 0),
+            bd.get("streak_penalty", 0), bd.get("cooldown", 0),
+            bd.get("hurst_delta", 0),
+            f"+{bd['smc_bonus']:.2f}" if bd.get("smc_bonus") else "—",
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     async def run(self) -> None:
         _LOGGER.info(
@@ -306,7 +349,7 @@ class DerivDaemon:
         _sig_elapsed = time.time() - _sig_last
         if _sig_elapsed < _cd_sec:
             _LOGGER.debug(
-                "[deriv-daemon] signal_cooldown_active %s elapsed=%.0fs / %.0fs",
+                "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%.0fs / %.0fs",
                 tick.symbol, _sig_elapsed, _cd_sec,
             )
             return
@@ -331,9 +374,11 @@ class DerivDaemon:
         _profile_min_score = min_score_for(tick.symbol)
         _asset_profile = get_asset_profile(tick.symbol)
         if snap.allowed and snap.score < _profile_min_score:
-            _LOGGER.debug(
-                "[deriv-daemon] %s profile_min_score=%.1f not met (score=%.2f type=%s) — skip",
-                tick.symbol, _profile_min_score, snap.score, _asset_profile.get("type", "?"),
+            self._log_entry_block(
+                tick.symbol, "PROFILE_SCORE_GATE",
+                score=snap.score, effective_min_score=_profile_min_score,
+                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
@@ -387,6 +432,12 @@ class DerivDaemon:
                 # Re-check allowance: penalty may push score below profile minimum
                 if snap.score < snap.effective_min_score:
                     snap.allowed = False
+                    self._log_entry_block(
+                        tick.symbol, "HURST_GATE_B_SOFT",
+                        score=snap.score, effective_min_score=snap.effective_min_score,
+                        side=snap.side, regime=snap.regime, hurst=_obs_hurst,
+                        score_breakdown=snap.score_breakdown,
+                    )
                     self._record_decision(
                         symbol=tick.symbol, allowed=False, side=snap.side,
                         score=snap.score,
@@ -422,9 +473,11 @@ class DerivDaemon:
         _spike_entry = bool(snap.score_breakdown.get("spike_entry"))
         _allow_mr = bool(_asset_profile.get("allow_mean_reversion", True))
         if snap.allowed and _mr_active and not _allow_mr:
-            _LOGGER.debug(
-                "[deriv-daemon] %s STRATEGY_GATE: mean_rev not allowed (mode=%s)",
-                tick.symbol, _strat,
+            self._log_entry_block(
+                tick.symbol, f"STRATEGY_GATE_mean_rev_rejected_mode={_strat}",
+                score=snap.score, effective_min_score=_profile_min_score,
+                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
@@ -442,9 +495,11 @@ class DerivDaemon:
         if snap.allowed and _strat == "spike":
             _has_smc = bool(snap.score_breakdown.get("fvg_active"))
             if not (_spike_entry or _has_smc):
-                _LOGGER.debug(
-                    "[deriv-daemon] %s STRATEGY_GATE: spike requires spike_entry|fvg",
-                    tick.symbol,
+                self._log_entry_block(
+                    tick.symbol, "STRATEGY_GATE_spike_requires_spike_or_fvg",
+                    score=snap.score, effective_min_score=_profile_min_score,
+                    side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                    score_breakdown=snap.score_breakdown,
                 )
                 self._record_decision(
                     symbol=tick.symbol, allowed=False, side=snap.side,
@@ -465,6 +520,14 @@ class DerivDaemon:
             "effective_min_score": snap.effective_min_score,
         }
         if not snap.allowed or snap.side is None:
+            self._log_entry_block(
+                tick.symbol,
+                "; ".join(snap.reasons) if snap.reasons else "MATH_REJECTED",
+                score=getattr(snap, "score", 0.0),
+                effective_min_score=snap.effective_min_score,
+                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                score_breakdown=snap.score_breakdown,
+            )
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
                 score=getattr(snap, "score", 0.0),
@@ -559,6 +622,15 @@ class DerivDaemon:
 
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
             reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+            self._log_entry_block(
+                tick.symbol, "AI_VETO",
+                score=snap.score, effective_min_score=snap.effective_min_score,
+                side=snap.side, regime=snap.regime,
+                hurst=analysis.hurst if analysis else pre_hurst,
+                ai_veto=True, ai_confidence=analysis.ai_confidence,
+                ai_reason=analysis.ai_reason,
+                score_breakdown=snap.score_breakdown,
+            )
             _LOGGER.warning(
                 "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
                 tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
@@ -622,6 +694,16 @@ class DerivDaemon:
 
         ai_note = "" if analysis is None or analysis.ai_skipped else f" ai={analysis.ai_confidence:.2f}"
         hurst_note = f" H={analysis.hurst:.3f}" if analysis and analysis.hurst != 0.5 else ""
+        _LOGGER.info(
+            "[PIPELINE] ENTRY_ALLOWED %s | score=%.2f effective_min=%.2f | side=%s | "
+            "regime=%s | H=%.3f | ai_conf=%.2f ai_model=%s | "
+            "stake=%.2f mult=%s",
+            tick.symbol, snap.score, snap.effective_min_score, snap.side,
+            snap.regime, analysis.hurst if analysis else pre_hurst,
+            analysis.ai_confidence if analysis else 0.0,
+            analysis.ai_model if analysis else "none",
+            snap.suggested_stake_usdt, snap.suggested_multiplier,
+        )
         self._record_decision(
             symbol=tick.symbol, allowed=True, side=snap.side,
             score=snap.score,
