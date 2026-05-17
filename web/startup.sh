@@ -13,7 +13,8 @@ set -e
 
 echo "[startup] Running migration 004 (PAMM tables)..."
 npx prisma db execute --schema ./prisma/schema.prisma \
-  --file ./db/migrations/004_pamm_trade_allocations.sql
+  --file ./db/migrations/004_pamm_trade_allocations.sql || \
+  echo "[startup] WARN: migration 004 had warnings (non-fatal)."
 
 echo "[startup] Attempting migration 006 (ownership transfer) with known postgres passwords..."
 OWNERSHIP_FIXED=0

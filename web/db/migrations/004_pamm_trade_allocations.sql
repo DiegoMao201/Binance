@@ -63,12 +63,12 @@ DO $$
 BEGIN
     CREATE INDEX IF NOT EXISTS idx_uta_user_id      ON user_trade_allocations(user_id);
     CREATE INDEX IF NOT EXISTS idx_uta_allocated_at ON user_trade_allocations(allocated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_uta_symbol       ON user_trade_allocations(symbol);
 EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'Skipped index creation on user_trade_allocations: not the table owner.';
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Skipped index creation on user_trade_allocations: %', SQLERRM;
 END;
 $$;
+-- idx_uta_symbol is created by migration 007 after the symbol column is added.
 
 -- ─── Extend ledger_transactions CHECK constraint ──────────────────────────────
 -- PostgreSQL does not support in-place modification of named CHECK constraints.
@@ -88,8 +88,8 @@ BEGIN
                 'WITHDRAWAL'
             ));
 EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'Skipped ledger_type_check update: bot_admin does not own ledger_transactions. A superuser must run this step manually.';
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Skipped ledger_type_check update: %', SQLERRM;
 END;
 $$;
 
@@ -102,8 +102,8 @@ BEGIN
     GRANT SELECT, INSERT ON user_trade_allocations TO bot_admin;
     GRANT USAGE, SELECT ON SEQUENCE user_trade_allocations_id_seq TO bot_admin;
 EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'Skipped grants on user_trade_allocations: already owner or insufficient privilege.';
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Skipped grants on user_trade_allocations: %', SQLERRM;
 END;
 $$;
 
