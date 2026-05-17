@@ -699,7 +699,7 @@ export default function DerivAnalyticsClient({ derivStatus: _initStatus, derivOp
                 <b style={{ color: MUTE, marginLeft: 8 }}>calm</b> → ATR bajo, spreads normales
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 10 }}>
-                {(status.symbols || ["R_100", "R_75", "R_50"]).map(sym => {
+                {(status.symbols || ["R_100", "R_75", "R_50", "BOOM500", "CRASH500", "BOOM1000", "CRASH1000"]).map(sym => {
                   const lastDec = [...(status.last_decisions || [])].reverse().find(d => d.symbol === sym);
                   const regime = lastDec?.regime || lastDec?.score_breakdown?.regime || "unknown";
                   const regimeCol = regime === "trending" ? G : regime === "volatile" ? R : regime === "calm" ? MUTE : B;
