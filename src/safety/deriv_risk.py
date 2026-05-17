@@ -659,7 +659,7 @@ class DerivRiskManager:
         # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
         if _mean_rev_mode:
             snap.score_breakdown["mean_rev_mode"] = True
-        snap.suggested_multiplier = self._suggest_multiplier(atr, ticks[-1])
+        snap.suggested_multiplier = self._suggest_multiplier(atr, ticks[-1], symbol)
 
         if score < effective_min_score:
             snap.reasons.append(
@@ -907,8 +907,32 @@ class DerivRiskManager:
             return 0.25
         return 0.0
 
-    def _suggest_multiplier(self, atr: float, last_price: float) -> int:
-        """Pick a conservative multiplier band based on synthetic vol."""
+    def _suggest_multiplier(self, atr: float, last_price: float, symbol: str = "") -> int:
+        """Pick a conservative multiplier respecting each symbol's valid range.
+
+        BOOM/CRASH multiplier contracts have a restricted set of valid values
+        enforced by the broker:
+          BOOM1000 / CRASH1000 : 100, 200, 300, 400, 500
+          BOOM500  / CRASH500  : 100, 150, 200, 300, 400
+        Returning an out-of-range value causes an immediate InvalidtoBuy rejection.
+
+        For R_* indices the ATR-based conservative capping still applies.
+        """
+        _su = symbol.upper()
+        _is_boom_crash = "BOOM" in _su or "CRASH" in _su
+
+        if _is_boom_crash:
+            # Broker-validated multiplier sets for spike markets
+            if "1000" in _su:
+                _valid = [100, 200, 300, 400, 500]
+            else:
+                _valid = [100, 150, 200, 300, 400]
+            target = self._settings.multiplier
+            # Largest valid multiplier that does not exceed the configured target
+            candidates = [v for v in _valid if v <= target]
+            return max(candidates) if candidates else min(_valid)
+
+        # R_* indices: use ATR-based conservative capping
         if last_price <= 0 or atr <= 0:
             return min(self._settings.multiplier, 30)
         atr_pct = atr / last_price
