@@ -96,6 +96,10 @@ class DerivDaemon:
         self._equity_history: list[dict[str, Any]] = []
         # Per-symbol tick counter for periodic diagnostic logs
         self._diag_tick_count: dict[str, int] = {}
+        # ── Signal cooldown (global anti-spam debounce for ALL HARD_MATH_OVERRIDE types) ──
+        # Tracks last fired override per symbol. Checked FIRST in _pipeline() so
+        # neither math nor AI evaluation runs on cooling-down symbols.
+        self._signal_cooldown: dict[str, float] = {}
 
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
                          score: float, reason: str,
@@ -273,27 +277,44 @@ class DerivDaemon:
             _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
 
     async def _pipeline(self, tick: NormalisedTick) -> None:
-        # ── Cool-down between attempts on the same symbol ──────────────────────
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
+        # ═══════════════════════════════════════════════════════════════════
         if not self._cooldown.can_fire(tick.symbol):
             return
 
-        # ── Score: informed by Hurst calibration ───────────────────────────────
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 1b — GATE: signal cooldown (anti-spam for ALL HARD_MATH_OVERRIDE
+        # types: trend_math, smc_confluence, micro_scalp_mr).
+        # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
+        # ═══════════════════════════════════════════════════════════════════
+        _cd_sec = float(os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180"))
+        _sig_last = self._signal_cooldown.get(tick.symbol, 0.0)
+        _sig_elapsed = time.time() - _sig_last
+        if _sig_elapsed < _cd_sec:
+            _LOGGER.debug(
+                "[deriv-daemon] signal_cooldown_active %s elapsed=%.0fs / %.0fs",
+                tick.symbol, _sig_elapsed, _cd_sec,
+            )
+            return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
+        # AI confidence is intentionally NOT passed here so the risk engine
+        # evaluates the full mathematical microstructure independently.
+        # ═══════════════════════════════════════════════════════════════════
         spread_pct = float(tick.metrics.get("spread") or 0.0)
         pre_analysis = self._analyst.get_history_summary().get(tick.symbol) or {}
         pre_hurst    = float(pre_analysis.get("hurst") or 0.5)
         pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
 
-        # ── Score ────────────────────────────────────────────────────────────────
         snap = self._risk.evaluate(
             tick.symbol, spread_pct,
             hurst=pre_hurst,
             autocorr_lag1=pre_autocorr,
         )
 
-        # ── Per-symbol minimum score gate (ASSET_INTEL_PROFILES) ──────────────
-        # BOOM/CRASH markets require ≥ 7.0. Volatility indices use the profile
-        # default (5.5). This overrides the risk engine's global min_score so
-        # each asset class enforces its own confluency requirements.
+        # Per-symbol minimum score gate (ASSET_INTEL_PROFILES)
         _profile_min_score = min_score_for(tick.symbol)
         _asset_profile = get_asset_profile(tick.symbol)
         if snap.allowed and snap.score < _profile_min_score:
@@ -314,7 +335,6 @@ class DerivDaemon:
             )
             return
 
-        # Record decision with full breakdown for telemetry
         decision_extra = {
             "score_breakdown": snap.score_breakdown,
             "regime": snap.regime,
@@ -330,8 +350,71 @@ class DerivDaemon:
             )
             return
 
-        # ── AI gate ──────────────────────────────────────────────────────────────────
-        # 5. Full AI gate — runs analysis (cached up to 15 min) + optional LLM call.
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 2b — HARD MATH OVERRIDE FAST PATH
+        # If the risk engine flagged a mathematical certainty (SMC FVG mitigation,
+        # Hurst-trend confluence, or micro-scalp band touch), we BYPASS the AI
+        # entirely. The order fires immediately and the signal cooldown is stamped.
+        # The AI veto can NEVER block this path — that is intentional by design.
+        # ═══════════════════════════════════════════════════════════════════
+        if snap.hurst_ai_override:
+            # Stamp signal cooldown for ALL override types (trend_math,
+            # smc_confluence, micro_scalp_mr) to prevent tick-by-tick spam.
+            self._signal_cooldown[tick.symbol] = time.time()
+            self._cooldown.mark(tick.symbol)
+
+            _is_mean_rev_ov = bool(snap.score_breakdown.get("mean_rev_mode"))
+            _sl_pct_ov  = 0.004 if _is_mean_rev_ov else self._settings.stop_loss_pct
+            _tp_pct_ov  = 0.004 if _is_mean_rev_ov else self._settings.take_profit_pct
+            _is_spike_ov = bool(snap.score_breakdown.get("spike_entry"))
+            _is_boom_crash_ov = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+            _max_hold_ov = (
+                float(spike_timeout_sec(tick.symbol))
+                if (_is_spike_ov or _is_boom_crash_ov)
+                else 0.0
+            )
+            payload_override: dict[str, Any] = {
+                "broker": "deriv",
+                "symbol": tick.symbol,
+                "side": snap.side,
+                "stake_usdt": snap.suggested_stake_usdt,
+                "multiplier": snap.suggested_multiplier,
+                "stop_loss_pct": _sl_pct_ov,
+                "take_profit_pct": _tp_pct_ov,
+                "score_breakdown": snap.score_breakdown,
+                "max_hold_seconds": _max_hold_ov,
+                "_analyst_context": {"hurst_ai_override": True},
+            }
+            self._record_decision(
+                symbol=tick.symbol, allowed=True, side=snap.side,
+                score=snap.score,
+                reason=f"GO [MATH_OVERRIDE] score={snap.score:.2f} regime={snap.regime}",
+                extra={**decision_extra, "hurst_ai_override": True},
+            )
+            self._counters["orders_sent"] += 1
+            try:
+                result = await self._router.route_order(payload_override)
+                self._counters["orders_ok"] += 1
+                _LOGGER.info(
+                    "[deriv-daemon] ORDER %s | score=%.2f [MATH_OVERRIDE] | %s",
+                    tick.symbol, snap.score, result,
+                )
+            except OrderRouterError as exc:
+                self._counters["orders_failed"] += 1
+                _LOGGER.warning("[deriv-daemon] router rejected (override): %s", exc)
+            except DerivClientError as exc:
+                self._counters["orders_failed"] += 1
+                _LOGGER.warning("[deriv-daemon] broker rejected order %s (override): %s", tick.symbol, exc)
+            except Exception:  # noqa: BLE001
+                self._counters["orders_failed"] += 1
+                _LOGGER.exception("[deriv-daemon] order pipeline crashed (override, suppressed)")
+            return  # ← override path always returns here; AI never runs
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 3 — AI GATE (only reached when NO hard math override fired)
+        # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.
+        # If AI approves (or is skipped/errored), execute the order.
+        # ═══════════════════════════════════════════════════════════════════
         try:
             analysis = await self._analyst.analyze(
                 symbol=tick.symbol,
@@ -343,52 +426,29 @@ class DerivDaemon:
             _LOGGER.warning("[deriv-daemon] analyst error for %s: %s — proceeding", tick.symbol, exc)
             analysis = None
 
-        # 6. AI veto check — but respect the math override flag from risk engine.
-        #    If snap.hurst_ai_override is True, we skip the AI veto for this signal.
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
-            # Re-evaluate with the now-known AI confidence so the override is applied
-            snap2 = self._risk.evaluate(
-                tick.symbol, spread_pct,
-                hurst=pre_hurst,
-                autocorr_lag1=pre_autocorr,
-                ai_confidence=analysis.ai_confidence,
+            reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+            _LOGGER.warning(
+                "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
+                tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
             )
-            if not snap2.hurst_ai_override:
-                reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
-                _LOGGER.warning(
-                    "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
-                    tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
-                )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score, reason=reason,
-                    extra={
-                        **decision_extra,
-                        "hurst": analysis.hurst,
-                        "autocorr": analysis.autocorr_lag1,
-                        "vol_regime": analysis.vol_regime,
-                        "ai_model": analysis.ai_model,
-                    },
-                )
-                return
-            # Override applied — log and continue
-            _LOGGER.info(
-                "[deriv-daemon] Hurst math override: AI vetoed but H=%.3f autocorr=%.3f — proceeding",
-                pre_hurst, pre_autocorr,
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score, reason=reason,
+                extra={
+                    **decision_extra,
+                    "hurst": analysis.hurst,
+                    "autocorr": analysis.autocorr_lag1,
+                    "vol_regime": analysis.vol_regime,
+                    "ai_model": analysis.ai_model,
+                },
             )
+            return
 
-        # ── Order payload ──────────────────────────────────────────────────────────────
-        # 7. Build broker-agnostic payload and route.
-        # Dynamic TP/SL: mean-reversion trades use tighter SL (0.4%) and faster TP (0.4%)
-        # to avoid 40-min waits at wide trending targets.
+        # ── Build order payload (AI-approved path) ─────────────────────────
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
         _sl_pct  = 0.004 if _is_mean_rev else self._settings.stop_loss_pct
         _tp_pct  = 0.004 if _is_mean_rev else self._settings.take_profit_pct
-        # Spike timeout:
-        #  BOOM/CRASH: ALWAYS apply the timeout — these instruments are spike products.
-        #  Holding them open via trailing SL guarantees inter-spike drift losses.
-        #  They must exit within spike_timeout_sec regardless of entry method.
-        #  R_*: only spike hunter entries get timed out; other entries use trailing SL.
         _is_spike_entry = bool(snap.score_breakdown.get("spike_entry"))
         _is_boom_crash = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
         _max_hold_sec = (
@@ -404,9 +464,7 @@ class DerivDaemon:
             "multiplier": snap.suggested_multiplier,
             "stop_loss_pct": _sl_pct,
             "take_profit_pct": _tp_pct,
-            # score_breakdown flows to DerivOrder → PAMM webhook → deriv_contracts.score_breakdown
             "score_breakdown": snap.score_breakdown,
-            # Spike timeout: only EMA-200 spike hunter entries; 0 = disabled.
             "max_hold_seconds": _max_hold_sec,
             "_analyst_context": {
                 "hurst": analysis.hurst if analysis else None,
@@ -419,25 +477,24 @@ class DerivDaemon:
                 "ai_confidence": analysis.ai_confidence if analysis else None,
                 "ai_model": analysis.ai_model if analysis else None,
                 "ai_reason": analysis.ai_reason if analysis else None,
-                "hurst_ai_override": snap.hurst_ai_override,
+                "hurst_ai_override": False,
             } if analysis else {},
         }
         self._cooldown.mark(tick.symbol)
 
         ai_note = "" if analysis is None or analysis.ai_skipped else f" ai={analysis.ai_confidence:.2f}"
         hurst_note = f" H={analysis.hurst:.3f}" if analysis and analysis.hurst != 0.5 else ""
-        override_note = " [MATH_OVERRIDE]" if snap.hurst_ai_override else ""
         self._record_decision(
             symbol=tick.symbol, allowed=True, side=snap.side,
             score=snap.score,
-            reason=f"GO{ai_note}{hurst_note}{override_note} score={snap.score:.2f} regime={snap.regime}",
+            reason=f"GO{ai_note}{hurst_note} score={snap.score:.2f} regime={snap.regime}",
             extra={
                 **decision_extra,
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr": analysis.autocorr_lag1 if analysis else None,
                 "vol_regime": analysis.vol_regime if analysis else None,
                 "ai_confidence": analysis.ai_confidence if analysis else None,
-                "hurst_ai_override": snap.hurst_ai_override,
+                "hurst_ai_override": False,
             },
         )
         self._counters["orders_sent"] += 1
@@ -445,16 +502,13 @@ class DerivDaemon:
             result = await self._router.route_order(payload)
             self._counters["orders_ok"] += 1
             _LOGGER.info(
-                "[deriv-daemon] ORDER %s | score=%.2f%s%s%s | %s",
-                tick.symbol, snap.score, ai_note, hurst_note, override_note, result,
+                "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
+                tick.symbol, snap.score, ai_note, hurst_note, result,
             )
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
         except DerivClientError as exc:
-            # Known broker-side rejection (capped stake, SL/TP limits, etc.).
-            # Already logged as CRITICAL inside deriv_client; do not crash the
-            # pipeline and do not spam with a traceback.
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] broker rejected order %s: %s", tick.symbol, exc)
         except Exception:  # noqa: BLE001
