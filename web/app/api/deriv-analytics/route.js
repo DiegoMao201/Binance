@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -12,9 +11,110 @@ async function readJson(fileName, fallback, dir = DERIV_LOGS) {
   try {
     const content = await fs.readFile(path.join(dir, fileName), "utf8");
     return JSON.parse(content);
-  } catch {
-    return fallback;
+  } catch { return fallback; }
+}
+
+const pnlOf = c => Number(c?.realized_pnl_usdt ?? c?.pnl ?? 0) || 0;
+const tsOf = c => {
+  const t = Number(c?.closed_at_ts ?? c?.opened_at_ts ?? c?.ts ?? 0);
+  return t > 1e12 ? t : t * 1000;
+};
+const holdOf = c => {
+  const o = Number(c?.opened_at_ts ?? 0);
+  const cl = Number(c?.closed_at_ts ?? 0);
+  if (!o || !cl) return null;
+  return Math.max(0, (cl - o) * 1000);
+};
+const symOf = c => c?.symbol || c?.underlying || "?";
+const sideOf = c => c?.side || c?.contract_type || "?";
+const regimeOf = c => c?.score_breakdown?.regime || c?.regime || "UNKNOWN";
+const strategyModeOf = c => {
+  const bd = c?.score_breakdown || {};
+  if (bd.spike_entry) return "SPIKE";
+  if (bd.micro_scalp) return "SCALP";
+  if (bd.mean_rev_mode) return "MEAN_REV";
+  if (bd.fvg_active) return "FVG";
+  return bd.strategy || "TREND";
+};
+const hurstZoneOf = c => c?.score_breakdown?.hurst_zone || "—";
+const scoreBand = s => {
+  if (s == null || !Number.isFinite(s)) return "?";
+  if (s < 4) return "<4";
+  if (s < 5) return "4-5";
+  if (s < 6) return "5-6";
+  if (s < 7) return "6-7";
+  if (s < 8) return "7-8";
+  if (s < 9) return "8-9";
+  return "9+";
+};
+const isoDay = ts => new Date(ts).toISOString().slice(0, 10);
+
+function emptyBucket() {
+  return { n: 0, wins: 0, losses: 0, pnl: 0, gross_profit: 0, gross_loss: 0, hold_sum: 0, hold_n: 0 };
+}
+function pushBucket(b, c) {
+  const p = pnlOf(c);
+  b.n++; b.pnl += p;
+  if (p > 0) { b.wins++; b.gross_profit += p; }
+  else if (p < 0) { b.losses++; b.gross_loss += -p; }
+  const h = holdOf(c);
+  if (h != null) { b.hold_sum += h; b.hold_n++; }
+}
+function finalizeBucket(b) {
+  return {
+    n: b.n, wins: b.wins, losses: b.losses,
+    pnl: +b.pnl.toFixed(4),
+    winrate: b.n ? b.wins / b.n : 0,
+    profit_factor: b.gross_loss > 0 ? +(b.gross_profit / b.gross_loss).toFixed(3) : (b.gross_profit > 0 ? null : 0),
+    expectancy: b.n ? +(b.pnl / b.n).toFixed(4) : 0,
+    avg_win: b.wins ? +(b.gross_profit / b.wins).toFixed(4) : 0,
+    avg_loss: b.losses ? +(-b.gross_loss / b.losses).toFixed(4) : 0,
+    avg_hold_sec: b.hold_n ? +(b.hold_sum / b.hold_n / 1000).toFixed(1) : null,
+  };
+}
+function aggBy(arr, keyFn) {
+  const m = {};
+  for (const c of arr) {
+    const k = keyFn(c) ?? "?";
+    (m[k] ||= emptyBucket()); pushBucket(m[k], c);
   }
+  const out = {};
+  for (const k of Object.keys(m)) out[k] = finalizeBucket(m[k]);
+  return out;
+}
+function rolling(arr, w) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const slice = arr.slice(Math.max(0, i - w + 1), i + 1);
+    const b = emptyBucket();
+    for (const c of slice) pushBucket(b, c);
+    const f = finalizeBucket(b);
+    out.push({ i, ts: tsOf(arr[i]), winrate: f.winrate, profit_factor: f.profit_factor || 0, expectancy: f.expectancy });
+  }
+  return out;
+}
+function maxDrawdown(eq) {
+  let peak = -Infinity, peakV = 0, maxDd = 0, maxDdPct = 0, valley = 0;
+  for (const p of eq) {
+    if (p.pnl > peak) { peak = p.pnl; peakV = p.pnl; }
+    const dd = peak - p.pnl;
+    if (dd > maxDd) { maxDd = dd; valley = p.pnl; maxDdPct = peak !== 0 ? dd / Math.max(1, Math.abs(peak)) : 0; }
+  }
+  return { max_dd: +maxDd.toFixed(4), max_dd_pct: +maxDdPct.toFixed(4), peak: +peakV.toFixed(4), valley: +valley.toFixed(4) };
+}
+function pearson(x, y) {
+  const n = Math.min(x.length, y.length);
+  if (n < 2) return 0;
+  let sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0, c = 0;
+  for (let i = 0; i < n; i++) {
+    const a = Number(x[i]), b = Number(y[i]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    sx += a; sy += b; sxy += a * b; sx2 += a * a; sy2 += b * b; c++;
+  }
+  if (c < 2) return 0;
+  const num = c * sxy - sx * sy;
+  const den = Math.sqrt((c * sx2 - sx * sx) * (c * sy2 - sy * sy));
+  return den === 0 ? 0 : +(num / den).toFixed(3);
 }
 
 export async function GET() {
@@ -23,133 +123,187 @@ export async function GET() {
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
   ]);
+  const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
+  const openContracts = Array.isArray(open) ? open : [];
 
-  // ── Compute analytics server-side ────────────────────────────────────────
-  const allClosed = Array.isArray(closed) ? closed : [];
-
-  // Session PnL (all closed)
-  const sessionPnl = allClosed.reduce(
-    (s, c) => s + Number(c.realized_pnl_usdt ?? c.pnl ?? 0),
-    0
-  );
-
-  // Win rate
-  const wins = allClosed.filter(
-    (c) => Number(c.realized_pnl_usdt ?? c.pnl ?? 0) > 0
-  ).length;
-  const winRate = allClosed.length > 0 ? wins / allClosed.length : 0;
-
-  // Per-symbol stats
-  const bySymbol = {};
-  for (const c of allClosed) {
-    const sym = c.symbol || c.underlying || "unknown";
-    if (!bySymbol[sym]) {
-      bySymbol[sym] = {
-        symbol: sym,
-        trades: 0,
-        wins: 0,
-        losses: 0,
-        pnl: 0,
-        best: null,
-        worst: null,
-        avg_hold_sec: 0,
-        total_hold_sec: 0,
-        by_side: { MULTUP: { trades: 0, wins: 0, pnl: 0 }, MULTDOWN: { trades: 0, wins: 0, pnl: 0 } },
-        by_exit: {},
-      };
-    }
-    const s = bySymbol[sym];
-    const p = Number(c.realized_pnl_usdt ?? c.pnl ?? 0);
-    const side = c.side || "unknown";
-    const exit = c.exit_reason || "unknown";
-    s.trades++;
-    s.pnl = Math.round((s.pnl + p) * 1e6) / 1e6;
-    if (p > 0) { s.wins++; }
-    else if (p < 0) { s.losses++; }
-    if (s.best === null || p > s.best) s.best = p;
-    if (s.worst === null || p < s.worst) s.worst = p;
-    if (c.opened_at_ts && c.closed_at_ts) {
-      s.total_hold_sec += (c.closed_at_ts - c.opened_at_ts);
-    }
-    if (side === "MULTUP" || side === "MULTDOWN") {
-      s.by_side[side].trades++;
-      s.by_side[side].pnl = Math.round((s.by_side[side].pnl + p) * 1e6) / 1e6;
-      if (p > 0) s.by_side[side].wins++;
-    }
-    s.by_exit[exit] = (s.by_exit[exit] || 0) + 1;
-  }
-  for (const s of Object.values(bySymbol)) {
-    s.win_rate = s.trades > 0 ? s.wins / s.trades : 0;
-    s.avg_pnl = s.trades > 0 ? s.pnl / s.trades : 0;
-    s.avg_hold_sec = s.trades > 0 ? s.total_hold_sec / s.trades : 0;
-  }
-
-  // Score distribution (from decisions log)
-  const decisions = Array.isArray(status.last_decisions) ? status.last_decisions : [];
-  const scoreHist = { "0-2": 0, "2-4": 0, "4-6": 0, "6-8": 0, "8-10": 0 };
-  for (const d of decisions) {
-    const sc = Number(d.score || 0);
-    if (sc < 2) scoreHist["0-2"]++;
-    else if (sc < 4) scoreHist["2-4"]++;
-    else if (sc < 6) scoreHist["4-6"]++;
-    else if (sc < 8) scoreHist["6-8"]++;
-    else scoreHist["8-10"]++;
-  }
-
-  // Exit reason breakdown
-  const exitReasons = {};
-  for (const c of allClosed) {
-    const r = c.exit_reason || "unknown";
-    if (!exitReasons[r]) exitReasons[r] = { count: 0, pnl: 0 };
-    exitReasons[r].count++;
-    exitReasons[r].pnl = Math.round((exitReasons[r].pnl + Number(c.realized_pnl_usdt ?? c.pnl ?? 0)) * 1e6) / 1e6;
-  }
-
-  // Multiplier distribution
-  const multiplierDist = {};
-  for (const c of allClosed) {
-    const m = String(c.multiplier || "?");
-    multiplierDist[m] = (multiplierDist[m] || 0) + 1;
-  }
-
-  // Streak analysis
-  let currentStreak = 0;
-  let bestStreak = 0;
-  let worstStreak = 0;
-  let tmpStreak = 0;
-  let tmpIsWin = null;
-  for (const c of allClosed) {
-    const won = Number(c.realized_pnl_usdt ?? c.pnl ?? 0) > 0;
-    if (tmpIsWin === null) { tmpIsWin = won; tmpStreak = 1; }
-    else if (won === tmpIsWin) { tmpStreak++; }
-    else { tmpIsWin = won; tmpStreak = 1; }
-    if (won && tmpStreak > bestStreak) bestStreak = tmpStreak;
-    if (!won && tmpStreak > worstStreak) worstStreak = tmpStreak;
-  }
-  if (allClosed.length > 0) {
-    const last = Number(allClosed[allClosed.length - 1].realized_pnl_usdt ?? allClosed[allClosed.length - 1].pnl ?? 0);
-    currentStreak = tmpIsWin === (last > 0) ? tmpStreak : 0;
-  }
-
-  return NextResponse.json({
-    status,
-    open_contracts: Array.isArray(open) ? open : [],
-    closed_contracts: allClosed,
-    analytics: {
-      session_pnl: Math.round(sessionPnl * 1e4) / 1e4,
-      win_rate: winRate,
-      total_trades: allClosed.length,
-      total_wins: wins,
-      total_losses: allClosed.length - wins,
-      by_symbol: bySymbol,
-      score_distribution: scoreHist,
-      exit_reasons: exitReasons,
-      multiplier_dist: multiplierDist,
-      streaks: { current: currentStreak, best_win: bestStreak, worst_loss: worstStreak },
-      equity_history: Array.isArray(status.equity_history) ? status.equity_history : [],
-    },
-    server_time: new Date().toISOString(),
-  }, {
-    headers: { "Cache-Control": "no-store, max-age=0" },
+  let cum = 0;
+  const equity_curve = allClosed.map(c => {
+    const p = pnlOf(c);
+    cum += p;
+    return { ts: tsOf(c), pnl: +cum.toFixed(4), trade_pnl: +p.toFixed(4), symbol: symOf(c) };
   });
+
+  const dailyMap = {};
+  for (const c of allClosed) {
+    const d = isoDay(tsOf(c));
+    (dailyMap[d] ||= { date: d, pnl: 0, trades: 0, wins: 0 });
+    dailyMap[d].pnl += pnlOf(c);
+    dailyMap[d].trades++;
+    if (pnlOf(c) > 0) dailyMap[d].wins++;
+  }
+  const daily_pnl = Object.values(dailyMap)
+    .map(d => ({ ...d, pnl: +d.pnl.toFixed(4), winrate: d.trades ? d.wins / d.trades : 0 }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const today = new Date();
+  const calendar = [];
+  for (let i = 89; i >= 0; i--) {
+    const d = new Date(today); d.setDate(today.getDate() - i);
+    const k = d.toISOString().slice(0, 10);
+    const v = dailyMap[k];
+    calendar.push({ date: k, pnl: v ? +v.pnl.toFixed(4) : 0, trades: v ? v.trades : 0 });
+  }
+
+  const heatmap_pnl = Array.from({ length: 7 }, () => Array(24).fill(0));
+  const heatmap_count = Array.from({ length: 7 }, () => Array(24).fill(0));
+  for (const c of allClosed) {
+    const dt = new Date(tsOf(c));
+    if (isNaN(dt)) continue;
+    heatmap_pnl[dt.getDay()][dt.getHours()] += pnlOf(c);
+    heatmap_count[dt.getDay()][dt.getHours()] += 1;
+  }
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) heatmap_pnl[d][h] = +heatmap_pnl[d][h].toFixed(4);
+
+  const by_regime    = aggBy(allClosed, regimeOf);
+  const by_strategy  = aggBy(allClosed, strategyModeOf);
+  const by_hurst_zone = aggBy(allClosed, hurstZoneOf);
+  const by_score_band = aggBy(allClosed, c => scoreBand(Number(c?.score)));
+  const by_side      = aggBy(allClosed, c => sideOf(c) === "MULTUP" ? "LONG" : sideOf(c) === "MULTDOWN" ? "SHORT" : "?");
+  const by_exit_reason = aggBy(allClosed, c => c?.exit_reason || "—");
+
+  const by_symbol = {};
+  const symbolGroups = {};
+  for (const c of allClosed) (symbolGroups[symOf(c)] ||= []).push(c);
+  for (const [s, trades] of Object.entries(symbolGroups)) {
+    const bAll = emptyBucket(), bL = emptyBucket(), bS = emptyBucket();
+    const regCnt = {};
+    for (const c of trades) {
+      pushBucket(bAll, c);
+      const side = sideOf(c);
+      if (side === "MULTUP") pushBucket(bL, c);
+      else if (side === "MULTDOWN") pushBucket(bS, c);
+      const r = regimeOf(c); regCnt[r] = (regCnt[r] || 0) + 1;
+    }
+    by_symbol[s] = { ...finalizeBucket(bAll), long: finalizeBucket(bL), short: finalizeBucket(bS), regime_counts: regCnt };
+  }
+
+  const rolling_20 = rolling(allClosed, 20);
+  const rolling_50 = rolling(allClosed, 50);
+
+  const scatterPool = allClosed.map(c => {
+    const bd = c?.score_breakdown || {};
+    return {
+      ts: tsOf(c),
+      symbol: symOf(c),
+      side: sideOf(c),
+      score: Number(c?.score ?? bd.score_raw ?? NaN),
+      hurst: Number(bd.hurst ?? NaN),
+      atr_pct: Number(bd.atr_pct ?? NaN),
+      pnl: pnlOf(c),
+      hold: holdOf(c) ? holdOf(c) / 1000 : null,
+      regime: regimeOf(c),
+    };
+  });
+  let scatter = scatterPool;
+  if (scatterPool.length > 800) {
+    const step = scatterPool.length / 800;
+    scatter = [];
+    for (let i = 0; i < scatterPool.length; i += step) scatter.push(scatterPool[Math.floor(i)]);
+  }
+
+  const cols = { score: [], hurst: [], atr_pct: [], pnl: [], hold: [] };
+  for (const p of scatterPool) {
+    cols.score.push(p.score); cols.hurst.push(p.hurst); cols.atr_pct.push(p.atr_pct);
+    cols.pnl.push(p.pnl); cols.hold.push(p.hold);
+  }
+  const corrKeys = Object.keys(cols);
+  const correlations = {};
+  for (const a of corrKeys) {
+    correlations[a] = {};
+    for (const b of corrKeys) correlations[a][b] = a === b ? 1 : pearson(cols[a], cols[b]);
+  }
+
+  const scoreHist = Array(11).fill(0);
+  const hurstHist = Array(20).fill(0);
+  for (const p of scatterPool) {
+    if (Number.isFinite(p.score)) scoreHist[Math.max(0, Math.min(10, Math.floor(p.score)))]++;
+    if (Number.isFinite(p.hurst)) hurstHist[Math.max(0, Math.min(19, Math.floor(p.hurst * 20)))]++;
+  }
+
+  let curType = null, curN = 0, maxW = 0, maxL = 0;
+  for (const c of allClosed) {
+    const p = pnlOf(c);
+    const t = p > 0 ? "W" : p < 0 ? "L" : null;
+    if (!t) continue;
+    if (t === curType) curN++; else { curType = t; curN = 1; }
+    if (t === "W") maxW = Math.max(maxW, curN); else maxL = Math.max(maxL, curN);
+  }
+
+  const totalPnl = allClosed.reduce((s, c) => s + pnlOf(c), 0);
+  const wins = allClosed.filter(c => pnlOf(c) > 0);
+  const losses = allClosed.filter(c => pnlOf(c) < 0);
+  const grossP = wins.reduce((s, c) => s + pnlOf(c), 0);
+  const grossL = -losses.reduce((s, c) => s + pnlOf(c), 0);
+  const holdValid = allClosed.map(holdOf).filter(h => h != null);
+  const avgDur = holdValid.length ? holdValid.reduce((s, h) => s + h, 0) / holdValid.length / 1000 : null;
+
+  const pnlArr = allClosed.map(pnlOf);
+  const mean = pnlArr.length ? pnlArr.reduce((a, b) => a + b, 0) / pnlArr.length : 0;
+  const variance = pnlArr.length ? pnlArr.reduce((a, b) => a + (b - mean) ** 2, 0) / pnlArr.length : 0;
+  const std = Math.sqrt(variance);
+  const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayPnl = (dailyMap[todayKey]?.pnl) || 0;
+
+  const global = {
+    total_trades: allClosed.length,
+    wins: wins.length,
+    losses: losses.length,
+    winrate: allClosed.length ? wins.length / allClosed.length : 0,
+    profit_factor: grossL > 0 ? +(grossP / grossL).toFixed(3) : (grossP > 0 ? null : 0),
+    expectancy: allClosed.length ? +(totalPnl / allClosed.length).toFixed(4) : 0,
+    avg_win: wins.length ? +(grossP / wins.length).toFixed(4) : 0,
+    avg_loss: losses.length ? +(-grossL / losses.length).toFixed(4) : 0,
+    gross_profit: +grossP.toFixed(4),
+    gross_loss: +grossL.toFixed(4),
+    session_pnl: +totalPnl.toFixed(4),
+    today_pnl: +todayPnl.toFixed(4),
+    avg_duration_sec: avgDur,
+    sharpe_like: +sharpe.toFixed(3),
+    max_drawdown: maxDrawdown(equity_curve),
+    streaks: { current: { type: curType, n: curN }, max_win: maxW, max_loss: maxL },
+  };
+
+  const rawDec = Array.isArray(status?.last_decisions) ? status.last_decisions : [];
+  const recent = rawDec.slice(-200);
+  const last_by_symbol = {};
+  for (const d of rawDec) { const s = d?.symbol; if (s) last_by_symbol[s] = d; }
+  const rejection_count = {};
+  for (const d of recent) {
+    if (d?.allowed) continue;
+    const k = String(d?.reason || "UNKNOWN").split(":")[0].slice(0, 60);
+    rejection_count[k] = (rejection_count[k] || 0) + 1;
+  }
+
+  return Response.json({
+    ts: Date.now(),
+    status: {
+      balance: status?.balance ?? null,
+      floating_pnl: status?.floating_pnl ?? null,
+      ws_state: status?.ws_state ?? null,
+      online: status?.online ?? null,
+      today_trades: status?.today_trades ?? null,
+    },
+    global,
+    equity_curve, daily_pnl, calendar,
+    heatmap_pnl, heatmap_count,
+    by_regime, by_strategy, by_hurst_zone, by_score_band, by_side, by_exit_reason, by_symbol,
+    rolling_20, rolling_50,
+    scatter, correlations,
+    histograms: { score: scoreHist, hurst: hurstHist },
+    decisions: { recent, last_by_symbol, rejection_count },
+    open_contracts: openContracts,
+    closed_contracts: allClosed,
+  }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
