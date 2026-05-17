@@ -2154,13 +2154,17 @@ export default function DashboardClient({ initialData }) {
   }, [activeSymbol, openPosition, lastScans, targetSymbols]);
 
   const isOnline = useMemo(() => {
+    // Primary: Binance bot heartbeat
     const hb  = status?.heartbeat_at;
-    if (!hb) return false;
     const ref = payload?.serverTime ? new Date(payload.serverTime).getTime() : NaN;
-    if (isNaN(ref)) return false;
-    // 300 s threshold: with 4 markets + sequential AI calls a cycle can take >2 min.
-    return ref - new Date(hb).getTime() < 300000;
-  }, [payload?.serverTime, status?.heartbeat_at]);
+    if (hb && !isNaN(ref) && ref - new Date(hb).getTime() < 300000) return true;
+    // Fallback: Deriv bot — connected=true and updated_at within 60s
+    if (derivStatus?.connected === true && derivStatus?.updated_at) {
+      const deriv_updated = new Date(derivStatus.updated_at).getTime();
+      if (Date.now() - deriv_updated < 60000) return true;
+    }
+    return false;
+  }, [payload?.serverTime, status?.heartbeat_at, derivStatus?.connected, derivStatus?.updated_at]);
 
   const focusScan = useMemo(() => {
     if (!lastScans.length) return null;

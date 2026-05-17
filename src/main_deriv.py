@@ -575,6 +575,7 @@ class DerivDaemon:
                 "balance": self._balance_usd,
                 "balance_currency": self._balance_currency,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
                 # ── Telemetría rica para auditoría visual ─────────────────
                 "counters": dict(self._counters),
                 "last_ticks": dict(self._last_ticks),
