@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from src.analysis.deriv_analyst import DerivAnalyst
-from src.data.deriv_client import DerivClient, NormalisedTick
+from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
@@ -421,6 +421,12 @@ class DerivDaemon:
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
+        except DerivClientError as exc:
+            # Known broker-side rejection (capped stake, SL/TP limits, etc.).
+            # Already logged as CRITICAL inside deriv_client; do not crash the
+            # pipeline and do not spam with a traceback.
+            self._counters["orders_failed"] += 1
+            _LOGGER.warning("[deriv-daemon] broker rejected order %s: %s", tick.symbol, exc)
         except Exception:  # noqa: BLE001
             self._counters["orders_failed"] += 1
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")

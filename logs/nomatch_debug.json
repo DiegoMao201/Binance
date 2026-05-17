@@ -1,7 +1,0 @@
-{
-  "generated_at": "2026-05-14T14:44:24.159999+00:00",
-  "total_audited": 1,
-  "n_nomatch": 0,
-  "advice": "Possible causes: dry_run trade not filtered (check 'mode' field), partial fill not aggregated (check _debug_fetch_count), trade executed more than 24 h after open (widen --rate-ms window), or trade was placed/closed manually outside the bot.",
-  "trades": []
-}

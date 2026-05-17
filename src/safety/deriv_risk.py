@@ -453,6 +453,26 @@ class DerivRiskManager:
         side = "MULTUP" if trend_dir > 0 else "MULTDOWN"
         snap.side = side
 
+        # ── Hard Random-Walk veto (R_* indices only) ──────────────────────
+        # When Hurst sits inside [0.45, 0.55] the price series is statistically
+        # indistinguishable from a random walk — there is no edge to exploit
+        # and the spread will systematically eat the position. This veto blocks
+        # ALL entries on volatility indices in that band. Spike markets
+        # (BOOM/CRASH) are exempt because their edge is the spike asymmetry,
+        # not Hurst-based trend.
+        _rw_lo = float(os.getenv("DERIV_RANDOM_WALK_LO", "0.45"))
+        _rw_hi = float(os.getenv("DERIV_RANDOM_WALK_HI", "0.55"))
+        if (
+            hurst is not None
+            and _rw_lo <= hurst <= _rw_hi
+            and not _is_spike_market(symbol)
+        ):
+            snap.reasons.append(
+                f"random_walk_veto: H={hurst:.3f} ∈ [{_rw_lo:.2f},{_rw_hi:.2f}] — no statistical edge"
+            )
+            snap.allowed = False
+            return snap
+
         # ── Spike asymmetry veto (BOOM/CRASH hard rule) ───────────────────
         # BOOM indices only allow MULTUP; CRASH indices only allow MULTDOWN.
         # This is a deterministic hard gate — no score can override it.
@@ -525,15 +545,17 @@ class DerivRiskManager:
                     _geo.divergence, side, _geo.smc_bonus, score,
                 )
 
-        # ── Micro-channel scalp trigger (Hurst<0.45 + 1.5σ band touch) ───────
-        # When the market is mean-reverting we don't wait for the macro 500-tick
-        # extreme: a touch of the inner 1.5σ band of the 150-tick channel
-        # combined with the geo direction is enough to inject a scalp order.
+        # ── Micro-channel scalp trigger (Hurst<0.40 + 1.5σ band touch) ───────
+        # When the market is strongly mean-reverting (H<0.40) we don't wait for
+        # the macro 500-tick extreme: a touch of the inner 1.5σ band of the
+        # 150-tick channel combined with the geo direction is enough to inject
+        # a scalp order. Tightened from 0.45 to 0.40 to avoid the random-walk
+        # band (0.45-0.55) where the spread eats the edge.
         if (
             _geo is not None
             and _geo.micro_band_signal is not None
             and hurst is not None
-            and hurst < 0.45
+            and hurst < 0.40
             and not _is_spike_market(symbol)
         ):
             _scalp_bonus = 1.5
@@ -551,6 +573,7 @@ class DerivRiskManager:
                 snap.score_breakdown["micro_scalp"] = True
                 snap.score_breakdown["micro_scalp_side"] = _scalp_side
                 snap.score = round(score, 3)
+                snap.reasons[-1] = snap.reasons[-1].replace("H={:.3f}<0.45".format(hurst), f"H={hurst:.3f}<0.40")
 
         # ── EMA-200 Spike Hunter (BOOM/CRASH only) ────────────────────────
         # BOOM spikes up → enter when price dips 0.02–0.10% below EMA200 (support).
@@ -623,10 +646,10 @@ class DerivRiskManager:
             # (c) Mean-reverting micro scalp
             elif (
                 _geo is not None and _geo.micro_band_signal is not None
-                and hurst is not None and hurst < 0.45
+                and hurst is not None and hurst < 0.40
                 and _geo.micro_band_signal == side
             ):
-                _override_reason = f"micro_scalp_mr: H={hurst:.3f}<0.45 band_touch={side}"
+                _override_reason = f"micro_scalp_mr: H={hurst:.3f}<0.40 band_touch={side}"
 
             if _override_reason:
                 snap.hurst_ai_override = True
@@ -639,6 +662,23 @@ class DerivRiskManager:
                     "[deriv-risk] HARD_MATH_OVERRIDE %s side=%s reason=%s ai=%s",
                     symbol, side, _override_reason, _ai_disp,
                 )
+
+        # ── BOOM/CRASH structural gate ────────────────────────────────
+        # BOOM and CRASH indices have a structural edge ONLY when entered at:
+        #   (a) an unmitigated FVG (Smart Money Concept liquidity zone), OR
+        #   (b) an EMA-200 spike-hunter setup (price dipping into support/resistance)
+        # Random entries on these symbols statistically lose to spike_timeout
+        # because the slow-drift phase between spikes wears down the position.
+        # If neither structural setup is active, veto the trade.
+        if _is_spike_market(symbol):
+            _has_smc = bool(snap.score_breakdown.get("fvg_active"))
+            _has_spike_hunter = bool(snap.score_breakdown.get("spike_entry"))
+            if not (_has_smc or _has_spike_hunter):
+                snap.reasons.append(
+                    "boom_crash_structural_veto: no FVG mitigation and no EMA200 spike-hunter setup"
+                )
+                snap.allowed = False
+                return snap
 
         # Sizing — proportional to bankroll, capped by ATR (anti-Martingale).
         risk_usdt = self._settings.bankroll_usdt * self._settings.risk_per_trade_pct
