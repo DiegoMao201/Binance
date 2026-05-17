@@ -578,6 +578,12 @@ class DerivRiskManager:
                         )
                     if _sh_bonus > 0.0:
                         score = float(np.clip(score + _sh_bonus, 0.0, 10.0))
+                        # Tag this trade as a spike_entry so the execution layer
+                        # applies the spike_timeout (force-close after N seconds).
+                        # Non-spike entries (SMC, Hurst, micro-scalp) must NOT carry
+                        # this tag — they need time to develop and are managed by the
+                        # dynamic trailing SL instead.
+                        snap.score_breakdown["spike_entry"] = True
                     snap.score_breakdown["ema200"] = round(_ema200_val, 5)
                     snap.score_breakdown["ema200_dev_pct"] = round(_dev * 100, 4)
                     snap.score = round(score, 3)

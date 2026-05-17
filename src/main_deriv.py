@@ -307,6 +307,11 @@ class DerivDaemon:
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
         _sl_pct  = 0.004 if _is_mean_rev else self._settings.stop_loss_pct
         _tp_pct  = 0.004 if _is_mean_rev else self._settings.take_profit_pct
+        # Spike timeout: only for EMA-200 spike hunter entries (tagged spike_entry=True).
+        # SMC / Hurst / micro-scalp entries must NOT be killed on a timer — they are
+        # managed by the dynamic trailing SL in the execution layer instead.
+        _is_spike_entry = bool(snap.score_breakdown.get("spike_entry"))
+        _max_hold_sec = float(spike_timeout_sec(tick.symbol)) if _is_spike_entry else 0.0
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,
@@ -317,9 +322,8 @@ class DerivDaemon:
             "take_profit_pct": _tp_pct,
             # score_breakdown flows to DerivOrder → PAMM webhook → deriv_contracts.score_breakdown
             "score_breakdown": snap.score_breakdown,
-            # Spike timeout: force-close BOOM/CRASH contracts after N seconds if
-            # the spike hasn't fired.  0 = disabled for non-spike markets.
-            "max_hold_seconds": float(spike_timeout_sec(tick.symbol)),
+            # Spike timeout: only EMA-200 spike hunter entries; 0 = disabled.
+            "max_hold_seconds": _max_hold_sec,
             "_analyst_context": {
                 "hurst": analysis.hurst if analysis else None,
                 "autocorr_lag1": analysis.autocorr_lag1 if analysis else None,

@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import os
 import time
 import uuid
 from contextlib import suppress
@@ -50,6 +52,27 @@ class DerivOrder:
     max_hold_seconds: float = field(default=0.0)
 
 
+# ─── Trailing SL configuration ──────────────────────────────────────────────
+# Initial hard SL floor for NON-spike contracts (in USD, relative to entry PnL).
+# When poc.profit crosses +TRAIL_START, the floor is ratcheted up by TRAIL_STEP.
+#   peak < TRAIL_START : floor = TRAIL_INIT_SL (e.g. -1.0)
+#   peak >= 0.50       : floor = 0.00  (breakeven)
+#   peak >= 1.00       : floor = +0.50 (lock half-dollar)
+#   peak >= 1.50       : floor = +1.00 ...
+# All three values are tunable via env vars without a code change.
+_TRAIL_INIT_SL: float  = float(os.getenv("DERIV_TRAIL_INIT_SL",  "-1.0"))  # hard floor
+_TRAIL_START:   float  = float(os.getenv("DERIV_TRAIL_START",    "0.5"))   # first trigger
+_TRAIL_STEP:    float  = float(os.getenv("DERIV_TRAIL_STEP",     "0.5"))   # ratchet size
+
+
+def _compute_trail_floor(peak: float) -> float:
+    """Return the minimum acceptable profit given the highest-ever profit seen."""
+    if peak < _TRAIL_START:
+        return _TRAIL_INIT_SL
+    # At peak=0.5 → floor=0.0, peak=1.0 → 0.5, peak=1.5 → 1.0, …
+    return math.floor(peak / _TRAIL_STEP) * _TRAIL_STEP - _TRAIL_STEP
+
+
 @dataclass(slots=True)
 class DerivOpenContract:
     contract_id: int
@@ -62,6 +85,9 @@ class DerivOpenContract:
     opened_at_ts: float
     score_breakdown: dict | None = field(default=None)
     max_hold_seconds: float = field(default=0.0)
+    # Trailing SL state (updated each poll cycle)
+    peak_profit: float = field(default=0.0)
+    trail_sl_locked: float = field(default=_TRAIL_INIT_SL)
 
 
 class DerivTradeExecutor:
@@ -227,18 +253,71 @@ class DerivTradeExecutor:
 
             poc = resp.get("proposal_open_contract") or {}
             is_sold = bool(poc.get("is_sold") or poc.get("is_settleable"))
+
+            # ── Dynamic trailing SL (non-spike trades, runs while contract is open) ──
+            # Tracks peak profit and force-sells when current profit falls below the
+            # trailing floor.  Also updates broker SL at each new ratchet milestone
+            # so the position is protected even if the bot restarts.
+            if not is_sold and oc_check is not None and oc_check.max_hold_seconds == 0:
+                _current_profit = float(poc.get("profit") or 0)
+                # Ratchet up peak (never down)
+                if _current_profit > oc_check.peak_profit:
+                    oc_check.peak_profit = _current_profit
+                _new_floor = _compute_trail_floor(oc_check.peak_profit)
+                # Update broker SL when the floor ratchets up to a new level
+                if _new_floor > oc_check.trail_sl_locked:
+                    oc_check.trail_sl_locked = _new_floor
+                    # Convert floor to broker stop_loss (maximum loss = floor*-1 if floor<0,
+                    # or 0.01 minimum when we are locking profit).
+                    _broker_sl = max(0.01, -_new_floor) if _new_floor <= 0 else 0.01
+                    try:
+                        await self._client.contract_update(
+                            cid, stop_loss=_broker_sl
+                        )
+                        _LOGGER.info(
+                            "[deriv-trader] trail_ratchet %s: peak=%.3f new_floor=%.3f "
+                            "broker_sl=%.2f",
+                            oc_check.symbol, oc_check.peak_profit, _new_floor, _broker_sl,
+                        )
+                    except DerivClientError as _trl_exc:
+                        _LOGGER.warning(
+                            "[deriv-trader] trail broker_sl update failed %s: %s",
+                            cid, _trl_exc,
+                        )
+                # Software force-sell when profit drops below the locked floor
+                if _current_profit < _new_floor:
+                    _LOGGER.info(
+                        "[deriv-trader] trail_stop %s: profit=%.3f < floor=%.3f "
+                        "(peak=%.3f) — force-selling",
+                        oc_check.symbol, _current_profit, _new_floor, oc_check.peak_profit,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[deriv-trader] trail_stop sell failed %s: %s", cid, exc
+                        )
+                    # Fall through — next poll will see is_sold=True
+
             if not is_sold:
                 continue
 
             realized = float(poc.get("profit") or 0)
             exit_price = float(poc.get("sell_price") or poc.get("current_spot") or 0)
             # Label spike-timeout exits distinctly for analytics
+            _was_trail_stop = (
+                oc_check is not None
+                and oc_check.max_hold_seconds == 0
+                and realized < oc_check.trail_sl_locked + 0.01
+            )
             if oc_check is not None and oc_check.max_hold_seconds > 0:
                 held = time.time() - oc_check.opened_at_ts
                 if held >= oc_check.max_hold_seconds:
                     exit_reason = "spike_timeout"
                 else:
                     exit_reason = self._classify_exit(poc)
+            elif _was_trail_stop:
+                exit_reason = f"trail_stop(floor={oc_check.trail_sl_locked:.2f})"
             else:
                 exit_reason = self._classify_exit(poc)
 

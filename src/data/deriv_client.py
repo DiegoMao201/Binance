@@ -416,6 +416,39 @@ class DerivClient:
             raise DerivClientError(f"sell error: {result['error']}")
         return result
 
+    async def contract_update(
+        self,
+        contract_id: int,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> dict[str, Any]:
+        """Update stop_loss and/or take_profit on an open multiplier contract.
+
+        Values are ABSOLUTE USD P&L thresholds:
+          stop_loss   = max loss in USD (positive number, e.g. 0.50 = "stop if I lose $0.50")
+          take_profit = target profit in USD (positive number)
+
+        To implement a broker-side trailing stop milestone:
+          - Breakeven:  stop_loss=0.01  (minimum accepted by Deriv)
+          - Lock +0.50: stop_loss must be omitted; instead reduce take_profit is not useful.
+            Use software trailing in the execution layer for profit-lock levels.
+        """
+        limit_order: dict[str, Any] = {}
+        if stop_loss is not None:
+            limit_order["stop_loss"] = max(0.01, round(float(stop_loss), 2))
+        if take_profit is not None:
+            limit_order["take_profit"] = round(float(take_profit), 2)
+        if not limit_order:
+            return {}
+        result = await self._request({
+            "contract_update": 1,
+            "contract_id": contract_id,
+            "limit_order": limit_order,
+        })
+        if "error" in result:
+            raise DerivClientError(f"contract_update error: {result['error']}")
+        return result
+
     async def proposal_open_contract(self, contract_id: int) -> dict[str, Any]:
         """Get current bid_price / profit / status for an open contract."""
         return await self._request(
