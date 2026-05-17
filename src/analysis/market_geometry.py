@@ -460,10 +460,20 @@ def compute_geometry(
     fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr)
     fvg_mid = (fvg_top + fvg_bot) / 2.0 if fvg_active else 0.0
     gap_mitigated = False
-    if fvg_active and fvg_mid > 0:
-        # Mitigation tolerance: within 0.05 % of the 50 % level
-        tol = max(fvg_top * 0.0005, abs(fvg_top - fvg_bot) * 0.10)
-        gap_mitigated = abs(current_price - fvg_mid) <= tol
+    if fvg_active and fvg_top > fvg_bot:
+        # CALIBRATION SAMPLING MODE: trigger mitigation when price has entered
+        # the gap by >= DERIV_FVG_MIT_PCT (default 0.50 = 50%) of the gap height.
+        # Previous effective threshold was ~75-80%; now relaxed to 50-60%.
+        _fvg_mit_pct = float(os.getenv("DERIV_FVG_MIT_PCT", "0.50"))
+        gap_height = fvg_top - fvg_bot
+        if fvg_dir == "bullish":
+            # Price must have dropped at least _fvg_mit_pct into the gap from top
+            _mit_level = fvg_top - _fvg_mit_pct * gap_height
+            gap_mitigated = current_price <= _mit_level + gap_height * 0.10
+        elif fvg_dir == "bearish":
+            # Price must have risen at least _fvg_mit_pct into the gap from bottom
+            _mit_level = fvg_bot + _fvg_mit_pct * gap_height
+            gap_mitigated = current_price >= _mit_level - gap_height * 0.10
 
     divergence = _detect_divergence(arr)
     micro_band_sig = _micro_band_signal(micro, current_price) if micro else None

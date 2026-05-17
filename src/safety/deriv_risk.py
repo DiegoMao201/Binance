@@ -394,7 +394,20 @@ class DerivRiskManager:
         snap.hurst_score_delta = round(hurst_delta, 2)
         snap.effective_min_score = round(effective_min_score, 2)
 
-        # ── Mean-reversion dual router ────────────────────────────────────
+        # ── Per-symbol min_score / min_hurst calibration (SAMPLING MODE) ─────
+        # Inject per-symbol effective_min_score floors so each market type
+        # has a threshold that matches its statistical edge profile.
+        _su_sym = symbol.upper()
+        if "BOOM" in _su_sym or "CRASH" in _su_sym:
+            effective_min_score = min(effective_min_score, 6.2)   # BOOM/CRASH: spike edge ≠ trend edge
+        elif "R_100" in _su_sym:
+            effective_min_score = min(effective_min_score, 5.5)   # R_100: high vol, lower bar
+        elif "R_75" in _su_sym:
+            effective_min_score = min(effective_min_score, 6.0)   # R_75: medium threshold
+        elif "R_25" in _su_sym or "R_50" in _su_sym:
+            effective_min_score = min(effective_min_score, 5.5)   # R_25/R_50: lower vol, mean-rev edge
+        snap.effective_min_score = round(effective_min_score, 2)
+
         # ── Mean-reversion dual router ────────────────────────────────────
         # When H < 0.45 (mean_reverting / ranging), the market oscillates around
         # a mean.  The classical trend detector produces ambiguous signals because
@@ -404,9 +417,21 @@ class DerivRiskManager:
         #      if recent price < short-term mean  → fade DOWN → MULTUP
         #   2. Apply +3.0 score bonus to compensate for absent trend factors.
         #   3. Override effective_min_score to 6.0 so the bonus can push through.
+        # CALIBRATION SAMPLING: Also route CALM regime through mean-rev when Hurst
+        # supports it (CALM 0.65x size is already enforced in _regime_mult).
+        # R_100/R_25/R_50 allow mean-reversion up to hurst_max=0.51.
+        _r_star = not _is_spike_market(symbol)
+        _hurst_mean_rev_ok = (
+            hurst is not None
+            and (
+                hurst < 0.45
+                or (_r_star and hurst <= 0.51)  # R_* mean-rev: hurst_max=0.51
+            )
+        )
         _mean_rev_mode = (
             regime in ("ranging", "mean_reverting")
-            or (hurst is not None and hurst < 0.45)
+            or _hurst_mean_rev_ok
+            or (regime == "calm" and hurst is not None and hurst < 0.51)  # CALM: allow if Hurst favors
         )
         if _mean_rev_mode and trend_dir is None:
             # Direction: fade the micro-deviation from the 20-tick mean
@@ -427,6 +452,11 @@ class DerivRiskManager:
                 f"dev={ticks[-1]-mean_mr:+.5f} → fade score+{mr_bonus}"
             )
 
+        # Derive setup_type from active strategy signals for telemetry
+        _setup_type = "TREND"
+        if _mean_rev_mode:
+            _setup_type = "MEAN_REV"
+
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
             "momentum": round(momentum_score, 2),
@@ -441,15 +471,38 @@ class DerivRiskManager:
             "hurst": round(hurst, 3) if (hurst is not None and math.isfinite(hurst)) else 0.5,
             "effective_min_score": round(effective_min_score, 2),
             "mean_rev_mode": _mean_rev_mode,
+            # ── Telemetry (CALIBRATION SAMPLING MODE) ──────────────────────
+            "setup_type": _setup_type,  # overridden below if SMC/spike/scalp fires
+            "symbol": symbol,
+            "atr_abs": round(atr, 8),
+            "atr_pct": round(atr / ticks[-1], 6) if ticks[-1] > 0 else 0.0,
         }
         snap.score = round(score, 3)
         snap.effective_min_score = round(effective_min_score, 2)
         snap.hurst_score_delta = round(hurst_delta, 2)
 
-        # Veto if trend still ambiguous after mean-rev routing
+        # Ambiguous trend: CALIBRATION SAMPLING — downgrade to soft penalty instead
+        # of hard block. Apply score penalty and 20% size reduction; attempt
+        # mean-rev direction resolution. Only hard-block if geo conflict is severe
+        # AND score still < effective_min_score after resolution attempt.
+        _ambiguous_trend_penalty = False
         if trend_dir is None:
-            snap.reasons.append("ambiguous trend across windows")
-            return snap
+            # Try to resolve direction from mean-reversion (20-tick mean fade)
+            window_amb = ticks[-20:] if len(ticks) >= 20 else ticks
+            mean_amb = sum(window_amb) / len(window_amb)
+            if ticks[-1] > mean_amb:
+                trend_dir = -1   # price above mean → MULTDOWN
+            else:
+                trend_dir = +1   # price below mean → MULTUP
+            # Apply calibration penalty: -1.0 score, 20% size reduction
+            score = max(0.0, score - 1.0)
+            _ambiguous_trend_penalty = True
+            snap.reasons.append(
+                f"ambiguous_trend_penalty: dir resolved via 20t-mean dev={ticks[-1]-mean_amb:+.5f} "
+                f"→ score-1.0, size-20%"
+            )
+            snap.score_breakdown["ambiguous_trend_penalty"] = True
+            snap.score = round(score, 3)
 
         side = "MULTUP" if trend_dir > 0 else "MULTDOWN"
         snap.side = side
@@ -539,6 +592,8 @@ class DerivRiskManager:
                 snap.score_breakdown["gap_mitigated"] = True
                 snap.score_breakdown["divergence"] = _geo.divergence
                 snap.score_breakdown["smc_bonus"] = round(_geo.smc_bonus, 2)
+                snap.score_breakdown["smc_strength"] = round(_geo.smc_bonus, 2)  # telemetry alias
+                snap.score_breakdown["setup_type"] = "SMC_FVG"
                 snap.score = round(score, 3)
                 _LOGGER.info(
                     "[deriv-risk] [SMC ENGINE] %s gap_mitigated dir=%s div=%s side=%s "
@@ -573,6 +628,7 @@ class DerivRiskManager:
                 )
                 snap.score_breakdown["micro_scalp"] = True
                 snap.score_breakdown["micro_scalp_side"] = _scalp_side
+                snap.score_breakdown["setup_type"] = "MICRO_SCALP"
                 snap.score = round(score, 3)
                 snap.reasons[-1] = snap.reasons[-1].replace("H={:.3f}<0.45".format(hurst), f"H={hurst:.3f}<0.40")
 
@@ -608,6 +664,7 @@ class DerivRiskManager:
                         # this tag — they need time to develop and are managed by the
                         # dynamic trailing SL instead.
                         snap.score_breakdown["spike_entry"] = True
+                        snap.score_breakdown["setup_type"] = "EMA200_SPIKE"
                     snap.score_breakdown["ema200"] = round(_ema200_val, 5)
                     snap.score_breakdown["ema200_dev_pct"] = round(_dev * 100, 4)
                     snap.score = round(score, 3)
@@ -715,6 +772,9 @@ class DerivRiskManager:
         # Reduce risk by the loss streak (mild de-grossing — never increase).
         if self._loss_streak >= 1:
             risk_usdt *= max(0.5, 1.0 - 0.15 * self._loss_streak)
+        # Ambiguous-trend penalty: reduce size by 20% when direction was inferred
+        if _ambiguous_trend_penalty:
+            risk_usdt *= 0.80
         # ── Regime → position size ─────────────────────────────────────────────
         # Each regime carries a different level of directional confidence.
         # PositionSize ∝ RegimeConfidence (not just entry gate).
@@ -989,7 +1049,8 @@ class DerivRiskManager:
     def _streak_penalty(self) -> float:
         if self._loss_streak <= 0:
             return 0.0
-        return -min(2.0, 0.7 * self._loss_streak)
+        raw = -min(2.0, 0.7 * self._loss_streak)
+        return max(-0.20, raw)  # CALIBRATION SAMPLING: clamp — never freeze below -0.20
 
     def _cooldown_bonus(self) -> float:
         if self._last_trade_ts == 0:
