@@ -224,6 +224,11 @@ class DerivRiskManager:
         self._MAX_ATR_HISTORY = 50
         # Force-test-trades tick counter (DERIV_FORCE_TEST_TRADES mode)
         self._force_tick_count: dict[str, int] = {}
+        # ── Signal cooldown (anti-spam debounce) ─────────────────────────
+        # Tracks last successful HARD_MATH_OVERRIDE micro_scalp_mr signal per
+        # symbol so we don't fire on every tick when Hurst<0.40 + band touch
+        # persists across many seconds. Cooldown is per-symbol, in-memory.
+        self._last_override_signal_ts: dict[str, float] = {}
         # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
         if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
             lf = settings.lockout_file
@@ -649,6 +654,23 @@ class DerivRiskManager:
                 and hurst is not None and hurst < 0.40
                 and _geo.micro_band_signal == side
             ):
+                # ── Signal cooldown debounce ────────────────────────────────
+                # Mean-reversion setups persist for many ticks while price
+                # hugs the 1.5σ band; without a debounce we'd fire every
+                # tick. Skip if this symbol fired within the cooldown window.
+                try:
+                    _cd_sec = float(os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180"))
+                    _last_ts = self._last_override_signal_ts.get(symbol, 0.0)
+                    _elapsed = time.time() - _last_ts
+                    if _elapsed < _cd_sec:
+                        snap.reasons.append(
+                            f"signal_cooldown_active: micro_scalp_mr fired {_elapsed:.0f}s ago "
+                            f"(cooldown={_cd_sec:.0f}s)"
+                        )
+                        snap.allowed = False
+                        return snap
+                except Exception:  # noqa: BLE001 — never crash the pipeline
+                    pass
                 _override_reason = f"micro_scalp_mr: H={hurst:.3f}<0.40 band_touch={side}"
 
             if _override_reason:
@@ -662,6 +684,10 @@ class DerivRiskManager:
                     "[deriv-risk] HARD_MATH_OVERRIDE %s side=%s reason=%s ai=%s",
                     symbol, side, _override_reason, _ai_disp,
                 )
+                # Stamp cooldown after a successful micro_scalp_mr override so
+                # subsequent ticks within DERIV_SIGNAL_COOLDOWN_SEC are skipped.
+                if _override_reason.startswith("micro_scalp_mr"):
+                    self._last_override_signal_ts[symbol] = time.time()
 
         # ── BOOM/CRASH structural gate ────────────────────────────────
         # BOOM and CRASH indices have a structural edge ONLY when entered at:
