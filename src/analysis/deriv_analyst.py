@@ -122,48 +122,67 @@ class DerivAnalysis:
 
 # ── Helpers: Hurst exponent via log-prices variance-at-scale method ─────────
 def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
-    """Estimate the Hurst exponent using the log-returns variance-at-scale method.
+    """Estimate the Hurst exponent via variance-of-aggregated-returns scaling.
 
-    sqrt(std(log_return[lag:]  - log_return[:-lag])) ~ lag^H
-    → OLS slope of log(sqrt_std) vs log(lag); hurst = slope * 2.0
+    For a fractional Brownian motion with Hurst exponent H:
+        Var( sum_{i=1..k} r_i )  ~  k^(2H)
+    => std( aggregated_k )  ~  k^H
+    => slope of log(std) vs log(k) gives H directly.
 
-    Returns H in [0.38, 0.72]:
+    Implementation: build the cumulative return series, then for each lag k
+    compute ``cum[k:] - cum[:-k]`` which equals the sum of ``k`` consecutive
+    log-returns at every starting index — the proper aggregated-return sample.
+
+    Returns H in [0.20, 0.80]:
       H ≈ 0.5  → random walk / no edge
-      H > 0.57 → persistent trend (momentum)
-      H < 0.43 → mean-reverting
+      H > 0.55 → persistent trend (momentum)
+      H < 0.45 → mean-reverting
+
+    NOTE: Previous implementation used ``log_returns[lag:] - log_returns[:-lag]``
+    (pairwise return difference) whose std DECREASES with lag, producing a
+    persistently negative slope clamped to 0.38 on every symbol. Fixed here.
     """
     import random as _random
     N = len(prices)
     # Warmup guard: fewer than 200 ticks → return neutral transactional value
     if N < 200:
-        return float(_random.uniform(0.51, 0.54))
+        return float(_random.uniform(0.49, 0.52))
 
     log_returns = np.diff(np.log(np.array(prices, dtype=float) + 1e-12))
-
-    if np.std(log_returns) == 0:
+    if log_returns.size < 64 or np.std(log_returns) == 0:
         return 0.50
 
-    max_lag = min(64, N // 4)
+    # Cumulative log-returns: cum[i] = sum(log_returns[0..i-1])
+    cum = np.concatenate(([0.0], np.cumsum(log_returns)))
+
+    max_lag = min(128, log_returns.size // 4)
     if max_lag < 8:
-        return 0.53
+        return 0.50
 
-    lags = [2, 4, 8, 16, 32, max_lag]
-    tau = []
-    for lag in lags:
-        if lag >= len(log_returns):
+    # Geometric-ish lag grid covers short + long horizons evenly in log space.
+    lag_candidates = [2, 4, 8, 16, 32, 64, max_lag]
+    lags: list[int] = []
+    tau: list[float] = []
+    seen: set[int] = set()
+    for lag in lag_candidates:
+        if lag in seen or lag <= 1 or lag >= cum.size:
             continue
-        diff = log_returns[lag:] - log_returns[:-lag]
-        val = float(np.sqrt(np.std(diff)))
-        tau.append(val if val > 0 else 1e-8)
+        seen.add(lag)
+        agg = cum[lag:] - cum[:-lag]   # aggregated k-step returns
+        s = float(np.std(agg))
+        if not np.isfinite(s) or s <= 0:
+            continue
+        lags.append(lag)
+        tau.append(s)
 
-    if len(tau) < 3:
-        return 0.53
+    if len(lags) < 3:
+        return 0.50
 
-    used_lags = lags[:len(tau)]
-    poly = np.polyfit(np.log(used_lags), np.log(tau), 1)
-    hurst = float(poly[0]) * 2.0  # ×2 to convert slope to Hurst exponent
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    hurst = float(poly[0])  # slope of log(std) vs log(k) IS H
 
-    return float(max(0.38, min(hurst, 0.72)))
+    # Wide clamp — only guard against pathological numerical blowups.
+    return float(max(0.20, min(hurst, 0.80)))
 
 
 def _autocorr_lag1(prices: np.ndarray) -> float:

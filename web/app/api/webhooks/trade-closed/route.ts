@@ -123,6 +123,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   const p: TradeClosedPayload = parsed.data;
 
+  // ── 2b. Ghost / zero-allocation short-circuit ──────────────────────────────
+  // Reconciliation-purged or otherwise zero-money trades have no PAMM math to
+  // perform: rawPnl=0 and binanceFee=0 means every allocation slice is 0, so
+  // the transaction would only burn DB locks and emit empty ledger rows. We
+  // acknowledge with 200 so the Python bot does not retry/log warnings.
+  if (
+    p.exitReason === "lost_or_ghost_closed" &&
+    Math.abs(p.rawPnl) < 1e-9 &&
+    Math.abs(p.binanceFee) < 1e-9
+  ) {
+    return NextResponse.json(
+      { status: "skipped", reason: "ghost_zero_allocation", tradeId: p.tradeId },
+      { status: 200 },
+    );
+  }
+
   // ── 3. Idempotency guard ───────────────────────────────────────────────────
   // Check BEFORE opening the transaction to avoid unnecessary DB locks.
   let existing: { id: bigint } | null;

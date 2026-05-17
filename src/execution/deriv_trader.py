@@ -498,6 +498,25 @@ class DerivTradeExecutor:
             )
             return
 
+        # ── Ghost-close bypass ────────────────────────────────────────────────
+        # Reconciliation-purged contracts carry realized_pnl_usdt=0.0 and
+        # exit_reason="lost_or_ghost_closed". The PAMM allocation engine has
+        # nothing to distribute ($0 → 0% of 0 = 0), so calling it just creates
+        # noisy HTTP 500s when the frontend DB transaction conflicts on a
+        # zero-value allocation. The local closed-contracts JSON record (and
+        # frontend file-watcher) already remove the zombie from the UI, so the
+        # webhook hop is purely redundant for ghosts.
+        if (
+            str(record.get("exit_reason")) == "lost_or_ghost_closed"
+            and float(record.get("realized_pnl_usdt") or 0.0) == 0.0
+        ):
+            _LOGGER.info(
+                "[deriv-trader] webhook skipped (ghost close, $0 allocation) "
+                "contract_id=%s — local JSON purge already syncs UI",
+                record.get("contract_id"),
+            )
+            return
+
         payload = {
             "tradeId": f"deriv:{record['contract_id']}",
             "userId": self._settings.user_id,
