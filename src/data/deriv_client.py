@@ -388,9 +388,9 @@ class DerivClient:
             err = result["error"]
             if err.get("code") == "InvalidtoBuy" and err.get("code_args"):
                 try:
-                    broker_limit = round(float(err["code_args"][0]), 2)
+                    broker_limit = max(round(float(err["code_args"][0]), 2), 1.00)
                     _LOGGER.info(
-                        "[deriv-client] %s stake capped: %.2f → %.2f (broker limit)",
+                        "[deriv-client] %s stake capped: %.2f → %.2f (broker limit, floor $1.00)",
                         symbol, _intended_stake, broker_limit,
                     )
                     buy_req["parameters"]["amount"] = broker_limit
