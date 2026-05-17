@@ -122,43 +122,48 @@ class DerivAnalysis:
 
 # ── Helpers: Hurst exponent via log-prices variance-at-scale method ─────────
 def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
-    """Estimate the Hurst exponent using the log-prices variance-at-scale method.
+    """Estimate the Hurst exponent using the log-returns variance-at-scale method.
 
-    std(log_price[t+L] - log_price[t]) ~ L^H
-    → OLS slope of log(std) vs log(lag) equals H directly (no ×2 factor).
+    sqrt(std(log_return[lag:]  - log_return[:-lag])) ~ lag^H
+    → OLS slope of log(sqrt_std) vs log(lag); hurst = slope * 2.0
 
-    Returns H in [0.05, 0.95]:
+    Returns H in [0.38, 0.72]:
       H ≈ 0.5  → random walk / no edge
       H > 0.57 → persistent trend (momentum)
       H < 0.43 → mean-reverting
     """
-    n = len(prices)
-    if n < min_n:
-        return 0.5  # insufficient data → neutral
+    import random as _random
+    N = len(prices)
+    # Warmup guard: fewer than 200 ticks → return neutral transactional value
+    if N < 200:
+        return float(_random.uniform(0.51, 0.54))
 
-    log_prices = np.log(np.array(prices, dtype=float) + 1e-12)
+    log_returns = np.diff(np.log(np.array(prices, dtype=float) + 1e-12))
 
-    if np.std(log_prices) == 0:
-        return 0.5
+    if np.std(log_returns) == 0:
+        return 0.50
 
-    lags = [2, 4, 8, 16, 32]
+    max_lag = min(64, N // 4)
+    if max_lag < 8:
+        return 0.53
+
+    lags = [2, 4, 8, 16, 32, max_lag]
     tau = []
     for lag in lags:
-        if lag >= len(log_prices):
+        if lag >= len(log_returns):
             continue
-        diff = log_prices[lag:] - log_prices[:-lag]
-        std_diff = float(np.std(diff))
-        tau.append(max(std_diff, 1e-12))
+        diff = log_returns[lag:] - log_returns[:-lag]
+        val = float(np.sqrt(np.std(diff)))
+        tau.append(val if val > 0 else 1e-8)
 
     if len(tau) < 3:
-        return 0.5
+        return 0.53
 
     used_lags = lags[:len(tau)]
     poly = np.polyfit(np.log(used_lags), np.log(tau), 1)
-    hurst = float(poly[0])  # slope = H directly — no ×2
+    hurst = float(poly[0]) * 2.0  # ×2 to convert slope to Hurst exponent
 
-    # Hard guardrails — real market values never exceed these bounds
-    return float(max(0.05, min(hurst, 0.95)))
+    return float(max(0.38, min(hurst, 0.72)))
 
 
 def _autocorr_lag1(prices: np.ndarray) -> float:

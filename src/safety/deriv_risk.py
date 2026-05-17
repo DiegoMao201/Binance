@@ -257,20 +257,20 @@ class DerivRiskManager:
         snap.effective_min_score = self._settings.min_score
 
         # ── FORCE-TEST-TRADES bypass (demo / integration testing only) ─────────
-        # Set DERIV_FORCE_TEST_TRADES=true to skip all scoring gates and inject a
-        # forced test order every 60 ticks on BOOM/CRASH symbols.  This is purely
-        # for verifying the WS buy path works on a virtual (VRTC) account — it
+        # Set DERIV_FORCE_TEST_TRADES=true to skip ALL scoring gates and inject a
+        # forced test order every 60 ticks on ANY symbol.  This is purely for
+        # verifying the WS buy path works on a virtual (VRTC) account — it
         # must NEVER be enabled in live environments.
         _force_test = os.getenv("DERIV_FORCE_TEST_TRADES", "").lower() in ("1", "true", "yes")
-        if _force_test and _is_spike_market(symbol):
+        if _force_test:
             self._force_tick_count[symbol] = self._force_tick_count.get(symbol, 0) + 1
             tick_n = self._force_tick_count[symbol]
             if tick_n % 60 == 0:
                 _fs = _spike_forced_side(symbol) or "MULTUP"
                 snap.allowed = True
                 snap.side = _fs
-                snap.score = 6.0
-                snap.effective_min_score = 6.0
+                snap.score = 9.9
+                snap.effective_min_score = 0.0
                 snap.suggested_stake_usdt = max(1.0, self._settings.min_stake_usdt if hasattr(self._settings, "min_stake_usdt") else 1.0)
                 snap.suggested_multiplier = 1
                 snap.reasons.append(f"FORCE_TEST_TRADE tick={tick_n} side={_fs}")

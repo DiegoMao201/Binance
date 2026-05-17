@@ -116,6 +116,17 @@ class DerivDaemon:
             self._settings.symbols, self._settings.dry_run, self._settings.bankroll_usdt,
         )
 
+        # Connect WS first so ticks_history calls (preload) have a live socket.
+        # The OTP URL is the auth token — once connected we are fully authorised.
+        # We wait 1.5 s after connect before the batch ticks_history requests so
+        # the server-side session is fully initialised.
+        try:
+            await asyncio.wait_for(self._client.connect(), timeout=20.0)
+            _LOGGER.info("[deriv-daemon] WS connected — waiting 1.5 s before history preload")
+            await asyncio.sleep(1.5)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[deriv-daemon] WS pre-connect failed: %s — preload skipped", exc)
+
         # Preload tick history so the risk engine + analyst are warm from tick 1
         try:
             await asyncio.wait_for(self._analyst.preload_history(), timeout=30.0)
