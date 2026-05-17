@@ -51,6 +51,15 @@ from src.utils.telegram_telemetry import TelegramTelemetry
 
 _LOGGER = logging.getLogger("deriv.daemon")
 
+# ─── BOOM/CRASH structural stop-loss / take-profit ───────────────────────────
+# Spike hunter trades use a wider initial SL so the contract survives the
+# accumulation period before the spike materialises.  The default values give
+# roughly 3 % SL / 6 % TP of the underlying price move (at typical multipliers
+# this translates to a 3–6× risk/reward on the stake).  Both values are fully
+# tunable via env vars without a code change.
+_BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.03"))
+_BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "0.06"))
+
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
 class _CooldownGate:
@@ -335,6 +344,33 @@ class DerivDaemon:
             )
             return
 
+        # Per-symbol Hurst regime gate (ASSET_INTEL_PROFILES)
+        # Spike markets (BOOM/CRASH) are exempt — their edge is structural, not
+        # Hurst-based.  For volatility indices, require the Hurst exponent to
+        # meet the profile's minimum before entry to avoid trading in a regime
+        # with no directional edge.
+        _profile_min_hurst = float(_asset_profile.get("min_hurst", 0.0))
+        _asset_type = _asset_profile.get("type", "volatility")
+        if _profile_min_hurst > 0 and _asset_type not in ("spike_boom", "spike_crash"):
+            _obs_hurst = float(snap.score_breakdown.get("hurst", 0.5))
+            if _obs_hurst < _profile_min_hurst:
+                _LOGGER.debug(
+                    "[deriv-daemon] %s HURST_GATE: H=%.3f < min_hurst=%.3f (%s) — skip",
+                    tick.symbol, _obs_hurst, _profile_min_hurst, _asset_type,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason=f"HURST_GATE: H={_obs_hurst:.3f} < "
+                           f"min_hurst={_profile_min_hurst:.3f} ({_asset_type})",
+                    extra={
+                        "score_breakdown": snap.score_breakdown,
+                        "regime": snap.regime,
+                        "profile": _asset_profile,
+                    },
+                )
+                return
+
         decision_extra = {
             "score_breakdown": snap.score_breakdown,
             "regime": snap.regime,
@@ -364,10 +400,18 @@ class DerivDaemon:
             self._cooldown.mark(tick.symbol)
 
             _is_mean_rev_ov = bool(snap.score_breakdown.get("mean_rev_mode"))
-            _sl_pct_ov  = 0.004 if _is_mean_rev_ov else self._settings.stop_loss_pct
-            _tp_pct_ov  = 0.004 if _is_mean_rev_ov else self._settings.take_profit_pct
-            _is_spike_ov = bool(snap.score_breakdown.get("spike_entry"))
             _is_boom_crash_ov = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+            # BOOM/CRASH spike-hunter: use a wide structural SL so the position
+            # survives the accumulation window before the spike hits.
+            _sl_pct_ov = (
+                _BOOM_CRASH_SL_PCT if _is_boom_crash_ov
+                else (0.004 if _is_mean_rev_ov else self._settings.stop_loss_pct)
+            )
+            _tp_pct_ov = (
+                _BOOM_CRASH_TP_PCT if _is_boom_crash_ov
+                else (0.004 if _is_mean_rev_ov else self._settings.take_profit_pct)
+            )
+            _is_spike_ov = bool(snap.score_breakdown.get("spike_entry"))
             _max_hold_ov = (
                 float(spike_timeout_sec(tick.symbol))
                 if (_is_spike_ov or _is_boom_crash_ov)
@@ -447,10 +491,17 @@ class DerivDaemon:
 
         # ── Build order payload (AI-approved path) ─────────────────────────
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
-        _sl_pct  = 0.004 if _is_mean_rev else self._settings.stop_loss_pct
-        _tp_pct  = 0.004 if _is_mean_rev else self._settings.take_profit_pct
         _is_spike_entry = bool(snap.score_breakdown.get("spike_entry"))
         _is_boom_crash = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        # BOOM/CRASH spike-hunter: wide structural SL (same logic as override path)
+        _sl_pct = (
+            _BOOM_CRASH_SL_PCT if _is_boom_crash
+            else (0.004 if _is_mean_rev else self._settings.stop_loss_pct)
+        )
+        _tp_pct = (
+            _BOOM_CRASH_TP_PCT if _is_boom_crash
+            else (0.004 if _is_mean_rev else self._settings.take_profit_pct)
+        )
         _max_hold_sec = (
             float(spike_timeout_sec(tick.symbol))
             if (_is_spike_entry or _is_boom_crash)

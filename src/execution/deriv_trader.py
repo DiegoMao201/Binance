@@ -53,23 +53,46 @@ class DerivOrder:
 
 
 # ─── Trailing SL configuration ──────────────────────────────────────────────
-# Initial hard SL floor for NON-spike contracts (in USD, relative to entry PnL).
-# When poc.profit crosses +TRAIL_START, the floor is ratcheted up by TRAIL_STEP.
-#   peak < TRAIL_START : floor = TRAIL_INIT_SL (e.g. -1.0)
-#   peak >= 0.50       : floor = 0.00  (breakeven)
-#   peak >= 1.00       : floor = +0.50 (lock half-dollar)
-#   peak >= 1.50       : floor = +1.00 ...
-# All three values are tunable via env vars without a code change.
-_TRAIL_INIT_SL: float  = float(os.getenv("DERIV_TRAIL_INIT_SL",  "-1.0"))  # hard floor
-_TRAIL_START:   float  = float(os.getenv("DERIV_TRAIL_START",    "0.5"))   # first trigger
-_TRAIL_STEP:    float  = float(os.getenv("DERIV_TRAIL_STEP",     "0.5"))   # ratchet size
+# Tiered trailing stop — thresholds expressed as a % of stake_usdt so the
+# same env-var set works for any stake size without manual tuning.
+#
+#   Tier 1 (peak >= T1%  of stake) → floor = 0.00      (break-even)
+#   Tier 2 (peak >= T2%  of stake) → floor = +T2_LOCK% (profit lock)
+#   Tier 3 (peak >= T3%  of stake) → floor = peak − T3_STEP%  (aggressive trail)
+#
+# Legacy flat vars kept for fallback when stake is unavailable.
+_TRAIL_INIT_SL:   float = float(os.getenv("DERIV_TRAIL_INIT_SL",  "-1.0"))
+_TRAIL_START:     float = float(os.getenv("DERIV_TRAIL_START",    "0.5"))
+_TRAIL_STEP:      float = float(os.getenv("DERIV_TRAIL_STEP",     "0.5"))
+# Tiered percentages (of stake_usdt)
+_T1_PCT:          float = float(os.getenv("DERIV_TRAIL_T1_PCT",        "0.010"))  # 1.0 % → BE
+_T2_PCT:          float = float(os.getenv("DERIV_TRAIL_T2_PCT",        "0.025"))  # 2.5 % → lock
+_T3_PCT:          float = float(os.getenv("DERIV_TRAIL_T3_PCT",        "0.040"))  # 4.0 % → tight
+_T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.010"))  # lock = +1 %
+_T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.005"))  # trail gap 0.5 %
 
 
-def _compute_trail_floor(peak: float) -> float:
-    """Return the minimum acceptable profit given the highest-ever profit seen."""
+def _compute_trail_floor(peak: float, stake: float = 0.0) -> float:
+    """Tiered trailing stop floor.
+
+    When *stake* > 0 the three tiers are evaluated as a percentage of stake so
+    the logic is invariant to position size.  Falls back to the legacy flat
+    ratchet when stake is zero or unavailable.
+    """
+    if stake > 0:
+        # Tier 3: strong run — follow closely (0.5 % behind peak)
+        if peak >= stake * _T3_PCT:
+            return round(peak - stake * _T3_STEP_PCT, 4)
+        # Tier 2: decent gain — lock in 1 % of stake
+        if peak >= stake * _T2_PCT:
+            return round(stake * _T2_LOCK_PCT, 4)
+        # Tier 1: first profit — protect break-even
+        if peak >= stake * _T1_PCT:
+            return 0.0
+        return _TRAIL_INIT_SL
+    # Legacy flat ratchet (stake unknown)
     if peak < _TRAIL_START:
         return _TRAIL_INIT_SL
-    # At peak=0.5 → floor=0.0, peak=1.0 → 0.5, peak=1.5 → 1.0, …
     return math.floor(peak / _TRAIL_STEP) * _TRAIL_STEP - _TRAIL_STEP
 
 
@@ -138,13 +161,32 @@ class DerivTradeExecutor:
 
         # Also block a second contract on the same symbol — synthetic indices are
         # independent but doubling up on the same underlying adds no edge.
+        # Age-based bypass: if the "open" contract on this symbol is stale (past
+        # its expected max_hold or older than 300 s), the reaper likely hasn't
+        # caught up yet after a restart. Allow the new trade through so the bot
+        # doesn't stay permanently frozen on that symbol.
         open_on_symbol = sum(1 for oc in self._open.values() if oc.symbol == order.symbol)
         if open_on_symbol >= 1:
-            _LOGGER.debug(
-                "[deriv-trader] %s already open — skipping duplicate order",
-                order.symbol,
+            _stale_threshold = 300.0
+            _all_stale = all(
+                (time.time() - oc.opened_at_ts) > (
+                    oc.max_hold_seconds * 1.5 if oc.max_hold_seconds > 0 else _stale_threshold
+                )
+                for oc in self._open.values()
+                if oc.symbol == order.symbol
             )
-            return {"status": "skipped_duplicate", "symbol": order.symbol}
+            if _all_stale:
+                _LOGGER.warning(
+                    "[deriv-trader] skipped_duplicate bypass: stale open contract on %s "
+                    "(threshold=%.0fs) — allowing new trade through",
+                    order.symbol, _stale_threshold,
+                )
+            else:
+                _LOGGER.debug(
+                    "[deriv-trader] %s already open — skipping duplicate order",
+                    order.symbol,
+                )
+                return {"status": "skipped_duplicate", "symbol": order.symbol}
 
         # All synthetic indices (R_*, BOOM*, CRASH*) use MULTUP/MULTDOWN
         # multiplier contracts.  BOOM/CRASH directional restriction is enforced
@@ -301,7 +343,7 @@ class DerivTradeExecutor:
                 # Ratchet up peak (never down)
                 if _current_profit > oc_check.peak_profit:
                     oc_check.peak_profit = _current_profit
-                _new_floor = _compute_trail_floor(oc_check.peak_profit)
+                _new_floor = _compute_trail_floor(oc_check.peak_profit, oc_check.stake_usdt)
                 # Update broker SL when the floor ratchets up to a new level.
                 # Deriv broker SL = maximum loss in absolute USD (always > 0).
                 # When the floor is still negative we can express it as a SL
@@ -630,6 +672,19 @@ class DerivTradeExecutor:
             "[deriv-recon] reconciliation_loop started (interval=%.0fs min_age=%.0fs)",
             _interval, self._RECON_MIN_AGE_SEC,
         )
+        # ── Boot-sync: immediate pass to flush ghosts from previous session ──
+        # Runs BEFORE the first periodic sleep.  A short delay lets the Deriv
+        # portfolio API settle after the WS connect.  We use min_age_sec=0 so
+        # ALL locally-registered contracts from the previous session are eligible
+        # for purge — none of them were opened in this process lifetime.
+        if not self._settings.dry_run:
+            await asyncio.sleep(5.0)
+            try:
+                _LOGGER.info("[deriv-recon] BOOT-SYNC: immediate reconciliation starting")
+                await self._reconcile_once(boot=True)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[deriv-recon] BOOT-SYNC error (non-fatal): %s", exc)
+
         while True:
             await asyncio.sleep(_interval)
             if self._settings.dry_run:
@@ -639,8 +694,20 @@ class DerivTradeExecutor:
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("[deriv-recon] reconcile cycle error: %s", exc)
 
-    async def _reconcile_once(self) -> None:
-        """Single reconciliation pass — compare local open set vs broker portfolio."""
+    async def _reconcile_once(self, boot: bool = False) -> None:
+        """Single reconciliation pass — compare local open set vs broker portfolio.
+
+        When *boot* is ``True`` (called at daemon startup) two safety guards are
+        relaxed:
+          1. The minimum-age threshold is set to 0 s — all locally-registered
+             contracts are from a previous process lifetime and therefore cannot
+             be "fresh" in the current session.
+          2. The empty-portfolio guard is bypassed **if every local contract is
+             older than 60 s** — at startup an empty broker response means the
+             contracts genuinely closed before the restart, not a transient WS
+             failure.
+        """
+        _min_age = 0.0 if boot else self._RECON_MIN_AGE_SEC
         broker_ids: list[int] = await self._client.portfolio()
 
         async with self._lock:
@@ -655,20 +722,31 @@ class DerivTradeExecutor:
         # Broker must return a non-empty list before we trust any diff.
         # An empty portfolio while we have open contracts is almost always
         # a transient WS failure — never purge on empty broker response.
+        # EXCEPTION (boot=True): if every local contract is > 60 s old the
+        # process restarted after they were already closed; treat as ghosts.
         if len(broker_ids) == 0:
-            _LOGGER.debug(
-                "[deriv-recon] broker portfolio empty while %d local contracts open — "
-                "assuming transient WS failure, skipping purge",
+            _boot_all_old = boot and all(
+                (time.time() - ts) > 60.0 for ts in local_snapshot.values()
+            )
+            if not _boot_all_old:
+                _LOGGER.debug(
+                    "[deriv-recon] broker portfolio empty while %d local contracts open — "
+                    "assuming transient WS failure, skipping purge",
+                    len(local_snapshot),
+                )
+                return
+            _LOGGER.info(
+                "[deriv-recon] BOOT-SYNC: broker returned empty portfolio and all %d "
+                "local contracts are >60 s old — treating as closed ghosts",
                 len(local_snapshot),
             )
-            return
 
         broker_set = set(broker_ids)
         now = time.time()
 
         # Identify ghost candidates: locally open but absent from broker.
         # Apply minimum-age guard: skip contracts opened within the last
-        # _RECON_MIN_AGE_SEC seconds to avoid false positives on fresh contracts
+        # _min_age seconds to avoid false positives on fresh contracts
         # that haven't propagated to Deriv's portfolio yet.
         ghost_ids: list[int] = []
         young_skipped: int = 0
@@ -676,11 +754,11 @@ class DerivTradeExecutor:
             if cid in broker_set:
                 continue  # broker confirms this contract — not a ghost
             age_sec = now - opened_at
-            if age_sec < self._RECON_MIN_AGE_SEC:
+            if age_sec < _min_age:
                 young_skipped += 1
                 _LOGGER.debug(
                     "[deriv-recon] contract_id=%s age=%.0fs < min_age=%.0fs — skipping ghost check",
-                    cid, age_sec, self._RECON_MIN_AGE_SEC,
+                    cid, age_sec, _min_age,
                 )
                 continue
             ghost_ids.append(cid)
@@ -688,7 +766,7 @@ class DerivTradeExecutor:
         if young_skipped:
             _LOGGER.info(
                 "[deriv-recon] %d contract(s) skipped (too young, min_age=%.0fs)",
-                young_skipped, self._RECON_MIN_AGE_SEC,
+                young_skipped, _min_age,
             )
 
         if not ghost_ids:

@@ -438,6 +438,7 @@ class DerivRiskManager:
             "headroom": round(headroom_bonus, 2),
             "regime": regime,
             "hurst_delta": round(hurst_delta, 2),
+            "hurst": round(hurst, 3) if (hurst is not None and math.isfinite(hurst)) else 0.5,
             "effective_min_score": round(effective_min_score, 2),
             "mean_rev_mode": _mean_rev_mode,
         }
