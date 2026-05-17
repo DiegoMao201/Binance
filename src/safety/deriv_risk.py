@@ -378,7 +378,39 @@ class DerivRiskManager:
         snap.hurst_score_delta = round(hurst_delta, 2)
         snap.effective_min_score = round(effective_min_score, 2)
 
-        snap.score = round(score, 3)
+        # ── Mean-reversion dual router ────────────────────────────────────
+        # ── Mean-reversion dual router ────────────────────────────────────
+        # When H < 0.45 (mean_reverting / ranging), the market oscillates around
+        # a mean.  The classical trend detector produces ambiguous signals because
+        # there is NO macro trend to detect — that is the point.  Instead we:
+        #   1. Resolve direction from the SHORT-window mean-reversion spike:
+        #      if recent price > short-term mean  → fade UP  → MULTDOWN
+        #      if recent price < short-term mean  → fade DOWN → MULTUP
+        #   2. Apply +3.0 score bonus to compensate for absent trend factors.
+        #   3. Override effective_min_score to 6.0 so the bonus can push through.
+        _mean_rev_mode = (
+            regime in ("ranging", "mean_reverting")
+            or (hurst is not None and hurst < 0.45)
+        )
+        if _mean_rev_mode and trend_dir is None:
+            # Direction: fade the micro-deviation from the 20-tick mean
+            window_mr = ticks[-20:] if len(ticks) >= 20 else ticks
+            mean_mr = sum(window_mr) / len(window_mr)
+            if ticks[-1] > mean_mr:
+                mr_dir = -1   # price above mean → fade → MULTDOWN
+            else:
+                mr_dir = +1   # price below mean → fade → MULTUP
+            trend_dir = mr_dir
+            # Score boost: compensates missing trend/momentum factors
+            mr_bonus = 3.0
+            score = max(0.0, min(10.0, score + mr_bonus))
+            hurst_delta += mr_bonus
+            effective_min_score = min(effective_min_score, 6.0)
+            snap.reasons.append(
+                f"mean_rev_spike: H={hurst:.3f} regime={regime} "
+                f"dev={ticks[-1]-mean_mr:+.5f} → fade score+{mr_bonus}"
+            )
+
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
             "momentum": round(momentum_score, 2),
@@ -391,9 +423,48 @@ class DerivRiskManager:
             "regime": regime,
             "hurst_delta": round(hurst_delta, 2),
             "effective_min_score": round(effective_min_score, 2),
+            "mean_rev_mode": _mean_rev_mode,
         }
+        snap.score = round(score, 3)
+        snap.effective_min_score = round(effective_min_score, 2)
+        snap.hurst_score_delta = round(hurst_delta, 2)
 
-        # Veto if trend ambiguous
+        # Veto if trend still ambiguous after mean-rev routing:] if len(ticks) >= 20 else ticks
+            mean_mr = sum(window_mr) / len(window_mr)
+            if ticks[-1] > mean_mr:
+                mr_dir = -1   # price above mean → fade → MULTDOWN
+            else:
+                mr_dir = +1   # price below mean → fade → MULTUP
+            trend_dir = mr_dir
+            # Score boost: compensates missing trend/momentum factors
+            mr_bonus = 3.0
+            score = max(0.0, min(10.0, score + mr_bonus))
+            hurst_delta += mr_bonus
+            effective_min_score = min(effective_min_score, 6.0)
+            snap.reasons.append(
+                f"mean_rev_spike: H={hurst:.3f} regime={regime} "
+                f"dev={ticks[-1]-mean_mr:+.5f} → fade score+{mr_bonus}"
+            )
+
+        snap.score_breakdown = {
+            "trend": round(trend_score, 2),
+            "momentum": round(momentum_score, 2),
+            "spread": round(spread_score, 2),
+            "atr": round(atr_score, 2),
+            "stability": round(stability_score, 2),
+            "streak_penalty": round(streak_penalty, 2),
+            "cooldown": round(cooldown_bonus, 2),
+            "headroom": round(headroom_bonus, 2),
+            "regime": regime,
+            "hurst_delta": round(hurst_delta, 2),
+            "effective_min_score": round(effective_min_score, 2),
+            "mean_rev_mode": _mean_rev_mode,
+        }
+        snap.score = round(score, 3)
+        snap.effective_min_score = round(effective_min_score, 2)
+        snap.hurst_score_delta = round(hurst_delta, 2)
+
+        # Veto if trend still ambiguous after mean-rev routing
         if trend_dir is None:
             snap.reasons.append("ambiguous trend across windows")
             return snap
@@ -414,8 +485,13 @@ class DerivRiskManager:
         # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
         # with the trade side, the mathematical microstructure signal is
         # considered more reliable than the qualitative LLM opinion.
-        # This allows a safe override that avoids blocking profitable setups
-        # when the AI model is being conservative or uncertain.
+        # Demo floor: always at least $3
+        min_stake = max(3.0, getattr(self._settings, "min_stake_usdt", 1.0))
+        stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
+        snap.suggested_stake_usdt = round(stake, 2)
+        # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
+        if _mean_rev_mode:
+            snap.score_breakdown["mean_rev_mode"] = Truer uncertain.
         _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.65"))
         snap.hurst_ai_override = False
         if (
@@ -435,7 +511,10 @@ class DerivRiskManager:
                 snap.reasons.append(
                     f"hurst_math_override: H={hurst:.3f}>0.65 autocorr={autocorr_lag1:.3f} "
                     f"(ai_conf={ai_confidence:.2f} < {_ai_min_conf}) — math > LLM"
-                )
+            # Loss-streak lockout disabled (set DERIV_LOSS_STREAK_LOCKOUT=999 or ≥ threshold)
+            # Only engage if loss_streak_lockout > 0 AND we truly hit the cap
+            cap = self._settings.loss_streak_lockout
+            if cap > 0 and self._loss_streak >= cap
                 _LOGGER.info(
                     "[deriv-risk] AI override by math: H=%.3f autocorr=%.3f ai_conf=%.2f",
                     hurst, autocorr_lag1, ai_confidence,
@@ -449,8 +528,13 @@ class DerivRiskManager:
         # In volatile regime, reduce stake by 20%
         if regime == "volatile":
             risk_usdt *= 0.8
-        stake = max(1.0, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
+        # Demo floor: always at least $3
+        min_stake = max(3.0, getattr(self._settings, "min_stake_usdt", 1.0))
+        stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
         snap.suggested_stake_usdt = round(stake, 2)
+        # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
+        if _mean_rev_mode:
+            snap.score_breakdown["mean_rev_mode"] = True
         snap.suggested_multiplier = self._suggest_multiplier(atr, ticks[-1])
 
         if score < effective_min_score:
@@ -470,7 +554,10 @@ class DerivRiskManager:
         self._last_trade_ts = time.time()
         if realized_pnl_usdt < 0:
             self._loss_streak += 1
-            if self._loss_streak >= self._settings.loss_streak_lockout:
+            # Loss-streak lockout disabled (set DERIV_LOSS_STREAK_LOCKOUT=999 or ≥ threshold)
+            # Only engage if loss_streak_lockout > 0 AND we truly hit the cap
+            cap = self._settings.loss_streak_lockout
+            if cap > 0 and self._loss_streak >= cap:
                 self._engage_lockout(
                     f"{self._loss_streak} consecutive losses"
                 )

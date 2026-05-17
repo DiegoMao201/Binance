@@ -302,14 +302,19 @@ class DerivDaemon:
 
         # ── Order payload ──────────────────────────────────────────────────────────────
         # 7. Build broker-agnostic payload and route.
+        # Dynamic TP/SL: mean-reversion trades use tighter SL (0.4%) and faster TP (0.4%)
+        # to avoid 40-min waits at wide trending targets.
+        _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
+        _sl_pct  = 0.004 if _is_mean_rev else self._settings.stop_loss_pct
+        _tp_pct  = 0.004 if _is_mean_rev else self._settings.take_profit_pct
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,
             "side": snap.side,
             "stake_usdt": snap.suggested_stake_usdt,
             "multiplier": snap.suggested_multiplier,
-            "stop_loss_pct": self._settings.stop_loss_pct,
-            "take_profit_pct": self._settings.take_profit_pct,
+            "stop_loss_pct": _sl_pct,
+            "take_profit_pct": _tp_pct,
             # score_breakdown flows to DerivOrder → PAMM webhook → deriv_contracts.score_breakdown
             "score_breakdown": snap.score_breakdown,
             # Spike timeout: force-close BOOM/CRASH contracts after N seconds if
