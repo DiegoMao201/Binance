@@ -158,16 +158,44 @@ class DerivTradeExecutor:
         )
         # `result` IS the buy dict (has contract_id, buy_price, etc.)
         contract_id = int(result.get("contract_id") or 0)
-        entry_price = float(result.get("buy_price") or 0)
         if contract_id <= 0:
             raise DerivClientError(f"buy returned no contract_id: {result}")
+
+        # Actual stake may differ from intended when the broker capped it.
+        # deriv_client injects _actual_stake_usdt when a cap/retry happened.
+        actual_stake = float(result.get("_actual_stake_usdt") or order.stake_usdt)
+
+        # Entry price: the buy_price field from Deriv's buy response is the
+        # *underlying spot price* when the contract was purchased — NOT the stake.
+        # However when the broker retries at a capped stake, buy_price may reflect
+        # the new stake rather than the spot. We therefore do a single
+        # proposal_open_contract poll immediately after the buy to get the
+        # definitive entry_tick_display_value (the broker's own record of the
+        # underlying spot at entry). Falls back to buy_price if unavailable.
+        entry_price = float(result.get("buy_price") or 0)
+        try:
+            _poc0 = (
+                await self._client.proposal_open_contract(contract_id)
+            ).get("proposal_open_contract") or {}
+            _spot = float(
+                _poc0.get("entry_tick_display_value")
+                or _poc0.get("entry_spot")
+                or _poc0.get("current_spot")
+                or 0
+            )
+            if _spot > 0:
+                entry_price = _spot
+        except Exception as _ep_exc:
+            _LOGGER.debug(
+                "[deriv-trader] entry-spot POC failed for %s: %s", contract_id, _ep_exc
+            )
 
         oc = DerivOpenContract(
             contract_id=contract_id,
             intent_id=order.intent_id,
             symbol=order.symbol,
             side=order.side,
-            stake_usdt=order.stake_usdt,
+            stake_usdt=actual_stake,
             multiplier=order.multiplier,
             entry_price=entry_price,
             opened_at_ts=time.time(),
@@ -179,14 +207,16 @@ class DerivTradeExecutor:
             self._persist_open()
 
         _LOGGER.info(
-            "[deriv-trader] LIVE buy ok | contract_id=%s symbol=%s side=%s stake=%.2f",
-            contract_id, order.symbol, order.side, order.stake_usdt,
+            "[deriv-trader] LIVE buy ok | contract_id=%s symbol=%s side=%s "
+            "stake_intended=%.2f stake_actual=%.2f entry=%.5f",
+            contract_id, order.symbol, order.side,
+            order.stake_usdt, actual_stake, entry_price,
         )
         self._notify("live_buy", {
             "contract_id": contract_id,
             "symbol": order.symbol,
             "side": order.side,
-            "stake_usdt": order.stake_usdt,
+            "stake_usdt": actual_stake,
             "intent_id": order.intent_id,
         })
 
@@ -197,7 +227,7 @@ class DerivTradeExecutor:
             "intent_id": order.intent_id,
             "symbol": order.symbol,
             "side": order.side,
-            "stake_usdt": order.stake_usdt,
+            "stake_usdt": actual_stake,
             "multiplier": order.multiplier,
             "entry_price": entry_price,
             "ts": int(time.time() * 1000),
@@ -252,7 +282,13 @@ class DerivTradeExecutor:
                 continue
 
             poc = resp.get("proposal_open_contract") or {}
-            is_sold = bool(poc.get("is_sold") or poc.get("is_settleable"))
+            _poc_status = (poc.get("status") or "").lower()
+            # is_sold must be True AND the contract must carry a definitive final
+            # status. is_settleable can be True while the contract is still
+            # open (just eligible for settlement), which caused ghost-closes with
+            # exit_reason='open'. We require a known terminal status.
+            _TERMINAL_STATUSES = {"won", "lost", "sold", "cancelled", "expired"}
+            is_sold = bool(poc.get("is_sold")) and _poc_status in _TERMINAL_STATUSES
 
             # ── Dynamic trailing SL (non-spike trades, runs while contract is open) ──
             # Tracks peak profit and force-sells when current profit falls below the
@@ -303,7 +339,17 @@ class DerivTradeExecutor:
                 continue
 
             realized = float(poc.get("profit") or 0)
-            exit_price = float(poc.get("sell_price") or poc.get("current_spot") or 0)
+            # Exit price: prefer the underlying spot at the time of the sell/settlement
+            # (sell_spot or exit_tick_display_value), not the USD sell_price which is
+            # the money received back (stake ± P&L) — a completely different value.
+            exit_price = float(
+                poc.get("sell_spot")
+                or poc.get("exit_tick_display_value")
+                or poc.get("exit_spot")
+                or poc.get("current_spot")
+                or poc.get("sell_price")
+                or 0
+            )
             # Label spike-timeout exits distinctly for analytics
             _was_trail_stop = (
                 oc_check is not None

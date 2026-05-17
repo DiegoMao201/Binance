@@ -377,27 +377,35 @@ class DerivClient:
                 },
             },
         }
+        _intended_stake = stake  # keep original for logging
         result = await self._request(buy_req)
-        # Auto-adjust stake if broker rejects with a minimum amount requirement.
-        # The broker returns code_args[0] with the required minimum (e.g. "7.28").
+        # Auto-adjust stake if broker rejects — this happens when the computed
+        # risk-sized stake exceeds the broker's allowed range for a given product
+        # (e.g. R_* multiplier contracts cap out around $5-6 on demo).
+        # code_args[0] is the broker's limit value; we use it directly (no +5%
+        # padding — that was pushing us over the cap).
         if "error" in result:
             err = result["error"]
             if err.get("code") == "InvalidtoBuy" and err.get("code_args"):
                 try:
-                    broker_min = round(float(err["code_args"][0]) * 1.05, 2)
-                    _LOGGER.warning(
-                        "[deriv-client] stake %.2f rejected for %s — broker min=%.2f, retrying with %.2f",
-                        stake, symbol, float(err["code_args"][0]), broker_min,
+                    broker_limit = round(float(err["code_args"][0]), 2)
+                    _LOGGER.info(
+                        "[deriv-client] %s stake capped: %.2f → %.2f (broker limit)",
+                        symbol, _intended_stake, broker_limit,
                     )
-                    buy_req["parameters"]["amount"] = broker_min
+                    buy_req["parameters"]["amount"] = broker_limit
                     # Recalculate SL/TP for the adjusted stake
                     buy_req["parameters"]["limit_order"]["stop_loss"] = round(
-                        max(broker_min * float(stop_loss_pct), 0.50), 2
+                        max(broker_limit * float(stop_loss_pct), 0.50), 2
                     )
                     buy_req["parameters"]["limit_order"]["take_profit"] = round(
-                        max(broker_min * float(take_profit_pct), 1.00), 2
+                        max(broker_limit * float(take_profit_pct), 1.00), 2
                     )
                     result = await self._request(buy_req)
+                    # Tag the result so the executor can store the actual stake
+                    if "buy" in result:
+                        result["buy"]["_actual_stake_usdt"] = broker_limit
+                        result["buy"]["_intended_stake_usdt"] = _intended_stake
                 except (ValueError, IndexError, KeyError):
                     pass  # fall through to original error handling
         if "error" in result:
