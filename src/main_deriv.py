@@ -138,6 +138,36 @@ class DerivDaemon:
                 except OSError as _re:
                     _LOGGER.warning("[deriv-daemon] clear-history failed for %s: %s", _reset_path, _re)
 
+        # One-shot DB purge: if DERIV_DB_PURGE_ON_START=true, TRUNCATE the
+        # deriv_contracts + deriv_tick_snapshots tables so the analytics DB
+        # starts fresh. Safe — only touches deriv_* tables, never PAMM /
+        # user_trade_allocations / ledger_transactions. Wrapped in try/except
+        # so a DB issue can never block the daemon from starting.
+        if os.getenv("DERIV_DB_PURGE_ON_START", "").lower() in {"1", "true", "yes"}:
+            try:
+                import asyncpg  # type: ignore[import-not-found]
+                _db_url = os.getenv("DATABASE_URL", "").strip()
+                if _db_url:
+                    _conn = await asyncpg.connect(_db_url, timeout=10.0)
+                    try:
+                        for _tbl in ("deriv_contracts", "deriv_tick_snapshots"):
+                            try:
+                                await _conn.execute(f"TRUNCATE TABLE {_tbl} RESTART IDENTITY CASCADE")
+                                _LOGGER.warning(
+                                    "[deriv-daemon] DERIV_DB_PURGE_ON_START: TRUNCATE %s OK", _tbl,
+                                )
+                            except Exception as _tex:  # noqa: BLE001
+                                _LOGGER.warning(
+                                    "[deriv-daemon] DERIV_DB_PURGE_ON_START: TRUNCATE %s failed: %s",
+                                    _tbl, _tex,
+                                )
+                    finally:
+                        await _conn.close()
+                else:
+                    _LOGGER.warning("[deriv-daemon] DERIV_DB_PURGE_ON_START: no DATABASE_URL")
+            except Exception as _dex:  # noqa: BLE001
+                _LOGGER.warning("[deriv-daemon] DERIV_DB_PURGE_ON_START error: %s", _dex)
+
         # Connect WS first so ticks_history calls (preload) have a live socket.
         # The OTP URL is the auth token — once connected we are fully authorised.
         # We wait 1.5 s after connect before the batch ticks_history requests so
