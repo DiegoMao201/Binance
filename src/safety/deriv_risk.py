@@ -690,14 +690,61 @@ class DerivRiskManager:
                 snap.allowed = False
                 return snap
 
-        # Sizing — proportional to bankroll, capped by ATR (anti-Martingale).
+        # ── Discriminatory score compression (tanh soft-cap) ─────────────────
+        # Bonuses from SMC, spike-hunter, mean-rev, and scalp can stack to push
+        # the raw score above 10 where it clips and loses discriminatory power.
+        # A tanh above the hinge (default 7.5) compresses the surplus smoothly:
+        #   raw 8.0  → 7.99  (negligible change near hinge)
+        #   raw 9.0  → 8.79
+        #   raw 10.0 → 9.27
+        #   raw 12.0 → 9.75
+        #   raw 15+  → 9.9   (ceiling — practically unreachable)
+        # Score=10 now requires ~15 raw points of aligned confluence.
+        # Parameters are env-var tunable for live calibration.
+        _sc_hinge = float(os.getenv("DERIV_SCORE_SOFTCAP_HINGE", "7.5"))
+        _sc_range = float(os.getenv("DERIV_SCORE_SOFTCAP_RANGE", "2.4"))
+        _raw_score = score  # pre-compression for telemetry
+        if score > _sc_hinge and _sc_range > 0:
+            score = _sc_hinge + _sc_range * math.tanh((score - _sc_hinge) / _sc_range)
+        score = round(score, 3)
+        snap.score = score
+        snap.score_breakdown["score_raw"] = round(_raw_score, 3)
+
+        # Sizing — proportional to bankroll, regime-adjusted, score-proportional.
         risk_usdt = self._settings.bankroll_usdt * self._settings.risk_per_trade_pct
         # Reduce risk by the loss streak (mild de-grossing — never increase).
         if self._loss_streak >= 1:
             risk_usdt *= max(0.5, 1.0 - 0.15 * self._loss_streak)
-        # In volatile regime, reduce stake by 20%
-        if regime == "volatile":
-            risk_usdt *= 0.8
+        # ── Regime → position size ─────────────────────────────────────────────
+        # Each regime carries a different level of directional confidence.
+        # PositionSize ∝ RegimeConfidence (not just entry gate).
+        #   trending  — confirmed linear structure → full size
+        #   ranging   — partial mean-rev edge     → -10 %
+        #   volatile  — elevated realised vol     → -25 %
+        #   calm      — low ATR, spread dominates → -35 %
+        #   unknown   — insufficient ticks         → -20 %
+        _regime_mult = {
+            "trending": 1.00,
+            "ranging":  0.90,
+            "volatile": 0.75,
+            "calm":     0.65,
+            "unknown":  0.80,
+        }.get(regime, 1.00)
+        risk_usdt *= _regime_mult
+        snap.score_breakdown["regime_size_mult"] = _regime_mult
+        # ── Score → position size (confidence-proportional) ──────────────────
+        # Compressed score drives a ±20% size adjustment so top-tier setups
+        # trade larger while mediocre ones trade smaller.
+        #   score ≥ 8.5 → up to +20% (linear to score 10)
+        #   score < 6.5 → down to −25% (linear from 6.5 to 5.5)
+        if score >= 8.5:
+            _score_sz = 1.0 + 0.20 * min(1.0, (score - 8.5) / 1.5)
+        elif score < 6.5:
+            _score_sz = max(0.75, 1.0 - 0.25 * (6.5 - score))
+        else:
+            _score_sz = 1.0
+        risk_usdt *= _score_sz
+        snap.score_breakdown["score_size_mult"] = round(_score_sz, 3)
         # Broker-safe absolute floor: Deriv Demo/Real minimum stake is ~$3.50–$4.30
         # depending on symbol.  We pad with +5 % and use $4.50 as the universal
         # safe floor so a high-probability signal is never rejected for being
@@ -929,7 +976,11 @@ class DerivRiskManager:
 
         if atr_pct > 0.005:
             return "volatile"
-        if atr_pct < 0.0003:
+        # Calm threshold halved (env-var tunable): the old 0.0003 was too aggressive —
+        # R_100 at price 1700 with typical ATR 0.3 gives atr_pct ≈ 0.000176 which is
+        # below 0.0003 and was incorrectly classified as 'calm' instead of 'ranging'.
+        _calm_thr = float(os.getenv("DERIV_CALM_ATR_PCT", "0.00015"))
+        if atr_pct < _calm_thr:
             return "calm"
         if r2 >= 0.55:
             return "trending"

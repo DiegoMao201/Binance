@@ -348,32 +348,65 @@ class DerivDaemon:
             )
             return
 
-        # Per-symbol Hurst regime gate (ASSET_INTEL_PROFILES)
+        # Per-symbol Hurst regime gate — 3 zones (ASSET_INTEL_PROFILES)
         # Spike markets (BOOM/CRASH) are exempt — their edge is structural, not
-        # Hurst-based.  For volatility indices, require the Hurst exponent to
-        # meet the profile's minimum before entry to avoid trading in a regime
-        # with no directional edge.
+        # Hurst-based.  For volatility indices:
+        #   Zone A  H < (min_hurst − 0.08)    hard reject (no statistical edge)
+        #   Zone B  H ∈ [floor, min_hurst)     soft: linear score penalty + size cut
+        #   Zone C  H ≥ min_hurst + 0.06       high-confidence: mild size boost (+15%)
         _profile_min_hurst = float(_asset_profile.get("min_hurst", 0.0))
         _asset_type = _asset_profile.get("type", "volatility")
         if _profile_min_hurst > 0 and _asset_type not in ("spike_boom", "spike_crash"):
             _obs_hurst = float(snap.score_breakdown.get("hurst", 0.5))
-            if _obs_hurst < _profile_min_hurst:
-                _LOGGER.debug(
-                    "[deriv-daemon] %s HURST_GATE: H=%.3f < min_hurst=%.3f (%s) — skip",
-                    tick.symbol, _obs_hurst, _profile_min_hurst, _asset_type,
-                )
+            _h_hard_floor = max(0.0, _profile_min_hurst - 0.08)
+            if _obs_hurst < _h_hard_floor:
+                # Zone A — far below any useful regime, hard reject
                 self._record_decision(
                     symbol=tick.symbol, allowed=False, side=snap.side,
                     score=snap.score,
-                    reason=f"HURST_GATE: H={_obs_hurst:.3f} < "
-                           f"min_hurst={_profile_min_hurst:.3f} ({_asset_type})",
-                    extra={
-                        "score_breakdown": snap.score_breakdown,
-                        "regime": snap.regime,
-                        "profile": _asset_profile,
-                    },
+                    reason=f"HURST_GATE[A-hard]: H={_obs_hurst:.3f} < floor={_h_hard_floor:.3f}",
+                    extra={"score_breakdown": snap.score_breakdown, "regime": snap.regime},
                 )
                 return
+            elif _obs_hurst < _profile_min_hurst:
+                # Zone B — borderline: graduated penalty so we don't hard-kill
+                # setups that are close to the threshold, but we de-risk them.
+                # At the hard floor  → −1.5 score pts, size×0.60
+                # At the threshold   → 0 penalty,       size×1.00
+                _zone_width = max(0.001, _profile_min_hurst - _h_hard_floor)
+                _zone_pos   = (_profile_min_hurst - _obs_hurst) / _zone_width  # 1→floor, 0→threshold
+                _h_score_pen = round(-1.5 * _zone_pos, 3)
+                _h_size_mult = round(1.0 - 0.40 * _zone_pos, 3)
+                snap.score = round(max(0.0, snap.score + _h_score_pen), 3)
+                snap.suggested_stake_usdt = round(
+                    max(4.50, snap.suggested_stake_usdt * _h_size_mult), 2
+                )
+                snap.score_breakdown["hurst_zone"] = "B-soft"
+                snap.score_breakdown["hurst_zone_pen"] = _h_score_pen
+                snap.score_breakdown["hurst_zone_size"] = _h_size_mult
+                # Re-check allowance: penalty may push score below profile minimum
+                if snap.score < snap.effective_min_score:
+                    snap.allowed = False
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score,
+                        reason=(
+                            f"HURST_GATE[B-soft]: H={_obs_hurst:.3f} pen={_h_score_pen:.2f}"
+                            f" → score={snap.score:.2f} < min={snap.effective_min_score:.2f}"
+                        ),
+                        extra={"score_breakdown": snap.score_breakdown, "regime": snap.regime},
+                    )
+                    return
+                _LOGGER.debug(
+                    "[deriv-daemon] %s HURST_ZONE_B: H=%.3f pen=%.2f size×%.2f score→%.2f",
+                    tick.symbol, _obs_hurst, _h_score_pen, _h_size_mult, snap.score,
+                )
+            elif _obs_hurst >= _profile_min_hurst + 0.06:
+                # Zone C — high-persistence: reward with up to +15% size
+                _h_boost = min(1.15, 1.0 + 0.10 * min(1.5, (_obs_hurst - (_profile_min_hurst + 0.06)) / 0.10))
+                snap.suggested_stake_usdt = round(snap.suggested_stake_usdt * _h_boost, 2)
+                snap.score_breakdown["hurst_zone"] = "C-boost"
+                snap.score_breakdown["hurst_zone_size"] = round(_h_boost, 3)
 
         # ── Strategy-mode gate (ASSET_INTEL_PROFILES) ─────────────────────
         # Reject setups whose mode mismatches the profile's allowed mode:
