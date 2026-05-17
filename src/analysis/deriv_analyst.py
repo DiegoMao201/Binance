@@ -279,7 +279,7 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
                     _OPENROUTER_URL,
                     headers=headers,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=6.0),
+                    timeout=aiohttp.ClientTimeout(total=1.0),
                 ) as resp:
                     if resp.status == 429:
                         _LOGGER.warning("[deriv-analyst] AI 429 on %s — skip", model)

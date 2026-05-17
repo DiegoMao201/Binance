@@ -74,6 +74,26 @@ class GeometryResult:
     geo_side: str | None            # "MULTUP" / "MULTDOWN" / None (advisory)
     geo_score_delta: float          # score bonus/penalty to apply
     geo_reason: str                 # human-readable label
+    # ── SMC / Microstructure confluence (lazy-populated; default neutral) ──
+    fvg_active: bool = False        # an unmitigated Fair Value Gap is open
+    fvg_top: float = 0.0            # upper edge of the active FVG
+    fvg_bottom: float = 0.0         # lower edge of the active FVG
+    fvg_mid: float = 0.0            # 50 % mitigation level
+    fvg_direction: str = ""         # "bullish" / "bearish" / ""
+    gap_mitigated: bool = False     # current tick has reached the 50 % level
+    divergence: str = ""            # "bullish" / "bearish" / ""
+    smc_side: str | None = None     # composite SMC suggestion (MULTUP/MULTDOWN)
+    smc_bonus: float = 0.0          # +3.5 when full SMC confluence triggers
+    smc_reason: str = ""            # human-readable label
+    micro_band_signal: str | None = None  # micro-channel 1.5σ touch signal
+
+
+# ── Microstructure parameters (SMC + Momentum) ───────────────────────────────
+FVG_LOOKBACK      = 80        # ticks of recent history to scan for a fresh gap
+FVG_MIN_GAP_PCT   = 0.00010   # 0.010 %  minimum gap width to be relevant
+ROC_PERIOD        = 14        # ticks for momentum rate-of-change
+DIV_PIVOT_RANGE   = 30        # ticks to evaluate price/momentum divergence
+MICRO_BAND_SIGMA  = 1.5       # σ band of micro-channel for scalp trigger
 
 
 # ─── Internal computations ────────────────────────────────────────────────────
@@ -163,6 +183,107 @@ def _pivot_sr_zones(prices: np.ndarray, current_price: float) -> SRZones:
         resistance=r[0], support=s[0],
         resistance_strength=r[1], support_strength=s[1],
     )
+
+
+# ─── Public entry point ───────────────────────────────────────────────────────
+
+# ── SMC / Microstructure detectors (vectorised, < 0.5 ms) ────────────────────
+
+def _detect_fvg(prices: np.ndarray) -> tuple[bool, float, float, str]:
+    """Detect the most recent unmitigated Fair Value Gap (3-tick imbalance).
+
+    A bullish FVG is registered when prices[i+2].low > prices[i].high
+    (we approximate low/high using rolling min/max over a 3-tick block).
+    Conversely for bearish FVGs.
+
+    Returns
+    -------
+    (active, top, bottom, direction)
+        active     : True if a fresh, unmitigated FVG is still open
+        top        : upper edge of the gap
+        bottom     : lower edge of the gap
+        direction  : "bullish" / "bearish" / ""
+    """
+    n = len(prices)
+    if n < FVG_LOOKBACK + 3:
+        return False, 0.0, 0.0, ""
+
+    seg = prices[-FVG_LOOKBACK:]
+    current = float(prices[-1])
+    # Iterate newest → oldest so we return the most recent unmitigated gap
+    for i in range(len(seg) - 3, 1, -1):
+        a_high = float(max(seg[i - 1], seg[i]))
+        a_low  = float(min(seg[i - 1], seg[i]))
+        c_high = float(max(seg[i + 1], seg[i + 2]))
+        c_low  = float(min(seg[i + 1], seg[i + 2]))
+
+        # Bullish gap: candle C low strictly above candle A high
+        gap = c_low - a_high
+        if gap > a_high * FVG_MIN_GAP_PCT:
+            top, bottom = c_low, a_high
+            # Mitigation check: has price entered the gap since then?
+            tail = seg[i + 2:]
+            if tail.min() > bottom:        # never re-entered → still active
+                return True, top, bottom, "bullish"
+            continue                       # already mitigated → keep scanning
+
+        # Bearish gap: candle A low strictly above candle C high
+        gap = a_low - c_high
+        if gap > a_low * FVG_MIN_GAP_PCT:
+            top, bottom = a_low, c_high
+            tail = seg[i + 2:]
+            if tail.max() < top:
+                return True, top, bottom, "bearish"
+            continue
+
+    return False, 0.0, 0.0, ""
+
+
+def _detect_divergence(prices: np.ndarray) -> str:
+    """Detect classic momentum divergence between price and ROC(14).
+
+    Bullish: price prints a LOWER low while ROC prints a HIGHER low.
+    Bearish: price prints a HIGHER high while ROC prints a LOWER high.
+
+    Returns "bullish", "bearish" or "".
+    """
+    n = len(prices)
+    if n < ROC_PERIOD + DIV_PIVOT_RANGE + 2:
+        return ""
+
+    # Rate of Change (vectorised)
+    roc = (prices[ROC_PERIOD:] - prices[:-ROC_PERIOD]) / np.maximum(
+        np.abs(prices[:-ROC_PERIOD]), 1e-12
+    )
+    if roc.size < DIV_PIVOT_RANGE + 2:
+        return ""
+
+    window_prices = prices[-DIV_PIVOT_RANGE:]
+    window_roc    = roc[-DIV_PIVOT_RANGE:]
+
+    # Compare the most recent half vs the prior half (two pivots)
+    half = DIV_PIVOT_RANGE // 2
+    p_prev, p_curr = window_prices[:half], window_prices[half:]
+    r_prev, r_curr = window_roc[:half],   window_roc[half:]
+
+    if p_curr.min() < p_prev.min() and r_curr.min() > r_prev.min():
+        return "bullish"
+    if p_curr.max() > p_prev.max() and r_curr.max() < r_prev.max():
+        return "bearish"
+    return ""
+
+
+def _micro_band_signal(micro: ChannelGeometry, current_price: float) -> str | None:
+    """Return MULTUP / MULTDOWN if price touches the micro 1.5σ band, else None."""
+    if micro is None or micro.residual_std <= 0:
+        return None
+    upper_inner = micro.mid + MICRO_BAND_SIGMA * micro.residual_std
+    lower_inner = micro.mid - MICRO_BAND_SIGMA * micro.residual_std
+    if current_price <= lower_inner:
+        return "MULTUP"
+    if current_price >= upper_inner:
+        return "MULTDOWN"
+    return None
 
 
 # ─── Public entry point ───────────────────────────────────────────────────────
@@ -328,6 +449,35 @@ def compute_geometry(
                 geo_score_delta = -0.3
                 reasons.append(f"neutral_extended_down: pos={channel_pos:.2f}")
 
+    # ── SMC / Microstructure layer (advisory) ────────────────────────────
+    fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr)
+    fvg_mid = (fvg_top + fvg_bot) / 2.0 if fvg_active else 0.0
+    gap_mitigated = False
+    if fvg_active and fvg_mid > 0:
+        # Mitigation tolerance: within 0.05 % of the 50 % level
+        tol = max(fvg_top * 0.0005, abs(fvg_top - fvg_bot) * 0.10)
+        gap_mitigated = abs(current_price - fvg_mid) <= tol
+
+    divergence = _detect_divergence(arr)
+    micro_band_sig = _micro_band_signal(micro, current_price) if micro else None
+
+    smc_side: str | None = None
+    smc_bonus = 0.0
+    smc_reason = ""
+    if fvg_active and gap_mitigated and divergence:
+        if fvg_dir == "bullish" and divergence == "bullish":
+            smc_side, smc_bonus = "MULTUP", 3.5
+            smc_reason = (
+                f"SMC_Liquidity_Inbound: bull_fvg mid={fvg_mid:.5f} mitigated + "
+                f"bull_divergence → +{smc_bonus}"
+            )
+        elif fvg_dir == "bearish" and divergence == "bearish":
+            smc_side, smc_bonus = "MULTDOWN", 3.5
+            smc_reason = (
+                f"SMC_Liquidity_Inbound: bear_fvg mid={fvg_mid:.5f} mitigated + "
+                f"bear_divergence → +{smc_bonus}"
+            )
+
     return GeometryResult(
         macro=macro,
         micro=micro,
@@ -335,4 +485,15 @@ def compute_geometry(
         geo_side=geo_side,
         geo_score_delta=geo_score_delta,
         geo_reason=" | ".join(reasons) if reasons else "geo_neutral",
+        fvg_active=fvg_active,
+        fvg_top=fvg_top,
+        fvg_bottom=fvg_bot,
+        fvg_mid=fvg_mid,
+        fvg_direction=fvg_dir,
+        gap_mitigated=gap_mitigated,
+        divergence=divergence,
+        smc_side=smc_side,
+        smc_bonus=smc_bonus,
+        smc_reason=smc_reason,
+        micro_band_signal=micro_band_sig,
     )

@@ -466,6 +466,7 @@ class DerivRiskManager:
         # Vectorised in NumPy — adds/removes score based on price position
         # within the macro regression channel.  Wrapped in try/except so
         # any calculation error cannot crash the live pipeline.
+        _geo = None
         try:
             _geo = _compute_geometry(ticks, hurst=hurst)
             if _geo.geo_score_delta != 0.0:
@@ -492,6 +493,64 @@ class DerivRiskManager:
             snap.score = round(score, 3)
         except Exception as _geo_exc:  # noqa: BLE001
             _LOGGER.debug("[deriv-risk] geometry skipped: %s", _geo_exc)
+
+        # ── SMC: FVG mitigation + Momentum divergence (institutional confluence) ──
+        # Spike markets enforce their direction (BOOM=bull only, CRASH=bear only).
+        # For R_* indices we accept either direction as long as FVG_dir == DIV_dir.
+        if _geo is not None and _geo.smc_side is not None and _geo.smc_bonus > 0:
+            _smc_dir_ok = True
+            _su = symbol.upper()
+            if "BOOM" in _su and _geo.smc_side != "MULTUP":
+                _smc_dir_ok = False
+            elif "CRASH" in _su and _geo.smc_side != "MULTDOWN":
+                _smc_dir_ok = False
+            if _smc_dir_ok:
+                side = _geo.smc_side
+                snap.side = side
+                score = float(np.clip(score + _geo.smc_bonus, 0.0, 10.0))
+                snap.reasons.append(_geo.smc_reason)
+                snap.score_breakdown["strategy"] = "SMC_Liquidity_Inbound"
+                snap.score_breakdown["fvg_active"] = True
+                snap.score_breakdown["fvg_direction"] = _geo.fvg_direction
+                snap.score_breakdown["fvg_top"] = round(_geo.fvg_top, 5)
+                snap.score_breakdown["fvg_bottom"] = round(_geo.fvg_bottom, 5)
+                snap.score_breakdown["fvg_mid"] = round(_geo.fvg_mid, 5)
+                snap.score_breakdown["gap_mitigated"] = True
+                snap.score_breakdown["divergence"] = _geo.divergence
+                snap.score_breakdown["smc_bonus"] = round(_geo.smc_bonus, 2)
+                snap.score = round(score, 3)
+                _LOGGER.info(
+                    "[deriv-risk] [SMC ENGINE] %s gap_mitigated dir=%s div=%s side=%s "
+                    "+%.2f score=%.2f", symbol, _geo.fvg_direction,
+                    _geo.divergence, side, _geo.smc_bonus, score,
+                )
+
+        # ── Micro-channel scalp trigger (Hurst<0.45 + 1.5σ band touch) ───────
+        # When the market is mean-reverting we don't wait for the macro 500-tick
+        # extreme: a touch of the inner 1.5σ band of the 150-tick channel
+        # combined with the geo direction is enough to inject a scalp order.
+        if (
+            _geo is not None
+            and _geo.micro_band_signal is not None
+            and hurst is not None
+            and hurst < 0.45
+            and not _is_spike_market(symbol)
+        ):
+            _scalp_bonus = 1.5
+            _scalp_side = _geo.micro_band_signal
+            # Only boost if the scalp side matches the geo bias (or geo neutral)
+            if _geo.geo_side is None or _geo.geo_side == _scalp_side:
+                if side != _scalp_side:
+                    side = _scalp_side
+                    snap.side = side
+                score = float(np.clip(score + _scalp_bonus, 0.0, 10.0))
+                snap.reasons.append(
+                    f"micro_scalp: H={hurst:.3f}<0.45 + 1.5σ band touch ({_scalp_side}) "
+                    f"+{_scalp_bonus}"
+                )
+                snap.score_breakdown["micro_scalp"] = True
+                snap.score_breakdown["micro_scalp_side"] = _scalp_side
+                snap.score = round(score, 3)
 
         # ── EMA-200 Spike Hunter (BOOM/CRASH only) ────────────────────────
         # BOOM spikes up → enter when price dips 0.02–0.10% below EMA200 (support).
@@ -525,32 +584,54 @@ class DerivRiskManager:
             except Exception as _sh_exc:  # noqa: BLE001
                 _LOGGER.debug("[deriv-risk] ema200_spike_hunter skipped: %s", _sh_exc)
 
-        # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
-        # with the trade side, the mathematical microstructure signal is
-        # considered more reliable than the qualitative LLM opinion.
-        _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.65"))
+        # If AI confidence is low / missing AND the geometric stack agrees,
+        # the mathematical microstructure signal is considered more reliable
+        # than the qualitative LLM opinion.  This is the "Hard Math Override".
+        # Triggers when:
+        #   • AI returned no answer (timeout / 4xx / circuit-open) OR
+        #   • AI returned confidence below the per-trade threshold
+        # AND any of:
+        #   (a) Hurst > 0.62 with autocorr aligned   (trend continuation)
+        #   (b) SMC FVG-mitigation confluence active (geo.smc_side aligned)
+        #   (c) micro-channel scalp with Hurst < 0.45 (mean-reversion fade)
+        _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.55"))
         snap.hurst_ai_override = False
-        if (
-            ai_confidence is not None
-            and ai_confidence < _ai_min_conf
-            and hurst is not None
-            and hurst > 0.65
-            and autocorr_lag1 is not None
-        ):
-            # Check autocorr alignment with direction (+1 MULTUP needs positive autocorr)
-            autocorr_aligned = (
-                (trend_dir > 0 and autocorr_lag1 > 0.05) or
-                (trend_dir < 0 and autocorr_lag1 < -0.05)
-            )
-            if autocorr_aligned:
+        _ai_failed = ai_confidence is None or ai_confidence < _ai_min_conf
+        if _ai_failed:
+            _override_reason = ""
+            # (a) Hurst-trend confluence
+            if (
+                hurst is not None and hurst > 0.62
+                and autocorr_lag1 is not None
+                and (
+                    (trend_dir > 0 and autocorr_lag1 >  0.04) or
+                    (trend_dir < 0 and autocorr_lag1 < -0.04)
+                )
+            ):
+                _override_reason = (
+                    f"trend_math: H={hurst:.3f} autocorr={autocorr_lag1:+.3f}"
+                )
+            # (b) SMC confluence
+            elif _geo is not None and _geo.smc_side is not None and _geo.smc_side == side:
+                _override_reason = f"smc_confluence: {_geo.smc_reason}"
+            # (c) Mean-reverting micro scalp
+            elif (
+                _geo is not None and _geo.micro_band_signal is not None
+                and hurst is not None and hurst < 0.45
+                and _geo.micro_band_signal == side
+            ):
+                _override_reason = f"micro_scalp_mr: H={hurst:.3f}<0.45 band_touch={side}"
+
+            if _override_reason:
                 snap.hurst_ai_override = True
+                _ai_disp = "n/a" if ai_confidence is None else f"{ai_confidence:.2f}"
                 snap.reasons.append(
-                    f"hurst_math_override: H={hurst:.3f}>0.65 autocorr={autocorr_lag1:.3f} "
-                    f"(ai_conf={ai_confidence:.2f} < {_ai_min_conf}) — math > LLM"
+                    f"hard_math_override: {_override_reason} "
+                    f"(ai_conf={_ai_disp} < {_ai_min_conf}) — math > LLM"
                 )
                 _LOGGER.info(
-                    "[deriv-risk] AI override by math: H=%.3f autocorr=%.3f ai_conf=%.2f",
-                    hurst, autocorr_lag1, ai_confidence,
+                    "[deriv-risk] HARD_MATH_OVERRIDE %s side=%s reason=%s ai=%s",
+                    symbol, side, _override_reason, _ai_disp,
                 )
 
         # Sizing — proportional to bankroll, capped by ATR (anti-Martingale).
@@ -561,8 +642,12 @@ class DerivRiskManager:
         # In volatile regime, reduce stake by 20%
         if regime == "volatile":
             risk_usdt *= 0.8
-        # Broker minimum floor (Deriv requires ≥$3.93 for R_50, ≥$7.28 for R_100)
-        min_stake = self._settings.min_stake_usdt  # default 10.0 via DERIV_MIN_STAKE_USDT
+        # Broker-safe absolute floor: Deriv Demo/Real minimum stake is ~$3.50–$4.30
+        # depending on symbol.  We pad with +5 % and use $4.50 as the universal
+        # safe floor so a high-probability signal is never rejected for being
+        # one cent below the broker limit.
+        _BROKER_SAFE_FLOOR = 4.50
+        min_stake = max(_BROKER_SAFE_FLOOR, float(self._settings.min_stake_usdt))
         stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
         snap.suggested_stake_usdt = round(stake, 2)
         # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
