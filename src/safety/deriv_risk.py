@@ -450,13 +450,6 @@ class DerivRiskManager:
         # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
         # with the trade side, the mathematical microstructure signal is
         # considered more reliable than the qualitative LLM opinion.
-        # Demo floor: always at least $3
-        min_stake = max(3.0, getattr(self._settings, "min_stake_usdt", 1.0))
-        stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
-        snap.suggested_stake_usdt = round(stake, 2)
-        # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
-        if _mean_rev_mode:
-            snap.score_breakdown["mean_rev_mode"] = True
         _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.65"))
         snap.hurst_ai_override = False
         if (
