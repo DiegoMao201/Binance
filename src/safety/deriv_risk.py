@@ -50,6 +50,19 @@ from src.analysis.market_geometry import compute_geometry as _compute_geometry
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# ── EMA-200 Spike Hunter helper ───────────────────────────────────────────────
+def _ema200(prices: list[float]) -> float | None:
+    """Compute EMA-200 from the last 200 ticks. Returns None if insufficient data."""
+    if len(prices) < 200:
+        return None
+    arr = np.asarray(prices[-200:], dtype=np.float64)
+    alpha = 2.0 / 201.0
+    ema = float(arr[:20].mean())
+    for p in arr[20:]:
+        ema = p * alpha + ema * (1.0 - alpha)
+    return ema
+
 # ─── Hurst Calibration from PostgreSQL ────────────────────────────────────────
 # Reads v_deriv_hurst_buckets every hour (async, decoupled from WS hot path).
 # Updates a shared dict that DerivRiskManager reads on every evaluate() call.
@@ -479,6 +492,39 @@ class DerivRiskManager:
             snap.score = round(score, 3)
         except Exception as _geo_exc:  # noqa: BLE001
             _LOGGER.debug("[deriv-risk] geometry skipped: %s", _geo_exc)
+
+        # ── EMA-200 Spike Hunter (BOOM/CRASH only) ────────────────────────
+        # BOOM spikes up → enter when price dips 0.02–0.10% below EMA200 (support).
+        # CRASH spikes down → enter when price rises 0.02–0.10% above EMA200 (resistance).
+        # Score bonus decays linearly: max +3.5 at the inner edge, 0 at the outer edge.
+        if _is_spike_market(symbol) and len(ticks) >= 200:
+            try:
+                _ema200_val = _ema200(list(ticks))
+                if _ema200_val is not None and _ema200_val > 0:
+                    _price = ticks[-1]
+                    _dev = (_price - _ema200_val) / _ema200_val  # signed % deviation
+                    _su = symbol.upper()
+                    _sh_bonus = 0.0
+                    if "BOOM" in _su and -0.0010 <= _dev <= -0.0002:
+                        _sh_bonus = 3.5 * (1.0 - abs(_dev) / 0.0010)
+                        snap.reasons.append(
+                            f"ema200_spike_hunter: BOOM dip={_dev*100:.4f}% "
+                            f"ema={_ema200_val:.5f} +{_sh_bonus:.2f}"
+                        )
+                    elif "CRASH" in _su and 0.0002 <= _dev <= 0.0010:
+                        _sh_bonus = 3.5 * (1.0 - _dev / 0.0010)
+                        snap.reasons.append(
+                            f"ema200_spike_hunter: CRASH rise={_dev*100:.4f}% "
+                            f"ema={_ema200_val:.5f} +{_sh_bonus:.2f}"
+                        )
+                    if _sh_bonus > 0.0:
+                        score = float(np.clip(score + _sh_bonus, 0.0, 10.0))
+                    snap.score_breakdown["ema200"] = round(_ema200_val, 5)
+                    snap.score_breakdown["ema200_dev_pct"] = round(_dev * 100, 4)
+                    snap.score = round(score, 3)
+            except Exception as _sh_exc:  # noqa: BLE001
+                _LOGGER.debug("[deriv-risk] ema200_spike_hunter skipped: %s", _sh_exc)
+
         # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
         # with the trade side, the mathematical microstructure signal is
         # considered more reliable than the qualitative LLM opinion.
