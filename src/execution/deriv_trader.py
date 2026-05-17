@@ -302,25 +302,39 @@ class DerivTradeExecutor:
                 if _current_profit > oc_check.peak_profit:
                     oc_check.peak_profit = _current_profit
                 _new_floor = _compute_trail_floor(oc_check.peak_profit)
-                # Update broker SL when the floor ratchets up to a new level
+                # Update broker SL when the floor ratchets up to a new level.
+                # Deriv broker SL = maximum loss in absolute USD (always > 0).
+                # When the floor is still negative we can express it as a SL
+                # amount; when the floor crosses 0 (break-even / profit lock),
+                # Deriv has no way to express "close if profit drops below X" via
+                # stop_loss — that's handled by the software force-sell below.
+                # Also enforces Deriv's minimum SL amount of $0.35.
                 if _new_floor > oc_check.trail_sl_locked:
                     oc_check.trail_sl_locked = _new_floor
-                    # Convert floor to broker stop_loss (maximum loss = floor*-1 if floor<0,
-                    # or 0.01 minimum when we are locking profit).
-                    _broker_sl = max(0.01, -_new_floor) if _new_floor <= 0 else 0.01
-                    try:
-                        await self._client.contract_update(
-                            cid, stop_loss=_broker_sl
-                        )
+                    if _new_floor < 0:
+                        # Still in loss territory — express as a stop-loss amount.
+                        _broker_sl = round(max(0.35, abs(_new_floor)), 2)
+                        try:
+                            await self._client.contract_update(
+                                cid, stop_loss=_broker_sl
+                            )
+                            _LOGGER.info(
+                                "[deriv-trader] trail_ratchet %s: peak=%.3f new_floor=%.3f "
+                                "broker_sl=%.2f",
+                                oc_check.symbol, oc_check.peak_profit, _new_floor, _broker_sl,
+                            )
+                        except DerivClientError as _trl_exc:
+                            _LOGGER.warning(
+                                "[deriv-trader] trail broker_sl update failed %s: %s",
+                                cid, _trl_exc,
+                            )
+                    else:
+                        # Floor >= 0 (break-even / profit lock): software force-sell
+                        # below handles this; broker SL can't express profit floors.
                         _LOGGER.info(
                             "[deriv-trader] trail_ratchet %s: peak=%.3f new_floor=%.3f "
-                            "broker_sl=%.2f",
-                            oc_check.symbol, oc_check.peak_profit, _new_floor, _broker_sl,
-                        )
-                    except DerivClientError as _trl_exc:
-                        _LOGGER.warning(
-                            "[deriv-trader] trail broker_sl update failed %s: %s",
-                            cid, _trl_exc,
+                            "(profit-lock — software guard only, no broker SL update)",
+                            oc_check.symbol, oc_check.peak_profit, _new_floor,
                         )
                 # Software force-sell when profit drops below the locked floor
                 if _current_profit < _new_floor:
