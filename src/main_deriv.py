@@ -116,6 +116,22 @@ class DerivDaemon:
             self._settings.symbols, self._settings.dry_run, self._settings.bankroll_usdt,
         )
 
+        # One-shot history reset: if DERIV_CLEAR_HISTORY_ON_START=true, truncate
+        # closed contracts and open contracts files so the dashboard starts fresh.
+        if os.getenv("DERIV_CLEAR_HISTORY_ON_START", "").lower() in {"1", "true", "yes"}:
+            for _reset_path in (
+                self._settings.closed_contracts_file,
+                self._settings.open_contracts_file,
+            ):
+                try:
+                    _reset_path.write_text("[]")
+                    _LOGGER.warning(
+                        "[deriv-daemon] DERIV_CLEAR_HISTORY_ON_START: cleared %s",
+                        _reset_path.name,
+                    )
+                except OSError as _re:
+                    _LOGGER.warning("[deriv-daemon] clear-history failed for %s: %s", _reset_path, _re)
+
         # Connect WS first so ticks_history calls (preload) have a live socket.
         # The OTP URL is the auth token — once connected we are fully authorised.
         # We wait 1.5 s after connect before the batch ticks_history requests so
@@ -307,11 +323,18 @@ class DerivDaemon:
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
         _sl_pct  = 0.004 if _is_mean_rev else self._settings.stop_loss_pct
         _tp_pct  = 0.004 if _is_mean_rev else self._settings.take_profit_pct
-        # Spike timeout: only for EMA-200 spike hunter entries (tagged spike_entry=True).
-        # SMC / Hurst / micro-scalp entries must NOT be killed on a timer — they are
-        # managed by the dynamic trailing SL in the execution layer instead.
+        # Spike timeout:
+        #  BOOM/CRASH: ALWAYS apply the timeout — these instruments are spike products.
+        #  Holding them open via trailing SL guarantees inter-spike drift losses.
+        #  They must exit within spike_timeout_sec regardless of entry method.
+        #  R_*: only spike hunter entries get timed out; other entries use trailing SL.
         _is_spike_entry = bool(snap.score_breakdown.get("spike_entry"))
-        _max_hold_sec = float(spike_timeout_sec(tick.symbol)) if _is_spike_entry else 0.0
+        _is_boom_crash = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        _max_hold_sec = (
+            float(spike_timeout_sec(tick.symbol))
+            if (_is_spike_entry or _is_boom_crash)
+            else 0.0
+        )
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,

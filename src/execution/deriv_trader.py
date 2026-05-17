@@ -140,9 +140,11 @@ class DerivTradeExecutor:
         # independent but doubling up on the same underlying adds no edge.
         open_on_symbol = sum(1 for oc in self._open.values() if oc.symbol == order.symbol)
         if open_on_symbol >= 1:
-            raise DerivClientError(
-                f"already have an open contract on {order.symbol} — skipping duplicate"
+            _LOGGER.debug(
+                "[deriv-trader] %s already open — skipping duplicate order",
+                order.symbol,
             )
+            return {"status": "skipped_duplicate", "symbol": order.symbol}
 
         # All synthetic indices (R_*, BOOM*, CRASH*) use MULTUP/MULTDOWN
         # multiplier contracts.  BOOM/CRASH directional restriction is enforced
