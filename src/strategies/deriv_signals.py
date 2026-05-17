@@ -44,10 +44,14 @@ import os
 _BOOM_SIDE:  str = "MULTUP"     # spike fires UP   → only long
 _CRASH_SIDE: str = "MULTDOWN"   # spike fires DOWN  → only short
 
-# Number of seconds (≈ ticks at 1 tick/s) to hold a BOOM/CRASH contract.
-# If the spike has not fired within this window the bot force-closes to cap
-# the inter-spike drift loss.  Set to 0 to disable time-based force-close.
-_SPIKE_TIMEOUT_SEC: int = int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", "10"))
+# Number of seconds to hold a BOOM/CRASH contract before force-closing.
+# BOOM500/CRASH500 spike frequency: ~1 spike per 500 ticks ≈ 500s.
+# BOOM1000/CRASH1000: ~1 spike per 1000 ticks ≈ 1000s.
+# Holding for 120s gives the spike a fair window to fire while capping the
+# inter-spike drift loss.  Previous default of 10s was killing all BOOM/CRASH
+# contracts before any spike could trigger.
+# Set to 0 to disable the time-based force-close (rely on broker SL only).
+_SPIKE_TIMEOUT_SEC: int = int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", "120"))
 
 
 # ─── Public helpers ───────────────────────────────────────────────────────────

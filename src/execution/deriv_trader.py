@@ -586,26 +586,38 @@ class DerivTradeExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     # Zombie reconciliation daemon
     # ─────────────────────────────────────────────────────────────────────────
-    async def reconciliation_loop(self, interval_sec: float = 30.0) -> None:
+    # How long to wait between reconciliation checks.  Default 10 min.
+    # Lower values increase the risk of false ghost-purges (Deriv portfolio
+    # takes up to 60s to reflect newly-opened contracts).
+    _RECON_INTERVAL_SEC: float = float(os.getenv("DERIV_RECON_INTERVAL_SEC", "600"))
+    # Minimum contract age before it can be considered a ghost.  Contracts
+    # opened within this window are ALWAYS skipped regardless of portfolio state.
+    _RECON_MIN_AGE_SEC: float = float(os.getenv("DERIV_RECON_MIN_AGE_SEC", "300"))
+
+    async def reconciliation_loop(self, interval_sec: float | None = None) -> None:
         """Background task that hard-reconciles local state against Deriv's portfolio.
 
-        Every *interval_sec* seconds the bot queries Deriv's live ``portfolio``
-        endpoint.  Any contract that is registered as open locally but is NOT
-        present in the broker's response is treated as a ghost and purged:
-          - Its state is removed from self._open and written out immediately.
-          - A synthetic 'lost_or_ghost_closed' record is written to the closed
-            log (PnL = 0 because we cannot recover the final value).
-          - The PAMM webhook is called so the frontend removes the zombie entry.
+        Every *interval_sec* seconds (default: DERIV_RECON_INTERVAL_SEC = 600s)
+        the bot queries Deriv's live ``portfolio`` endpoint.  Any contract that
+        is registered as open locally but is NOT present in the broker's response
+        is treated as a ghost and purged, subject to the minimum-age guard.
 
-        The loop is purely additive and does NOT interfere with the normal
-        reap_closed() poller.  It only acts on contracts the poller has
-        already missed.
+        CRITICAL SAFETY GUARD — minimum age:
+          Deriv's portfolio API may take up to 60s to reflect a newly-opened
+          contract.  Purging a contract that is simply «not settled yet» would
+          create false ghost-close records and desync the UI.  We therefore
+          NEVER purge a contract opened within the last DERIV_RECON_MIN_AGE_SEC
+          seconds (default 300s = 5 min).  Only contracts that have been locally
+          live for more than 5 minutes AND are absent from broker portfolio are
+          true ghosts.
         """
+        _interval = interval_sec if interval_sec is not None else self._RECON_INTERVAL_SEC
         _LOGGER.info(
-            "[deriv-recon] reconciliation_loop started (interval=%.0fs)", interval_sec
+            "[deriv-recon] reconciliation_loop started (interval=%.0fs min_age=%.0fs)",
+            _interval, self._RECON_MIN_AGE_SEC,
         )
         while True:
-            await asyncio.sleep(interval_sec)
+            await asyncio.sleep(_interval)
             if self._settings.dry_run:
                 continue
             try:
@@ -617,31 +629,56 @@ class DerivTradeExecutor:
         """Single reconciliation pass — compare local open set vs broker portfolio."""
         broker_ids: list[int] = await self._client.portfolio()
 
-        # If portfolio() returned an empty list AND we have open contracts, it
-        # could mean a transient WS error rather than genuine broker-side closure.
-        # Only purge if there is a concrete mismatch (at least one known-live
-        # contract ID that the broker does not report).
         async with self._lock:
-            local_ids = list(self._open.keys())
+            # Snapshot open contracts with their ages
+            local_snapshot: dict[int, float] = {
+                cid: oc.opened_at_ts for cid, oc in self._open.items()
+            }
 
-        if not local_ids:
+        if not local_snapshot:
             return  # nothing to reconcile
 
-        broker_set = set(broker_ids)
-        ghost_ids = [cid for cid in local_ids if cid not in broker_set]
-
-        if not ghost_ids:
-            return  # all local contracts confirmed by broker
-
-        # Safety guard: if broker returned zero contracts and all local contracts
-        # look like ghosts, treat it as a portfolio API failure and skip.
-        if len(broker_ids) == 0 and len(ghost_ids) == len(local_ids):
+        # Broker must return a non-empty list before we trust any diff.
+        # An empty portfolio while we have open contracts is almost always
+        # a transient WS failure — never purge on empty broker response.
+        if len(broker_ids) == 0:
             _LOGGER.debug(
                 "[deriv-recon] broker portfolio empty while %d local contracts open — "
                 "assuming transient WS failure, skipping purge",
-                len(local_ids),
+                len(local_snapshot),
             )
             return
+
+        broker_set = set(broker_ids)
+        now = time.time()
+
+        # Identify ghost candidates: locally open but absent from broker.
+        # Apply minimum-age guard: skip contracts opened within the last
+        # _RECON_MIN_AGE_SEC seconds to avoid false positives on fresh contracts
+        # that haven't propagated to Deriv's portfolio yet.
+        ghost_ids: list[int] = []
+        young_skipped: int = 0
+        for cid, opened_at in local_snapshot.items():
+            if cid in broker_set:
+                continue  # broker confirms this contract — not a ghost
+            age_sec = now - opened_at
+            if age_sec < self._RECON_MIN_AGE_SEC:
+                young_skipped += 1
+                _LOGGER.debug(
+                    "[deriv-recon] contract_id=%s age=%.0fs < min_age=%.0fs — skipping ghost check",
+                    cid, age_sec, self._RECON_MIN_AGE_SEC,
+                )
+                continue
+            ghost_ids.append(cid)
+
+        if young_skipped:
+            _LOGGER.info(
+                "[deriv-recon] %d contract(s) skipped (too young, min_age=%.0fs)",
+                young_skipped, self._RECON_MIN_AGE_SEC,
+            )
+
+        if not ghost_ids:
+            return  # no confirmed ghosts after age filter
 
         for cid in ghost_ids:
             async with self._lock:
@@ -651,10 +688,11 @@ class DerivTradeExecutor:
             if oc is None:
                 continue
 
+            age_min = (now - oc.opened_at_ts) / 60
             _LOGGER.warning(
                 "[deriv-recon] GHOST purged: contract_id=%s symbol=%s side=%s "
-                "stake=%.2f — not found in broker portfolio",
-                cid, oc.symbol, oc.side, oc.stake_usdt,
+                "stake=%.2f age=%.1fmin — not found in broker portfolio",
+                cid, oc.symbol, oc.side, oc.stake_usdt, age_min,
             )
 
             record = {
@@ -669,7 +707,7 @@ class DerivTradeExecutor:
                 "realized_pnl_usdt": 0.0,
                 "exit_reason": "lost_or_ghost_closed",
                 "opened_at_ts": oc.opened_at_ts,
-                "closed_at_ts": time.time(),
+                "closed_at_ts": now,
                 "score_breakdown": oc.score_breakdown,
                 "max_hold_seconds": oc.max_hold_seconds,
             }
