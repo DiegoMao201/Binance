@@ -194,6 +194,56 @@ function TabBar({ tabs, active, onChange }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   TOOLTIP HINT — quant term explanations (modo simple)
+   ════════════════════════════════════════════════════════════════════════ */
+function TooltipHint({ tip }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <span
+        onMouseEnter={() => setShow(true)}
+        onMouseLeave={() => setShow(false)}
+        style={{
+          cursor: "help", color: T.mute, fontSize: 8, marginLeft: 3, fontWeight: 700,
+          border: `1px solid ${T.mute}55`, borderRadius: "50%",
+          width: 12, height: 12, display: "inline-flex", alignItems: "center",
+          justifyContent: "center", lineHeight: 1, flexShrink: 0,
+        }}>?</span>
+      {show && (
+        <span style={{
+          position: "absolute", bottom: "130%", left: "50%",
+          transform: "translateX(-50%)",
+          background: T.panel2, border: `1px solid ${T.borderH}`,
+          color: T.textD, fontSize: 10, padding: "7px 10px",
+          borderRadius: 7, width: 220, zIndex: 300, pointerEvents: "none",
+          boxShadow: "0 6px 24px rgba(0,0,0,0.6)",
+          whiteSpace: "normal", lineHeight: 1.55, fontFamily: FONT_MONO,
+        }}>{tip}</span>
+      )}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SIDE BADGE — dirección de la posición
+   ════════════════════════════════════════════════════════════════════════ */
+function SideBadge({ side }) {
+  const isUp   = String(side || "").toUpperCase().includes("UP");
+  const isDown = String(side || "").toUpperCase().includes("DOWN");
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 3,
+      background: isUp ? `${T.green}22` : isDown ? `${T.red}22` : `${T.mute}22`,
+      color: isUp ? T.green : isDown ? T.red : T.mute,
+      letterSpacing: "0.1em",
+      border: `1px solid ${isUp ? T.green + "44" : isDown ? T.red + "44" : T.mute + "22"}`,
+    }}>
+      {isUp ? "▲ SUBE" : isDown ? "▼ BAJA" : side || "–"}
+    </span>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    CHART HELPERS
    ════════════════════════════════════════════════════════════════════════ */
 const CHART_GRID = "rgba(255,255,255,0.04)";
@@ -227,13 +277,14 @@ function chartTooltip(formatter) {
    ROOT
    ════════════════════════════════════════════════════════════════════════ */
 const TABS = [
-  { id: "overview",  label: "Overview",  icon: "◉" },
-  { id: "analytics", label: "Analytics", icon: "▤" },
-  { id: "telemetry", label: "Telemetry", icon: "◈" },
-  { id: "decisions", label: "Decisions", icon: "▸" },
-  { id: "symbols",   label: "Symbols",   icon: "✦" },
-  { id: "logs",      label: "Logs",      icon: "≡" },
-  { id: "export",    label: "Export",    icon: "↓" },
+  { id: "operaciones", label: "Operaciones", icon: "◎" },
+  { id: "overview",    label: "Overview",    icon: "◉" },
+  { id: "analytics",   label: "Analytics",   icon: "▤" },
+  { id: "telemetry",   label: "Telemetry",   icon: "◈" },
+  { id: "decisions",   label: "Decisions",   icon: "▸" },
+  { id: "symbols",     label: "Symbols",     icon: "✦" },
+  { id: "logs",        label: "Logs",        icon: "≡" },
+  { id: "export",      label: "Export",      icon: "↓" },
 ];
 
 export default function DerivAnalyticsClient({ initialState }) {
@@ -291,6 +342,7 @@ export default function DerivAnalyticsClient({ initialState }) {
         <motion.div key={tab}
           initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.18 }}>
+          {tab === "operaciones" && <OperacionesTab data={data} />}
           {tab === "overview"  && <OverviewTab data={data} />}
           {tab === "analytics" && <AnalyticsTab data={data} />}
           {tab === "telemetry" && <TelemetryTab data={data} />}
@@ -371,6 +423,307 @@ function ErrorShell({ err, onRetry }) {
         <span style={{ color: T.textD, fontSize: 11 }}>{err}</span>
         <button onClick={onRetry} style={btnStyle(T.cyan)}>↻ RETRY</button>
       </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   TAB 0 — OPERACIONES
+   ════════════════════════════════════════════════════════════════════════ */
+function OpenContractCard({ c }) {
+  const pnl = Number(c.floating_pnl ?? c.pnl ?? 0);
+  const pnlColor = pnl > 0.001 ? T.green : pnl < -0.001 ? T.red : T.textD;
+  const sym = c.symbol || c.underlying || "–";
+  const openedTs = c.opened_at_ts;
+  const openedSec = openedTs ? Number(openedTs > 1e12 ? openedTs / 1000 : openedTs) : null;
+  const duration = openedSec ? Math.round(Date.now() / 1000 - openedSec) : null;
+  return (
+    <div style={{
+      background: T.panel2, borderRadius: 10,
+      border: `1px solid ${pnl > 0.001 ? T.green + "55" : pnl < -0.001 ? T.red + "55" : T.border}`,
+      padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8,
+      boxShadow: pnl > 0.001 ? `0 0 20px ${T.green}14` : pnl < -0.001 ? `0 0 20px ${T.red}14` : "none",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{sym}</span>
+          <SideBadge side={c.side} />
+        </div>
+        <span style={{ fontSize: 18, fontWeight: 700, color: pnlColor, fontFamily: FONT_MONO }}>
+          {pnl > 0 ? "+" : ""}{n(pnl, 2)}
+        </span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+        <MicroStat lbl="STAKE"   val={`$${n(c.stake_usdt, 2)}`} />
+        <MicroStat lbl="MULT"    val={`×${c.multiplier || "–"}`} color={T.violet} />
+        <MicroStat lbl="ENTRY"   val={n(c.entry_price, 4)} color={T.cyan} />
+        <MicroStat lbl="DUR."    val={dur(duration)} color={T.amber} />
+      </div>
+      {(c.score != null || c.regime != null) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+          <MicroStat
+            lbl={<>SCORE <TooltipHint tip="Puntuación compuesta de la señal (0–10). Mayor score = entrada de mayor calidad." /></>}
+            val={c.score != null ? n(c.score, 2) : "–"}
+            color={c.score >= 7 ? T.green : c.score >= 5 ? T.amber : T.red}
+          />
+          <MicroStat
+            lbl={<>HURST <TooltipHint tip="Exponente Hurst: >0.55 = tendencia persistente, <0.45 = mean-reversion." /></>}
+            val={c.hurst != null ? n(c.hurst, 3) : "–"}
+            color={T.violet}
+          />
+          <MicroStat lbl="REGIME" val={c.regime || "–"} color={REGIME_COLORS[c.regime] || T.cyan} />
+        </div>
+      )}
+      {c.ai_approved != null && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Pill color={c.ai_approved ? T.green : T.red} size="sm">
+            {c.ai_approved ? "IA ✓" : "IA ✗"}{c.ai_confidence != null ? ` ${pct(c.ai_confidence, 0)}` : ""}
+          </Pill>
+          {c.ai_model && <span style={{ fontSize: 9, color: T.mute }}>{c.ai_model}</span>}
+        </div>
+      )}
+      <div style={{ fontSize: 9, color: T.mute, display: "flex", justifyContent: "space-between" }}>
+        <span>#{String(c.contract_id || "–").slice(-8)}</span>
+        <span>{fmtT(openedTs)}</span>
+      </div>
+    </div>
+  );
+}
+
+function OperacionesTab({ data }) {
+  const open   = data.open_contracts   || [];
+  const closed = data.closed_contracts || [];
+
+  const [symFilter,    setSymFilter]    = useState("all");
+  const [sideFilter,   setSideFilter]   = useState("all");
+  const [resultFilter, setResultFilter] = useState("all");
+  const [sortBy,       setSortBy]       = useState("date");
+  const [sortDir,      setSortDir]      = useState("desc");
+  const [search,       setSearch]       = useState("");
+  const [page,         setPage]         = useState(0);
+  const PAGE_SIZE = 25;
+
+  const syms = useMemo(
+    () => [...new Set(closed.map(c => c.symbol || c.underlying || "–"))].sort(),
+    [closed]
+  );
+
+  const filteredClosed = useMemo(() => {
+    const rows = closed.filter(c => {
+      const sym = c.symbol || c.underlying || "–";
+      const pnl = Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0);
+      if (symFilter !== "all" && sym !== symFilter) return false;
+      if (sideFilter !== "all") {
+        const s = String(c.side || "").toUpperCase();
+        if (sideFilter === "up"   && !s.includes("UP"))   return false;
+        if (sideFilter === "down" && !s.includes("DOWN")) return false;
+      }
+      if (resultFilter === "win"  && pnl <= 0) return false;
+      if (resultFilter === "loss" && pnl >= 0) return false;
+      if (search) {
+        const q = `${sym} ${c.side || ""} ${c.exit_reason || ""}`.toLowerCase();
+        if (!q.includes(search.toLowerCase())) return false;
+      }
+      return true;
+    });
+    rows.sort((a, b) => {
+      let va = 0, vb = 0;
+      if (sortBy === "date")  { va = Number(a.closed_at_ts || a.opened_at_ts || 0); vb = Number(b.closed_at_ts || b.opened_at_ts || 0); }
+      if (sortBy === "pnl")   { va = Number(a.realized_pnl_usdt ?? a.pnl ?? 0); vb = Number(b.realized_pnl_usdt ?? b.pnl ?? 0); }
+      if (sortBy === "score") { va = Number(a.score || 0); vb = Number(b.score || 0); }
+      if (sortBy === "dur") {
+        const d1 = a.closed_at_ts && a.opened_at_ts ? Math.abs(Number(a.closed_at_ts) - Number(a.opened_at_ts)) : 0;
+        const d2 = b.closed_at_ts && b.opened_at_ts ? Math.abs(Number(b.closed_at_ts) - Number(b.opened_at_ts)) : 0;
+        va = d1; vb = d2;
+      }
+      return sortDir === "desc" ? vb - va : va - vb;
+    });
+    return rows;
+  }, [closed, symFilter, sideFilter, resultFilter, search, sortBy, sortDir]);
+
+  const totalPages  = Math.ceil(filteredClosed.length / PAGE_SIZE);
+  const paginated   = filteredClosed.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const wins        = filteredClosed.filter(c => Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0) > 0).length;
+  const totalPnl    = filteredClosed.reduce((s, c) => s + Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0), 0);
+  const winRate     = filteredClosed.length > 0 ? wins / filteredClosed.length : null;
+
+  const SortBtn = ({ id, label }) => (
+    <button
+      onClick={() => {
+        if (sortBy === id) setSortDir(d => d === "desc" ? "asc" : "desc");
+        else { setSortBy(id); setSortDir("desc"); setPage(0); }
+      }}
+      style={{
+        background: sortBy === id ? `${T.cyan}18` : "transparent",
+        color: sortBy === id ? T.cyan : T.mute,
+        border: `1px solid ${sortBy === id ? T.cyan + "44" : "transparent"}`,
+        borderRadius: 4, padding: "3px 8px", cursor: "pointer",
+        fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
+      }}
+    >{label}{sortBy === id ? (sortDir === "desc" ? " ↓" : " ↑") : ""}</button>
+  );
+
+  const exportUrl = (fmt) => {
+    const p = new URLSearchParams({ dataset: "trades", format: fmt });
+    if (symFilter    !== "all") p.set("symbol", symFilter);
+    if (sideFilter   === "up")   p.set("side", "MULTUP");
+    if (sideFilter   === "down") p.set("side", "MULTDOWN");
+    if (resultFilter !== "all") p.set("result", resultFilter);
+    return `/api/deriv-analytics/export?${p.toString()}`;
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+      {/* ── POSICIONES ABIERTAS ── */}
+      <Panel
+        title={`posiciones abiertas · ${open.length}`}
+        right={open.length > 0 ? <span style={{ color: T.amber, fontWeight: 700, fontSize: 10 }}>● LIVE</span> : null}
+        glow
+      >
+        {open.length === 0
+          ? <div style={{ color: T.mute, fontSize: 11, padding: "6px 0" }}>sin posiciones abiertas en este momento</div>
+          : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+              {open.map((c, i) => <OpenContractCard key={c.contract_id || i} c={c} />)}
+            </div>
+        }
+      </Panel>
+
+      {/* ── KPI STRIP ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+        <KPI label="Trades (filtro)" value={nC(filteredClosed.length)} accent={T.cyan} />
+        <KPI label="Ganadas"  value={wins}  color={T.green} accent={T.green} />
+        <KPI label="Perdidas" value={filteredClosed.length - wins} color={T.red} accent={T.red} />
+        <KPI label="Winrate" value={winRate != null ? pct(winRate) : "–"} color={winRate != null ? (winRate >= 0.5 ? T.green : T.red) : T.textD} accent={T.violet} />
+        <KPI label="PnL filtrado" value={`${totalPnl >= 0 ? "+" : ""}$${n(totalPnl, 2)}`} color={tone(totalPnl)} accent={tone(totalPnl)} />
+      </div>
+
+      {/* ── TABLA HISTÓRICA ── */}
+      <Panel
+        title={`historial de operaciones · ${filteredClosed.length} trades`}
+        pad={false}
+        right={
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              value={search} onChange={e => { setSearch(e.target.value); setPage(0); }}
+              placeholder="buscar…" style={inputStyle}
+            />
+            <select value={symFilter} onChange={e => { setSymFilter(e.target.value); setPage(0); }}
+              style={{ ...inputStyle, minWidth: 110 }}>
+              <option value="all">Todos los símbolos</option>
+              {syms.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select value={sideFilter} onChange={e => { setSideFilter(e.target.value); setPage(0); }}
+              style={{ ...inputStyle, minWidth: 90 }}>
+              <option value="all">SUBE + BAJA</option>
+              <option value="up">▲ Solo SUBE</option>
+              <option value="down">▼ Solo BAJA</option>
+            </select>
+            <select value={resultFilter} onChange={e => { setResultFilter(e.target.value); setPage(0); }}
+              style={{ ...inputStyle, minWidth: 100 }}>
+              <option value="all">Todos resultados</option>
+              <option value="win">✓ Solo wins</option>
+              <option value="loss">✗ Solo losses</option>
+            </select>
+          </div>
+        }
+      >
+        {/* Sort + Export row */}
+        <div style={{ display: "flex", gap: 6, padding: "10px 14px 6px", borderBottom: `1px solid ${T.border}`, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.12em", fontWeight: 700 }}>ORDEN:</span>
+          <SortBtn id="date"  label="FECHA" />
+          <SortBtn id="pnl"   label="PNL" />
+          <SortBtn id="score" label="SCORE" />
+          <SortBtn id="dur"   label="DUR." />
+          <div style={{ flex: 1 }} />
+          <a href={exportUrl("csv")}  download style={{ ...btnStyle(T.green), textDecoration: "none", padding: "3px 10px" }}>↓ CSV</a>
+          <a href={exportUrl("json")} download style={{ ...btnStyle(T.cyan),  textDecoration: "none", padding: "3px 10px" }}>↓ JSON</a>
+          <a href={exportUrl("csv") + "&all=1"} download style={{ ...btnStyle(T.amber), textDecoration: "none", padding: "3px 10px" }}>↓ MUESTRA COMPLETA</a>
+        </div>
+
+        {/* Column headers */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "28px 100px 72px 54px 44px 60px 54px 84px 84px 1fr 70px",
+          gap: 4, padding: "6px 14px",
+          fontSize: 9, color: T.mute, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase",
+          borderBottom: `1px solid ${T.border}`,
+        }}>
+          <span>#</span>
+          <span>SÍMBOLO</span>
+          <span>DIRECCIÓN</span>
+          <span>STAKE</span>
+          <span>MULT</span>
+          <span>
+            SCORE{" "}
+            <TooltipHint tip="Puntuación compuesta de la señal de entrada (0–10). Mayor score = mayor calidad de entrada." />
+          </span>
+          <span>DUR.</span>
+          <span>APERTURA</span>
+          <span>CIERRE</span>
+          <span>RAZÓN</span>
+          <span>PNL</span>
+        </div>
+
+        {/* Rows */}
+        <div style={{ maxHeight: 560, overflowY: "auto" }}>
+          {paginated.length === 0 && (
+            <div style={{ color: T.mute, fontSize: 11, padding: "16px 14px" }}>sin trades con los filtros seleccionados</div>
+          )}
+          {paginated.map((c, i) => {
+            const pnl    = Number(c.realized_pnl_usdt ?? c.pnl ?? c.profit ?? 0);
+            const isWin  = pnl > 0;
+            const sym    = c.symbol || c.underlying || "–";
+            const oTs    = c.opened_at_ts;
+            const cTs    = c.closed_at_ts;
+            const sec1   = Number(oTs > 1e12 ? oTs / 1000 : oTs);
+            const sec2   = Number(cTs > 1e12 ? cTs / 1000 : cTs);
+            const holdSec = oTs && cTs ? Math.abs(sec2 - sec1) : null;
+            const rowIdx  = page * PAGE_SIZE + i;
+            return (
+              <div key={c.contract_id || i} style={{
+                display: "grid",
+                gridTemplateColumns: "28px 100px 72px 54px 44px 60px 54px 84px 84px 1fr 70px",
+                gap: 4, padding: "5px 14px",
+                background: rowIdx % 2 === 0 ? T.panel2 : T.panel,
+                alignItems: "center", fontSize: 10,
+                borderLeft: `3px solid ${isWin ? T.green + "66" : T.red + "66"}`,
+              }}>
+                <span style={{ color: T.mute, fontSize: 9 }}>{rowIdx + 1}</span>
+                <span style={{ fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sym}</span>
+                <SideBadge side={c.side} />
+                <span style={{ color: T.textD }}>{n(c.stake_usdt, 2)}</span>
+                <span style={{ color: T.violet }}>×{c.multiplier || "–"}</span>
+                <span style={{ color: c.score != null ? (c.score >= 7 ? T.green : c.score >= 5 ? T.amber : T.red) : T.mute }}>
+                  {c.score != null ? n(c.score, 1) : "–"}
+                </span>
+                <span style={{ color: T.textD }}>{dur(holdSec)}</span>
+                <span style={{ color: T.mute, fontSize: 9 }}>{fmtDT(oTs)}</span>
+                <span style={{ color: T.mute, fontSize: 9 }}>{fmtDT(cTs)}</span>
+                <span style={{ color: T.textD, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 9 }}>
+                  {c.exit_reason || "–"}
+                </span>
+                <span style={{ fontWeight: 700, color: isWin ? T.green : T.red }}>
+                  {pnl > 0 ? "+" : ""}{n(pnl, 2)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: `1px solid ${T.border}`, alignItems: "center" }}>
+            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+              style={{ ...btnStyle(T.cyan), opacity: page === 0 ? 0.3 : 1 }}>← PREV</button>
+            <span style={{ fontSize: 10, color: T.mute, flex: 1, textAlign: "center" }}>
+              Página {page + 1} de {totalPages} · {filteredClosed.length} trades
+            </span>
+            <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
+              style={{ ...btnStyle(T.cyan), opacity: page >= totalPages - 1 ? 0.3 : 1 }}>NEXT →</button>
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }
@@ -500,6 +853,119 @@ function BucketTable({ data, keyName = "key", colorMap }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   AUTO-INSIGHTS — genera análisis automáticos en español
+   ════════════════════════════════════════════════════════════════════════ */
+function AutoInsights({ data }) {
+  const insights = useMemo(() => {
+    const g         = data?.global        || {};
+    const bySymbol  = data?.by_symbol     || {};
+    const byRegime  = data?.by_regime     || {};
+    const byScore   = data?.by_score_band || {};
+    const byHurst   = data?.by_hurst_zone || {};
+    const decisions = data?.decisions?.recent || [];
+    const N_MIN = 5;
+    const res = [];
+
+    if ((g.total_trades || 0) < N_MIN) {
+      res.push({ icon: "◷", c: T.mute, txt: `Necesitas al menos ${N_MIN} trades completados para generar insights automáticos.` });
+      return res;
+    }
+
+    // Winrate
+    const wr = g.winrate;
+    if (wr >= 0.6)      res.push({ icon: "✓", c: T.green, txt: `Winrate de ${pct(wr, 0)} en ${g.total_trades} trades — rendimiento sólido.` });
+    else if (wr < 0.4)  res.push({ icon: "⚠", c: T.red,   txt: `Winrate en ${pct(wr, 0)} — por debajo del 50%. Considera revisar los filtros de entrada.` });
+    else                res.push({ icon: "◉", c: T.amber,  txt: `Winrate de ${pct(wr, 0)} — dentro del rango neutro. Hay margen para optimizar.` });
+
+    // Profit factor
+    if (g.profit_factor != null) {
+      if (g.profit_factor >= 1.5)     res.push({ icon: "★", c: T.green, txt: `Profit Factor ${n(g.profit_factor, 2)}: cada $1 arriesgado genera $${n(g.profit_factor, 2)} en ganancias brutas.` });
+      else if (g.profit_factor < 1.0) res.push({ icon: "✗", c: T.red,   txt: `Profit Factor de ${n(g.profit_factor, 2)}: el sistema está perdiendo en términos brutos. Revisa los filtros de entrada.` });
+    }
+
+    // Best / worst symbol
+    const symRows = Object.entries(bySymbol).filter(([, v]) => (v.n || 0) >= N_MIN);
+    if (symRows.length > 0) {
+      const [bestSym, bestV]   = symRows.reduce((a, b) => (b[1].pnl || 0) > (a[1].pnl || 0) ? b : a);
+      const [worstSym, worstV] = symRows.reduce((a, b) => (b[1].pnl || 0) < (a[1].pnl || 0) ? b : a);
+      res.push({ icon: "◉", c: T.cyan, txt: `${bestSym} es el símbolo más rentable: $${n(bestV.pnl, 2)} PnL, ${pct(bestV.winrate, 0)} WR.` });
+      if (worstSym !== bestSym)
+        res.push({ icon: "⚡", c: T.amber, txt: `${worstSym} arrastra el PnL con $${n(worstV.pnl, 2)}. Considera ajustar su perfil de entrada.` });
+    }
+
+    // Best / worst regime
+    const regRows = Object.entries(byRegime).filter(([, v]) => (v.n || 0) >= N_MIN);
+    if (regRows.length >= 2) {
+      const [bestReg, bestRV]   = regRows.reduce((a, b) => (b[1].winrate || 0) > (a[1].winrate || 0) ? b : a);
+      const [worstReg, worstRV] = regRows.reduce((a, b) => (b[1].winrate || 0) < (a[1].winrate || 0) ? b : a);
+      res.push({ icon: "◈", c: REGIME_COLORS[bestReg] || T.cyan, txt: `Mejor régimen de mercado: ${bestReg} con ${pct(bestRV.winrate, 0)} WR y PF ${n(bestRV.profit_factor, 2)}.` });
+      if (worstReg !== bestReg && (worstRV.winrate || 0) < 0.4)
+        res.push({ icon: "⚠", c: T.amber, txt: `Régimen ${worstReg} tiene WR de ${pct(worstRV.winrate, 0)} — candidato a filtrar o reducir exposición.` });
+    }
+
+    // Score band efficiency
+    const scoreBands = Object.entries(byScore).filter(([, v]) => (v.n || 0) >= N_MIN);
+    if (scoreBands.length >= 2) {
+      const [bestBand, bestBV] = scoreBands.reduce((a, b) =>
+        ((b[1].pnl || 0) / (b[1].n || 1)) > ((a[1].pnl || 0) / (a[1].n || 1)) ? b : a
+      );
+      res.push({ icon: "◎", c: T.violet, txt: `Zona de score más eficiente: ${bestBand} con $${n((bestBV.pnl || 0) / (bestBV.n || 1), 3)} PnL/trade.` });
+    }
+
+    // AI filter ratio
+    if (decisions.length >= 20) {
+      const aiBlocked = decisions.filter(d => !d.allowed && String(d.reason || "").toUpperCase().includes("AI")).length;
+      const aiRate    = aiBlocked / decisions.length;
+      if (aiRate > 0.3)
+        res.push({ icon: "🤖", c: T.violet, txt: `La IA está bloqueando el ${pct(aiRate, 0)} de las señales. Si parece excesivo, revisa el umbral AI en la config.` });
+      else if (aiRate < 0.05 && decisions.length > 50)
+        res.push({ icon: "🤖", c: T.cyan, txt: `La IA aprueba casi todo (${pct(1 - aiRate, 0)}). El filtro AI podría estar demasiado permisivo — verifica la conectividad.` });
+    }
+
+    // Hurst zone
+    const hurstRows = Object.entries(byHurst).filter(([, v]) => (v.n || 0) >= N_MIN);
+    if (hurstRows.length >= 2) {
+      const [bestH, bestHV] = hurstRows.reduce((a, b) => (b[1].winrate || 0) > (a[1].winrate || 0) ? b : a);
+      res.push({ icon: "〰", c: T.blue, txt: `Zona Hurst más rentable: ${bestH} (WR ${pct(bestHV.winrate, 0)}). Prioriza entradas en esta zona.` });
+    }
+
+    // Drawdown warning
+    const ddPct = g.max_drawdown?.max_dd_pct;
+    if (ddPct != null && ddPct > 0.15)
+      res.push({ icon: "▼", c: T.red, txt: `Max drawdown de ${pct(ddPct, 1)}: zona de riesgo elevado. Revisa los límites del risk manager.` });
+
+    // Expectancy
+    if (g.expectancy != null) {
+      if (g.expectancy > 0)       res.push({ icon: "→", c: T.green, txt: `Expectancy positiva de $${n(g.expectancy, 3)} por trade — el sistema es matemáticamente rentable.` });
+      else if (g.expectancy < 0)  res.push({ icon: "→", c: T.red,   txt: `Expectancy negativa ($${n(g.expectancy, 3)}/trade) — el sistema pierde dinero en promedio. Revisa ratio riesgo/recompensa.` });
+    }
+
+    return res;
+  }, [data]);
+
+  return (
+    <Panel
+      title="insights automáticos"
+      right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>basado en datos reales · español</span>}
+      glow
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {insights.map((ins, i) => (
+          <div key={i} style={{
+            display: "flex", gap: 10, alignItems: "flex-start",
+            padding: "8px 12px", borderRadius: 6,
+            background: `${ins.c}0d`, border: `1px solid ${ins.c}22`,
+          }}>
+            <span style={{ fontSize: 13, color: ins.c, flexShrink: 0, marginTop: 1 }}>{ins.icon}</span>
+            <span style={{ fontSize: 11, color: T.textD, lineHeight: 1.55, fontFamily: FONT_MONO }}>{ins.txt}</span>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    TAB 2 — ANALYTICS
    ════════════════════════════════════════════════════════════════════════ */
 function AnalyticsTab({ data }) {
@@ -507,6 +973,7 @@ function AnalyticsTab({ data }) {
   const rolling = w === 20 ? data.rolling_20 : data.rolling_50;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <AutoInsights data={data} />
       <Panel
         title={`rolling metrics · window=${w}`}
         right={<div style={{ display: "flex", gap: 4 }}>{[20, 50].map(x => <button key={x} onClick={() => setW(x)} style={{ ...btnStyle(w === x ? T.cyan : T.mute), padding: "3px 8px", fontSize: 9 }}>{x}</button>)}</div>}
@@ -700,6 +1167,117 @@ function DrawdownChart({ equity }) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   DECISION FUNNEL — embudo visual del pipeline de señales
+   ════════════════════════════════════════════════════════════════════════ */
+function DecisionFunnel({ decisions = [], pipelineCounts }) {
+  const N = decisions.length;
+  if (N === 0 && !pipelineCounts) return <div style={{ color: T.mute, fontSize: 11 }}>sin datos de pipeline</div>;
+
+  // Derive counts from decisions log
+  const blocked = { cooldown: 0, score: 0, hurst: 0, regime: 0, ai: 0, other: 0 };
+  for (const d of decisions) {
+    if (d.allowed) continue;
+    const r = String(d.reason || "").toUpperCase();
+    if      (r.includes("COOLDOWN"))                                           blocked.cooldown++;
+    else if (r.includes("SCORE") || r.includes("PROFILE") || r.includes("MIN_SCORE")) blocked.score++;
+    else if (r.includes("HURST"))                                              blocked.hurst++;
+    else if (r.includes("AI") || r.includes("VETO"))                          blocked.ai++;
+    else if (r.includes("REGIME") || r.includes("STRATEGY"))                  blocked.regime++;
+    else                                                                       blocked.other++;
+  }
+  const executed = decisions.filter(d => d.allowed).length;
+
+  // Override with backend counters if present
+  const pc = pipelineCounts || {};
+  const stagesRaw = [
+    { label: "SEÑALES EVALUADAS", color: T.cyan,   n: pc.total    || N,
+      desc: "Total de setups evaluados por el pipeline" },
+    { label: "COOLDOWN OK",       color: T.blue,   n: pc.pass_cd  || Math.max(0, N - blocked.cooldown),
+      blocked: pc.block_cd  != null ? pc.block_cd  : blocked.cooldown,
+      desc: "Señales que pasan el filtro de cooldown entre trades" },
+    { label: "SCORE PASS",        color: T.violet, n: pc.pass_sc  || Math.max(0, N - blocked.cooldown - blocked.score),
+      blocked: pc.block_sc  != null ? pc.block_sc  : blocked.score,
+      desc: "Señales con score ≥ umbral mínimo configurado" },
+    { label: "HURST PASS",        color: T.amber,  n: pc.pass_h   || Math.max(0, N - blocked.cooldown - blocked.score - blocked.hurst),
+      blocked: pc.block_h   != null ? pc.block_h   : blocked.hurst,
+      desc: "Señales en zona Hurst favorable para la estrategia" },
+    { label: "RÉGIMEN OK",        color: T.green,  n: pc.pass_reg || Math.max(0, N - blocked.cooldown - blocked.score - blocked.hurst - blocked.regime),
+      blocked: pc.block_reg != null ? pc.block_reg : blocked.regime,
+      desc: "Señales cuyo régimen de mercado es compatible con la estrategia" },
+    { label: "APROBADO IA",       color: T.cyan,   n: pc.pass_ai  || Math.max(0, N - blocked.cooldown - blocked.score - blocked.hurst - blocked.regime - blocked.ai),
+      blocked: pc.block_ai  != null ? pc.block_ai  : blocked.ai,
+      desc: "Señales que superan el gate de análisis de la IA" },
+    { label: "EJECUTADO",         color: T.green,  n: pc.exec     || executed,
+      blocked: 0,
+      desc: "Contratos efectivamente abiertos" },
+  ].map(s => ({ ...s, n: Math.max(0, s.n ?? 0), blocked: Math.max(0, s.blocked ?? 0) }));
+
+  const maxN = stagesRaw[0].n || 1;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {stagesRaw.map((s, i) => {
+        const w = (s.n / maxN) * 100;
+        const dropPct = i > 0 && stagesRaw[i - 1].n > 0 ? 1 - s.n / stagesRaw[i - 1].n : 0;
+        return (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {/* Stage label */}
+            <div style={{ width: 148, textAlign: "right", flexShrink: 0 }}>
+              <span style={{ fontSize: 9, color: s.color, fontWeight: 700, letterSpacing: "0.09em" }}>{s.label}</span>
+            </div>
+            {/* Bar */}
+            <div title={s.desc} style={{
+              flex: 1, height: 28, background: T.bg, borderRadius: 5,
+              overflow: "hidden", position: "relative", cursor: "help",
+            }}>
+              <div style={{
+                width: `${w}%`, height: "100%",
+                background: `linear-gradient(90deg, ${s.color}55, ${s.color}28)`,
+                border: `1px solid ${s.color}66`, borderRadius: 5,
+                transition: "width 500ms ease",
+              }} />
+              <span style={{
+                position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)",
+                fontSize: 12, fontWeight: 700, color: s.color,
+              }}>{nC(s.n, 0)}</span>
+              <span style={{
+                position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                fontSize: 9, color: T.mute,
+              }}>{pct(s.n / maxN, 0)}</span>
+            </div>
+            {/* Drop-off indicator */}
+            <div style={{ width: 80, flexShrink: 0, textAlign: "left" }}>
+              {s.blocked > 0
+                ? <span style={{ fontSize: 10, color: T.red, fontWeight: 700 }}>−{nC(s.blocked, 0)}
+                    {dropPct > 0 && <span style={{ fontSize: 8, color: T.mute }}> ({pct(dropPct, 0)})</span>}
+                  </span>
+                : i === stagesRaw.length - 1
+                  ? <span style={{ fontSize: 9, color: T.green, fontWeight: 700 }}>EXEC ✓</span>
+                  : <span />
+              }
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ marginTop: 4, padding: "8px 12px", background: `${T.cyan}0a`, borderRadius: 6, border: `1px solid ${T.cyan}22` }}>
+        <span style={{ fontSize: 10, color: T.mute }}>
+          Tasa de ejecución:{" "}
+          <span style={{ color: T.cyan, fontWeight: 700 }}>
+            {maxN > 0 ? pct((stagesRaw[stagesRaw.length - 1].n) / maxN, 1) : "–"}
+          </span>
+          {" "}· Bloqueadas por IA:{" "}
+          <span style={{ color: T.violet, fontWeight: 700 }}>{nC(blocked.ai, 0)}</span>
+          {" "}· Por score:{" "}
+          <span style={{ color: T.amber, fontWeight: 700 }}>{nC(blocked.score, 0)}</span>
+          {" "}· Por Hurst:{" "}
+          <span style={{ color: T.red, fontWeight: 700 }}>{nC(blocked.hurst, 0)}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    TAB 3 — TELEMETRY
    ════════════════════════════════════════════════════════════════════════ */
 function TelemetryTab({ data }) {
@@ -707,8 +1285,10 @@ function TelemetryTab({ data }) {
   const symbols = Object.keys(last).sort();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <Panel title="signal → execution pipeline" glow>
-        <PipelineFlow decisions={data.decisions?.recent || []} />
+      <Panel title="embudo de decisión · señal → ejecución" glow right={
+        <span style={{ fontSize: 9, color: T.mute }}>{data.decisions?.recent?.length || 0} evaluaciones recientes</span>
+      }>
+        <DecisionFunnel decisions={data.decisions?.recent || []} pipelineCounts={data.decisions?.pipeline_counts} />
       </Panel>
       <Panel title={`per-symbol live state · ${symbols.length} symbols`}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
@@ -1039,9 +1619,10 @@ function RegimeMix({ counts }) {
    TAB 6 — LOGS
    ════════════════════════════════════════════════════════════════════════ */
 function LogsTab({ data }) {
-  const [search, setSearch] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [severity, setSeverity] = useState("all");
+  const [search,      setSearch]      = useState("");
+  const [autoScroll,  setAutoScroll]  = useState(true);
+  const [severity,    setSeverity]    = useState("all");
+  const [groupBySym,  setGroupBySym]  = useState(false);
   const all = (data.decisions?.recent || []).slice().reverse();
   const ref = useRef(null);
   useEffect(() => { if (autoScroll && ref.current) ref.current.scrollTop = 0; }, [all.length, autoScroll]);
@@ -1049,47 +1630,126 @@ function LogsTab({ data }) {
   const severityOf = d => {
     if (d.allowed) return "info";
     const r = String(d.reason || "").toUpperCase();
-    if (r.includes("HARD") || r.includes("VETO") || r.includes("ERROR")) return "err";
+    if (r.includes("HARD") || r.includes("ERROR"))                      return "err";
+    if (r.includes("AI") || r.includes("VETO"))                         return "ai";
+    if (r.includes("HURST"))                                            return "hurst";
+    if (r.includes("SCORE") || r.includes("PROFILE"))                   return "score";
     return "warn";
   };
-  const tagColor = { info: T.green, warn: T.amber, err: T.red };
+
+  const SEVER = {
+    info:  { color: T.green,  label: "ENTRY" },
+    ai:    { color: T.violet, label: "AI-VETO" },
+    hurst: { color: T.blue,   label: "HURST" },
+    score: { color: T.amber,  label: "SCORE" },
+    warn:  { color: T.amber,  label: "BLOCK" },
+    err:   { color: T.red,    label: "ERROR" },
+  };
+  const SEV_FILTER_MAP = { info: "info", ai: "ai", hurst: "hurst", score: "score", warn: "warn", err: "err" };
+
+  const severityFilters = ["all", "info", "ai", "hurst", "score", "warn", "err"];
 
   const filtered = all
     .filter(d => severity === "all" || severityOf(d) === severity)
     .filter(d => !search || JSON.stringify(d).toLowerCase().includes(search.toLowerCase()));
 
+  const LogRow = ({ d, i }) => {
+    const sev = severityOf(d);
+    const meta = SEVER[sev] || { color: T.mute, label: "LOG" };
+    const isEntry = sev === "info";
+    return (
+      <div style={{
+        display: "flex", gap: 10, padding: "4px 2px",
+        borderBottom: `1px solid rgba(255,255,255,0.03)`,
+        background: i % 2 === 0 ? "rgba(255,255,255,0.008)" : "transparent",
+        borderLeft: `3px solid ${meta.color}55`,
+        paddingLeft: 8,
+      }}>
+        <span style={{ color: T.mute, width: 68, flexShrink: 0, fontSize: 9 }}>{fmtT(d.ts)}</span>
+        <span style={{
+          flexShrink: 0, fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+          background: `${meta.color}22`, color: meta.color,
+          border: `1px solid ${meta.color}44`, letterSpacing: "0.08em",
+          width: 66, textAlign: "center",
+        }}>{meta.label}</span>
+        <span style={{ color: T.cyan, width: 90, flexShrink: 0, fontWeight: 700 }}>{d.symbol || "—"}</span>
+        <SideBadge side={d.side} />
+        <span style={{ color: T.textD, width: 52, flexShrink: 0, fontSize: 9 }}>
+          s={d.score != null ? n(d.score, 1) : "–"}
+        </span>
+        <span style={{ color: REGIME_COLORS[d.regime] || T.mute, width: 80, flexShrink: 0, fontSize: 9 }}>
+          {d.regime || "–"}
+        </span>
+        <span style={{ color: isEntry ? T.green : T.textD, flex: 1, fontSize: 10 }}>{d.reason || (isEntry ? "ENTRY ALLOWED" : "–")}</span>
+      </div>
+    );
+  };
+
+  const renderGrouped = () => {
+    const bySymbol = {};
+    for (const d of filtered) {
+      const s = d.symbol || "—";
+      if (!bySymbol[s]) bySymbol[s] = [];
+      bySymbol[s].push(d);
+    }
+    return Object.entries(bySymbol)
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([sym, rows]) => {
+        const wins   = rows.filter(d => d.allowed).length;
+        const blocks = rows.length - wins;
+        const symColor = sym.includes("BOOM") ? T.green : sym.includes("CRASH") ? T.red : T.cyan;
+        return (
+          <div key={sym} style={{ marginBottom: 10 }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "5px 6px",
+              background: `${symColor}0d`, borderRadius: 5,
+              borderLeft: `3px solid ${symColor}66`, marginBottom: 4,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: symColor }}>{sym}</span>
+              <Pill color={T.green} size="sm">{wins} entries</Pill>
+              <Pill color={T.red}   size="sm">{blocks} blocked</Pill>
+              <span style={{ fontSize: 9, color: T.mute, marginLeft: 4 }}>{rows.length} total</span>
+            </div>
+            {rows.slice(0, 50).map((d, i) => <LogRow key={i} d={d} i={i} />)}
+            {rows.length > 50 && <div style={{ fontSize: 9, color: T.mute, padding: "4px 8px" }}>+ {rows.length - 50} más…</div>}
+          </div>
+        );
+      });
+  };
+
   return (
     <Panel
-      title={`live decision log · ${filtered.length}/${all.length}`}
+      title={`decision log · ${filtered.length}/${all.length}`}
       right={
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input placeholder="search…" value={search} onChange={e => setSearch(e.target.value)} style={inputStyle} />
-          {["all", "info", "warn", "err"].map(s => (
-            <button key={s} onClick={() => setSeverity(s)} style={{ ...btnStyle(severity === s ? (tagColor[s] || T.cyan) : T.mute), padding: "3px 8px", fontSize: 9 }}>{s}</button>
-          ))}
-          <button onClick={() => setAutoScroll(!autoScroll)} style={{ ...btnStyle(autoScroll ? T.green : T.mute), padding: "3px 8px", fontSize: 9 }}>{autoScroll ? "AUTO" : "PIN"}</button>
+        <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+          <input placeholder="buscar…" value={search} onChange={e => setSearch(e.target.value)} style={inputStyle} />
+          {severityFilters.map(s => {
+            const meta = SEVER[s] || { color: T.cyan, label: "ALL" };
+            return (
+              <button key={s} onClick={() => setSeverity(s)} style={{
+                ...btnStyle(severity === s ? (meta.color || T.cyan) : T.mute),
+                padding: "3px 7px", fontSize: 9,
+              }}>{s === "all" ? "ALL" : meta.label}</button>
+            );
+          })}
+          <button onClick={() => setGroupBySym(!groupBySym)} style={{
+            ...btnStyle(groupBySym ? T.cyan : T.mute), padding: "3px 8px", fontSize: 9,
+          }}>⊞ GRUPO</button>
+          <button onClick={() => setAutoScroll(!autoScroll)} style={{
+            ...btnStyle(autoScroll ? T.green : T.mute), padding: "3px 8px", fontSize: 9,
+          }}>{autoScroll ? "AUTO" : "PIN"}</button>
         </div>
       }
       pad={false}>
       <div ref={ref} style={{
-        maxHeight: 720, overflowY: "auto", fontSize: 11, padding: 12,
+        maxHeight: 740, overflowY: "auto", fontSize: 11, padding: "10px 12px",
         background: "linear-gradient(180deg, #07090f 0%, #0a0c12 100%)",
       }}>
-        {filtered.map((d, i) => {
-          const sev = severityOf(d);
-          const sc = tagColor[sev];
-          return (
-            <div key={i} style={{ display: "flex", gap: 10, padding: "3px 0", borderBottom: `1px solid ${T.border}` }}>
-              <span style={{ color: T.mute, width: 70 }}>{fmtT(d.ts)}</span>
-              <Pill color={sc} size="sm">{sev.toUpperCase()}</Pill>
-              <span style={{ color: T.cyan, width: 90 }}>{d.symbol || "—"}</span>
-              <span style={{ color: tone(d.side === "MULTUP" ? 1 : d.side === "MULTDOWN" ? -1 : 0), width: 70 }}>{d.side || "—"}</span>
-              <span style={{ color: T.text, width: 60 }}>s={n(d.score, 2)}</span>
-              <span style={{ color: T.textD, flex: 1 }}>{d.reason}</span>
-            </div>
-          );
-        })}
-        {filtered.length === 0 && <div style={{ color: T.mute, padding: 16, textAlign: "center" }}>— empty —</div>}
+        {groupBySym
+          ? renderGrouped()
+          : filtered.slice(0, 400).map((d, i) => <LogRow key={i} d={d} i={i} />)
+        }
+        {filtered.length === 0 && <div style={{ color: T.mute, padding: 16, textAlign: "center" }}>— sin resultados —</div>}
       </div>
     </Panel>
   );
