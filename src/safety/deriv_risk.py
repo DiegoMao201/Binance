@@ -37,12 +37,15 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Iterable
 
+import numpy as np
+
 from src.strategies.deriv_signals import (
     direction_veto as _spike_direction_veto,
     forced_side as _spike_forced_side,
     is_spike_market as _is_spike_market,
 )
 from src.utils.deriv_config import DerivSettings
+from src.analysis.market_geometry import compute_geometry as _compute_geometry
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -202,7 +205,7 @@ class DerivRiskManager:
         self._daily_anchor_date = datetime.now(timezone.utc).date()
         # Per-symbol rolling tick window for synthetic ATR / trend.
         self._ticks: dict[str, list[float]] = {}
-        self._max_window = 270
+        self._max_window = 1000  # enlarged for multi-TF geometry (was 270)
         # Per-symbol rolling ATR history (last 50 ATR values for percentile)
         self._atr_history: dict[str, list[float]] = {}
         self._MAX_ATR_HISTORY = 50
@@ -446,7 +449,36 @@ class DerivRiskManager:
             snap.allowed = False
             return snap
 
-        # ── AI confidence guardrail + math override ───────────────────────
+        # ── Multi-timeframe channel geometry (advisory, additive) ──────────
+        # Vectorised in NumPy — adds/removes score based on price position
+        # within the macro regression channel.  Wrapped in try/except so
+        # any calculation error cannot crash the live pipeline.
+        try:
+            _geo = _compute_geometry(ticks, hurst=hurst)
+            if _geo.geo_score_delta != 0.0:
+                score = float(np.clip(score + _geo.geo_score_delta, 0.0, 10.0))
+                snap.reasons.append(f"geo: {_geo.geo_reason}")
+            # If geometry proposes a direction that conflicts with risk-engine
+            # side → apply a modest conviction penalty (not a hard veto)
+            if _geo.geo_side is not None and _geo.geo_side != side:
+                score = max(0.0, score - 1.0)
+                snap.reasons.append(
+                    f"geo_conflict: geo={_geo.geo_side} vs risk={side} → -1.0"
+                )
+            # Store telemetry
+            if _geo.macro:
+                ch_w = _geo.macro.upper - _geo.macro.lower
+                snap.score_breakdown["geo_channel_pos"] = round(
+                    (ticks[-1] - _geo.macro.mid) / (ch_w / 2.0)
+                    if ch_w > 0 else 0.0, 3
+                )
+                snap.score_breakdown["geo_slope_pct"] = round(
+                    _geo.macro.slope / ticks[-1] * 100.0, 5
+                )
+            snap.score_breakdown["geo_delta"] = round(_geo.geo_score_delta, 2)
+            snap.score = round(score, 3)
+        except Exception as _geo_exc:  # noqa: BLE001
+            _LOGGER.debug("[deriv-risk] geometry skipped: %s", _geo_exc)
         # If AI confidence is low but Hurst > 0.65 AND autocorr is aligned
         # with the trade side, the mathematical microstructure signal is
         # considered more reliable than the qualitative LLM opinion.
