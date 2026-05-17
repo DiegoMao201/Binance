@@ -104,6 +104,7 @@ class DerivSettings:
     max_daily_dd_pct: float
     loss_streak_lockout: int
     lockout_hours: int
+    min_stake_usdt: float
     max_spread_pct: float
 
     # ── Contract specifics ──────────────────────────────────────────────────
@@ -174,6 +175,7 @@ def load_deriv_settings() -> DerivSettings:
         max_daily_dd_pct=_get_float("DERIV_MAX_DAILY_DD_PCT", 0.02),
         loss_streak_lockout=_get_int("DERIV_LOSS_STREAK_LOCKOUT", 3),
         lockout_hours=_get_int("DERIV_LOCKOUT_HOURS", 12),
+        min_stake_usdt=_get_float("DERIV_MIN_STAKE_USDT", 10.0),
         max_spread_pct=_get_float("DERIV_MAX_SPREAD_PCT", 0.0010),
         contract_duration_sec=_get_int("DERIV_CONTRACT_DURATION_SEC", 300),
         multiplier=_get_int("DERIV_MULTIPLIER", 200),

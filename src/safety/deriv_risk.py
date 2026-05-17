@@ -483,8 +483,8 @@ class DerivRiskManager:
         # In volatile regime, reduce stake by 20%
         if regime == "volatile":
             risk_usdt *= 0.8
-        # Demo floor: always at least $3
-        min_stake = max(3.0, getattr(self._settings, "min_stake_usdt", 1.0))
+        # Broker minimum floor (Deriv requires ≥$3.93 for R_50, ≥$7.28 for R_100)
+        min_stake = self._settings.min_stake_usdt  # default 10.0 via DERIV_MIN_STAKE_USDT
         stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
         snap.suggested_stake_usdt = round(stake, 2)
         # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
