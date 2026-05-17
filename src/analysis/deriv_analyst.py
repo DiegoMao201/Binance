@@ -89,13 +89,16 @@ _AI_CACHE_TTL_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "900"))   # 15 min d
 _AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
 
 # Model preference order (all via OpenRouter — verified production model IDs)
-# google/gemini-2.5-flash-preview:05-20  — fastest, cheapest (~$0.15/M)
-# openai/gpt-4.1-mini                    — reliable backup (~$0.40/M)
-# anthropic/claude-3-5-haiku             — third fallback (~$0.80/M)
-_AI_MODELS = [
-    "google/gemini-2.5-flash-preview-05-20",
-    "openai/gpt-4.1-mini",
-    "anthropic/claude-3-5-haiku",
+# google/gemini-2.5-flash               — fastest, cheapest (~$0.15/M); stable ID (preview-05-20 is deprecated)
+# openai/gpt-4o-mini                    — reliable backup (~$0.15/M)
+# anthropic/claude-3-5-haiku            — third fallback (~$0.80/M)
+_AI_MODELS: list[str] = [
+    m.strip()
+    for m in os.getenv(
+        "DERIV_AI_MODELS",
+        "google/gemini-2.5-flash,openai/gpt-4o-mini,anthropic/claude-3-5-haiku",
+    ).split(",")
+    if m.strip()
 ]
 
 
@@ -298,7 +301,7 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
                     _OPENROUTER_URL,
                     headers=headers,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=1.0),
+                    timeout=aiohttp.ClientTimeout(total=12.0),
                 ) as resp:
                     if resp.status == 429:
                         _LOGGER.warning("[deriv-analyst] AI 429 on %s — skip", model)
@@ -601,7 +604,7 @@ class DerivAnalyst:
 
         try:
             _LOGGER.info("[deriv-analyst] consulting AI for %s (cache expired / first call)", symbol)
-            ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=8.0)
+            ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=40.0)
             # No API key configured — skip gate entirely, don't veto the trade.
             if ai_result.get("reason") == "no_api_key":
                 _LOGGER.warning(
