@@ -644,11 +644,16 @@ class DerivRiskManager:
             # (b) SMC confluence
             elif _geo is not None and _geo.smc_side is not None and _geo.smc_side == side:
                 _override_reason = f"smc_confluence: {_geo.smc_reason}"
-            # (c) Mean-reverting micro scalp
+            # (c) Mean-reverting micro scalp — STRICTLY volatility-only.
+            # BOOM/CRASH are spike-asymmetric and have no statistical band-touch
+            # edge.  Allowing this branch for spike markets caused repeated
+            # false overrides on BOOM1000/CRASH1000 that were later vetoed by
+            # the structural gate (log pollution + wasted CPU).
             elif (
                 _geo is not None and _geo.micro_band_signal is not None
                 and hurst is not None and hurst < 0.40
                 and _geo.micro_band_signal == side
+                and not _is_spike_market(symbol)
             ):
                 _override_reason = f"micro_scalp_mr: H={hurst:.3f}<0.40 band_touch={side}"
 
@@ -659,7 +664,11 @@ class DerivRiskManager:
                     f"hard_math_override: {_override_reason} "
                     f"(ai_conf={_ai_disp} < {_ai_min_conf}) — math > LLM"
                 )
-                _LOGGER.info(
+                # Demoted to DEBUG: the daemon emits an INFO ORDER log only when
+                # the override actually executes (after cooldown + structural
+                # gates).  Keeping this at INFO produced spam on every tick
+                # where math fired but the trade was later blocked downstream.
+                _LOGGER.debug(
                     "[deriv-risk] HARD_MATH_OVERRIDE %s side=%s reason=%s ai=%s",
                     symbol, side, _override_reason, _ai_disp,
                 )

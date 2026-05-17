@@ -296,8 +296,12 @@ class DerivDaemon:
         # BLOCK 1b — GATE: signal cooldown (anti-spam for ALL HARD_MATH_OVERRIDE
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
+        # Per-symbol override via ASSET_INTEL_PROFILES['cooldown_sec'] takes
+        # precedence over the global DERIV_SIGNAL_COOLDOWN_SEC env var.
         # ═══════════════════════════════════════════════════════════════════
-        _cd_sec = float(os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180"))
+        _global_cd = float(os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180"))
+        _profile_cd = float(get_asset_profile(tick.symbol).get("cooldown_sec", 0) or 0)
+        _cd_sec = _profile_cd if _profile_cd > 0 else _global_cd
         _sig_last = self._signal_cooldown.get(tick.symbol, 0.0)
         _sig_elapsed = time.time() - _sig_last
         if _sig_elapsed < _cd_sec:
@@ -363,6 +367,56 @@ class DerivDaemon:
                     score=snap.score,
                     reason=f"HURST_GATE: H={_obs_hurst:.3f} < "
                            f"min_hurst={_profile_min_hurst:.3f} ({_asset_type})",
+                    extra={
+                        "score_breakdown": snap.score_breakdown,
+                        "regime": snap.regime,
+                        "profile": _asset_profile,
+                    },
+                )
+                return
+
+        # ── Strategy-mode gate (ASSET_INTEL_PROFILES) ─────────────────────
+        # Reject setups whose mode mismatches the profile's allowed mode:
+        #   • "trend"       → block mean-reversion entries
+        #   • "mean_revert" → block trend-only setups (but breakouts still
+        #                     OK on hybrid). Trend gives a strong score so we
+        #                     gate on the explicit mean_rev_mode flag instead.
+        #   • "spike"       → only SMC or spike_hunter (already enforced by
+        #                     the structural veto inside deriv_risk).
+        #   • "hybrid"      → no extra gate.
+        _strat = str(_asset_profile.get("strategy_mode", "hybrid")).lower()
+        _mr_active = bool(snap.score_breakdown.get("mean_rev_mode"))
+        _spike_entry = bool(snap.score_breakdown.get("spike_entry"))
+        _allow_mr = bool(_asset_profile.get("allow_mean_reversion", True))
+        if snap.allowed and _mr_active and not _allow_mr:
+            _LOGGER.debug(
+                "[deriv-daemon] %s STRATEGY_GATE: mean_rev not allowed (mode=%s)",
+                tick.symbol, _strat,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"STRATEGY_GATE: mean_rev rejected (mode={_strat})",
+                extra={
+                    "score_breakdown": snap.score_breakdown,
+                    "regime": snap.regime,
+                    "profile": _asset_profile,
+                },
+            )
+            return
+        # spike strategy: must be spike_entry OR SMC active; structural veto in
+        # risk engine already enforces this — extra defensive log here is fine.
+        if snap.allowed and _strat == "spike":
+            _has_smc = bool(snap.score_breakdown.get("fvg_active"))
+            if not (_spike_entry or _has_smc):
+                _LOGGER.debug(
+                    "[deriv-daemon] %s STRATEGY_GATE: spike requires spike_entry|fvg",
+                    tick.symbol,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason="STRATEGY_GATE: spike requires spike_entry or fvg",
                     extra={
                         "score_breakdown": snap.score_breakdown,
                         "regime": snap.regime,
