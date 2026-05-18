@@ -645,13 +645,13 @@ class DerivRiskManager:
         _calm_bc_floor_used: float | None = None
         if _is_boom_crash_sym:
             if regime == "calm":
-                # Hard floor: never let the env-var push below 6.20.
-                # Values below 6.20 introduce over-triggering risk; any
-                # DERIV_CALM_STRUCTURAL_MIN_SCORE < 6.20 is silently clamped.
-                _CALM_MIN_HARD_FLOOR: float = 6.20
+                # Hard floor: never let the env-var push below 5.80.
+                # Values below 5.80 introduce over-triggering risk; any
+                # DERIV_CALM_STRUCTURAL_MIN_SCORE < 5.80 is silently clamped.
+                _CALM_MIN_HARD_FLOOR: float = 5.80
                 _bc_calm_floor = max(
                     _CALM_MIN_HARD_FLOOR,
-                    float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "6.20")),
+                    float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.80")),
                 )
                 effective_min_score = _bc_calm_floor   # direct override — no min()
                 _calm_bc_floor_used = _bc_calm_floor
@@ -662,7 +662,7 @@ class DerivRiskManager:
                     symbol, effective_min_score, _CALM_MIN_HARD_FLOOR, _atr_calm_bypassed,
                 )
             else:
-                effective_min_score = min(effective_min_score, 6.2)  # spike edge ≠ trend edge
+                effective_min_score = min(effective_min_score, 5.8)  # spike edge ≠ trend edge
         elif "R_100" in _su_sym:
             if regime == "calm":
                 effective_min_score = min(effective_min_score, 5.50)
@@ -737,6 +737,23 @@ class DerivRiskManager:
         if _mean_rev_mode:
             _setup_type = "MEAN_REV"
 
+        # ── Higher-Direction (HD) bonus — multi-timeframe macro alignment ──────
+        # Uses the 500-tick (~1H) macro trend to confirm or penalise the proposed
+        # direction AFTER trend_dir has been fully resolved (spike forced-side /
+        # mean-rev fade / OLS trend).  Applied BEFORE score_breakdown is built so
+        # both the score and the breakdown dict reflect the correct HD value.
+        _hd_bonus = self._higher_direction_bonus(ticks, trend_dir)
+        if _hd_bonus != 0.0:
+            score = max(0.0, min(10.0, score + _hd_bonus))
+            if _hd_bonus > 0:
+                snap.reasons.append(
+                    f"hd_aligned: macro_500t slope confirms {trend_dir:+d} → +{_hd_bonus:.1f}"
+                )
+            else:
+                snap.reasons.append(
+                    f"hd_opposed: macro_500t slope contradicts {trend_dir:+d} → {_hd_bonus:.1f}"
+                )
+
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
             "momentum": round(momentum_score, 2),
@@ -746,6 +763,7 @@ class DerivRiskManager:
             "streak_penalty": round(streak_penalty, 2),
             "cooldown": round(cooldown_bonus, 2),
             "headroom": round(headroom_bonus, 2),
+            "hd_bonus": round(_hd_bonus, 2),
             "regime": regime,
             "hurst_delta": round(hurst_delta, 2),
             "hurst": round(hurst, 3) if (hurst is not None and math.isfinite(hurst)) else 0.5,
@@ -1329,6 +1347,50 @@ class DerivRiskManager:
     # ─────────────────────────────────────────────────────────────────────────
     # Internal scoring helpers — v2 (smarter math)
     # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _higher_direction_bonus(
+        ticks: list[float],
+        trade_dir: int | None,
+    ) -> float:
+        """Multi-timeframe Higher Direction (HD) score.
+
+        Uses the last 500 ticks (~1H equivalent at ~1 tick/s on Deriv synthetics)
+        to determine the macro trend direction via OLS slope.  When the macro
+        slope aligns with the proposed trade direction, award +1.5.  When it
+        opposes, apply a mild -0.5 penalty.  A near-flat slope (< 0.001% per
+        tick) returns 0.0 so the bonus only activates on genuine trends.
+
+        Parameters
+        ----------
+        ticks     : full tick buffer (most recent = last element)
+        trade_dir : +1 = MULTUP (bullish), -1 = MULTDOWN (bearish), None = unknown
+        """
+        if trade_dir is None or len(ticks) < 100:
+            return 0.0
+
+        macro = ticks[-min(500, len(ticks)):]
+        n = len(macro)
+        if n < 20:
+            return 0.0
+
+        # OLS slope via normal equations (vectorised, no NumPy dep at this level)
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(macro) / n
+        ss_xy = sum((i - x_mean) * (macro[i] - y_mean) for i in range(n))
+        ss_xx = sum((i - x_mean) ** 2 for i in range(n))
+        if ss_xx == 0 or y_mean == 0:
+            return 0.0
+        slope_pct = (ss_xy / ss_xx) / y_mean * 100.0  # % per tick
+
+        if abs(slope_pct) < 0.001:   # near-flat → neutral
+            return 0.0
+
+        macro_dir = 1 if slope_pct > 0 else -1
+        if macro_dir == trade_dir:
+            return 1.5    # ← HD aligned: macro trend confirms trade direction
+        return -0.5       # ← HD opposed: macro trend contradicts trade direction
+
     @staticmethod
     def _synthetic_atr(ticks: list[float]) -> float:
         """Mean absolute first-difference over the last 30 ticks."""

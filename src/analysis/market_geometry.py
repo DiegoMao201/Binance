@@ -29,10 +29,11 @@ from typing import Sequence
 import numpy as np
 
 # SMC bonus weight — configurable via env var.
-# Default 2.0 (reduced from 3.5 to prevent SMC from single-handedly dominating the score).
-# At +2.0 a solid base score (5.5-6.5) + SMC = 7.5-8.5 → passes min_score.
-# A weak base (<5.0) + SMC = <7.0 → still fails, requiring genuine edge elsewhere.
-_SMC_BONUS = float(os.getenv("DERIV_SMC_BONUS", "2.0"))
+# Default 3.0: FVG mitigation + BOS / divergence confluence → +3.0.
+# At +3.0 a baseline score (4.0-5.0) + SMC = 7.0-8.0 → passes spike min_score.
+# FVG alone (no secondary confirmation) → +1.0 (partial signal).
+_SMC_BONUS = float(os.getenv("DERIV_SMC_BONUS", "3.0"))  # full confluence bonus
+_SMC_PARTIAL = float(os.getenv("DERIV_SMC_PARTIAL", "1.0"))  # FVG alone
 
 # ── Window sizes (ticks ≈ 1–2 ticks/s on Deriv synthetics) ──────────────────
 WIN_MACRO = 500     # ~M15  (last 500 ticks)
@@ -89,8 +90,10 @@ class GeometryResult:
     fvg_direction: str = ""         # "bullish" / "bearish" / ""
     gap_mitigated: bool = False     # current tick has reached the 50 % level
     divergence: str = ""            # "bullish" / "bearish" / ""
+    bos_confirmed: bool = False     # Break of Structure confirmed
+    bos_direction: str = ""         # "bullish" / "bearish" / ""
     smc_side: str | None = None     # composite SMC suggestion (MULTUP/MULTDOWN)
-    smc_bonus: float = 0.0          # +3.5 when full SMC confluence triggers
+    smc_bonus: float = 0.0          # +3.0 (full) or +1.0 (partial FVG)
     smc_reason: str = ""            # human-readable label
     micro_band_signal: str | None = None  # micro-channel 1.5σ touch signal
 
@@ -101,6 +104,8 @@ FVG_MIN_GAP_PCT   = 0.00010   # 0.010 %  minimum gap width to be relevant
 ROC_PERIOD        = 14        # ticks for momentum rate-of-change
 DIV_PIVOT_RANGE   = 30        # ticks to evaluate price/momentum divergence
 MICRO_BAND_SIGMA  = 1.5       # σ band of micro-channel for scalp trigger
+BOS_LOOKBACK      = 60        # ticks to scan for swing pivots (BOS detection)
+BOS_PIVOT_ORDER   = 4         # pivot neighbourhood for BOS extrema
 
 
 # ─── Internal computations ────────────────────────────────────────────────────
@@ -293,6 +298,65 @@ def _micro_band_signal(micro: ChannelGeometry, current_price: float) -> str | No
     return None
 
 
+def _detect_bos(prices: np.ndarray) -> tuple[bool, str]:
+    """Break of Structure (BOS) detector.
+
+    Scans the last BOS_LOOKBACK ticks for swing pivots and checks if the
+    current price has broken the most recent swing structure:
+
+    Bullish BOS  — last confirmed Higher Low sequence (swing_lows[-1] >
+                   swing_lows[-2]) AND current price > most recent swing high.
+    Bearish BOS  — last confirmed Lower High sequence (swing_highs[-1] <
+                   swing_highs[-2]) AND current price < most recent swing low.
+
+    Returns (confirmed: bool, direction: str)  where direction is
+    "bullish", "bearish", or "" when not confirmed.
+    """
+    n = len(prices)
+    if n < BOS_LOOKBACK + BOS_PIVOT_ORDER * 2:
+        return False, ""
+
+    seg = prices[-BOS_LOOKBACK:]
+    order = BOS_PIVOT_ORDER
+    seg_n = len(seg)
+
+    swing_highs: list[float] = []
+    swing_lows: list[float] = []
+    for i in range(order, seg_n - order):
+        window = seg[i - order: i + order + 1]
+        p = float(seg[i])
+        if p == float(window.max()) and p > float(seg.mean()):
+            swing_highs.append(p)
+        elif p == float(window.min()) and p < float(seg.mean()):
+            swing_lows.append(p)
+
+    current = float(prices[-1])
+
+    # ── Bullish BOS: Higher Lows structure + price above last swing high ──
+    if len(swing_lows) >= 2 and len(swing_highs) >= 1:
+        if swing_lows[-1] > swing_lows[-2]:          # Higher Low confirmed
+            if current > swing_highs[-1]:            # breaks above last high
+                return True, "bullish"
+
+    # ── Bearish BOS: Lower Highs structure + price below last swing low ──
+    if len(swing_highs) >= 2 and len(swing_lows) >= 1:
+        if swing_highs[-1] < swing_highs[-2]:        # Lower High confirmed
+            if current < swing_lows[-1]:             # breaks below last low
+                return True, "bearish"
+
+    # ── Fallback: simple new-high / new-low break in BOS_LOOKBACK window ──
+    # Catches setups where clean swing structure is absent (low-volatility).
+    half = seg_n // 2
+    prior_high = float(seg[:half].max())
+    prior_low  = float(seg[:half].min())
+    if current > prior_high:
+        return True, "bullish"
+    if current < prior_low:
+        return True, "bearish"
+
+    return False, ""
+
+
 # ─── Public entry point ───────────────────────────────────────────────────────
 
 def compute_geometry(
@@ -478,21 +542,54 @@ def compute_geometry(
     divergence = _detect_divergence(arr)
     micro_band_sig = _micro_band_signal(micro, current_price) if micro else None
 
+    # ── BOS detection ──────────────────────────────────────────────────────
+    bos_ok, bos_dir = _detect_bos(arr)
+
     smc_side: str | None = None
     smc_bonus = 0.0
     smc_reason = ""
-    if fvg_active and gap_mitigated and divergence:
-        if fvg_dir == "bullish" and divergence == "bullish":
+
+    if fvg_active and gap_mitigated:
+        # Secondary confirmation: BOS OR momentum divergence (either suffices)
+        _bull_secondary = (
+            (bos_ok and bos_dir == "bullish") or divergence == "bullish"
+        )
+        _bear_secondary = (
+            (bos_ok and bos_dir == "bearish") or divergence == "bearish"
+        )
+        _bull_tag = (
+            "BOS" if (bos_ok and bos_dir == "bullish")
+            else ("div" if divergence == "bullish" else "")
+        )
+        _bear_tag = (
+            "BOS" if (bos_ok and bos_dir == "bearish")
+            else ("div" if divergence == "bearish" else "")
+        )
+
+        if fvg_dir == "bullish" and _bull_secondary:
             smc_side, smc_bonus = "MULTUP", _SMC_BONUS
             smc_reason = (
-                f"SMC_Liquidity_Inbound: bull_fvg mid={fvg_mid:.5f} mitigated + "
-                f"bull_divergence → +{smc_bonus}"
+                f"SMC_Liquidity_Inbound: bull_fvg mid={fvg_mid:.5f} "
+                f"mitigated+{_bull_tag} → +{smc_bonus:.1f}"
             )
-        elif fvg_dir == "bearish" and divergence == "bearish":
+        elif fvg_dir == "bearish" and _bear_secondary:
             smc_side, smc_bonus = "MULTDOWN", _SMC_BONUS
             smc_reason = (
-                f"SMC_Liquidity_Inbound: bear_fvg mid={fvg_mid:.5f} mitigated + "
-                f"bear_divergence → +{smc_bonus}"
+                f"SMC_Liquidity_Inbound: bear_fvg mid={fvg_mid:.5f} "
+                f"mitigated+{_bear_tag} → +{smc_bonus:.1f}"
+            )
+        elif fvg_dir == "bullish":
+            # Partial signal: FVG mitigated but no secondary confirmation yet
+            smc_side, smc_bonus = "MULTUP", _SMC_PARTIAL
+            smc_reason = (
+                f"SMC_FVG_partial: bull_fvg mid={fvg_mid:.5f} mitigated "
+                f"(no BOS/div yet) → +{smc_bonus:.1f}"
+            )
+        elif fvg_dir == "bearish":
+            smc_side, smc_bonus = "MULTDOWN", _SMC_PARTIAL
+            smc_reason = (
+                f"SMC_FVG_partial: bear_fvg mid={fvg_mid:.5f} mitigated "
+                f"(no BOS/div yet) → +{smc_bonus:.1f}"
             )
 
     return GeometryResult(
@@ -509,6 +606,8 @@ def compute_geometry(
         fvg_direction=fvg_dir,
         gap_mitigated=gap_mitigated,
         divergence=divergence,
+        bos_confirmed=bos_ok,
+        bos_direction=bos_dir,
         smc_side=smc_side,
         smc_bonus=smc_bonus,
         smc_reason=smc_reason,

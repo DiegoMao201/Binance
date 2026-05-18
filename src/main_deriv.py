@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from src.analysis.deriv_analyst import DerivAnalyst
+from src.analysis.tick_velocity import TickVelocityAnalyzer
 from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
@@ -106,6 +107,7 @@ class DerivDaemon:
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(seconds=max(60, int(settings.contract_duration_sec)))
         self._stop_event = asyncio.Event()
+        self._velocity = TickVelocityAnalyzer()  # Module 2: tick acceleration detector
         # Telemetría in-memory (anillos) para que el frontend audite por qué
         # entra (o no entra) el bot. Se serializa junto al status cada 10s.
         self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
@@ -186,7 +188,7 @@ class DerivDaemon:
             bd.get("trend", 0), bd.get("momentum", 0), bd.get("atr", 0),
             bd.get("spread", 0), bd.get("stability", 0),
             bd.get("streak_penalty", 0), bd.get("cooldown", 0),
-            bd.get("hurst_delta", 0),
+            bd.get("hd_bonus", 0),   # HD = Higher Direction (1H macro alignment)
             f"+{bd['smc_bonus']:.2f}" if bd.get("smc_bonus") else "—",
         )
 
@@ -347,6 +349,8 @@ class DerivDaemon:
         # Feed ingest buffers inline — pure in-memory, μs cost.
         self._risk.ingest_tick(tick.symbol, tick.price)
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
+        self._velocity.ingest_tick(tick.symbol, tick.price)
+        self._velocity.ingest_tick(tick.symbol, tick.price)
 
         # Periodic diagnostic log every 10 ticks per symbol (visible in Coolify).
         self._diag_tick_count[tick.symbol] = self._diag_tick_count.get(tick.symbol, 0) + 1
@@ -538,10 +542,42 @@ class DerivDaemon:
 
         # ── Regime-aware min_score gate — delegate entirely to risk engine ──
         # snap.effective_min_score is already the authoritative threshold computed
-        # by DerivRiskManager (applies calm-floor 6.20, DERIV_CALM_STRUCTURAL_MIN_SCORE,
+        # by DerivRiskManager (applies calm-floor 5.80, DERIV_CALM_STRUCTURAL_MIN_SCORE,
         # spike-market overrides, etc.).  We must NOT shadow it with a second call
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
         _regime_min = snap.effective_min_score
+
+        # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
+        # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
+        # AND the macro Higher-Direction is aligned (+1.5 hd_bonus already in score),
+        # the combination strongly suggests an imminent spike.  Grant a +1.0 bonus
+        # to push borderline scores over the effective_min gate.
+        # Only applied for spike markets (BOOM/CRASH) to avoid false triggers on R_*.
+        _vel_acc, _vel_score, _vel_dir = self._velocity.check_acceleration(tick.symbol)
+        _hd_bonus_val = float(snap.score_breakdown.get("hd_bonus", 0.0))
+        _is_bc_vel = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        if (
+            _vel_acc
+            and _hd_bonus_val >= 1.5
+            and _is_bc_vel
+            and snap.score >= (_regime_min - 1.5)
+        ):
+            _vel_boost = round(1.0 * _vel_score, 2)  # up to +1.0 scaled by accel_score
+            snap.score = round(min(10.0, snap.score + _vel_boost), 3)
+            snap.score_breakdown["velocity_boost"] = _vel_boost
+            snap.score_breakdown["velocity_score"] = round(_vel_score, 3)
+            snap.score_breakdown["velocity_dir"] = _vel_dir or "?"
+            snap.reasons.append(
+                f"velocity_confluence: acc_score={_vel_score:.2f} dir={_vel_dir} "
+                f"hd={_hd_bonus_val:+.1f} → +{_vel_boost:.2f}"
+            )
+            _LOGGER.info(
+                "[PIPELINE] VELOCITY_CONFLUENCE %s | acc=%.2f dir=%s hd=%+.1f "
+                "boost=+%.2f score→%.2f",
+                tick.symbol, _vel_score, _vel_dir or "?", _hd_bonus_val,
+                _vel_boost, snap.score,
+            )
+
         if snap.score < _regime_min:
             self._log_entry_block(
                 tick.symbol, f"REGIME_SCORE_GATE_{snap.regime}",

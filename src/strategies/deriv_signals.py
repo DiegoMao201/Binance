@@ -268,7 +268,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.5,             # raised 7.0→7.5: require stronger confluence
+        "min_score": 6.5,             # lowered 7.5→6.5: hd+smc bonuses bring viable setups to ≥7.5
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -290,7 +290,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 6.5,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -313,7 +313,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 6.5,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -325,7 +325,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Wins had geo ∈ [-0.69, +1.04]; loss had geo +1.35 (extended).
         "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
         "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
-        "min_score": 7.5,             # raised 7.0→7.5
+        "min_score": 6.5,             # lowered 7.5→6.5
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -338,7 +338,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.5,             # raised 7.0→7.5: require stronger confluence
+        "min_score": 6.5,             # lowered 7.5→6.5: hd+smc bonuses bridge the gap
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -360,7 +360,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 6.5,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -372,7 +372,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Confirmed: no structural edge when price is not well below channel mid.
         "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid (loosened from -1.20)
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        "min_score": 7.5,             # raised 7.0→7.5
+        "min_score": 6.5,             # lowered 7.5→6.5
     },
     "CRASH1000": {
         "type": "spike_crash",
@@ -384,7 +384,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 6.5,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -395,7 +395,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Wins: geo -1.09 (both) | Losses: geo -0.77 avg.
         # Confirmed: edge only when price is well below channel midpoint.
         "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid
-        "min_score": 7.5,             # raised 7.0→7.5
+        "min_score": 6.5,             # lowered 7.5→6.5
     },
 }
 
