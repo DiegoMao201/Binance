@@ -547,18 +547,19 @@ class DerivRiskManager:
         cooldown_bonus = self._cooldown_bonus()
         headroom_bonus = self._headroom_bonus(dd_cap)
 
-        # ── ATR calm-weight reduction (BOOM/CRASH only) ────────────────────
-        # In calm regimes the ATR component deflates to near-zero because
-        # spike markets naturally compress between spikes.  Penalising this
-        # cross-contaminates the SMC/EMA200 signal path.  Apply a damping
-        # multiplier so atr_score contributes less without being zeroed.
-        # DERIV_BOOM_CRASH_ATR_WEIGHT_CALM_MULT default 0.50 (halved penalty).
+        # ── ATR bypass for spike markets in calm regime ─────────────────────
+        # BOOM/CRASH naturally compress ATR between spikes — the tick series
+        # is flat by design until the next spike fires.  Penalising ATR in
+        # this regime cross-contaminates the SMC/EMA200 signal path.
+        # FIX: instead of a multiplier (0×0.50 = 0 still), apply a floor of
+        # 1.0 so the component contributes neutrally and stops depressing the
+        # total score.  'BYPASS' in log = full neutral contribution restored.
+        # For non-calm or non-spike markets, atr_score is unchanged.
+        _atr_calm_bypassed = False
         if regime == "calm" and _is_spike_market(symbol):
-            _atr_calm_mult = float(
-                os.getenv("DERIV_BOOM_CRASH_ATR_WEIGHT_CALM_MULT", "0.50")
-            )
-            atr_score = round(atr_score * _atr_calm_mult, 3)
-            snap.score_breakdown["atr_calm_mult"] = _atr_calm_mult
+            if atr_score < 1.0:
+                atr_score = 1.0
+                _atr_calm_bypassed = True
 
         # In volatile regime, require a stronger trend signal
         if regime == "volatile" and trend_dir is not None:
@@ -616,25 +617,30 @@ class DerivRiskManager:
         snap.effective_min_score = round(effective_min_score, 2)
 
         # ── Per-symbol min_score calibration (regime-aware) ─────────────────
-        # Normal thresholds apply in trending/ranging/volatile regimes.
-        # In CALM regime each family gets a lower floor because the composite
-        # score naturally deflates (ATR, momentum, trend all compress) while
-        # institutional setups can still be structurally sound.
-        # Thresholds are env-var tunable for live recalibration.
+        # In CALM regime each symbol family gets a dedicated lower floor because
+        # composite scores naturally deflate (ATR, momentum, trend all compress)
+        # while the institutional setup can still be structurally sound.
+        # BOOM/CRASH: DIRECT assignment (not min()) — enforce the env-var value
+        # unconditionally so no stale 7.5 remnant can override calm behaviour.
+        # Structural gate (EMA200_SPIKE / FVG) still enforced downstream.
         _su_sym = symbol.upper()
         _is_boom_crash_sym = "BOOM" in _su_sym or "CRASH" in _su_sym
+        _calm_bc_floor_used: float | None = None
         if _is_boom_crash_sym:
             if regime == "calm":
-                # Calm + spike market: drop threshold to allow structural entries.
-                # Mandatory structural gate (EMA200_SPIKE or FVG) still runs
-                # downstream — this ONLY relaxes the numeric floor.
                 _bc_calm_floor = float(
                     os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.00")
                 )
-                effective_min_score = min(effective_min_score, _bc_calm_floor)
-                snap.score_breakdown["calm_bc_floor"] = _bc_calm_floor
+                effective_min_score = _bc_calm_floor   # direct override — no min()
+                _calm_bc_floor_used = _bc_calm_floor
+                _LOGGER.info(
+                    "[PIPELINE] [REGIME_SCORE_GATE_calm] %s regime=calm "
+                    "effective_min=%.2f (DERIV_CALM_STRUCTURAL_MIN_SCORE) "
+                    "atr_bypassed=%s",
+                    symbol, effective_min_score, _atr_calm_bypassed,
+                )
             else:
-                effective_min_score = min(effective_min_score, 6.2)   # normal: spike edge ≠ trend edge
+                effective_min_score = min(effective_min_score, 6.2)  # spike edge ≠ trend edge
         elif "R_100" in _su_sym:
             if regime == "calm":
                 effective_min_score = min(effective_min_score, 5.50)
@@ -728,6 +734,9 @@ class DerivRiskManager:
             "symbol": symbol,
             "atr_abs": round(atr, 8),
             "atr_pct": round(atr / ticks[-1], 6) if ticks[-1] > 0 else 0.0,
+            # ── Calm-regime bypass telemetry ────────────────────────────────
+            "atr_calm_bypassed": _atr_calm_bypassed,
+            "calm_bc_floor": _calm_bc_floor_used,
         }
         snap.score = round(score, 3)
         snap.effective_min_score = round(effective_min_score, 2)
@@ -1063,7 +1072,7 @@ class DerivRiskManager:
         if _spike_gate_active:
             _su_gate = symbol.upper()
             _override_enabled = os.getenv(
-                "DERIV_STRUCTURAL_OVERRIDE_ENABLED", ""
+                "DERIV_STRUCTURAL_OVERRIDE_ENABLED", "true"
             ).lower() in ("1", "true", "yes")
             _setup_now  = snap.score_breakdown.get("setup_type", "")
             _fvg_active = bool(snap.score_breakdown.get("fvg_active"))
