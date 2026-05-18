@@ -146,6 +146,43 @@ class DerivTradeExecutor:
         self._session_pnl: float = 0.0
         self._session_trades: int = 0
 
+        # ── Restore open contracts from previous session (disk → memory) ─────
+        # The process was restarted (e.g. Coolify deploy).  Re-hydrate
+        # self._open from the persisted JSON so the boot-sync reconciliation
+        # has a complete local snapshot to diff against broker portfolio,
+        # and the reaper/trailing-stop loops can resume without an amnesia gap.
+        _disk = self._settings.open_contracts_file
+        if _disk.exists():
+            try:
+                _raw: list[dict[str, Any]] = json.loads(_disk.read_text())
+                for _r in _raw:
+                    _cid = int(_r["contract_id"])
+                    self._open[_cid] = DerivOpenContract(
+                        contract_id=_cid,
+                        intent_id=_r.get("intent_id", ""),
+                        symbol=_r["symbol"],
+                        side=_r["side"],
+                        stake_usdt=float(_r["stake_usdt"]),
+                        multiplier=int(_r.get("multiplier", 200)),
+                        entry_price=float(_r.get("entry_price", 0.0)),
+                        opened_at_ts=float(_r["opened_at_ts"]),
+                        score_breakdown=_r.get("score_breakdown"),
+                        max_hold_seconds=float(_r.get("max_hold_seconds", 0.0)),
+                        peak_profit=float(_r.get("peak_profit", 0.0)),
+                        trail_sl_locked=float(_r.get("trail_sl_locked", _TRAIL_INIT_SL)),
+                    )
+                if self._open:
+                    _LOGGER.info(
+                        "[deriv-trader] restored %d open contract(s) from disk: %s",
+                        len(self._open),
+                        list(self._open.keys()),
+                    )
+            except Exception as _disk_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "[deriv-trader] could not restore open contracts from disk: %s — starting fresh",
+                    _disk_exc,
+                )
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public API consumed by the OrderRouter
     # ─────────────────────────────────────────────────────────────────────────
@@ -845,18 +882,28 @@ class DerivTradeExecutor:
     async def _reconcile_once(self, boot: bool = False) -> None:
         """Single reconciliation pass — compare local open set vs broker portfolio.
 
-        When *boot* is ``True`` (called at daemon startup) two safety guards are
-        relaxed:
+        When *boot* is ``True`` (called at daemon startup) three things change:
           1. The minimum-age threshold is set to 0 s — all locally-registered
-             contracts are from a previous process lifetime and therefore cannot
-             be "fresh" in the current session.
-          2. The empty-portfolio guard is bypassed **if every local contract is
-             older than 60 s** — at startup an empty broker response means the
-             contracts genuinely closed before the restart, not a transient WS
-             failure.
+             contracts are from a previous process lifetime and cannot be fresh.
+          2. The empty-portfolio guard is bypassed if every local contract is
+             older than 60 s — an empty broker response at boot means they
+             genuinely closed before the restart, not a transient WS failure.
+          3. Inverse direction is checked: broker contracts NOT present in the
+             local DB are recovered and re-subscribed (boot amnesia fix).
         """
         _min_age = 0.0 if boot else self._RECON_MIN_AGE_SEC
-        broker_ids: list[int] = await self._client.portfolio()
+
+        # At boot, fetch the full portfolio payload so we can reconstruct
+        # DerivOpenContract entries for broker-side orphans (Phase 2 below).
+        # At steady-state, only contract IDs are needed for ghost detection.
+        if boot:
+            broker_contracts: list[dict[str, Any]] = await self._client.portfolio_full()
+            broker_ids: list[int] = [
+                int(c["contract_id"]) for c in broker_contracts if "contract_id" in c
+            ]
+        else:
+            broker_contracts = []
+            broker_ids = await self._client.portfolio()
 
         async with self._lock:
             # Snapshot open contracts with their ages
@@ -864,8 +911,14 @@ class DerivTradeExecutor:
                 cid: oc.opened_at_ts for cid, oc in self._open.items()
             }
 
+        # ── Phase 1: Ghost purge (local → broker direction) ───────────────
         if not local_snapshot:
-            return  # nothing to reconcile
+            # No locally-known contracts to purge.  At boot we still need to
+            # run Phase 2 to recover any broker-side orphans (e.g. a fresh
+            # container that lost its disk state entirely).
+            if boot:
+                await self._boot_recover_broker_orphans(broker_contracts)
+            return
 
         # Broker must return a non-empty list before we trust any diff.
         # An empty portfolio while we have open contracts is almost always
@@ -882,6 +935,9 @@ class DerivTradeExecutor:
                     "assuming transient WS failure, skipping purge",
                     len(local_snapshot),
                 )
+                # Still run boot recovery even though ghost-purge is skipped.
+                if boot:
+                    await self._boot_recover_broker_orphans(broker_contracts)
                 return
             _LOGGER.info(
                 "[deriv-recon] BOOT-SYNC: broker returned empty portfolio and all %d "
@@ -916,9 +972,6 @@ class DerivTradeExecutor:
                 "[deriv-recon] %d contract(s) skipped (too young, min_age=%.0fs)",
                 young_skipped, _min_age,
             )
-
-        if not ghost_ids:
-            return  # no confirmed ghosts after age filter
 
         for cid in ghost_ids:
             async with self._lock:
@@ -960,6 +1013,131 @@ class DerivTradeExecutor:
             self._append_closed(record)
             await self._post_pamm_webhook(record)
             self._notify("ghost_closed", record)
+
+        # ── Phase 2: Broker → local recovery (boot only) ──────────────────
+        # Must run AFTER ghost purge so we never re-insert a freshly-purged
+        # ghost.  broker_contracts is only populated when boot=True.
+        if boot:
+            await self._boot_recover_broker_orphans(broker_contracts)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Boot amnesia recovery — broker → local direction
+    # Iterates the broker's live portfolio and inserts any contract that is NOT
+    # already tracked in self._open.  Fires a WS subscription for each so the
+    # trailing-stop reaper and is_sold callbacks resume immediately.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _boot_recover_broker_orphans(
+        self, broker_contracts: list[dict[str, Any]]
+    ) -> None:
+        """Recover live broker contracts missing from the local open-contract DB.
+
+        Called only during the boot-sync pass.  For each contract present on
+        Deriv's portfolio that is NOT already in ``self._open``:
+          1. Calls ``proposal_open_contract`` to get the current spot price
+             (best-effort — falls back to ``buy_price`` if unavailable).
+          2. Builds a ``DerivOpenContract`` with ``intent_id='recovered_on_boot'``
+             and the trailing SL reset to the initial sentinel (–1.0) so the
+             trailing tiers start fresh from the current position.
+          3. Inserts the record into ``self._open`` and persists to disk.
+          4. Subscribes to the broker WS stream so trailing-stop updates and
+             ``is_sold`` events resume without waiting for the next reap cycle.
+        """
+        if not broker_contracts:
+            return
+
+        async with self._lock:
+            local_ids = set(self._open.keys())
+
+        orphan_contracts = [
+            c for c in broker_contracts
+            if "contract_id" in c and int(c["contract_id"]) not in local_ids
+        ]
+
+        if not orphan_contracts:
+            _LOGGER.info("[deriv-recon] BOOT-SYNC: no broker orphans — local DB is in sync")
+            return
+
+        _LOGGER.info(
+            "[deriv-recon] BOOT-SYNC: found %d broker orphan(s) to recover: %s",
+            len(orphan_contracts),
+            [int(c["contract_id"]) for c in orphan_contracts],
+        )
+
+        recovered = 0
+        for c in orphan_contracts:
+            cid = int(c["contract_id"])
+            symbol: str = str(c.get("symbol") or c.get("underlying") or "UNKNOWN")
+            # contract_type is MULTUP / MULTDOWN (or RISE/FALL for BOOM/CRASH)
+            side: str = str(c.get("contract_type") or "MULTUP").upper()
+            # buy_price for multiplier contracts IS the stake paid (in USD)
+            stake: float = float(c.get("buy_price") or c.get("stake") or 0.0)
+            multiplier: int = int(c.get("multiplier") or 200)
+            # date_start is a Unix timestamp (seconds)
+            opened_at: float = float(c.get("date_start") or time.time())
+
+            # Best-effort: get the entry spot from the live POC endpoint.
+            entry_price = 0.0
+            try:
+                _poc = (
+                    await asyncio.wait_for(
+                        self._client.proposal_open_contract(cid), timeout=8.0
+                    )
+                ).get("proposal_open_contract") or {}
+                _spot = float(
+                    _poc.get("entry_tick_display_value")
+                    or _poc.get("entry_spot")
+                    or _poc.get("current_spot")
+                    or 0
+                )
+                if _spot > 0:
+                    entry_price = _spot
+            except Exception as _ep_exc:  # noqa: BLE001
+                _LOGGER.debug(
+                    "[deriv-recon] boot-recover POC failed for %s: %s — entry_price=0",
+                    cid, _ep_exc,
+                )
+
+            oc = DerivOpenContract(
+                contract_id=cid,
+                intent_id="recovered_on_boot",
+                symbol=symbol,
+                side=side,
+                stake_usdt=stake,
+                multiplier=multiplier,
+                entry_price=entry_price,
+                opened_at_ts=opened_at,
+                score_breakdown={"recovered": True},
+                max_hold_seconds=0.0,  # no timeout for recovered contracts
+                peak_profit=0.0,
+                trail_sl_locked=_TRAIL_INIT_SL,
+            )
+
+            async with self._lock:
+                # Double-check: another coroutine may have inserted it between
+                # our snapshot and now (race guard).
+                if cid not in self._open:
+                    self._open[cid] = oc
+                    self._persist_open()
+                    recovered += 1
+                    _LOGGER.info(
+                        "[deriv-recon] RECOVERED contract_id=%s symbol=%s side=%s "
+                        "stake=%.2f entry=%.5f opened_at=%s",
+                        cid, symbol, side, stake, entry_price,
+                        time.strftime("%H:%M:%S", time.localtime(opened_at)),
+                    )
+
+            # Re-subscribe to broker WS stream so trailing-stop and is_sold
+            # callbacks work immediately — no waiting for next reap_closed cycle.
+            asyncio.create_task(
+                self._client.subscribe_contract(cid, self._on_ws_contract_sold),
+                name=f"boot-sub-{cid}",
+            )
+
+        if recovered:
+            _LOGGER.info(
+                "[deriv-recon] BOOT-SYNC complete: Recovered %d live contract(s) from broker",
+                recovered,
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Smart ghost-exit classifier

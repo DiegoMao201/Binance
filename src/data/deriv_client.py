@@ -529,15 +529,28 @@ class DerivClient:
         Returns an empty list on any API error rather than raising, so a
         transient WS glitch never kills the reconciliation daemon.
         """
+        contracts = await self.portfolio_full()
+        return [int(c["contract_id"]) for c in contracts if "contract_id" in c]
+
+    async def portfolio_full(self) -> list[dict[str, Any]]:
+        """Return full contract objects for all currently open contracts.
+
+        Each dict contains (at minimum):
+          contract_id, contract_type, buy_price, date_start, multiplier, symbol
+
+        Used by the boot-sync to reconstruct ``DerivOpenContract`` entries for
+        positions that were live when the process was last stopped.
+
+        Returns an empty list on any API error — never raises.
+        """
         try:
             resp = await self._request({"portfolio": 1}, timeout=15.0)
         except Exception:  # noqa: BLE001
             return []
         if "error" in resp:
-            _LOGGER.debug("portfolio error: %s", resp["error"])
+            _LOGGER.debug("portfolio_full error: %s", resp["error"])
             return []
-        contracts = (resp.get("portfolio") or {}).get("contracts") or []
-        return [int(c["contract_id"]) for c in contracts if "contract_id" in c]
+        return list((resp.get("portfolio") or {}).get("contracts") or [])
 
     async def ticks_history(
         self,
