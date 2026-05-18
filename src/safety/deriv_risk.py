@@ -334,14 +334,17 @@ class DerivRiskManager:
     # ─────────────────────────────────────────────────────────────────────────
     @staticmethod
     def check_random_walk_prefilter(symbol: str, hurst: float | None) -> dict | None:
-        """Pre-pipeline structural veto for R_* volatility indices in the
-        absolute noise zone (0.45 ≤ H ≤ 0.55).
+        """Pre-pipeline Hurst regime classifier for R_* volatility indices.
 
-        Returns the veto payload when the symbol should be rejected BEFORE
-        the AI gate and before the full evaluate() call.  Returns None when
-        the symbol passes the prefilter (caller continues with normal flow).
+        Classifies the symbol into one of three Hurst zones and returns a
+        dict with ``block`` / ``regime`` so the daemon can act accordingly:
 
-        BOOM/CRASH are exempt — their edge is structural, not Hurst-based.
+        • H < 0.45  → mean_reverting  → ``block=False``  (MEAN_REV setups allowed)
+        • 0.45 ≤ H ≤ 0.55 → random_walk → ``block=True``  (noise zone, veto)
+        • H > 0.55  → trending         → ``block=False``  (TREND setups allowed)
+
+        Returns None for non-R_* symbols (BOOM/CRASH exempt — structural edge).
+        Returns None when hurst is None/invalid — caller should skip prefilter.
         """
         if not symbol.startswith("R_"):
             return None
@@ -351,14 +354,28 @@ class DerivRiskManager:
             h = float(hurst)
         except (TypeError, ValueError):
             return None
-        if 0.45 <= h <= 0.55:
+        if h < 0.45:
             return {
-                "approved": False,
-                "reason": "random_walk_zone_prefilter",
-                "score": None,
-                "ai_called": False,
+                "block": False,
+                "regime": "mean_reverting",
+                "hurst": h,
             }
-        return None
+        if h > 0.55:
+            return {
+                "block": False,
+                "regime": "trending",
+                "hurst": h,
+            }
+        # 0.45 ≤ h ≤ 0.55 — absolute noise zone
+        return {
+            "block": True,
+            "regime": "random_walk",
+            "hurst": h,
+            "approved": False,
+            "reason": "random_walk_zone_prefilter",
+            "score": None,
+            "ai_called": False,
+        }
 
     def ingest_tick(self, symbol: str, price: float) -> None:
         if price <= 0 or not math.isfinite(price):

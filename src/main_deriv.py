@@ -415,42 +415,91 @@ class DerivDaemon:
         # ═══════════════════════════════════════════════════════════════════
         spread_pct = float(tick.metrics.get("spread") or 0.0)
         pre_analysis = self._analyst.get_history_summary().get(tick.symbol) or {}
-        pre_hurst    = float(pre_analysis.get("hurst") or 0.5)
+        # Use None when hurst hasn't been computed yet (e.g. cold-start or stale
+        # analyst cache).  Defaulting to 0.5 would put the tick squarely in the
+        # random-walk zone and trigger a false RANDOM_WALK_PREFILTER veto.
+        _raw_hurst = pre_analysis.get("hurst")
+        pre_hurst  = float(_raw_hurst) if _raw_hurst not in (None, 0) else None
         pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
 
-        # ── Random-Walk pre-filter (R_* only, H ∈ [0.45, 0.55]) ───────────
-        # Structural veto BEFORE the AI gate and full evaluate() — avoids
-        # wasted LLM tokens on R_* indices stuck in the noise band.
-        _rw_veto = self._risk.check_random_walk_prefilter(tick.symbol, pre_hurst)
-        if _rw_veto is not None:
-            self._log_entry_block(
-                tick.symbol, "RANDOM_WALK_PREFILTER",
-                score=0.0, effective_min_score=0.0,
-                side=None, regime="?", hurst=pre_hurst,
+        # ── Random-Walk pre-filter (R_* only) — regime-split logic ─────────
+        # Classifies the Hurst zone and decides:
+        #   H < 0.45  (mean_reverting) → allow, enforce score ≥ 9.0 downstream
+        #   H ∈ [0.45,0.55] (random_walk) → veto (noise zone, no edge)
+        #   H > 0.55  (trending)       → allow normally
+        # Avoids wasted LLM tokens on R_* stuck in the noise band.
+        _rw_info = self._risk.check_random_walk_prefilter(tick.symbol, pre_hurst)
+        if _rw_info is not None:
+            _rw_regime = _rw_info.get("regime", "random_walk")
+            _rw_block  = bool(_rw_info.get("block", True))
+            _LOGGER.info(
+                "[PREFILTER_REGIME_SPLIT] symbol=%s H=%s regime=%s action=%s",
+                tick.symbol,
+                f"{pre_hurst:.3f}" if pre_hurst is not None else "?",
+                _rw_regime,
+                "block" if _rw_block else "allow",
             )
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=None,
-                score=0.0,
-                reason=f"RANDOM_WALK_PREFILTER: H={pre_hurst:.3f} ∈ [0.45,0.55]",
-                extra={"prefilter": _rw_veto, "hurst": pre_hurst},
-            )
-            return
+            if _rw_block:
+                self._log_entry_block(
+                    tick.symbol, "RANDOM_WALK_PREFILTER",
+                    score=0.0, effective_min_score=0.0,
+                    side=None, regime="random_walk",
+                    hurst=pre_hurst if pre_hurst is not None else 0.5,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=None,
+                    score=0.0,
+                    reason=(
+                        f"RANDOM_WALK_PREFILTER: H={pre_hurst:.3f} ∈ [0.45,0.55]"
+                        if pre_hurst is not None
+                        else "RANDOM_WALK_PREFILTER: hurst=?"
+                    ),
+                    extra={"prefilter": _rw_info, "hurst": pre_hurst},
+                )
+                return
+            # mean_reverting or trending — pass through; remember regime for
+            # the downstream score floor (mean_reverting requires score ≥ 9.0).
+        else:
+            _rw_regime = None
+
+        # Fallback: when hurst was None we skipped the prefilter; use 0.5 only
+        # for the downstream evaluate() call so it has a numeric value.
+        _eval_hurst = pre_hurst if pre_hurst is not None else 0.5
 
         snap = self._risk.evaluate(
             tick.symbol, spread_pct,
-            hurst=pre_hurst,
+            hurst=_eval_hurst,
             autocorr_lag1=pre_autocorr,
         )
 
+        # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 9.0) ──────
+        # When the prefilter passed because H < 0.45 (mean_reverting), only
+        # high-conviction MEAN_REV setups are allowed (SMC score ≥ 9.0).
+        if _rw_regime == "mean_reverting" and snap.score < 9.0:
+            self._log_entry_block(
+                tick.symbol, "MEAN_REV_SCORE_GATE",
+                score=snap.score, effective_min_score=9.0,
+                side=snap.side, regime=snap.regime,
+                hurst=_eval_hurst,
+                score_breakdown=snap.score_breakdown,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"MEAN_REV_SCORE_GATE: H={_eval_hurst:.3f} mean_reverting requires≥9.00 got={snap.score:.2f}",
+                extra={"hurst": _eval_hurst, "regime": "mean_reverting"},
+            )
+            return
+
         # ── Extreme MR exhaustion penalty (BOOM/CRASH only) ───────────────
         _geo_label = str(snap.score_breakdown.get("geo_layout") or "")
-        _mr_pen = extreme_mr_penalty(tick.symbol, pre_hurst, _geo_label)
+        _mr_pen = extreme_mr_penalty(tick.symbol, _eval_hurst, _geo_label)
         if _mr_pen != 0.0:
             snap.score = round(max(0.0, snap.score + _mr_pen), 3)
             snap.score_breakdown["hurst_mr_penalty"] = _mr_pen
             _LOGGER.info(
                 "[PIPELINE] EXTREME_MR_PENALTY %s | H=%.3f geo=%s pen=%.2f score→%.2f",
-                tick.symbol, pre_hurst, _geo_label, _mr_pen, snap.score,
+                tick.symbol, _eval_hurst, _geo_label, _mr_pen, snap.score,
             )
 
         # ── ATR volatility filter (BOOM500/1000 + CRASH500/1000) ──────────
@@ -470,7 +519,7 @@ class DerivDaemon:
             self._log_entry_block(
                 tick.symbol, "ATR_VOLATILITY_FILTER",
                 score=snap.score, effective_min_score=snap.effective_min_score,
-                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
@@ -490,7 +539,7 @@ class DerivDaemon:
             self._log_entry_block(
                 tick.symbol, f"REGIME_SCORE_GATE_{snap.regime}",
                 score=snap.score, effective_min_score=_regime_min,
-                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
@@ -508,7 +557,7 @@ class DerivDaemon:
             self._log_entry_block(
                 tick.symbol, "PROFILE_SCORE_GATE",
                 score=snap.score, effective_min_score=_profile_min_score,
-                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
@@ -617,7 +666,7 @@ class DerivDaemon:
             self._log_entry_block(
                 tick.symbol, f"STRATEGY_GATE_mean_rev_rejected_mode={_strat}",
                 score=snap.score, effective_min_score=_profile_min_score,
-                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
@@ -639,7 +688,7 @@ class DerivDaemon:
                 self._log_entry_block(
                     tick.symbol, "STRATEGY_GATE_spike_requires_spike_or_fvg",
                     score=snap.score, effective_min_score=_profile_min_score,
-                    side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                     score_breakdown=snap.score_breakdown,
                 )
                 self._record_decision(
@@ -678,7 +727,7 @@ class DerivDaemon:
                 self._log_entry_block(
                     tick.symbol, "GEO_ENTRY_VETO",
                     score=snap.score, effective_min_score=snap.effective_min_score,
-                    side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                     score_breakdown=snap.score_breakdown,
                 )
                 self._record_decision(
@@ -693,14 +742,14 @@ class DerivDaemon:
         # entries where the underlying Hurst is too low (no persistence).
         _hms = _asset_profile.get("hurst_min_spike")
         if _hms is not None and is_spike_market(tick.symbol):
-            if pre_hurst < float(_hms):
+            if _eval_hurst < float(_hms):
                 _hms_reason = (
-                    f"HURST_SPIKE_VETO: {tick.symbol} H={pre_hurst:.3f} < strict_min={_hms:.3f}"
+                    f"HURST_SPIKE_VETO: {tick.symbol} H={_eval_hurst:.3f} < strict_min={_hms:.3f}"
                 )
                 self._record_decision(
                     symbol=tick.symbol, allowed=False, side=snap.side,
                     score=snap.score, reason=_hms_reason,
-                    extra={"hurst": pre_hurst, "hurst_min_spike": _hms},
+                    extra={"hurst": _eval_hurst, "hurst_min_spike": _hms},
                 )
                 return
 
@@ -716,7 +765,7 @@ class DerivDaemon:
                 "; ".join(snap.reasons) if snap.reasons else "MATH_REJECTED",
                 score=getattr(snap, "score", 0.0),
                 effective_min_score=snap.effective_min_score,
-                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
             )
             self._record_decision(
@@ -834,7 +883,7 @@ class DerivDaemon:
                 tick.symbol, "AI_VETO",
                 score=snap.score, effective_min_score=snap.effective_min_score,
                 side=snap.side, regime=snap.regime,
-                hurst=analysis.hurst if analysis else pre_hurst,
+                hurst=analysis.hurst if analysis else _eval_hurst,
                 ai_veto=True, ai_confidence=analysis.ai_confidence,
                 ai_reason=analysis.ai_reason,
                 score_breakdown=snap.score_breakdown,
@@ -911,7 +960,7 @@ class DerivDaemon:
             "regime=%s | H=%.3f | ai_conf=%.2f ai_model=%s | "
             "stake=%.2f mult=%s",
             tick.symbol, snap.score, snap.effective_min_score, snap.side,
-            snap.regime, analysis.hurst if analysis else pre_hurst,
+            snap.regime, analysis.hurst if analysis else _eval_hurst,
             analysis.ai_confidence if analysis else 0.0,
             analysis.ai_model if analysis else "none",
             snap.suggested_stake_usdt, snap.suggested_multiplier,
