@@ -36,6 +36,32 @@ from src.utils.telegram_telemetry import TelegramTelemetry
 _LOGGER = logging.getLogger(__name__)
 
 
+def _symbol_from_shortcode(shortcode: str) -> str:
+    """Extract the underlying symbol from a Deriv contract shortcode.
+
+    Deriv shortcodes follow the pattern:
+        <CONTRACT_TYPE>_<SYMBOL>_<STAKE>_<MULTIPLIER>_...
+    where STAKE is always a decimal (e.g. "3.00") and SYMBOL may contain
+    underscores (e.g. "R_100", "R_75").  We accumulate segments after the
+    contract type until we hit the first segment containing a decimal point.
+
+    Examples:
+        "MULTUP_BOOM500_3.00_200_..."  →  "BOOM500"
+        "MULTUP_R_100_3.00_200_..."   →  "R_100"
+        "MULTDOWN_R_75_3.00_200_..."  →  "R_75"
+        "CALL_BOOM500_3.00_0_..."     →  "BOOM500"
+    """
+    if not shortcode:
+        return ""
+    parts = shortcode.split("_")
+    sym_parts: list[str] = []
+    for part in parts[1:]:  # skip contract type (MULTUP, MULTDOWN, CALL, PUT…)
+        if "." in part:     # stake is always decimal — marks end of symbol
+            break
+        sym_parts.append(part)
+    return "_".join(sym_parts)
+
+
 # ─── Order payload contract (broker-agnostic) ────────────────────────────────
 @dataclass(slots=True)
 class DerivOrder:
@@ -725,6 +751,10 @@ class DerivTradeExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     async def _on_ws_contract_sold(self, poc: dict[str, Any]) -> None:
         """Immediate settlement triggered by the live broker WS stream."""
+        # Guard: Deriv WS fires this callback on EVERY tick update, not just
+        # on close. Only proceed when the broker explicitly marks is_sold=True.
+        if not poc.get("is_sold"):
+            return
         cid = int(poc.get("contract_id") or 0)
         if cid <= 0:
             return
@@ -1066,7 +1096,13 @@ class DerivTradeExecutor:
         recovered = 0
         for c in orphan_contracts:
             cid = int(c["contract_id"])
-            symbol: str = str(c.get("symbol") or c.get("underlying") or "UNKNOWN")
+            symbol: str = (
+                c.get("symbol")
+                or c.get("underlying_symbol")
+                or c.get("underlying")
+                or _symbol_from_shortcode(c.get("shortcode", ""))
+                or "UNKNOWN"
+            )
             # contract_type is MULTUP / MULTDOWN (or RISE/FALL for BOOM/CRASH)
             side: str = str(c.get("contract_type") or "MULTUP").upper()
             # buy_price for multiplier contracts IS the stake paid (in USD)
