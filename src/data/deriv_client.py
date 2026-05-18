@@ -139,6 +139,10 @@ class DerivClient:
         self.connected_at: float | None = None
         # contract_id → async callback fired on is_sold=1 (live WS subscription)
         self._contract_subs: dict[int, Callable[[dict[str, Any]], Awaitable[None]]] = {}
+        # Optional reconnect hook: called after _subscribe_ticks() on every
+        # (re)connect so the executor can re-subscribe open contracts whose
+        # WS subscriptions were lost during the disconnect.
+        self._on_reconnect_cb: Optional[Callable[[], Awaitable[None]]] = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Connection lifecycle
@@ -194,6 +198,16 @@ class DerivClient:
                 fut.set_exception(DerivClientError("connection closed"))
         self._pending.clear()
 
+    def set_reconnect_callback(
+        self, cb: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Register a coroutine to call after each (re)connect + tick subscription.
+
+        Used by DerivTradeExecutor to re-subscribe open contract WS streams
+        after a WebSocket disconnect/reconnect cycle.
+        """
+        self._on_reconnect_cb = cb
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public market-data API
     # ─────────────────────────────────────────────────────────────────────────
@@ -213,6 +227,17 @@ class DerivClient:
 
                 # Subscribe (tick-stream) for every symbol we care about.
                 await self._subscribe_ticks()
+
+                # Fire the reconnect hook (if set) so the executor can
+                # re-subscribe open contract WS subscriptions that were lost
+                # during the previous disconnect.
+                if self._on_reconnect_cb is not None:
+                    try:
+                        asyncio.create_task(
+                            self._on_reconnect_cb(), name="deriv-reconnect-hook"
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.warning("[deriv] reconnect_cb scheduling failed")
 
                 _LOGGER.info(
                     "[deriv] Tick stream up for %d symbols", len(self._settings.symbols)

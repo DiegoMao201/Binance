@@ -28,6 +28,7 @@ from typing import Any
 import aiohttp
 
 from src.data.deriv_client import DerivClient, DerivClientError
+from src.execution.position_manager import DynamicPositionManager
 from src.strategies.deriv_signals import get_asset_profile, is_spike_market
 from src.utils.deriv_config import DerivSettings
 from src.utils.telegram_telemetry import TelegramTelemetry
@@ -204,6 +205,12 @@ class DerivTradeExecutor:
         self._sym_stats: dict[str, dict[str, Any]] = {}
         self._session_pnl: float = 0.0
         self._session_trades: int = 0
+        # DynamicPositionManager — replaces static tiered trailing stop.
+        # Manages ratchet SL + momentum-based exit for every open contract.
+        self._dpm = DynamicPositionManager()
+        # Hook the WS client so open-contract subscriptions are automatically
+        # re-established after every WS reconnect.
+        self._client.set_reconnect_callback(self._on_ws_reconnect)
 
         # ── Restore open contracts from previous session (disk → memory) ─────
         # The process was restarted (e.g. Coolify deploy).  Re-hydrate
@@ -381,10 +388,19 @@ class DerivTradeExecutor:
             self._open[contract_id] = oc
             self._persist_open()
 
+        # Register with DynamicPositionManager for ratchet SL + momentum tracking.
+        self._dpm.register(
+            contract_id=contract_id,
+            symbol=order.symbol,
+            stake=actual_stake,
+            entry_price=entry_price,
+            entry_ts=oc.opened_at_ts,
+        )
+
         # Subscribe to live broker stream for this contract so we settle
         # immediately on is_sold=1 without waiting for the next reap_closed cycle.
         asyncio.create_task(
-            self._client.subscribe_contract(contract_id, self._on_ws_contract_sold),
+            self._client.subscribe_contract(contract_id, self._on_ws_contract_update),
             name=f"poc-sub-{contract_id}",
         )
 
@@ -472,89 +488,37 @@ class DerivTradeExecutor:
             _TERMINAL_STATUSES = {"won", "lost", "sold", "cancelled", "expired"}
             is_sold = bool(poc.get("is_sold")) and _poc_status in _TERMINAL_STATUSES
 
-            # ── Dynamic trailing SL (all non-settled trades) ──────────────────────
-            # Spike markets (BOOM/CRASH) now also run trailing alongside spike_timeout:
-            # whichever fires first exits the contract.
-            # Tier 1 (BE at 1%) is suppressed for spike markets via spike_market flag
-            # to prevent premature exits on inter-spike drift; trailing activates at
-            # Tier 2 (2.5% gain = confirmed profitable territory).
+            # ── DynamicPositionManager: ratchet SL + momentum exit ───────────────
+            # Replaces the static tiered trailing stop (_compute_trail_floor).
+            # DPM tracks per-contract state (fase, sl_ratchet, momentum) and
+            # returns a close reason when any condition fires.  The WS callback
+            # (_on_ws_contract_update) also calls DPM on every tick for real-time
+            # response; this poll-path (every 2s) is the safety-net fallback.
             if not is_sold and oc_check is not None:
-                _is_spike_oc = is_spike_market(oc_check.symbol)
                 _current_profit = float(poc.get("profit") or 0)
-                # Ratchet up peak (never down)
-                if _current_profit > oc_check.peak_profit:
-                    oc_check.peak_profit = _current_profit
-                _oc_profile = get_asset_profile(oc_check.symbol)
-                _oc_trail_min = float(_oc_profile.get("trail_floor_min_usdt", 0.0))
-                _new_floor = _compute_trail_floor(
-                    oc_check.peak_profit, oc_check.stake_usdt,
-                    spike_market=_is_spike_oc,
-                    trail_floor_min=_oc_trail_min,
-                )
-                # None → trailing inactive (peak below Tier 1) — skip ratchet + force-sell.
-                if _new_floor is None:
-                    continue
-                # Update broker SL when the floor ratchets up to a new level.
-                # Deriv broker SL = maximum loss in absolute USD (always > 0).
-                # When the floor is still negative we can express it as a SL
-                # amount; when the floor crosses 0 (break-even / profit lock),
-                # Deriv has no way to express "close if profit drops below X" via
-                # stop_loss — that's handled by the software force-sell below.
-                # Also enforces Deriv's minimum SL amount of $0.35.
-                if _new_floor > oc_check.trail_sl_locked:
-                    oc_check.trail_sl_locked = _new_floor
-                    # Determine which tier fired for logging clarity.
-                    if _new_floor < 0:
-                        _tier_label = "T1_tighten" if oc_check.stake_usdt > 0 else "legacy_ratchet"
-                    elif _new_floor == 0.0:
-                        _tier_label = "T1_breakeven"
-                    elif _new_floor > 0:
-                        _peak_ratio = oc_check.peak_profit / max(oc_check.stake_usdt, 0.01)
-                        _tier_label = "T3_tight_trail" if _peak_ratio >= _T3_PCT else "T2_profit_lock"
-                    else:
-                        _tier_label = "unknown"
-                    if _new_floor < 0:
-                        # Still in loss territory — express as a stop-loss amount.
-                        _broker_sl = round(max(0.35, abs(_new_floor)), 2)
-                        try:
-                            await self._client.contract_update(
-                                cid, stop_loss=_broker_sl
-                            )
-                            _LOGGER.info(
-                                "[deriv-trader] trail_ratchet %s [%s]: peak=%.3f new_floor=%.3f "
-                                "broker_sl=%.2f",
-                                oc_check.symbol, _tier_label,
-                                oc_check.peak_profit, _new_floor, _broker_sl,
-                            )
-                        except DerivClientError as _trl_exc:
-                            _LOGGER.warning(
-                                "[deriv-trader] trail broker_sl update failed %s: %s",
-                                cid, _trl_exc,
-                            )
-                    else:
-                        # Floor >= 0 (break-even / profit lock): software force-sell
-                        # below handles this; broker SL can't express profit floors.
-                        _LOGGER.info(
-                            "[deriv-trader] trail_ratchet %s [%s]: peak=%.3f new_floor=%.3f "
-                            "(profit-lock — software guard only, no broker SL update)",
-                            oc_check.symbol, _tier_label,
-                            oc_check.peak_profit, _new_floor,
-                        )
-                    # Persist trail state to JSON so the dashboard reflects the live tier.
-                    async with self._lock:
-                        self._persist_open()
-                # Software force-sell when profit drops below the locked floor
-                if _current_profit < _new_floor:
+                _current_price  = float(poc.get("current_spot") or 0)
+                _close_reason   = self._dpm.on_tick(cid, _current_profit, _current_price)
+                # Sync DPM state back to oc for dashboard/persistence
+                _snap = self._dpm.get_state_snapshot(cid)
+                if _snap:
+                    _old_peak = oc_check.peak_profit
+                    _old_sl   = oc_check.trail_sl_locked
+                    oc_check.peak_profit     = _snap["peak_profit"]
+                    oc_check.trail_sl_locked = _snap["sl_ratchet"]
+                    if oc_check.peak_profit != _old_peak or oc_check.trail_sl_locked != _old_sl:
+                        async with self._lock:
+                            self._persist_open()
+                if _close_reason:
                     _LOGGER.info(
-                        "[deriv-trader] trail_stop %s: profit=%.3f < floor=%.3f "
-                        "(peak=%.3f) — force-selling",
-                        oc_check.symbol, _current_profit, _new_floor, oc_check.peak_profit,
+                        "[DPM-REAPER] %s closing symbol=%s reason=%s pnl=%.4f",
+                        cid, oc_check.symbol, _close_reason, _current_profit,
                     )
                     try:
                         await self._client.sell(cid)
                     except DerivClientError as exc:
                         _LOGGER.warning(
-                            "[deriv-trader] trail_stop sell failed %s: %s", cid, exc
+                            "[DPM-REAPER] sell failed for %s: %s — poll will detect close",
+                            cid, exc,
                         )
                     # Fall through — next poll will see is_sold=True
 
@@ -596,6 +560,8 @@ class DerivTradeExecutor:
             if oc is None:
                 continue
 
+            _dpm_stats = self._dpm.get_close_stats(cid, realized)
+            self._dpm.unregister(cid)
             record = {
                 "broker": "deriv",
                 "contract_id": cid,
@@ -607,10 +573,12 @@ class DerivTradeExecutor:
                 "exit_price": exit_price,
                 "realized_pnl_usdt": realized,
                 "exit_reason": exit_reason,
+                "closed_by": "reaper_poll",
                 "opened_at_ts": oc.opened_at_ts,
                 "closed_at_ts": time.time(),
                 "score_breakdown": oc.score_breakdown,
                 "max_hold_seconds": oc.max_hold_seconds,
+                **_dpm_stats,
             }
             self._append_closed(record)
             await self._post_pamm_webhook(record)
@@ -796,27 +764,52 @@ class DerivTradeExecutor:
         return status or "unknown"
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Live WS settlement callback
-    # Called immediately when Deriv pushes is_sold=1 via the POC subscription.
-    # Settles the contract without waiting for the next reap_closed() poll.
+    # Live WS update callback
+    # Fired on EVERY broker POC push (tick updates + is_sold=1 close events).
+    # • For ongoing ticks: evaluates DynamicPositionManager; sells if triggered.
+    # • For is_sold=1: immediate settlement without waiting for reap_closed().
     # ─────────────────────────────────────────────────────────────────────────
-    async def _on_ws_contract_sold(self, poc: dict[str, Any]) -> None:
-        """Immediate settlement triggered by the live broker WS stream."""
-        # Guard: Deriv WS fires this callback on EVERY tick update, not just
-        # on close. Only proceed when the broker explicitly marks is_sold=True.
-        if not poc.get("is_sold"):
-            return
+    async def _on_ws_contract_update(self, poc: dict[str, Any]) -> None:
+        """WS callback: handles both tick updates and final settlement."""
         cid = int(poc.get("contract_id") or 0)
         if cid <= 0:
             return
 
+        # ── Ongoing tick: run DPM evaluation ─────────────────────────────────
+        if not poc.get("is_sold"):
+            async with self._lock:
+                oc_check = self._open.get(cid)
+            if oc_check is None:
+                return
+            current_profit = float(poc.get("profit") or 0)
+            current_price  = float(poc.get("current_spot") or 0)
+            close_reason   = self._dpm.on_tick(cid, current_profit, current_price)
+            # Sync DPM state to oc for dashboard visibility
+            _snap = self._dpm.get_state_snapshot(cid)
+            if _snap:
+                oc_check.peak_profit     = _snap["peak_profit"]
+                oc_check.trail_sl_locked = _snap["sl_ratchet"]
+            if close_reason:
+                _LOGGER.info(
+                    "[DPM-WS] %s closing symbol=%s reason=%s pnl=%.4f "
+                    "fase=%s sl=%.4f",
+                    cid, oc_check.symbol, close_reason, current_profit,
+                    _snap.get("dpm_fase", "?"), _snap.get("sl_ratchet", 0),
+                )
+                try:
+                    await self._client.sell(cid)
+                except DerivClientError as exc:
+                    _LOGGER.warning("[DPM-WS] sell failed for %s: %s", cid, exc)
+            return
+
+        # ── is_sold=True: immediate settlement ───────────────────────────────
         async with self._lock:
             oc = self._open.pop(cid, None)
             if oc is None:
                 return  # already settled by reaper or reconciliation
             self._persist_open()
 
-        realized = float(poc.get("profit") or 0)
+        realized   = float(poc.get("profit") or 0)
         exit_price = float(
             poc.get("sell_spot")
             or poc.get("exit_tick_display_value")
@@ -826,14 +819,19 @@ class DerivTradeExecutor:
             or 0
         )
         held = time.time() - oc.opened_at_ts
-        _was_trail = (
+
+        _dpm_stats = self._dpm.get_close_stats(cid, realized)
+        self._dpm.unregister(cid)
+
+        # Exit reason: prefer DPM reason if the SL floor was hit
+        _was_ratchet = (
             oc.trail_sl_locked > _TRAIL_INIT_SL
             and realized <= oc.trail_sl_locked + 0.01
         )
         if oc.max_hold_seconds > 0 and held >= oc.max_hold_seconds:
             exit_reason = "spike_timeout"
-        elif _was_trail:
-            exit_reason = f"trail_stop(floor={oc.trail_sl_locked:.2f})"
+        elif _was_ratchet:
+            exit_reason = f"ratchet_sl_alcanzado(floor={oc.trail_sl_locked:.4f})"
         else:
             exit_reason = self._classify_exit(poc)
 
@@ -848,20 +846,159 @@ class DerivTradeExecutor:
             "exit_price": exit_price,
             "realized_pnl_usdt": realized,
             "exit_reason": exit_reason,
+            "closed_by": "ws_event",
             "opened_at_ts": oc.opened_at_ts,
             "closed_at_ts": time.time(),
             "score_breakdown": oc.score_breakdown,
             "max_hold_seconds": oc.max_hold_seconds,
             "_settled_by": "ws_subscription",
+            **_dpm_stats,
         }
         _LOGGER.info(
-            "[deriv-trader] WS_INSTANT_CLOSE %s symbol=%s pnl=%.4f reason=%s",
+            "[deriv-trader] WS_INSTANT_CLOSE %s symbol=%s pnl=%.4f reason=%s "
+            "eficiencia=%.2f max_pnl=%.4f dpm_fase=%s",
             cid, oc.symbol, realized, exit_reason,
+            _dpm_stats.get("eficiencia", 0), _dpm_stats.get("max_pnl_alcanzado", 0),
+            _dpm_stats.get("dpm_fase", "?"),
         )
         self._append_closed(record)
         await self._post_pamm_webhook(record)
         self._notify("close", record)
         self._update_sym_stats(record)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # WS reconnect hook — re-subscribe open contracts after disconnect
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _on_ws_reconnect(self) -> None:
+        """Re-subscribe all open contracts after a WebSocket reconnect.
+
+        Called automatically by DerivClient.run_forever() after every
+        (re)connect + tick-subscription cycle, within 3 seconds of the new
+        connection being live.  Ensures the per-contract POC subscription stream
+        is restored for every contract that was open when the disconnect happened.
+        """
+        async with self._lock:
+            open_ids = list(self._open.keys())
+        if not open_ids:
+            return
+        _LOGGER.info(
+            "[deriv-trader] WS_RECONNECT: re-subscribing %d open contract(s): %s",
+            len(open_ids), open_ids,
+        )
+        for cid in open_ids:
+            asyncio.create_task(
+                self._client.subscribe_contract(cid, self._on_ws_contract_update),
+                name=f"resub-{cid}",
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Heartbeat monitor (PROBLEMA 1 — unknown closes)
+    # ─────────────────────────────────────────────────────────────────────────    # Runs every 10 seconds as a dedicated safety net:
+    #  1. Re-subscribes any open contract whose WS subscription was lost
+    #     (e.g. after a WS reconnect that happened while the contract was open).
+    #  2. REST-polls every open contract to catch forced closes that the WS
+    #     event never delivered — records them as closed_by="heartbeat_poll"
+    #     with the real PnL from the broker, eliminating "unknown" close labels.
+    # ─────────────────────────────────────────────────────────────────────────
+    _HEARTBEAT_INTERVAL_SEC: float = float(os.getenv("DERIV_HEARTBEAT_SEC", "10"))
+
+    async def heartbeat_loop(self) -> None:
+        """10-second heartbeat: re-sub lost WS connections + detect forced closes."""
+        _TERMINAL_STATUSES = {"won", "lost", "sold", "cancelled", "expired"}
+        while True:
+            await asyncio.sleep(self._HEARTBEAT_INTERVAL_SEC)
+            if self._settings.dry_run or not self._open:
+                continue
+            try:
+                async with self._lock:
+                    open_ids = list(self._open.keys())
+
+                for cid in open_ids:
+                    # ── 1. Re-subscribe if WS subscription was silently lost ──
+                    if cid not in self._client._contract_subs:
+                        _LOGGER.debug(
+                            "[heartbeat] re-subscribing lost WS sub for contract %s", cid
+                        )
+                        asyncio.create_task(
+                            self._client.subscribe_contract(
+                                cid, self._on_ws_contract_update
+                            ),
+                            name=f"hb-resub-{cid}",
+                        )
+
+                    # ── 2. Poll for forced closes (REST fallback) ─────────────
+                    try:
+                        resp = await asyncio.wait_for(
+                            self._client.proposal_open_contract(cid), timeout=8.0
+                        )
+                    except (DerivClientError, asyncio.TimeoutError) as exc:
+                        _LOGGER.debug(
+                            "[heartbeat] poll failed for %s: %s", cid, exc
+                        )
+                        continue
+
+                    poc = resp.get("proposal_open_contract") or {}
+                    _poc_status = (poc.get("status") or "").lower()
+                    is_sold = (
+                        bool(poc.get("is_sold"))
+                        and _poc_status in _TERMINAL_STATUSES
+                    )
+                    if not is_sold:
+                        continue
+
+                    # Contract is closed but bot didn't know — forced close
+                    async with self._lock:
+                        oc = self._open.pop(cid, None)
+                        if oc is None:
+                            continue  # already settled by WS callback or reaper
+                        self._persist_open()
+
+                    realized = float(poc.get("profit") or 0)
+                    exit_price = float(
+                        poc.get("sell_spot")
+                        or poc.get("exit_tick_display_value")
+                        or poc.get("exit_spot")
+                        or poc.get("current_spot")
+                        or poc.get("sell_price")
+                        or 0
+                    )
+                    exit_reason = self._classify_exit(poc)
+                    if exit_reason in ("", "unknown"):
+                        exit_reason = "forced_close"
+
+                    _dpm_stats = self._dpm.get_close_stats(cid, realized)
+                    self._dpm.unregister(cid)
+
+                    _LOGGER.warning(
+                        "[heartbeat] FORCED_CLOSE detected contract_id=%s symbol=%s "
+                        "pnl=%.4f status=%s — was not caught by WS event or reaper",
+                        cid, oc.symbol, realized, _poc_status,
+                    )
+                    record = {
+                        "broker": "deriv",
+                        "contract_id": cid,
+                        "intent_id": oc.intent_id,
+                        "symbol": oc.symbol,
+                        "side": oc.side,
+                        "stake_usdt": oc.stake_usdt,
+                        "entry_price": oc.entry_price,
+                        "exit_price": exit_price,
+                        "realized_pnl_usdt": realized,
+                        "exit_reason": exit_reason,
+                        "closed_by": "heartbeat_poll",
+                        "opened_at_ts": oc.opened_at_ts,
+                        "closed_at_ts": time.time(),
+                        "score_breakdown": oc.score_breakdown,
+                        "max_hold_seconds": oc.max_hold_seconds,
+                        **_dpm_stats,
+                    }
+                    self._append_closed(record)
+                    await self._post_pamm_webhook(record)
+                    self._notify("forced_close", record)
+                    self._update_sym_stats(record)
+
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[heartbeat] loop error: %s", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Independent timeout clock
@@ -1264,10 +1401,20 @@ class DerivTradeExecutor:
                         time.strftime("%H:%M:%S", time.localtime(opened_at)),
                     )
 
+            # Register with DPM so ratchet SL picks up on this recovered contract.
+            if not self._dpm.is_registered(cid):
+                self._dpm.register(
+                    contract_id=cid,
+                    symbol=symbol,
+                    stake=stake,
+                    entry_price=entry_price,
+                    entry_ts=opened_at,
+                )
+
             # Re-subscribe to broker WS stream so trailing-stop and is_sold
             # callbacks work immediately — no waiting for next reap_closed cycle.
             asyncio.create_task(
-                self._client.subscribe_contract(cid, self._on_ws_contract_sold),
+                self._client.subscribe_contract(cid, self._on_ws_contract_update),
                 name=f"boot-sub-{cid}",
             )
 
