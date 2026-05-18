@@ -283,6 +283,12 @@ class DerivDaemon:
             "(SL=$0.54 en stake $1.50 — supera floor $0.50 del broker), stake_max=$1.50. "
             "Causa raíz anterior: SL floor dominaba en 1-2 min con ATR_abs≈4.1.",
         )
+        _LOGGER.info(
+            "[R50_SL_FIX] R_50 stop_loss_pct_override=0.36 stake_max=$1.50 aplicado. "
+            "SL = 0.36 × $1.50 = $0.54 > $0.50 floor broker. "
+            "Causa raíz: mean_rev stop_loss_pct=0.004 producía sl_usd≪$0.50 (floor) "
+            "→ trade cerraba en SL a los 2-3 min por floor del broker.",
+        )
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")

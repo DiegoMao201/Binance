@@ -205,6 +205,13 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_min": -1.0,          # reject if geo < -1.0 (too extended down)
         "geo_entry_max":  0.5,          # reject if geo >  0.5 (too extended up)
         "trail_floor_min_usdt": 0.30,   # T1 activates at ≥$0.30 locked profit
+        # ── SL floor fix 2026-05-18 (mismo bug que R_75) ──────────────────
+        # stop_loss_pct=0.004 (mean_rev) × stake prodíca sl_usd≪$0.50 (floor broker)
+        # → SL se flooreaba a $0.50 que es 33-50% del stake → trade cerraba en SL rápido.
+        # SL floor del broker = $0.50 — stake mínimo $1.40 para superarlo.
+        # Fix: stop_loss_pct_override=0.36 → SL = 0.36 × $1.50 = $0.54 > $0.50 ✅
+        "stop_loss_pct_override": 0.36,  # 36% de stake → SL $0.54 en stake $1.50
+        "stake_max_usdt": 1.50,
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
     # breakouts when H<0.58, prefer reversals/sweeps with ATR expansion.
