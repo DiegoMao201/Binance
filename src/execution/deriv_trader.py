@@ -101,34 +101,60 @@ _TRAIL_STEP:      float = float(os.getenv("DERIV_TRAIL_STEP",     "0.5"))
 _T1_PCT:          float = float(os.getenv("DERIV_TRAIL_T1_PCT",        "0.15"))   # 15% → BE
 _T2_PCT:          float = float(os.getenv("DERIV_TRAIL_T2_PCT",        "0.35"))   # 35% → lock
 _T3_PCT:          float = float(os.getenv("DERIV_TRAIL_T3_PCT",        "0.60"))   # 60% → tight
-_T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.15"))   # lock = +15%
+_T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.20"))   # lock = +20% (institutional spec)
 _T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.05"))   # trail gap 5%
+# Strict safety boundary: maximum loss allowed as a fraction of stake.
+# Default 1.00 (the full stake — Deriv contracts can never lose more than stake).
+_TRAIL_MAX_LOSS_PCT: float = float(os.getenv("DERIV_TRAIL_MAX_LOSS_PCT", "1.00"))
 
 
-def _compute_trail_floor(peak: float, stake: float = 0.0, spike_market: bool = False) -> float:
-    """Tiered trailing stop floor.
+def _compute_trail_floor(
+    peak: float,
+    stake: float = 0.0,
+    spike_market: bool = False,
+) -> float | None:
+    """Institutional tiered trailing stop floor (refactored 2026-05-18).
 
-    When *stake* > 0 the three tiers are evaluated as a percentage of stake so
-    the logic is invariant to position size.  Falls back to the legacy flat
-    ratchet when stake is zero or unavailable.
+    Strict tier semantics based on peak PnL as a fraction of stake:
 
-    spike_market=True skips Tier 1 (break-even at 1%) for BOOM/CRASH contracts:
-    pre-spike inter-tick drift is violent enough to trigger BE exits prematurely.
-    Trailing only activates at Tier 2 (2.5% gain = genuine profit territory).
+      • Below T1  (peak_pnl_pct < T1_PCT)           → None (trailing inactive)
+      • T1 ≤ pct < T2                                → 0.0  (break-even lock)
+      • T2 ≤ pct < T3                                → stake × T2_LOCK_PCT (+20%)
+      • pct ≥ T3                                     → (pct − T3_STEP_PCT) × stake
+
+    Final value is clamped by the strict safety boundary:
+        max(floor, -sl_max_loss)
+    so any anomalous computation can never force an invalid SL beyond the
+    structural maximum loss (stake × DERIV_TRAIL_MAX_LOSS_PCT).
+
+    spike_market=True suppresses Tier 1 (BE) to avoid premature exits on
+    inter-spike noise — trailing only activates at Tier 2 (genuine profit).
+
+    Returns None when no floor is active (caller must skip ratchet logic).
+    Falls back to the legacy flat ratchet only when stake is unavailable.
     """
     if stake > 0:
-        # Tier 3: strong run — follow closely (0.5 % behind peak)
-        if peak >= stake * _T3_PCT:
-            return round(peak - stake * _T3_STEP_PCT, 4)
-        # Tier 2: decent gain — lock in 1 % of stake
-        if peak >= stake * _T2_PCT:
-            return round(stake * _T2_LOCK_PCT, 4)
-        # Tier 1: first profit — protect break-even
-        # BOOM/CRASH: skip — 1% gain is normal inter-spike noise; BE causes premature exit.
-        if not spike_market and peak >= stake * _T1_PCT:
+        peak_pnl_pct = peak / stake
+        sl_max_loss = stake * _TRAIL_MAX_LOSS_PCT
+
+        # Tier 3: strong run → tight trail (peak − step) × stake
+        if peak_pnl_pct >= _T3_PCT:
+            floor = (peak_pnl_pct - _T3_STEP_PCT) * stake
+            return round(max(floor, -sl_max_loss), 4)
+
+        # Tier 2: decent gain → lock at +20% of stake
+        if peak_pnl_pct >= _T2_PCT:
+            floor = stake * _T2_LOCK_PCT
+            return round(max(floor, -sl_max_loss), 4)
+
+        # Tier 1: first profit → break-even (skipped for spike markets)
+        if not spike_market and peak_pnl_pct >= _T1_PCT:
             return 0.0
-        return _TRAIL_INIT_SL
-    # Legacy flat ratchet (stake unknown)
+
+        # Below T1 → trailing inactive (caller must not ratchet)
+        return None
+
+    # Legacy flat ratchet (stake unknown) — kept for backwards compatibility
     if peak < _TRAIL_START:
         return _TRAIL_INIT_SL
     return math.floor(peak / _TRAIL_STEP) * _TRAIL_STEP - _TRAIL_STEP
@@ -455,6 +481,9 @@ class DerivTradeExecutor:
                     oc_check.peak_profit, oc_check.stake_usdt,
                     spike_market=_is_spike_oc,
                 )
+                # None → trailing inactive (peak below Tier 1) — skip ratchet + force-sell.
+                if _new_floor is None:
+                    continue
                 # Update broker SL when the floor ratchets up to a new level.
                 # Deriv broker SL = maximum loss in absolute USD (always > 0).
                 # When the floor is still negative we can express it as a SL
@@ -859,6 +888,51 @@ class DerivTradeExecutor:
                             )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("[deriv-timeout-clock] error: %s", exc)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Orphaned-contract grim reaper — institutional safety net (2026-05-18)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Runs every 10 seconds. For every open contract whose elapsed time exceeds
+    # (max_hold_seconds + 30s), force a close and purge from memory. This catches
+    # cases where the broker WS dropped the close event or timeout_clock_loop
+    # was blocked.  CRITICAL-level log so the orphan is auditable.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def verify_orphaned_contracts(self) -> None:
+        """Independent 10-second grim reaper for orphaned (zombie) contracts."""
+        _GRACE_SEC = 30.0
+        while True:
+            await asyncio.sleep(10)
+            if self._settings.dry_run:
+                continue
+            try:
+                now_ts = time.time()
+                async with self._lock:
+                    candidates = [
+                        (cid, oc) for cid, oc in self._open.items()
+                        if oc.max_hold_seconds > 0
+                        and (now_ts - oc.opened_at_ts) > (oc.max_hold_seconds + _GRACE_SEC)
+                    ]
+                for cid, oc in candidates:
+                    elapsed = now_ts - oc.opened_at_ts
+                    _LOGGER.critical(
+                        "[GRIM_REAPER] ORPHANED_CONTRACT contract_id=%s symbol=%s "
+                        "elapsed=%.1fs > max_hold=%.0fs + grace=%.0fs — force-closing",
+                        cid, oc.symbol, elapsed, oc.max_hold_seconds, _GRACE_SEC,
+                    )
+                    try:
+                        await self.close_contract(cid)
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "[GRIM_REAPER] sell failed for %s (may be already closed): %s",
+                            cid, exc,
+                        )
+                    # Purge from memory regardless of sell outcome (reaper will
+                    # later reconcile via portfolio if the broker still holds it).
+                    async with self._lock:
+                        self._open.pop(cid, None)
+                        self._persist_open()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[GRIM_REAPER] loop error: %s", exc)
 
     def _notify(self, level: str, payload: dict[str, Any]) -> None:
         if self._telemetry is None:

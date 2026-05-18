@@ -412,3 +412,104 @@ def spike_contract_type(symbol: str, multside: str) -> str:
     if "CRASH" in su:
         return "FALL"
     return ms
+
+
+# ─── Institutional volatility / regime filters (added 2026-05-18) ───────────
+
+# Symbols subject to the ATR-percentile gate. BOOM300/CRASH300 are excluded
+# because their accumulation windows are short and the ATR filter would
+# starve them of valid setups.
+_ATR_FILTER_SYMBOLS: set[str] = {"BOOM500", "BOOM1000", "CRASH500", "CRASH1000"}
+
+
+def passes_atr_volatility_filter(
+    symbol: str,
+    current_atr: float,
+    atr_history: list[float],
+    percentile_threshold: int = 40,
+) -> tuple[bool, str]:
+    """Institutional ATR volatility gate for BOOM500/1000 + CRASH500/1000.
+
+    Rejects entries whose current ATR is below the *percentile_threshold*-th
+    percentile of the rolling 24-h ATR history.  This filters out dead-volume
+    sessions where the spike accumulation simply will not occur.
+
+    Returns (allowed: bool, reason: str). Symbols outside the filter set
+    always return (True, "").
+    """
+    su = symbol.upper()
+    if su not in _ATR_FILTER_SYMBOLS:
+        return True, ""
+    # Need at least 10 historical ATR samples to compute a meaningful percentile.
+    if not atr_history or len(atr_history) < 10:
+        return True, ""
+    if current_atr <= 0:
+        return False, "ENTRY_BLOCKED: Insufficient ATR Volatility (atr=0)"
+    try:
+        # Lightweight percentile (no numpy dep required at call site).
+        sorted_hist = sorted(atr_history)
+        idx = max(0, min(len(sorted_hist) - 1,
+                         int(len(sorted_hist) * percentile_threshold / 100.0)))
+        p_threshold = sorted_hist[idx]
+    except Exception:  # noqa: BLE001
+        return True, ""
+    if current_atr < p_threshold:
+        return False, (
+            f"ENTRY_BLOCKED: Insufficient ATR Volatility "
+            f"(current={current_atr:.6f} < p{percentile_threshold}={p_threshold:.6f})"
+        )
+    return True, ""
+
+
+def min_score_for_regime(symbol: str, regime: str) -> float:
+    """Regime-aware minimum score override.
+
+    • calm regime  → 7.50  (only ultra-high-conviction setups in flat markets)
+    • trending / volatile → 6.00 baseline
+    • other (ranging, unknown) → falls back to the symbol's profile minimum.
+    """
+    r = (regime or "").lower()
+    if r == "calm":
+        return 7.50
+    if r in ("trending", "volatile"):
+        return 6.00
+    return min_score_for(symbol)
+
+
+def adaptive_max_hold(symbol: str, regime: str) -> int:
+    """Macro-timeout: BOOM/CRASH trending markets get 600s, others 450s.
+
+    Non-spike markets return 0 (no timeout).
+    """
+    if not is_spike_market(symbol):
+        return 0
+    r = (regime or "").lower()
+    return 600 if r == "trending" else 450
+
+
+def extreme_mr_penalty(symbol: str, hurst: float | None, geo_label: str | None) -> float:
+    """Extreme mean-reversion exhaustion penalty for BOOM/CRASH.
+
+    Triggers when:
+      • symbol is a spike market (BOOM/CRASH)
+      • hurst < 0.30 (deep mean-reverting exhaustion)
+      • geo_label == "mr_near_mean" (price is hugging the macro mean)
+
+    Returns -1.5 if all conditions match, 0.0 otherwise. Caller is expected
+    to add the return value to score and to record
+    score_breakdown["hurst_mr_penalty"] = returned_value when non-zero.
+    """
+    if not is_spike_market(symbol):
+        return 0.0
+    if hurst is None:
+        return 0.0
+    try:
+        h = float(hurst)
+    except (TypeError, ValueError):
+        return 0.0
+    if h >= 0.30:
+        return 0.0
+    if (geo_label or "").lower() != "mr_near_mean":
+        return 0.0
+    return -1.5
+

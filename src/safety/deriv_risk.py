@@ -235,9 +235,61 @@ class DerivRiskManager:
                 except Exception:  # noqa: BLE001
                     pass
 
+        # ── State hydration: restore consecutive_losses + bankroll from disk ──
+        # Survives daemon/deploy restarts so loss-streak protection isn't lost
+        # to amnesia. Only loads fields that exist; missing fields are ignored.
+        try:
+            lf = settings.lockout_file
+            if lf.exists():
+                _raw = json.loads(lf.read_text())
+                if isinstance(_raw, dict):
+                    _ls = int(_raw.get("consecutive_losses", 0) or 0)
+                    if _ls > 0:
+                        self._loss_streak = _ls
+                        _LOGGER.info(
+                            "[risk] hydrated consecutive_losses=%d from lockout file",
+                            _ls,
+                        )
+                    _bk = float(_raw.get("bankroll", 0) or 0)
+                    if _bk > 0 and abs(_bk - settings.bankroll_usdt) > 0.01:
+                        _LOGGER.info(
+                            "[risk] persisted bankroll=%.2f differs from config=%.2f (using config)",
+                            _bk, settings.bankroll_usdt,
+                        )
+        except Exception as _hyd_exc:  # noqa: BLE001
+            _LOGGER.warning("[risk] state hydration failed: %s — starting fresh", _hyd_exc)
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router
     # ─────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def check_random_walk_prefilter(symbol: str, hurst: float | None) -> dict | None:
+        """Pre-pipeline structural veto for R_* volatility indices in the
+        absolute noise zone (0.45 ≤ H ≤ 0.55).
+
+        Returns the veto payload when the symbol should be rejected BEFORE
+        the AI gate and before the full evaluate() call.  Returns None when
+        the symbol passes the prefilter (caller continues with normal flow).
+
+        BOOM/CRASH are exempt — their edge is structural, not Hurst-based.
+        """
+        if not symbol.startswith("R_"):
+            return None
+        if hurst is None:
+            return None
+        try:
+            h = float(hurst)
+        except (TypeError, ValueError):
+            return None
+        if 0.45 <= h <= 0.55:
+            return {
+                "approved": False,
+                "reason": "random_walk_zone_prefilter",
+                "score": None,
+                "ai_called": False,
+            }
+        return None
+
     def ingest_tick(self, symbol: str, price: float) -> None:
         if price <= 0 or not math.isfinite(price):
             return
@@ -898,21 +950,78 @@ class DerivRiskManager:
         return snap
 
     def register_close(self, realized_pnl_usdt: float) -> None:
-        """Update streak + daily DD after a contract closes."""
+        """Update streak + daily DD after a contract closes.
+
+        Streak logic (institutional refactor 2026-05-18):
+          • significant win  (pnl > sl_typical × 0.30)  → reset streak to 0
+          • loss              (pnl < 0)                  → increment streak
+          • micro-win         (0 ≤ pnl ≤ threshold)      → preserve counter
+
+        After every call the risk state (consecutive_losses, lockout_until,
+        bankroll) is serialized to logs/deriv_lockout.json so that the
+        protective state survives daemon/deploy restarts.
+        """
         self._roll_daily_anchor_if_needed()
         self._daily_realized_pnl += realized_pnl_usdt
         self._last_trade_ts = time.time()
-        if realized_pnl_usdt < 0:
+
+        # ── Significance threshold (anti-noise) ───────────────────────────
+        # sl_typical: representative dollar-loss for a BOOM/CRASH contract.
+        # win_significant_threshold = 30% of sl_typical. A win below this is
+        # classified as a micro-win (noise) and does NOT reset the streak.
+        _boom_crash_sl_pct = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.60"))
+        sl_typical = (
+            self._settings.bankroll_usdt
+            * self._settings.risk_per_trade_pct
+            * _boom_crash_sl_pct
+        )
+        win_significant_threshold = max(0.0, sl_typical * 0.30)
+
+        if realized_pnl_usdt > win_significant_threshold:
+            if self._loss_streak > 0:
+                _LOGGER.info(
+                    "[risk] significant win pnl=%.3f > thr=%.3f — streak reset (was %d)",
+                    realized_pnl_usdt, win_significant_threshold, self._loss_streak,
+                )
+            self._loss_streak = 0
+        elif realized_pnl_usdt < 0:
             self._loss_streak += 1
-            # Loss-streak lockout disabled (set DERIV_LOSS_STREAK_LOCKOUT=999 or ≥ threshold)
-            # Only engage if loss_streak_lockout > 0 AND we truly hit the cap
             cap = self._settings.loss_streak_lockout
             if cap > 0 and self._loss_streak >= cap:
                 self._engage_lockout(
                     f"{self._loss_streak} consecutive losses"
                 )
         else:
-            self._loss_streak = 0
+            # 0 ≤ pnl ≤ threshold — micro-win, preserve counter
+            _LOGGER.info(
+                "[risk] micro_win pnl=%.3f ≤ thr=%.3f — streak preserved (%d)",
+                realized_pnl_usdt, win_significant_threshold, self._loss_streak,
+            )
+
+        # ── State serialization (persistence across restarts) ─────────────
+        try:
+            lf = self._settings.lockout_file
+            lf.parent.mkdir(parents=True, exist_ok=True)
+            # Read existing lockout state (if any) so we don't clobber it.
+            existing: dict[str, Any] = {}
+            if lf.exists():
+                try:
+                    existing = json.loads(lf.read_text()) or {}
+                except Exception:  # noqa: BLE001
+                    existing = {}
+            existing.update({
+                "consecutive_losses": int(self._loss_streak),
+                "lockout_until": float(existing.get("until_ts", 0) or 0),
+                "bankroll": float(self._settings.bankroll_usdt),
+                "daily_realized_pnl": round(self._daily_realized_pnl, 4),
+                "last_trade_ts": self._last_trade_ts,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            tmp = lf.with_suffix(lf.suffix + ".tmp")
+            tmp.write_text(json.dumps(existing, indent=2))
+            tmp.replace(lf)
+        except Exception as _ser_exc:  # noqa: BLE001
+            _LOGGER.warning("[risk] state serialization failed: %s", _ser_exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Internal scoring helpers — v2 (smarter math)

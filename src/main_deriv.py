@@ -40,9 +40,13 @@ from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
 from src.strategies.deriv_signals import (
+    adaptive_max_hold,
+    extreme_mr_penalty,
     get_asset_profile,
     is_spike_market,
     min_score_for,
+    min_score_for_regime,
+    passes_atr_volatility_filter,
     spike_timeout_sec,
 )
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
@@ -62,6 +66,18 @@ _LOGGER = logging.getLogger("deriv.daemon")
 # Both tunable via env vars without a code change.
 _BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.60"))
 _BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "2.50"))
+
+# ─── Anti-slippage spread veto (institutional execution gate) ────────────────
+# Stricter than the risk-engine spread veto (which is 0.0010 = 0.10%).
+# This is the FINAL pre-execution check applied right before the broker WS
+# transmits the buy. Default 0.0008 = 0.08% (8 bps).
+_EXEC_MAX_SPREAD_PCT: float = float(os.getenv("DERIV_EXEC_MAX_SPREAD_PCT", "0.0008"))
+
+# ─── Anti-slippage spread veto (institutional execution gate) ────────────────
+# Stricter than the risk-engine spread veto (which is 0.0010 = 0.10%).
+# This is the FINAL pre-execution check applied right before the broker WS
+# transmits the buy. Default 0.0008 = 0.08% (8 bps).
+_EXEC_MAX_SPREAD_PCT: float = float(os.getenv("DERIV_EXEC_MAX_SPREAD_PCT", "0.0008"))
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
@@ -250,6 +266,7 @@ class DerivDaemon:
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
+        grim_reaper_task = asyncio.create_task(self._executor.verify_orphaned_contracts(), name="deriv-grim-reaper")
         status_task      = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
         balance_task     = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
         history_task     = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
@@ -368,11 +385,80 @@ class DerivDaemon:
         pre_hurst    = float(pre_analysis.get("hurst") or 0.5)
         pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
 
+        # ── Random-Walk pre-filter (R_* only, H ∈ [0.45, 0.55]) ───────────
+        # Structural veto BEFORE the AI gate and full evaluate() — avoids
+        # wasted LLM tokens on R_* indices stuck in the noise band.
+        _rw_veto = self._risk.check_random_walk_prefilter(tick.symbol, pre_hurst)
+        if _rw_veto is not None:
+            self._log_entry_block(
+                tick.symbol, "RANDOM_WALK_PREFILTER",
+                score=0.0, effective_min_score=0.0,
+                side=None, regime="?", hurst=pre_hurst,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=None,
+                score=0.0,
+                reason=f"RANDOM_WALK_PREFILTER: H={pre_hurst:.3f} ∈ [0.45,0.55]",
+                extra={"prefilter": _rw_veto, "hurst": pre_hurst},
+            )
+            return
+
         snap = self._risk.evaluate(
             tick.symbol, spread_pct,
             hurst=pre_hurst,
             autocorr_lag1=pre_autocorr,
         )
+
+        # ── Extreme MR exhaustion penalty (BOOM/CRASH only) ───────────────
+        _geo_label = str(snap.score_breakdown.get("geo_layout") or "")
+        _mr_pen = extreme_mr_penalty(tick.symbol, pre_hurst, _geo_label)
+        if _mr_pen != 0.0:
+            snap.score = round(max(0.0, snap.score + _mr_pen), 3)
+            snap.score_breakdown["hurst_mr_penalty"] = _mr_pen
+            _LOGGER.info(
+                "[PIPELINE] EXTREME_MR_PENALTY %s | H=%.3f geo=%s pen=%.2f score→%.2f",
+                tick.symbol, pre_hurst, _geo_label, _mr_pen, snap.score,
+            )
+
+        # ── ATR volatility filter (BOOM500/1000 + CRASH500/1000) ──────────
+        # Reject entries during low-volume sessions where the spike accumulation
+        # will not have enough fuel. Uses live ATR vs the rolling 24h ATR history
+        # maintained by DerivRiskManager.
+        _atr_current = float(snap.score_breakdown.get("atr_abs") or 0.0)
+        _atr_hist = self._risk._atr_history.get(tick.symbol, [])
+        _atr_ok, _atr_reason = passes_atr_volatility_filter(
+            tick.symbol, _atr_current, _atr_hist,
+        )
+        if not _atr_ok:
+            self._log_entry_block(
+                tick.symbol, "ATR_VOLATILITY_FILTER",
+                score=snap.score, effective_min_score=snap.effective_min_score,
+                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                score_breakdown=snap.score_breakdown,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score, reason=_atr_reason,
+                extra={"atr_current": _atr_current, "atr_hist_n": len(_atr_hist)},
+            )
+            return
+
+        # ── Regime-aware min_score override (calm → 7.50) ─────────────────
+        _regime_min = min_score_for_regime(tick.symbol, snap.regime)
+        if snap.score < _regime_min:
+            self._log_entry_block(
+                tick.symbol, f"REGIME_SCORE_GATE_{snap.regime}",
+                score=snap.score, effective_min_score=_regime_min,
+                side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                score_breakdown=snap.score_breakdown,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}",
+                extra={"regime": snap.regime},
+            )
+            return
 
         # Per-symbol minimum score gate (ASSET_INTEL_PROFILES)
         _profile_min_score = min_score_for(tick.symbol)
@@ -566,8 +652,9 @@ class DerivDaemon:
                 else (0.004 if _is_mean_rev_ov else self._settings.take_profit_pct)
             )
             _is_spike_ov = bool(snap.score_breakdown.get("spike_entry"))
+            # Adaptive timeout: trending BOOM/CRASH gets 600s, others 450s.
             _max_hold_ov = (
-                float(spike_timeout_sec(tick.symbol))
+                float(adaptive_max_hold(tick.symbol, snap.regime))
                 if (_is_spike_ov or _is_boom_crash_ov)
                 else 0.0
             )
@@ -589,6 +676,19 @@ class DerivDaemon:
                 reason=f"GO [MATH_OVERRIDE] score={snap.score:.2f} regime={snap.regime}",
                 extra={**decision_extra, "hurst_ai_override": True},
             )
+            # ── Anti-slippage: final spread veto before broker WS ──────────
+            if spread_pct > _EXEC_MAX_SPREAD_PCT:
+                _LOGGER.warning(
+                    "[deriv-daemon] ENTRY_VETO: Spread of %.5f exceeds limit of %.5f (override path)",
+                    spread_pct, _EXEC_MAX_SPREAD_PCT,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason=f"SPREAD_VETO: {spread_pct:.5f} > {_EXEC_MAX_SPREAD_PCT:.5f}",
+                    extra={**decision_extra, "spread_pct": spread_pct},
+                )
+                return
             self._counters["orders_sent"] += 1
             try:
                 result = await self._router.route_order(payload_override)
@@ -665,8 +765,9 @@ class DerivDaemon:
             _BOOM_CRASH_TP_PCT if _is_boom_crash
             else (0.004 if _is_mean_rev else self._settings.take_profit_pct)
         )
+        # Adaptive timeout: trending BOOM/CRASH gets 600s, others 450s.
         _max_hold_sec = (
-            float(spike_timeout_sec(tick.symbol))
+            float(adaptive_max_hold(tick.symbol, snap.regime))
             if (_is_spike_entry or _is_boom_crash)
             else 0.0
         )
@@ -721,6 +822,19 @@ class DerivDaemon:
                 "hurst_ai_override": False,
             },
         )
+        # ── Anti-slippage: final spread veto before broker WS ──────────────
+        if spread_pct > _EXEC_MAX_SPREAD_PCT:
+            _LOGGER.warning(
+                "[deriv-daemon] ENTRY_VETO: Spread of %.5f exceeds limit of %.5f (AI path)",
+                spread_pct, _EXEC_MAX_SPREAD_PCT,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"SPREAD_VETO: {spread_pct:.5f} > {_EXEC_MAX_SPREAD_PCT:.5f}",
+                extra={**decision_extra, "spread_pct": spread_pct},
+            )
+            return
         self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
@@ -881,7 +995,23 @@ class DerivDaemon:
             try:
                 closed = await self._executor.reap_closed()
                 for rec in closed:
-                    self._risk.register_close(float(rec.get("realized_pnl_usdt") or 0))
+                    # ── Slippage interceptor (TASK 4.1) ─────────────────────
+                    # If a contract closed with zero duration AND negative pnl,
+                    # treat it as a structural slippage event. Log critically
+                    # and force-route via register_close so streak/lockout
+                    # protection still applies.
+                    _opened_ts = float(rec.get("opened_at_ts") or 0)
+                    _closed_ts = float(rec.get("closed_at_ts") or 0)
+                    _duration = max(0.0, _closed_ts - _opened_ts)
+                    _pnl = float(rec.get("realized_pnl_usdt") or 0)
+                    if _duration < 1.0 and _pnl < 0:
+                        _LOGGER.critical(
+                            "[SLIPPAGE_EXIT] symbol=%s contract=%s duration=%.2fs "
+                            "pnl=%.4f side=%s — structural slippage event",
+                            rec.get("symbol"), rec.get("contract_id"),
+                            _duration, _pnl, rec.get("side"),
+                        )
+                    self._risk.register_close(_pnl)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("[deriv-daemon] reaper iteration failed")
             try:
