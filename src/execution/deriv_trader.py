@@ -72,12 +72,16 @@ _T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.010"))
 _T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.005"))  # trail gap 0.5 %
 
 
-def _compute_trail_floor(peak: float, stake: float = 0.0) -> float:
+def _compute_trail_floor(peak: float, stake: float = 0.0, spike_market: bool = False) -> float:
     """Tiered trailing stop floor.
 
     When *stake* > 0 the three tiers are evaluated as a percentage of stake so
     the logic is invariant to position size.  Falls back to the legacy flat
     ratchet when stake is zero or unavailable.
+
+    spike_market=True skips Tier 1 (break-even at 1%) for BOOM/CRASH contracts:
+    pre-spike inter-tick drift is violent enough to trigger BE exits prematurely.
+    Trailing only activates at Tier 2 (2.5% gain = genuine profit territory).
     """
     if stake > 0:
         # Tier 3: strong run — follow closely (0.5 % behind peak)
@@ -87,7 +91,8 @@ def _compute_trail_floor(peak: float, stake: float = 0.0) -> float:
         if peak >= stake * _T2_PCT:
             return round(stake * _T2_LOCK_PCT, 4)
         # Tier 1: first profit — protect break-even
-        if peak >= stake * _T1_PCT:
+        # BOOM/CRASH: skip — 1% gain is normal inter-spike noise; BE causes premature exit.
+        if not spike_market and peak >= stake * _T1_PCT:
             return 0.0
         return _TRAIL_INIT_SL
     # Legacy flat ratchet (stake unknown)
@@ -334,16 +339,22 @@ class DerivTradeExecutor:
             _TERMINAL_STATUSES = {"won", "lost", "sold", "cancelled", "expired"}
             is_sold = bool(poc.get("is_sold")) and _poc_status in _TERMINAL_STATUSES
 
-            # ── Dynamic trailing SL (non-spike trades, runs while contract is open) ──
-            # Tracks peak profit and force-sells when current profit falls below the
-            # trailing floor.  Also updates broker SL at each new ratchet milestone
-            # so the position is protected even if the bot restarts.
-            if not is_sold and oc_check is not None and oc_check.max_hold_seconds == 0:
+            # ── Dynamic trailing SL (all non-settled trades) ──────────────────────
+            # Spike markets (BOOM/CRASH) now also run trailing alongside spike_timeout:
+            # whichever fires first exits the contract.
+            # Tier 1 (BE at 1%) is suppressed for spike markets via spike_market flag
+            # to prevent premature exits on inter-spike drift; trailing activates at
+            # Tier 2 (2.5% gain = confirmed profitable territory).
+            if not is_sold and oc_check is not None:
+                _is_spike_oc = is_spike_market(oc_check.symbol)
                 _current_profit = float(poc.get("profit") or 0)
                 # Ratchet up peak (never down)
                 if _current_profit > oc_check.peak_profit:
                     oc_check.peak_profit = _current_profit
-                _new_floor = _compute_trail_floor(oc_check.peak_profit, oc_check.stake_usdt)
+                _new_floor = _compute_trail_floor(
+                    oc_check.peak_profit, oc_check.stake_usdt,
+                    spike_market=_is_spike_oc,
+                )
                 # Update broker SL when the floor ratchets up to a new level.
                 # Deriv broker SL = maximum loss in absolute USD (always > 0).
                 # When the floor is still negative we can express it as a SL

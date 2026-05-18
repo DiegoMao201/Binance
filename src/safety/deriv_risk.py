@@ -42,6 +42,7 @@ import numpy as np
 from src.strategies.deriv_signals import (
     direction_veto as _spike_direction_veto,
     forced_side as _spike_forced_side,
+    get_eval_mode as _get_eval_mode,
     is_spike_market as _is_spike_market,
 )
 from src.utils.deriv_config import DerivSettings
@@ -363,13 +364,21 @@ class DerivRiskManager:
         )
         score = max(0.0, min(10.0, score))
 
+        # ── Asset routing: determine eval mode (spike vs stochastic) ──────────
+        # BOOM/CRASH: skip Hurst/mean_rev/random_walk — edge is spike asymmetry,
+        # not Hurst persistence. R_*: full stochastic pipeline.
+        _eval_mode = _get_eval_mode(symbol)
+        _is_spike = _eval_mode == "smc_fvg"
+
         # ── Hurst dynamic calibration ──────────────────────────────────────
         # Applies score delta and/or threshold adjustment based on the hourly
         # snapshot from v_deriv_hurst_buckets.  Zero-cost: reads in-process dict.
+        # SPIKE MARKETS: Hurst pipeline is bypassed — their edge is not Hurst-based
+        # and Hurst penalties/boosts cross-contaminate the SMC+FVG signal path.
         hurst_delta = 0.0
         effective_min_score = self._settings.min_score
 
-        if hurst is not None and math.isfinite(hurst):
+        if not _is_spike and hurst is not None and math.isfinite(hurst):
             bucket_stats = HurstCalibrator.get_bucket_stats(hurst)
 
             # Rule 1: penalise low-edge bucket (win_rate < 45%)
@@ -420,19 +429,30 @@ class DerivRiskManager:
         # CALIBRATION SAMPLING: Also route CALM regime through mean-rev when Hurst
         # supports it (CALM 0.65x size is already enforced in _regime_mult).
         # R_100/R_25/R_50 allow mean-reversion up to hurst_max=0.51.
+        # SPIKE MARKETS: mean_rev_mode is always False — direction comes from
+        # forced_side / SMC alone; mean-rev routing produces cross-contamination.
         _r_star = not _is_spike_market(symbol)
-        _hurst_mean_rev_ok = (
-            hurst is not None
-            and (
-                hurst < 0.45
-                or (_r_star and hurst <= 0.51)  # R_* mean-rev: hurst_max=0.51
+        if _is_spike:
+            _mean_rev_mode = False
+            # Resolve direction from the mandatory spike side when trend is ambiguous
+            if trend_dir is None:
+                _fs = _spike_forced_side(symbol)
+                if _fs:
+                    trend_dir = 1 if _fs == "MULTUP" else -1
+                    snap.reasons.append(f"spike_forced_dir: {_fs} (Hurst/trend bypassed)")
+        else:
+            _hurst_mean_rev_ok = (
+                hurst is not None
+                and (
+                    hurst < 0.45
+                    or (_r_star and hurst <= 0.51)  # R_* mean-rev: hurst_max=0.51
+                )
             )
-        )
-        _mean_rev_mode = (
-            regime in ("ranging", "mean_reverting")
-            or _hurst_mean_rev_ok
-            or (regime == "calm" and hurst is not None and hurst < 0.51)  # CALM: allow if Hurst favors
-        )
+            _mean_rev_mode = (
+                regime in ("ranging", "mean_reverting")
+                or _hurst_mean_rev_ok
+                or (regime == "calm" and hurst is not None and hurst < 0.51)  # CALM: allow if Hurst favors
+            )
         if _mean_rev_mode and trend_dir is None:
             # Direction: fade the micro-deviation from the 20-tick mean
             window_mr = ticks[-20:] if len(ticks) >= 20 else ticks
@@ -521,11 +541,25 @@ class DerivRiskManager:
             and _rw_lo <= hurst <= _rw_hi
             and not _is_spike_market(symbol)
         ):
-            snap.reasons.append(
-                f"random_walk_veto: H={hurst:.3f} ∈ [{_rw_lo:.2f},{_rw_hi:.2f}] — no statistical edge"
-            )
-            snap.allowed = False
-            return snap
+            # CALIBRATION: bypass veto for deep mean-reversion setups.
+            # A random walk WITHOUT trend is the ideal environment for fade trades
+            # when price is sufficiently displaced (|z-score| >= 2.0 from 30t mean).
+            _z_window = ticks[-30:] if len(ticks) >= 30 else ticks
+            _z_mean = sum(_z_window) / len(_z_window)
+            _z_std = (sum((x - _z_mean) ** 2 for x in _z_window) / len(_z_window)) ** 0.5
+            _z_score = (ticks[-1] - _z_mean) / _z_std if _z_std > 0 else 0.0
+            _bypass_rw = _mean_rev_mode and abs(_z_score) >= 2.0
+            snap.score_breakdown["rw_z_score"] = round(_z_score, 2)
+            if _bypass_rw:
+                snap.reasons.append(
+                    f"rw_veto_bypassed: H={hurst:.3f} MEAN_REV z={_z_score:+.2f} (|z|≥2.0) — deep reversion valid"
+                )
+            else:
+                snap.reasons.append(
+                    f"random_walk_veto: H={hurst:.3f} ∈ [{_rw_lo:.2f},{_rw_hi:.2f}] — no statistical edge"
+                )
+                snap.allowed = False
+                return snap
 
         # ── Spike asymmetry veto (BOOM/CRASH hard rule) ───────────────────
         # BOOM indices only allow MULTUP; CRASH indices only allow MULTDOWN.
@@ -542,7 +576,10 @@ class DerivRiskManager:
         # any calculation error cannot crash the live pipeline.
         _geo = None
         try:
-            _geo = _compute_geometry(ticks, hurst=hurst)
+            # Spike markets use 15% FVG mitigation — spikes graze FVGs without
+            # deep penetration. R_* use env-var default (50%).
+            _fvg_mit_override = 0.15 if _is_spike else None
+            _geo = _compute_geometry(ticks, hurst=hurst, fvg_mit_pct=_fvg_mit_override)
             if _geo.geo_score_delta != 0.0:
                 score = float(np.clip(score + _geo.geo_score_delta, 0.0, 10.0))
                 snap.reasons.append(f"geo: {_geo.geo_reason}")

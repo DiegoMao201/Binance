@@ -298,6 +298,7 @@ def _micro_band_signal(micro: ChannelGeometry, current_price: float) -> str | No
 def compute_geometry(
     ticks: Sequence[float],
     hurst: float | None = None,
+    fvg_mit_pct: float | None = None,
 ) -> GeometryResult:
     """
     Compute multi-timeframe channel geometry and Hurst-adaptive signal.
@@ -311,11 +312,11 @@ def compute_geometry(
           > 0.56  → trending  → pro-trend pullback logic
           < 0.45  → ranging   → mean-reversion fade logic
           else    → neutral
-
-    Returns
-    -------
-    GeometryResult
-        Always returns a valid object; sub-fields may be None if ticks < min.
+    fvg_mit_pct : float | None
+        Override the FVG mitigation penetration threshold for this call.
+        When None, falls back to DERIV_FVG_MIT_PCT env var (default 0.50).
+        Spike markets (BOOM/CRASH) should pass 0.15 — spikes graze FVGs
+        without fully penetrating them.
     """
     arr = np.asarray(ticks, dtype=np.float64)
     n = len(arr)
@@ -461,10 +462,9 @@ def compute_geometry(
     fvg_mid = (fvg_top + fvg_bot) / 2.0 if fvg_active else 0.0
     gap_mitigated = False
     if fvg_active and fvg_top > fvg_bot:
-        # CALIBRATION SAMPLING MODE: trigger mitigation when price has entered
-        # the gap by >= DERIV_FVG_MIT_PCT (default 0.50 = 50%) of the gap height.
-        # Previous effective threshold was ~75-80%; now relaxed to 50-60%.
-        _fvg_mit_pct = float(os.getenv("DERIV_FVG_MIT_PCT", "0.50"))
+        # Mitigation threshold: how far into the gap price must penetrate.
+        # fvg_mit_pct param overrides the env var (spike markets pass 0.15).
+        _fvg_mit_pct = fvg_mit_pct if fvg_mit_pct is not None else float(os.getenv("DERIV_FVG_MIT_PCT", "0.50"))
         gap_height = fvg_top - fvg_bot
         if fvg_dir == "bullish":
             # Price must have dropped at least _fvg_mit_pct into the gap from top

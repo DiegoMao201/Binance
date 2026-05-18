@@ -368,6 +368,17 @@ def min_score_for(symbol: str) -> float:
     return float(profile.get("min_score", 5.5))
 
 
+def get_eval_mode(symbol: str) -> str:
+    """Return the evaluation pipeline mode for *symbol*.
+
+    "smc_fvg"    — BOOM/CRASH spike markets: skip Hurst/mean_rev/random_walk;
+                   use only SMC+FVG mitigation + EMA-200 spike-hunter.
+    "stochastic" — R_* volatility indices: full stochastic pipeline
+                   (Hurst, mean-reversion, random-walk veto, geometry).
+    """
+    return "smc_fvg" if is_spike_market(symbol) else "stochastic"
+
+
 def spike_contract_type(symbol: str, multside: str) -> str:
     """Map a MULTUP/MULTDOWN side to the correct Deriv contract type for BOOM/CRASH.
 
