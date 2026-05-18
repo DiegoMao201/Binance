@@ -475,34 +475,37 @@ class DerivRiskManager:
             return snap
 
         # ── Spike-cycle gate (BOOM/CRASH only) ────────────────────────────
-        # After a spike fires, price needs to re-accumulate before the next
-        # spike is statistically due.  The minimum safe wait is 40% of the
-        # expected inter-spike interval (encoded by name: BOOM300≈300 ticks,
-        # BOOM500≈500 ticks, BOOM1000≈1000 ticks; same for CRASH).
-        # We use wall-clock seconds at ~1 tick/second as a proxy.
-        # Env var DERIV_SPIKE_CYCLE_FRAC (default 0.40) allows calibration.
+        # After a spike fires the market needs to re-accumulate before the
+        # next spike is statistically due.  Minimum safe wait =
+        # DERIV_SPIKE_CYCLE_FRAC × expected inter-spike interval
+        # (BOOM/CRASH 300≈300s, 500≈500s, 1000≈1000s at ~1 tick/s).
+        #
+        # Default fraction is 0.30 (lowered from 0.40 to reduce execution
+        # starvation while still protecting against immediate re-entry).
+        #
+        # DEFERRED veto: if the gate fires we do NOT return immediately.
+        # Instead we let the full scoring pipeline run so that the
+        # structural-override check (below) can allow high-quality setups
+        # through.  The final resolution happens after EMA200 / SMC scoring.
+        _spike_gate_active   = False   # resolved after full pipeline
+        _spike_gate_elapsed  = 0.0
+        _spike_gate_min_wait = 0.0
+        _spike_gate_interval = 300     # updated from symbol name below
         if _is_spike_market(symbol) and not _force_test_active:
             _last_spike = self._last_spike_ts.get(symbol, 0.0)
             if _last_spike > 0:
-                _elapsed = time.time() - _last_spike
-                # Extract the expected interval from the symbol name (300/500/1000)
-                _su = symbol.upper()
-                _interval_ticks = (
-                    1000 if "1000" in _su
-                    else (500 if "500" in _su else 300)
+                _sg_elapsed = time.time() - _last_spike
+                _su_sg = symbol.upper()
+                _spike_gate_interval = (
+                    1000 if "1000" in _su_sg
+                    else (500 if "500" in _su_sg else 300)
                 )
-                _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.40"))
-                _min_wait = _interval_ticks * _frac  # seconds (~1 tick/s)
-                if _elapsed < _min_wait:
-                    snap.reasons.append(
-                        f"SPIKE_CYCLE_GATE: {symbol} last_spike={_elapsed:.0f}s ago "
-                        f"< {_min_wait:.0f}s ({_frac*100:.0f}%% of {_interval_ticks} expected)"
-                    )
-                    _LOGGER.debug(
-                        "[SPIKE_CYCLE_GATE] %s blocked: spike was %.0fs ago, need %.0fs",
-                        symbol, _elapsed, _min_wait,
-                    )
-                    return snap
+                _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.30"))
+                _sg_min_wait = _spike_gate_interval * _frac
+                if _sg_elapsed < _sg_min_wait:
+                    _spike_gate_active   = True
+                    _spike_gate_elapsed  = _sg_elapsed
+                    _spike_gate_min_wait = _sg_min_wait
 
         # ── Compute factors ────────────────────────────────────────────────
         atr = self._synthetic_atr(ticks)
@@ -1001,6 +1004,84 @@ class DerivRiskManager:
                 )
                 snap.allowed = False
                 return snap
+
+        # ── Spike-cycle gate resolution ────────────────────────────────────
+        # Now that the full scoring pipeline has run (EMA200 hunter + SMC FVG)
+        # we know the setup_type and whether an aligned FVG is active.
+        # Two possible outcomes per symbol:
+        #   A) STRUCTURAL_OVERRIDE: setup is EMA200_SPIKE + aligned FVG active
+        #      → bypass the timer; the institutional confluence math > time.
+        #   B) No override: emit the SPIKE_CYCLE_GATE veto and return.
+        #
+        # FVG direction alignment is evaluated per-symbol:
+        #   BOOM  (forced_side=MULTUP)   → FVG must be bullish  ("bull")
+        #   CRASH (forced_side=MULTDOWN) → FVG must be bearish  ("bear")
+        # This prevents a bullish FVG from clearing a CRASH spike gate and
+        # vice-versa — the engine must understand which index it is evaluating.
+        if _spike_gate_active:
+            _su_gate = symbol.upper()
+            _override_enabled = os.getenv(
+                "DERIV_STRUCTURAL_OVERRIDE_ENABLED", ""
+            ).lower() in ("1", "true", "yes")
+            _setup_now  = snap.score_breakdown.get("setup_type", "")
+            _fvg_active = bool(snap.score_breakdown.get("fvg_active"))
+            _fvg_dir    = snap.score_breakdown.get("fvg_direction", "")
+            # Per-symbol FVG direction check (BOOM=bull, CRASH=bear)
+            _fvg_aligned = (
+                ("BOOM"  in _su_gate and _fvg_dir == "bull") or
+                ("CRASH" in _su_gate and _fvg_dir == "bear")
+            )
+            _structural_ok = (
+                _override_enabled
+                and _setup_now == "EMA200_SPIKE"
+                and _fvg_active
+                and _fvg_aligned
+            )
+            if _structural_ok:
+                _LOGGER.info(
+                    "[PIPELINE] [STRUCTURAL_OVERRIDE] Symbol: %s | "
+                    "Reason: Spike gate bypassed by structural confluence "
+                    "(EMA200_SPIKE + aligned_FVG=%s elapsed=%.0fs/%.0fs)",
+                    symbol, _fvg_dir, _spike_gate_elapsed, _spike_gate_min_wait,
+                )
+                snap.score_breakdown["spike_gate_override"]  = True
+                snap.score_breakdown["spike_gate_elapsed_s"] = round(_spike_gate_elapsed, 1)
+            else:
+                _frac_used = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.30"))
+                snap.reasons.append(
+                    f"SPIKE_CYCLE_GATE: {symbol} last_spike={_spike_gate_elapsed:.0f}s ago "
+                    f"< {_spike_gate_min_wait:.0f}s "
+                    f"({_frac_used*100:.0f}% of {_spike_gate_interval}s expected)"
+                )
+                _LOGGER.debug(
+                    "[SPIKE_CYCLE_GATE] %s vetoed: spike %.0fs ago need %.0fs "
+                    "(override_enabled=%s setup=%s fvg_active=%s fvg_aligned=%s)",
+                    symbol, _spike_gate_elapsed, _spike_gate_min_wait,
+                    _override_enabled, _setup_now, _fvg_active, _fvg_aligned,
+                )
+                return snap
+
+        # ── Calm-regime structural grace (BOOM/CRASH only) ────────────────
+        # In calm markets (low ATR) the composite score naturally compresses
+        # because spread, ATR, and momentum components all deflate.
+        # If the entry is anchored to a structural zone (EMA200 dip/rise or
+        # an active unmitigated FVG) the edge is still institutionally valid —
+        # only the score arithmetic is punished by regime.
+        # Loosen effective_min_score to 6.80 so a calm+structural setup can
+        # pass without requiring coincidentally high volatility.
+        # Applied per-symbol: only BOOM and CRASH indices have this grace.
+        if _is_spike_market(symbol) and regime == "calm":
+            _setup_final = snap.score_breakdown.get("setup_type", "")
+            if _setup_final in ("EMA200_SPIKE", "SMC_FVG"):
+                _calm_floor = float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "6.80"))
+                if effective_min_score > _calm_floor:
+                    effective_min_score = _calm_floor
+                    snap.reasons.append(
+                        f"calm_structural_grace: {symbol} regime=calm "
+                        f"setup={_setup_final} → effective_min_score→{_calm_floor}"
+                    )
+                    snap.score_breakdown["calm_structural_grace"] = True
+                    snap.effective_min_score = round(effective_min_score, 2)
 
         # ── Discriminatory score compression (tanh soft-cap) ─────────────────
         # Bonuses from SMC, spike-hunter, mean-rev, and scalp can stack to push
