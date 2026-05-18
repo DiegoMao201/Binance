@@ -263,6 +263,11 @@ class DerivDaemon:
             _LOGGER.warning("[deriv-daemon] history preload error: %s — continuing cold", exc)
 
         # Spawn the reaper as a background task; cancel on shutdown.
+        _LOGGER.info(
+            "[R75_REACTIVACION] R_75 reactivado: sl_mult=1.8, stop_loss_pct_override=0.36 "
+            "(SL=$0.54 en stake $1.50 — supera floor $0.50 del broker), stake_max=$1.50. "
+            "Causa raíz anterior: SL floor dominaba en 1-2 min con ATR_abs≈4.1.",
+        )
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
@@ -496,6 +501,16 @@ class DerivDaemon:
             )
             return
 
+        # Per-profile stake cap — overrides global DERIV_MAX_STAKE_USDT for symbols
+        # that require reduced exposure (e.g. R_75 during re-validation).
+        _profile_stake_max = float(_asset_profile.get("stake_max_usdt", float("inf")))
+        if snap.suggested_stake_usdt > _profile_stake_max:
+            _LOGGER.debug(
+                "[deriv-daemon] %s: stake capped by profile %.2f → %.2f (stake_max_usdt)",
+                tick.symbol, snap.suggested_stake_usdt, _profile_stake_max,
+            )
+            snap.suggested_stake_usdt = round(_profile_stake_max, 2)
+
         # Per-symbol Hurst regime gate — 3 zones (ASSET_INTEL_PROFILES)
         # Spike markets (BOOM/CRASH) are exempt — their edge is structural, not
         # Hurst-based.  For volatility indices:
@@ -710,6 +725,9 @@ class DerivDaemon:
                 _BOOM_CRASH_SL_PCT if _is_boom_crash_ov
                 else (0.004 if _is_mean_rev_ov else self._settings.stop_loss_pct)
             )
+            # Per-profile override: some symbols need a wider SL to clear the
+            # broker minimum floor (e.g. R_75 with stop_loss_pct_override=0.36).
+            _sl_pct_ov = float(_asset_profile.get("stop_loss_pct_override") or _sl_pct_ov)
             _tp_pct_ov = (
                 _BOOM_CRASH_TP_PCT if _is_boom_crash_ov
                 else (0.004 if _is_mean_rev_ov else self._settings.take_profit_pct)
@@ -824,6 +842,9 @@ class DerivDaemon:
             _BOOM_CRASH_SL_PCT if _is_boom_crash
             else (0.004 if _is_mean_rev else self._settings.stop_loss_pct)
         )
+        # Per-profile override: some symbols need a wider SL to clear the
+        # broker minimum floor (e.g. R_75 with stop_loss_pct_override=0.36).
+        _sl_pct = float(_asset_profile.get("stop_loss_pct_override") or _sl_pct)
         _tp_pct = (
             _BOOM_CRASH_TP_PCT if _is_boom_crash
             else (0.004 if _is_mean_rev else self._settings.take_profit_pct)

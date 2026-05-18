@@ -159,18 +159,30 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     "R_25":  {
         "type": "volatility",
         "strategy_mode": "mean_revert",
-        "min_hurst": 0.48,
+        "min_hurst": 0.52,
         "use_mean_reversion": True,
         "allow_mean_reversion": True,
         "allow_breakout": False,
         "band_sigma": 1.92,
         "ema_trend_filter": False,
-        "min_score": 5.5,
+        "min_score": 9.0,
         "atr_min": 0.0,
         "cooldown_sec": 90,
         "sl_multiplier": 1.0,
         "tp_multiplier": 1.0,
         "trailing_mode": "aggressive",
+        "geo_entry_min": -0.8,
+        "geo_entry_max":  0.3,
+        "trail_floor_min_usdt": 0.25,
+        "stake_max_usdt": 1.50,
+        "max_hold_seconds": 120,
+        "setup_allowed": ["MEAN_REV"],
+        # MODO OBSERVACIÓN 48h: suspended=True bloquea ejecución de trades.
+        # Hurst≥0.52 + score≥9.0 + geo ∈ [-0.8, +0.3] calibrados para validar
+        # edge antes de activar. Diagnósticos (Hurst + régimen) visibles en logs
+        # vía [DIAGNÓSTICO] cada 10 ticks — no requiere pipeline activo.
+        # Activar retirando "suspended" cuando WR observado ≥ 55% en 20+ setups.
+        "suspended": True,
     },
     "R_50":  {
         "type": "volatility",
@@ -208,15 +220,17 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "min_score": 6.5,
         "atr_min": 0.0,
         "cooldown_sec": 120,
-        "sl_multiplier": 1.2,
+        "sl_multiplier": 1.8,
         "tp_multiplier": 1.5,
         "trailing_mode": "atr_dynamic",
-        # ── Batch analysis 2026-05-18: WR COLLAPSED 50%→0% ────────────────
-        # 4 trades, all closed in 1-2 min with -$0.53 via 'unknown' reason.
-        # Hurst 0.525-0.548 with scores 7.9-9.05 MEAN_REV — scores fine but
-        # multiplier stop hunting entries before target reached. SUSPENDED until
-        # sl_mult / ATR_abs ~4.1 vs entry is investigated and adjusted.
-        "suspended": True,
+        # ── Reactivado 2026-05-18 tras auditoría SL vs ATR ─────────────────
+        # Causa raíz: stop_loss_pct=0.004 (mean_rev) × stake producía sl_usd=$0.026
+        # → flooreado a $0.50 mínimo Deriv = 33% del stake en cada trade.
+        # Con ATR_abs≈4.1 y 200× apalancamiento, el floor era alcanzable en 1-2 min.
+        # Fix: stop_loss_pct_override=0.36 → sl_usd=$0.54 en stake $1.50 (supera floor).
+        # stake_max_usdt=1.50 reduce exposición mientras se valida el nuevo SL.
+        "stop_loss_pct_override": 0.36,  # 36% de stake → SL $0.54 en stake $1.50
+        "stake_max_usdt": 1.50,
     },
     # R_100: trending, long moves, better persistence → trend following.
     "R_100": {

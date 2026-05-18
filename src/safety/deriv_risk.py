@@ -385,6 +385,20 @@ class DerivRiskManager:
 
         # ── Compute factors ────────────────────────────────────────────────
         atr = self._synthetic_atr(ticks)
+        # [ATR_ZERO_FALLBACK]: synthetic indices can freeze (all ticks identical)
+        # or the window may be too thin, yielding ATR=0.  When this happens, use
+        # the most recent cached non-zero ATR from _atr_history so that ATR-dependent
+        # scores (_atr_adaptive_score, _detect_regime) don't collapse silently.
+        if atr == 0.0:
+            _atr_hist = self._atr_history.get(symbol, [])
+            _atr_cached = next((v for v in reversed(_atr_hist) if v > 0.0), 0.0)
+            if _atr_cached > 0.0:
+                _LOGGER.warning(
+                    "[ATR_ZERO_FALLBACK] %s: ATR=0 (window=%d ticks) — "
+                    "using cached ATR=%.6f from history",
+                    symbol, len(ticks), _atr_cached,
+                )
+                atr = _atr_cached
         snap.synthetic_atr = round(atr, 8)
 
         # Detect market regime first (influences score weights)
