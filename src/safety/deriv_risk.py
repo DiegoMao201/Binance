@@ -225,6 +225,24 @@ class DerivRiskManager:
         self._MAX_ATR_HISTORY = 50
         # Force-test-trades tick counter (DERIV_FORCE_TEST_TRADES mode)
         self._force_tick_count: dict[str, int] = {}
+        # ── Spike-cycle tracker (BOOM/CRASH only) ─────────────────────────
+        # Records the wall-clock time of the last detected spike per symbol.
+        # A "spike" is any single tick whose absolute jump exceeds 3× recent ATR.
+        # Used in evaluate() to gate entries: we only allow entry when enough
+        # time has elapsed since the last spike (the market needs to re-accumulate
+        # before the next spike is statistically due).
+        self._last_spike_ts: dict[str, float] = {}
+        # Running per-symbol tick counter — incremented in ingest_tick.
+        self._ingest_tick_count: dict[str, int] = {}
+        # ── Spike-cycle tracker (BOOM/CRASH only) ─────────────────────────
+        # Records the wall-clock time of the last detected spike per symbol.
+        # A "spike" is any single tick whose absolute jump exceeds 3× recent ATR.
+        # Used in evaluate() to gate entries: we only allow entry when enough
+        # time has elapsed since the last spike (the market needs to re-accumulate
+        # before the next spike is statistically due).
+        self._last_spike_ts: dict[str, float] = {}
+        # Running per-symbol tick counter — incremented in ingest_tick.
+        self._ingest_tick_count: dict[str, int] = {}
         # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
         if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
             lf = settings.lockout_file
@@ -349,6 +367,8 @@ class DerivRiskManager:
         buf.append(price)
         if len(buf) > self._max_window:
             del buf[: len(buf) - self._max_window]
+        # Increment per-symbol tick counter
+        self._ingest_tick_count[symbol] = self._ingest_tick_count.get(symbol, 0) + 1
         # Update ATR history every 30 ticks
         if len(buf) >= 30 and len(buf) % 10 == 0:
             atr = self._synthetic_atr(buf)
@@ -356,6 +376,25 @@ class DerivRiskManager:
             hist.append(atr)
             if len(hist) > self._MAX_ATR_HISTORY:
                 del hist[: len(hist) - self._MAX_ATR_HISTORY]
+        # ── Spike-cycle detection (BOOM/CRASH only) ────────────────────────
+        # A spike is a single-tick jump > 3× recent ATR.
+        # Record wall-clock time so evaluate() can gate premature re-entries.
+        if len(buf) >= 2 and _is_spike_market(symbol):
+            _atr_hist = self._atr_history.get(symbol, [])
+            if _atr_hist:
+                _recent_atr = mean(_atr_hist[-5:]) if len(_atr_hist) >= 5 else _atr_hist[-1]
+                if _recent_atr > 0:
+                    _jump = buf[-1] - buf[-2]
+                    _su = symbol.upper()
+                    _is_boom_spike  = "BOOM"  in _su and _jump >  3.0 * _recent_atr
+                    _is_crash_spike = "CRASH" in _su and _jump < -3.0 * _recent_atr
+                    if _is_boom_spike or _is_crash_spike:
+                        self._last_spike_ts[symbol] = time.time()
+                        _LOGGER.info(
+                            "[SPIKE_DETECTED] %s jump=%.5f atr=%.5f (%.1f×) — "
+                            "spike-cycle timer reset",
+                            symbol, _jump, _recent_atr, abs(_jump) / _recent_atr,
+                        )
 
     def evaluate(
         self,
@@ -434,6 +473,36 @@ class DerivRiskManager:
         if len(ticks) < _warmup_needed:
             snap.reasons.append(f"insufficient ticks ({len(ticks)}/{_warmup_needed})")
             return snap
+
+        # ── Spike-cycle gate (BOOM/CRASH only) ────────────────────────────
+        # After a spike fires, price needs to re-accumulate before the next
+        # spike is statistically due.  The minimum safe wait is 40% of the
+        # expected inter-spike interval (encoded by name: BOOM300≈300 ticks,
+        # BOOM500≈500 ticks, BOOM1000≈1000 ticks; same for CRASH).
+        # We use wall-clock seconds at ~1 tick/second as a proxy.
+        # Env var DERIV_SPIKE_CYCLE_FRAC (default 0.40) allows calibration.
+        if _is_spike_market(symbol) and not _force_test_active:
+            _last_spike = self._last_spike_ts.get(symbol, 0.0)
+            if _last_spike > 0:
+                _elapsed = time.time() - _last_spike
+                # Extract the expected interval from the symbol name (300/500/1000)
+                _su = symbol.upper()
+                _interval_ticks = (
+                    1000 if "1000" in _su
+                    else (500 if "500" in _su else 300)
+                )
+                _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.40"))
+                _min_wait = _interval_ticks * _frac  # seconds (~1 tick/s)
+                if _elapsed < _min_wait:
+                    snap.reasons.append(
+                        f"SPIKE_CYCLE_GATE: {symbol} last_spike={_elapsed:.0f}s ago "
+                        f"< {_min_wait:.0f}s ({_frac*100:.0f}%% of {_interval_ticks} expected)"
+                    )
+                    _LOGGER.debug(
+                        "[SPIKE_CYCLE_GATE] %s blocked: spike was %.0fs ago, need %.0fs",
+                        symbol, _elapsed, _min_wait,
+                    )
+                    return snap
 
         # ── Compute factors ────────────────────────────────────────────────
         atr = self._synthetic_atr(ticks)

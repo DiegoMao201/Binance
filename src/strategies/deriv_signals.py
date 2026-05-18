@@ -261,13 +261,17 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 7.5,             # raised 7.0→7.5: require stronger confluence
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Geo gate added 2026-05-18: BOOM needs price below channel mid ──
+        # BOOM spikes UP from accumulation zones. Extended prices (positive geo)
+        # indicate the price already moved away from the dip → wrong entry timing.
+        "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
     },
     "BOOM500": {
         "type": "spike_boom",
@@ -313,7 +317,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
         # Wins had geo ∈ [-0.69, +1.04]; loss had geo +1.35 (extended).
         "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
-        "geo_entry_max": 0.50,          # don't enter when price is too extended upward
+        "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
+        "min_score": 7.5,             # raised 7.0→7.5
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -326,13 +331,17 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 7.5,             # raised 7.0→7.5: require stronger confluence
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Geo gate added 2026-05-18: CRASH needs price below channel mid ──
+        # CRASH spikes DOWN from extended low zones. Wins had deeply negative geo.
+        # Entering near channel mid or above = no accumulated downward pressure.
+        "geo_entry_max": -0.70,         # only enter when price ≤ 0.70σ below mid
     },
     "CRASH500": {
         "type": "spike_crash",
@@ -354,8 +363,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Wins: geo -1.23 and -1.61 | Losses: geo -0.84 avg.
         # Confirmed: no structural edge when price is not well below channel mid.
-        "geo_entry_max": -1.20,         # only enter when price ≤ -1.20σ below mid
+        "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid (loosened from -1.20)
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
+        "min_score": 7.5,             # raised 7.0→7.5
     },
     "CRASH1000": {
         "type": "spike_crash",
@@ -378,6 +388,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Wins: geo -1.09 (both) | Losses: geo -0.77 avg.
         # Confirmed: edge only when price is well below channel midpoint.
         "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid
+        "min_score": 7.5,             # raised 7.0→7.5
     },
 }
 
