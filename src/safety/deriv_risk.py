@@ -469,7 +469,16 @@ class DerivRiskManager:
 
         ticks = self._ticks.get(symbol, [])
         _force_test_active = os.getenv("DERIV_FORCE_TEST_TRADES", "").lower() in ("1", "true", "yes")
-        _warmup_needed = 5 if _force_test_active else 30
+        # DERIV_MIN_WARMUP_TICKS: minimum tick history required before any
+        # evaluation runs (prevents analysis on near-empty buffers).
+        # Spike markets default to 100 (need ATR history for spike detection);
+        # force-test mode always uses 5 regardless.
+        _default_warmup = 5 if _force_test_active else (
+            int(os.getenv("DERIV_MIN_WARMUP_TICKS", "100"))
+            if _is_spike_market(symbol)
+            else 30
+        )
+        _warmup_needed = _default_warmup
         if len(ticks) < _warmup_needed:
             snap.reasons.append(f"insufficient ticks ({len(ticks)}/{_warmup_needed})")
             return snap
@@ -538,6 +547,19 @@ class DerivRiskManager:
         cooldown_bonus = self._cooldown_bonus()
         headroom_bonus = self._headroom_bonus(dd_cap)
 
+        # ── ATR calm-weight reduction (BOOM/CRASH only) ────────────────────
+        # In calm regimes the ATR component deflates to near-zero because
+        # spike markets naturally compress between spikes.  Penalising this
+        # cross-contaminates the SMC/EMA200 signal path.  Apply a damping
+        # multiplier so atr_score contributes less without being zeroed.
+        # DERIV_BOOM_CRASH_ATR_WEIGHT_CALM_MULT default 0.50 (halved penalty).
+        if regime == "calm" and _is_spike_market(symbol):
+            _atr_calm_mult = float(
+                os.getenv("DERIV_BOOM_CRASH_ATR_WEIGHT_CALM_MULT", "0.50")
+            )
+            atr_score = round(atr_score * _atr_calm_mult, 3)
+            snap.score_breakdown["atr_calm_mult"] = _atr_calm_mult
+
         # In volatile regime, require a stronger trend signal
         if regime == "volatile" and trend_dir is not None:
             trend_score = min(trend_score, 2.0)
@@ -593,18 +615,38 @@ class DerivRiskManager:
         snap.hurst_score_delta = round(hurst_delta, 2)
         snap.effective_min_score = round(effective_min_score, 2)
 
-        # ── Per-symbol min_score / min_hurst calibration (SAMPLING MODE) ─────
-        # Inject per-symbol effective_min_score floors so each market type
-        # has a threshold that matches its statistical edge profile.
+        # ── Per-symbol min_score calibration (regime-aware) ─────────────────
+        # Normal thresholds apply in trending/ranging/volatile regimes.
+        # In CALM regime each family gets a lower floor because the composite
+        # score naturally deflates (ATR, momentum, trend all compress) while
+        # institutional setups can still be structurally sound.
+        # Thresholds are env-var tunable for live recalibration.
         _su_sym = symbol.upper()
-        if "BOOM" in _su_sym or "CRASH" in _su_sym:
-            effective_min_score = min(effective_min_score, 6.2)   # BOOM/CRASH: spike edge ≠ trend edge
+        _is_boom_crash_sym = "BOOM" in _su_sym or "CRASH" in _su_sym
+        if _is_boom_crash_sym:
+            if regime == "calm":
+                # Calm + spike market: drop threshold to allow structural entries.
+                # Mandatory structural gate (EMA200_SPIKE or FVG) still runs
+                # downstream — this ONLY relaxes the numeric floor.
+                _bc_calm_floor = float(
+                    os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.00")
+                )
+                effective_min_score = min(effective_min_score, _bc_calm_floor)
+                snap.score_breakdown["calm_bc_floor"] = _bc_calm_floor
+            else:
+                effective_min_score = min(effective_min_score, 6.2)   # normal: spike edge ≠ trend edge
         elif "R_100" in _su_sym:
-            effective_min_score = min(effective_min_score, 5.5)   # R_100: high vol, lower bar
+            if regime == "calm":
+                effective_min_score = min(effective_min_score, 5.50)
+            else:
+                effective_min_score = min(effective_min_score, 5.5)
         elif "R_75" in _su_sym:
-            effective_min_score = min(effective_min_score, 6.0)   # R_75: medium threshold
+            if regime == "calm":
+                effective_min_score = min(effective_min_score, 5.50)
+            else:
+                effective_min_score = min(effective_min_score, 6.0)
         elif "R_25" in _su_sym or "R_50" in _su_sym:
-            effective_min_score = min(effective_min_score, 5.5)   # R_25/R_50: lower vol, mean-rev edge
+            effective_min_score = min(effective_min_score, 5.5)       # mean-rev edge
         snap.effective_min_score = round(effective_min_score, 2)
 
         # ── Mean-reversion dual router ────────────────────────────────────
@@ -1061,27 +1103,25 @@ class DerivRiskManager:
                 )
                 return snap
 
-        # ── Calm-regime structural grace (BOOM/CRASH only) ────────────────
-        # In calm markets (low ATR) the composite score naturally compresses
-        # because spread, ATR, and momentum components all deflate.
-        # If the entry is anchored to a structural zone (EMA200 dip/rise or
-        # an active unmitigated FVG) the edge is still institutionally valid —
-        # only the score arithmetic is punished by regime.
-        # Loosen effective_min_score to 6.80 so a calm+structural setup can
-        # pass without requiring coincidentally high volatility.
-        # Applied per-symbol: only BOOM and CRASH indices have this grace.
-        if _is_spike_market(symbol) and regime == "calm":
-            _setup_final = snap.score_breakdown.get("setup_type", "")
-            if _setup_final in ("EMA200_SPIKE", "SMC_FVG"):
-                _calm_floor = float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "6.80"))
-                if effective_min_score > _calm_floor:
-                    effective_min_score = _calm_floor
-                    snap.reasons.append(
-                        f"calm_structural_grace: {symbol} regime=calm "
-                        f"setup={_setup_final} → effective_min_score→{_calm_floor}"
-                    )
-                    snap.score_breakdown["calm_structural_grace"] = True
-                    snap.effective_min_score = round(effective_min_score, 2)
+        # ── Calm-regime R_* mean-rev z-score boost ───────────────────────
+        # In calm markets R_* price oscillates around mean with high
+        # predictability. If a deep z-score (>= 2.0) is present the
+        # statistical edge is comparable to volatile regimes.
+        # Add +3.0 bonus (same as mean_rev_mode) so the score can clear
+        # the relaxed 5.50 calm floor even without trend/ATR components.
+        # Only applies to non-spike (R_*) symbols in calm regime.
+        if regime == "calm" and not _is_spike_market(symbol):
+            _z_win = ticks[-30:] if len(ticks) >= 30 else ticks
+            _z_mean = sum(_z_win) / len(_z_win)
+            _z_std = (sum((x - _z_mean) ** 2 for x in _z_win) / len(_z_win)) ** 0.5
+            _z_calm = (ticks[-1] - _z_mean) / _z_std if _z_std > 0 else 0.0
+            if abs(_z_calm) >= 2.0:
+                score = float(np.clip(score + 3.0, 0.0, 10.0))
+                snap.score = round(score, 3)
+                snap.score_breakdown["calm_mr_z_bonus"] = round(_z_calm, 2)
+                snap.reasons.append(
+                    f"calm_mr_z_boost: regime=calm z={_z_calm:+.2f} (|z|≥2.0) +3.0"
+                )
 
         # ── Discriminatory score compression (tanh soft-cap) ─────────────────
         # Bonuses from SMC, spike-hunter, mean-rev, and scalp can stack to push
