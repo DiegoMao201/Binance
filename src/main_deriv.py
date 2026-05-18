@@ -53,12 +53,15 @@ _LOGGER = logging.getLogger("deriv.daemon")
 
 # ─── BOOM/CRASH structural stop-loss / take-profit ───────────────────────────
 # Spike hunter trades use a wider initial SL so the contract survives the
-# accumulation period before the spike materialises.  The default values give
-# roughly 3 % SL / 6 % TP of the underlying price move (at typical multipliers
-# this translates to a 3–6× risk/reward on the stake).  Both values are fully
-# tunable via env vars without a code change.
-_BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.03"))
-_BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "0.06"))
+# Structural SL/TP for BOOM/CRASH spike-hunter trades (stake-relative, not price-%).
+# With a $3 hard cap and 200× multiplier, a price-% SL always hits the Deriv minimum
+# ($0.50) and gets wicked out by 1–2 ticks of inter-spike noise.
+# Stake-relative values:
+#   SL 60% of stake  → $1.80 on $3 — survives 5–10 adverse ticks before the spike.
+#   TP 250% of stake → $7.50 on $3 — realistic spike target at 200×.
+# Both tunable via env vars without a code change.
+_BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.60"))
+_BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "2.50"))
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────

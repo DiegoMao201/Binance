@@ -683,23 +683,54 @@ class DerivRiskManager:
                     _sh_bonus = 0.0
                     if "BOOM" in _su and -0.0010 <= _dev <= -0.0002:
                         _sh_bonus = 3.5 * (1.0 - abs(_dev) / 0.0010)
-                        snap.reasons.append(
-                            f"ema200_spike_hunter: BOOM dip={_dev*100:.4f}% "
-                            f"ema={_ema200_val:.5f} +{_sh_bonus:.2f}"
-                        )
                     elif "CRASH" in _su and 0.0002 <= _dev <= 0.0010:
                         _sh_bonus = 3.5 * (1.0 - _dev / 0.0010)
+
+                    # ── Adverse-momentum deceleration (exhaustion filter) ─────────────
+                    # Compare the average tick-delta of the last 5 ticks vs the prior 5.
+                    # BOOM:  adverse direction is DOWN. Decel = recent avg_Δ > prior avg_Δ
+                    #        (selling pace slowing → buyers absorbing → spike imminent).
+                    # CRASH: adverse direction is UP.  Decel = recent avg_Δ < prior avg_Δ
+                    #        (buying pace slowing → sellers absorbing → spike imminent).
+                    # Confirmed deceleration → +20% on bonus (high-quality exhaustion).
+                    # Adverse momentum still accelerating → halve bonus (poor timing).
+                    if _sh_bonus > 0.0:
+                        _rd = [ticks[-i] - ticks[-(i + 1)] for i in range(1, 6)]
+                        _pd = [ticks[-(5 + i)] - ticks[-(6 + i)] for i in range(1, 6)]
+                        _avg_r = sum(_rd) / 5.0
+                        _avg_p = sum(_pd) / 5.0
+                        _decel_ok = (_avg_r > _avg_p) if "BOOM" in _su else (_avg_r < _avg_p)
+                        if _decel_ok:
+                            _sh_bonus = round(_sh_bonus * 1.20, 2)
+                            snap.score_breakdown["momentum_decel"] = True
+                        else:
+                            _sh_bonus = round(_sh_bonus * 0.50, 2)
+                            snap.score_breakdown["momentum_decel"] = False
+                            _LOGGER.debug(
+                                "[deriv-risk] %s adverse_momentum_active: "
+                                "avg_rec=%.6f avg_prv=%.6f — sh_bonus halved to %.2f",
+                                symbol, _avg_r, _avg_p, _sh_bonus,
+                            )
+
+                    _decel_tag = (
+                        "✓" if snap.score_breakdown.get("momentum_decel") is True
+                        else "✗" if snap.score_breakdown.get("momentum_decel") is False
+                        else "?"
+                    )
+                    if "BOOM" in _su and -0.0010 <= _dev <= -0.0002:
+                        snap.reasons.append(
+                            f"ema200_spike_hunter: BOOM dip={_dev*100:.4f}% "
+                            f"ema={_ema200_val:.5f} decel={_decel_tag} +{_sh_bonus:.2f}"
+                        )
+                    elif "CRASH" in _su and 0.0002 <= _dev <= 0.0010:
                         snap.reasons.append(
                             f"ema200_spike_hunter: CRASH rise={_dev*100:.4f}% "
-                            f"ema={_ema200_val:.5f} +{_sh_bonus:.2f}"
+                            f"ema={_ema200_val:.5f} decel={_decel_tag} +{_sh_bonus:.2f}"
                         )
                     if _sh_bonus > 0.0:
                         score = float(np.clip(score + _sh_bonus, 0.0, 10.0))
-                        # Tag this trade as a spike_entry so the execution layer
-                        # applies the spike_timeout (force-close after N seconds).
-                        # Non-spike entries (SMC, Hurst, micro-scalp) must NOT carry
-                        # this tag — they need time to develop and are managed by the
-                        # dynamic trailing SL instead.
+                        # Tag as spike_entry so the execution layer applies spike_timeout.
+                        # Non-spike entries (SMC, Hurst, micro-scalp) must NOT carry this.
                         snap.score_breakdown["spike_entry"] = True
                         snap.score_breakdown["setup_type"] = "EMA200_SPIKE"
                     snap.score_breakdown["ema200"] = round(_ema200_val, 5)

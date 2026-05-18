@@ -65,11 +65,18 @@ _TRAIL_INIT_SL:   float = float(os.getenv("DERIV_TRAIL_INIT_SL",  "-1.0"))
 _TRAIL_START:     float = float(os.getenv("DERIV_TRAIL_START",    "0.5"))
 _TRAIL_STEP:      float = float(os.getenv("DERIV_TRAIL_STEP",     "0.5"))
 # Tiered percentages (of stake_usdt)
-_T1_PCT:          float = float(os.getenv("DERIV_TRAIL_T1_PCT",        "0.010"))  # 1.0 % → BE
-_T2_PCT:          float = float(os.getenv("DERIV_TRAIL_T2_PCT",        "0.025"))  # 2.5 % → lock
-_T3_PCT:          float = float(os.getenv("DERIV_TRAIL_T3_PCT",        "0.040"))  # 4.0 % → tight
-_T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.010"))  # lock = +1 %
-_T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.005"))  # trail gap 0.5 %
+# Tiered trailing stop — thresholds scaled to 200× leverage and a $1–$3 stake.
+# At 200×, a 0.01% price move = 2% stake move, so the old 1%/2.5%/4% tiers were
+# triggered by 1–2 ticks of noise before the spike had time to develop.
+# New tiers require a meaningful profit before any floor is ratcheted:
+#   T1 (BE):        15% of stake  → $0.45 on $3  (not reached before major move)
+#   T2 (profit lock): 35% of stake → $1.05 on $3  → locks +15% of stake
+#   T3 (tight trail): 60% of stake → $1.80 on $3  → trails at peak − 5% of stake
+_T1_PCT:          float = float(os.getenv("DERIV_TRAIL_T1_PCT",        "0.15"))   # 15% → BE
+_T2_PCT:          float = float(os.getenv("DERIV_TRAIL_T2_PCT",        "0.35"))   # 35% → lock
+_T3_PCT:          float = float(os.getenv("DERIV_TRAIL_T3_PCT",        "0.60"))   # 60% → tight
+_T2_LOCK_PCT:     float = float(os.getenv("DERIV_TRAIL_T2_LOCK_PCT",   "0.15"))   # lock = +15%
+_T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.05"))   # trail gap 5%
 
 
 def _compute_trail_floor(peak: float, stake: float = 0.0, spike_market: bool = False) -> float:
