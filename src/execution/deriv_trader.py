@@ -106,12 +106,17 @@ _T3_STEP_PCT:     float = float(os.getenv("DERIV_TRAIL_T3_STEP_PCT",   "0.05")) 
 # Strict safety boundary: maximum loss allowed as a fraction of stake.
 # Default 1.00 (the full stake — Deriv contracts can never lose more than stake).
 _TRAIL_MAX_LOSS_PCT: float = float(os.getenv("DERIV_TRAIL_MAX_LOSS_PCT", "1.00"))
+# Minimum locked floor once trailing is active (applied per-symbol via profile;
+# this constant enforces the global baseline). Eliminates break-even noise closes
+# and the recovered-on-boot legacy floor=-1.00 issue.
+_TRAIL_FLOOR_GLOBAL_MIN: float = float(os.getenv("DERIV_TRAIL_FLOOR_MIN_USDT", "0.20"))
 
 
 def _compute_trail_floor(
     peak: float,
     stake: float = 0.0,
     spike_market: bool = False,
+    trail_floor_min: float = 0.0,
 ) -> float | None:
     """Institutional tiered trailing stop floor (refactored 2026-05-18).
 
@@ -136,20 +141,22 @@ def _compute_trail_floor(
     if stake > 0:
         peak_pnl_pct = peak / stake
         sl_max_loss = stake * _TRAIL_MAX_LOSS_PCT
+        _floor_min = max(trail_floor_min, _TRAIL_FLOOR_GLOBAL_MIN)
 
         # Tier 3: strong run → tight trail (peak − step) × stake
         if peak_pnl_pct >= _T3_PCT:
             floor = (peak_pnl_pct - _T3_STEP_PCT) * stake
-            return round(max(floor, -sl_max_loss), 4)
+            return round(max(floor, _floor_min, -sl_max_loss), 4)
 
         # Tier 2: decent gain → lock at +20% of stake
         if peak_pnl_pct >= _T2_PCT:
             floor = stake * _T2_LOCK_PCT
-            return round(max(floor, -sl_max_loss), 4)
+            return round(max(floor, _floor_min, -sl_max_loss), 4)
 
-        # Tier 1: first profit → break-even (skipped for spike markets)
+        # Tier 1: first profit → floor at minimum (skipped for spike markets)
+        # floor_min replaces the old 0.0 break-even to prevent noise-close losses.
         if not spike_market and peak_pnl_pct >= _T1_PCT:
-            return 0.0
+            return round(max(_floor_min, 0.0), 4)
 
         # Below T1 → trailing inactive (caller must not ratchet)
         return None
@@ -477,9 +484,12 @@ class DerivTradeExecutor:
                 # Ratchet up peak (never down)
                 if _current_profit > oc_check.peak_profit:
                     oc_check.peak_profit = _current_profit
+                _oc_profile = get_asset_profile(oc_check.symbol)
+                _oc_trail_min = float(_oc_profile.get("trail_floor_min_usdt", 0.0))
                 _new_floor = _compute_trail_floor(
                     oc_check.peak_profit, oc_check.stake_usdt,
                     spike_market=_is_spike_oc,
+                    trail_floor_min=_oc_trail_min,
                 )
                 # None → trailing inactive (peak below Tier 1) — skip ratchet + force-sell.
                 if _new_floor is None:

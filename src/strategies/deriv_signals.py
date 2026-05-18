@@ -175,18 +175,24 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     "R_50":  {
         "type": "volatility",
         "strategy_mode": "mean_revert",
-        "min_hurst": 0.48,
+        "min_hurst": 0.43,              # lowered from 0.48 (wins had H≥0.43)
         "use_mean_reversion": True,
         "allow_mean_reversion": True,
         "allow_breakout": False,
         "band_sigma": 1.95,
         "ema_trend_filter": False,
-        "min_score": 5.5,
+        "min_score": 9.0,              # raised from 5.5 (all wins had score_raw≥9.5)
         "atr_min": 0.0,
         "cooldown_sec": 90,
         "sl_multiplier": 1.0,
         "tp_multiplier": 1.0,
         "trailing_mode": "aggressive",
+        # ── Batch analysis 2026-05-18: pattern confirmed ───────────────────
+        # 4 wins: score_raw≥9.5, mean_rev_mode=true, SMC_FVG, geo ∈ [-1.0, +0.5]
+        # Losses had geo>0.5 (price extended away from mean). floor=0.00 was tóxico.
+        "geo_entry_min": -1.0,          # reject if geo < -1.0 (too extended down)
+        "geo_entry_max":  0.5,          # reject if geo >  0.5 (too extended up)
+        "trail_floor_min_usdt": 0.30,   # T1 activates at ≥$0.30 locked profit
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
     # breakouts when H<0.58, prefer reversals/sweeps with ATR expansion.
@@ -205,6 +211,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 1.2,
         "tp_multiplier": 1.5,
         "trailing_mode": "atr_dynamic",
+        # ── Batch analysis 2026-05-18: WR COLLAPSED 50%→0% ────────────────
+        # 4 trades, all closed in 1-2 min with -$0.53 via 'unknown' reason.
+        # Hurst 0.525-0.548 with scores 7.9-9.05 MEAN_REV — scores fine but
+        # multiplier stop hunting entries before target reached. SUSPENDED until
+        # sl_mult / ATR_abs ~4.1 vs entry is investigated and adjusted.
+        "suspended": True,
     },
     # R_100: trending, long moves, better persistence → trend following.
     "R_100": {
@@ -260,6 +272,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Batch analysis 2026-05-18: 10 trades, -$2.96, geo always extended ──
+        # All 9 losses had avg geo +1.48 (price overextended on entry).
+        # Even the sole win had geo +1.31. Zero structural edge found.
+        # DISABLED until further evidence of consistent positive expectancy.
+        "disabled": True,
     },
     "BOOM1000": {
         "type": "spike_boom",
@@ -278,6 +295,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Batch analysis 2026-05-18 ──────────────────────────────────────
+        # Sole loss had H=0.402 (below meaningful persistence for spike setup).
+        # Wins had geo ∈ [-0.69, +1.04]; loss had geo +1.35 (extended).
+        "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
+        "geo_entry_max": 0.50,          # don't enter when price is too extended upward
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -315,6 +337,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Batch analysis 2026-05-18 ──────────────────────────────────────
+        # Wins: geo -1.23 and -1.61 | Losses: geo -0.84 avg.
+        # Confirmed: no structural edge when price is not well below channel mid.
+        "geo_entry_max": -1.20,         # only enter when price ≤ -1.20σ below mid
+        "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
     },
     "CRASH1000": {
         "type": "spike_crash",
@@ -333,6 +360,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        # ── Batch analysis 2026-05-18 ──────────────────────────────────────
+        # Wins: geo -1.09 (both) | Losses: geo -0.77 avg.
+        # Confirmed: edge only when price is well below channel midpoint.
+        "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid
     },
 }
 
@@ -352,6 +383,9 @@ _DEFAULT_VOLATILITY_PROFILE: dict = {
     "sl_multiplier": 1.0,
     "tp_multiplier": 1.5,
     "trailing_mode": "aggressive",
+    # Global floor minimum — no trail_stop_floor below this value once trailing
+    # is active. Eliminates 'break-even noise' closes and legacy floor=-1.00.
+    "trail_floor_min_usdt": 0.20,
 }
 
 

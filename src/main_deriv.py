@@ -357,7 +357,20 @@ class DerivDaemon:
             return
 
         # ═══════════════════════════════════════════════════════════════════
-        # BLOCK 1b — GATE: signal cooldown (anti-spam for ALL HARD_MATH_OVERRIDE
+        # BLOCK 0b — GATE: disabled / suspended symbols
+        # "disabled" = permanently removed from trading (evidenced zero edge).
+        # "suspended" = temporarily paused for investigation; re-enable by
+        #               removing the flag from ASSET_INTEL_PROFILES.
+        # ═══════════════════════════════════════════════════════════════════
+        _early_profile = get_asset_profile(tick.symbol)
+        if _early_profile.get("disabled"):
+            _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
+            return
+        if _early_profile.get("suspended"):
+            _LOGGER.debug("[PIPELINE] SYMBOL_SUSPENDED %s — skipping", tick.symbol)
+            return
+
+
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
         # Per-symbol override via ASSET_INTEL_PROFILES['cooldown_sec'] takes
@@ -600,6 +613,56 @@ class DerivDaemon:
                         "regime": snap.regime,
                         "profile": _asset_profile,
                     },
+                )
+                return
+
+        # ── Geo channel position gate (per-symbol, from ASSET_INTEL_PROFILES) ──
+        # Filters entries when the macro-channel position is outside the validated
+        # edge zone derived from batch analysis. Spike markets use it as a downside
+        # extension filter; R_50 uses a symmetric band around the channel mid.
+        _geo_pos = snap.score_breakdown.get("geo_channel_pos")
+        if _geo_pos is not None:
+            _geo_ok = True
+            _geo_veto_reason = ""
+            _geo_min = _asset_profile.get("geo_entry_min")
+            _geo_max = _asset_profile.get("geo_entry_max")
+            if _geo_min is not None and float(_geo_pos) < float(_geo_min):
+                _geo_ok = False
+                _geo_veto_reason = (
+                    f"GEO_ENTRY_VETO: {tick.symbol} geo={_geo_pos:.3f} < min={_geo_min:.3f}"
+                )
+            elif _geo_max is not None and float(_geo_pos) > float(_geo_max):
+                _geo_ok = False
+                _geo_veto_reason = (
+                    f"GEO_ENTRY_VETO: {tick.symbol} geo={_geo_pos:.3f} > max={_geo_max:.3f}"
+                )
+            if not _geo_ok:
+                self._log_entry_block(
+                    tick.symbol, "GEO_ENTRY_VETO",
+                    score=snap.score, effective_min_score=snap.effective_min_score,
+                    side=snap.side, regime=snap.regime, hurst=pre_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=_geo_veto_reason,
+                    extra={"geo_channel_pos": _geo_pos, "profile": _asset_profile},
+                )
+                return
+
+        # ── hurst_min_spike gate (spike markets that have a strict Hurst floor) ──
+        # BOOM1000/CRASH1000 etc. can declare hurst_min_spike: 0.43 to filter out
+        # entries where the underlying Hurst is too low (no persistence).
+        _hms = _asset_profile.get("hurst_min_spike")
+        if _hms is not None and is_spike_market(tick.symbol):
+            if pre_hurst < float(_hms):
+                _hms_reason = (
+                    f"HURST_SPIKE_VETO: {tick.symbol} H={pre_hurst:.3f} < strict_min={_hms:.3f}"
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=_hms_reason,
+                    extra={"hurst": pre_hurst, "hurst_min_spike": _hms},
                 )
                 return
 
