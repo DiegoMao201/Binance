@@ -262,6 +262,21 @@ class DerivDaemon:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("[deriv-daemon] history preload error: %s — continuing cold", exc)
 
+        # Seed the risk engine warmup counter with the preloaded ticks so the bot
+        # does not start blind.  ingest_tick() is idempotent: it just appends to
+        # the rolling buffer and increments _ingest_tick_count — calling it here
+        # with historical prices gives the warmup the same guarantee as live ticks.
+        _preload_summary: dict[str, int] = {}
+        for _sym, _prices in self._analyst._history.items():
+            for _p in _prices:
+                self._risk.ingest_tick(_sym, float(_p))
+            _preload_summary[_sym] = len(_prices)
+        if _preload_summary:
+            _LOGGER.info(
+                "[deriv-daemon] risk-engine warmup seeded from preload: %s",
+                {s: n for s, n in _preload_summary.items()},
+            )
+
         # Spawn the reaper as a background task; cancel on shutdown.
         _LOGGER.info(
             "[R75_REACTIVACION] R_75 reactivado: sl_mult=1.8, stop_loss_pct_override=0.36 "
@@ -442,12 +457,16 @@ class DerivDaemon:
         # Reject entries during low-volume sessions where the spike accumulation
         # will not have enough fuel. Uses live ATR vs the rolling 24h ATR history
         # maintained by DerivRiskManager.
+        # EXCEPTION: if the risk engine already bypassed the ATR gate for a
+        # spike market in calm regime (atr_calm_bypassed=True), we must NOT
+        # re-apply the filter here — that would create a phantom double-gate.
+        _atr_calm_bypassed = bool(snap.score_breakdown.get("atr_calm_bypassed", False))
         _atr_current = float(snap.score_breakdown.get("atr_abs") or 0.0)
         _atr_hist = self._risk._atr_history.get(tick.symbol, [])
         _atr_ok, _atr_reason = passes_atr_volatility_filter(
             tick.symbol, _atr_current, _atr_hist,
         )
-        if not _atr_ok:
+        if not _atr_ok and not _atr_calm_bypassed:
             self._log_entry_block(
                 tick.symbol, "ATR_VOLATILITY_FILTER",
                 score=snap.score, effective_min_score=snap.effective_min_score,
@@ -461,8 +480,12 @@ class DerivDaemon:
             )
             return
 
-        # ── Regime-aware min_score override (calm → 7.50) ─────────────────
-        _regime_min = min_score_for_regime(tick.symbol, snap.regime)
+        # ── Regime-aware min_score gate — delegate entirely to risk engine ──
+        # snap.effective_min_score is already the authoritative threshold computed
+        # by DerivRiskManager (applies calm-floor 6.20, DERIV_CALM_STRUCTURAL_MIN_SCORE,
+        # spike-market overrides, etc.).  We must NOT shadow it with a second call
+        # to min_score_for_regime() which returns a stale hardcoded 7.50.
+        _regime_min = snap.effective_min_score
         if snap.score < _regime_min:
             self._log_entry_block(
                 tick.symbol, f"REGIME_SCORE_GATE_{snap.regime}",
