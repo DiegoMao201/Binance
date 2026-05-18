@@ -469,16 +469,16 @@ class DerivRiskManager:
 
         ticks = self._ticks.get(symbol, [])
         _force_test_active = os.getenv("DERIV_FORCE_TEST_TRADES", "").lower() in ("1", "true", "yes")
-        # DERIV_MIN_WARMUP_TICKS: minimum tick history required before any
-        # evaluation runs (prevents analysis on near-empty buffers).
-        # Spike markets default to 100 (need ATR history for spike detection);
-        # force-test mode always uses 5 regardless.
-        _default_warmup = 5 if _force_test_active else (
-            int(os.getenv("DERIV_MIN_WARMUP_TICKS", "100"))
-            if _is_spike_market(symbol)
-            else 30
-        )
-        _warmup_needed = _default_warmup
+        # DERIV_MIN_WARMUP_TICKS: minimum tick history before any evaluation.
+        # Hard floor of 500 ticks enforced via max() to prevent analysis on
+        # thin buffers.  force-test mode uses 5 ticks regardless.
+        # Default env value: 600 (overrideable, but always >= 500 in prod).
+        _warmup_needed: int
+        if _force_test_active:
+            _warmup_needed = 5
+        else:
+            _env_warmup = int(os.getenv("DERIV_MIN_WARMUP_TICKS", "600"))
+            _warmup_needed = max(500, _env_warmup)
         if len(ticks) < _warmup_needed:
             snap.reasons.append(f"insufficient ticks ({len(ticks)}/{_warmup_needed})")
             return snap
@@ -628,16 +628,21 @@ class DerivRiskManager:
         _calm_bc_floor_used: float | None = None
         if _is_boom_crash_sym:
             if regime == "calm":
-                _bc_calm_floor = float(
-                    os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.00")
+                # Hard floor: never let the env-var push below 6.20.
+                # Values below 6.20 introduce over-triggering risk; any
+                # DERIV_CALM_STRUCTURAL_MIN_SCORE < 6.20 is silently clamped.
+                _CALM_MIN_HARD_FLOOR: float = 6.20
+                _bc_calm_floor = max(
+                    _CALM_MIN_HARD_FLOOR,
+                    float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "6.20")),
                 )
                 effective_min_score = _bc_calm_floor   # direct override — no min()
                 _calm_bc_floor_used = _bc_calm_floor
                 _LOGGER.info(
                     "[PIPELINE] [REGIME_SCORE_GATE_calm] %s regime=calm "
-                    "effective_min=%.2f (DERIV_CALM_STRUCTURAL_MIN_SCORE) "
+                    "effective_min=%.2f (floor=%.2f DERIV_CALM_STRUCTURAL_MIN_SCORE) "
                     "atr_bypassed=%s",
-                    symbol, effective_min_score, _atr_calm_bypassed,
+                    symbol, effective_min_score, _CALM_MIN_HARD_FLOOR, _atr_calm_bypassed,
                 )
             else:
                 effective_min_score = min(effective_min_score, 6.2)  # spike edge ≠ trend edge
@@ -1113,23 +1118,39 @@ class DerivRiskManager:
                 return snap
 
         # ── Calm-regime R_* mean-rev z-score boost ───────────────────────
-        # In calm markets R_* price oscillates around mean with high
-        # predictability. If a deep z-score (>= 2.0) is present the
-        # statistical edge is comparable to volatile regimes.
-        # Add +3.0 bonus (same as mean_rev_mode) so the score can clear
-        # the relaxed 5.50 calm floor even without trend/ATR components.
-        # Only applies to non-spike (R_*) symbols in calm regime.
+        # In calm markets R_* oscillates around mean with high predictability.
+        # Deep z-score displacement (±2.0σ) signals a fade-trade edge.
+        # Uses NumPy for vectorised std; div-by-zero guarded at 1e-8.
+        # Direction coherence enforced: bonus ONLY when trade direction aligns
+        # with the fade (MULTDOWN if z≥2.0, MULTUP if z≤-2.0).
         if regime == "calm" and not _is_spike_market(symbol):
-            _z_win = ticks[-30:] if len(ticks) >= 30 else ticks
-            _z_mean = sum(_z_win) / len(_z_win)
-            _z_std = (sum((x - _z_mean) ** 2 for x in _z_win) / len(_z_win)) ** 0.5
-            _z_calm = (ticks[-1] - _z_mean) / _z_std if _z_std > 0 else 0.0
-            if abs(_z_calm) >= 2.0:
+            _z_win: np.ndarray = np.asarray(
+                ticks[-30:] if len(ticks) >= 30 else ticks, dtype=np.float64
+            )
+            _z_mean: float = float(_z_win.mean())
+            _z_std: float  = float(_z_win.std())
+            if _z_std > 1e-8:
+                _z_calm: float = (ticks[-1] - _z_mean) / _z_std
+            else:
+                _z_calm = 0.0
+            # Direction coherence: only boost when the score is for the fade side
+            _z_fade_side: str | None = (
+                "MULTDOWN" if _z_calm >= 2.0
+                else ("MULTUP" if _z_calm <= -2.0 else None)
+            )
+            if _z_fade_side is not None and snap.side == _z_fade_side:
                 score = float(np.clip(score + 3.0, 0.0, 10.0))
                 snap.score = round(score, 3)
                 snap.score_breakdown["calm_mr_z_bonus"] = round(_z_calm, 2)
                 snap.reasons.append(
-                    f"calm_mr_z_boost: regime=calm z={_z_calm:+.2f} (|z|≥2.0) +3.0"
+                    f"calm_mr_z_boost: regime=calm z={_z_calm:+.2f} "
+                    f"fade={_z_fade_side} (coherent) +3.0"
+                )
+            elif _z_fade_side is not None:
+                # Deep displacement but direction conflict — log and skip
+                _LOGGER.debug(
+                    "[calm_mr_z] %s z=%.2f fade=%s side=%s — direction conflict, no bonus",
+                    symbol, _z_calm, _z_fade_side, snap.side,
                 )
 
         # ── Discriminatory score compression (tanh soft-cap) ─────────────────
