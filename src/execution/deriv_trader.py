@@ -28,7 +28,7 @@ from typing import Any
 import aiohttp
 
 from src.data.deriv_client import DerivClient, DerivClientError
-from src.strategies.deriv_signals import is_spike_market
+from src.strategies.deriv_signals import get_asset_profile, is_spike_market
 from src.utils.deriv_config import DerivSettings
 from src.utils.telegram_telemetry import TelegramTelemetry
 
@@ -278,6 +278,18 @@ class DerivTradeExecutor:
                 order.stake_usdt, _final_hard_cap,
             )
             order.stake_usdt = _final_hard_cap
+
+        # Enforce per-profile max_hold_seconds for spike markets so that a stale
+        # BOOM_CRASH_SPIKE_TIMEOUT_SEC env var in Coolify can never override the
+        # profile value baked into ASSET_INTEL_PROFILES.
+        _profile_mh = float(get_asset_profile(order.symbol).get("max_hold_seconds", 0.0))
+        if is_spike_market(order.symbol) and _profile_mh > 0:
+            if order.max_hold_seconds != _profile_mh:
+                _LOGGER.info(
+                    "[deriv-trader] max_hold_seconds enforced from profile: %.0fs → %.0fs (%s)",
+                    order.max_hold_seconds, _profile_mh, order.symbol,
+                )
+            order.max_hold_seconds = _profile_mh
         result = await self._client.buy(
             symbol=order.symbol,
             contract_type=order.side,
@@ -1133,6 +1145,12 @@ class DerivTradeExecutor:
                     cid, _ep_exc,
                 )
 
+            # Restore per-symbol max_hold from profile so spike timeouts resume
+            # correctly after a restart (boot-recovered contracts inherit the same
+            # 450s limit as freshly-opened ones).
+            _oc_profile = get_asset_profile(symbol)
+            _max_hold_recovered = float(_oc_profile.get("max_hold_seconds", 0.0))
+
             oc = DerivOpenContract(
                 contract_id=cid,
                 intent_id="recovered_on_boot",
@@ -1143,7 +1161,7 @@ class DerivTradeExecutor:
                 entry_price=entry_price,
                 opened_at_ts=opened_at,
                 score_breakdown={"recovered": True},
-                max_hold_seconds=0.0,  # no timeout for recovered contracts
+                max_hold_seconds=_max_hold_recovered,
                 peak_profit=0.0,
                 trail_sl_locked=_TRAIL_INIT_SL,
             )

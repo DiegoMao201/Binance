@@ -32,7 +32,8 @@ Public API
 
   spike_timeout_sec(symbol)  → int
       Maximum seconds to hold an open BOOM/CRASH contract before force-close.
-      Controlled by env var BOOM_CRASH_SPIKE_TIMEOUT_SEC (default 10).
+      Controlled by per-profile max_hold_seconds (default 450) or env var
+      BOOM_CRASH_SPIKE_TIMEOUT_SEC as a global override.
       Non-spike markets return 0 (= no timeout).
 """
 
@@ -113,12 +114,20 @@ def spike_timeout_sec(symbol: str) -> int:
     """Seconds to hold a BOOM/CRASH contract before force-closing.
 
     Returns the configured timeout for spike markets, 0 for all others.
-    Reads BOOM_CRASH_SPIKE_TIMEOUT_SEC at call-time so it can be updated
-    via environment without restarting (if dynamic env reloading is used).
+
+    Priority (highest to lowest):
+      1. Per-profile ``max_hold_seconds`` in ASSET_INTEL_PROFILES — baked into
+         the codebase so a stale Coolify env var can never override it.
+      2. ``BOOM_CRASH_SPIKE_TIMEOUT_SEC`` env var — global runtime tuning.
+      3. Module-level default ``_SPIKE_TIMEOUT_SEC`` (450 s).
     """
     if not is_spike_market(symbol):
         return 0
-    # Re-read env each call so ops can tune it without a redeploy
+    # Per-profile value beats everything else — protects against stale env vars.
+    profile_hold = int(get_asset_profile(symbol).get("max_hold_seconds", 0))
+    if profile_hold > 0:
+        return profile_hold
+    # Global env var fallback for symbols not in the profile dict.
     return int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", str(_SPIKE_TIMEOUT_SEC)))
 
 
@@ -221,6 +230,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 20,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.02,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -238,6 +248,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 12,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -255,6 +266,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -273,6 +285,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 20,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.02,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -290,6 +303,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -307,6 +321,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
+        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
