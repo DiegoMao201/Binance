@@ -197,6 +197,17 @@ class DerivTradeExecutor:
         # multiplier contracts.  BOOM/CRASH directional restriction is enforced
         # upstream by direction_veto in the risk engine (BOOM→MULTUP only,
         # CRASH→MULTDOWN only).  The old RISE/FALL path was rejected by the broker.
+        # ABSOLUTE HARD CAP — final guard before any order touches the broker.
+        # DERIV_MAX_STAKE_USDT (default $3.00) is unbreakable: no regime/score
+        # multiplier or Hurst boost can send a larger stake. Logged as a warning
+        # so calibration samples are always within the configured ceiling.
+        _final_hard_cap = float(os.getenv("DERIV_MAX_STAKE_USDT", "3.00"))
+        if order.stake_usdt > _final_hard_cap:
+            _LOGGER.warning(
+                "[deriv-trader] stake capped %.2f → %.2f (DERIV_MAX_STAKE_USDT hard cap)",
+                order.stake_usdt, _final_hard_cap,
+            )
+            order.stake_usdt = _final_hard_cap
         result = await self._client.buy(
             symbol=order.symbol,
             contract_type=order.side,
@@ -254,6 +265,13 @@ class DerivTradeExecutor:
         async with self._lock:
             self._open[contract_id] = oc
             self._persist_open()
+
+        # Subscribe to live broker stream for this contract so we settle
+        # immediately on is_sold=1 without waiting for the next reap_closed cycle.
+        asyncio.create_task(
+            self._client.subscribe_contract(contract_id, self._on_ws_contract_sold),
+            name=f"poc-sub-{contract_id}",
+        )
 
         _LOGGER.info(
             "[deriv-trader] LIVE buy ok | contract_id=%s symbol=%s side=%s "
@@ -364,6 +382,16 @@ class DerivTradeExecutor:
                 # Also enforces Deriv's minimum SL amount of $0.35.
                 if _new_floor > oc_check.trail_sl_locked:
                     oc_check.trail_sl_locked = _new_floor
+                    # Determine which tier fired for logging clarity.
+                    if _new_floor < 0:
+                        _tier_label = "T1_tighten" if oc_check.stake_usdt > 0 else "legacy_ratchet"
+                    elif _new_floor == 0.0:
+                        _tier_label = "T1_breakeven"
+                    elif _new_floor > 0:
+                        _peak_ratio = oc_check.peak_profit / max(oc_check.stake_usdt, 0.01)
+                        _tier_label = "T3_tight_trail" if _peak_ratio >= _T3_PCT else "T2_profit_lock"
+                    else:
+                        _tier_label = "unknown"
                     if _new_floor < 0:
                         # Still in loss territory — express as a stop-loss amount.
                         _broker_sl = round(max(0.35, abs(_new_floor)), 2)
@@ -372,9 +400,10 @@ class DerivTradeExecutor:
                                 cid, stop_loss=_broker_sl
                             )
                             _LOGGER.info(
-                                "[deriv-trader] trail_ratchet %s: peak=%.3f new_floor=%.3f "
+                                "[deriv-trader] trail_ratchet %s [%s]: peak=%.3f new_floor=%.3f "
                                 "broker_sl=%.2f",
-                                oc_check.symbol, oc_check.peak_profit, _new_floor, _broker_sl,
+                                oc_check.symbol, _tier_label,
+                                oc_check.peak_profit, _new_floor, _broker_sl,
                             )
                         except DerivClientError as _trl_exc:
                             _LOGGER.warning(
@@ -385,10 +414,14 @@ class DerivTradeExecutor:
                         # Floor >= 0 (break-even / profit lock): software force-sell
                         # below handles this; broker SL can't express profit floors.
                         _LOGGER.info(
-                            "[deriv-trader] trail_ratchet %s: peak=%.3f new_floor=%.3f "
+                            "[deriv-trader] trail_ratchet %s [%s]: peak=%.3f new_floor=%.3f "
                             "(profit-lock — software guard only, no broker SL update)",
-                            oc_check.symbol, oc_check.peak_profit, _new_floor,
+                            oc_check.symbol, _tier_label,
+                            oc_check.peak_profit, _new_floor,
                         )
+                    # Persist trail state to JSON so the dashboard reflects the live tier.
+                    async with self._lock:
+                        self._persist_open()
                 # Software force-sell when profit drops below the locked floor
                 if _current_profit < _new_floor:
                     _LOGGER.info(
@@ -531,6 +564,8 @@ class DerivTradeExecutor:
                 "opened_at_ts": oc.opened_at_ts,
                 "score_breakdown": oc.score_breakdown,
                 "max_hold_seconds": oc.max_hold_seconds,
+                "peak_profit": oc.peak_profit,
+                "trail_sl_locked": oc.trail_sl_locked,
             }
             for oc in self._open.values()
         ]
@@ -566,21 +601,16 @@ class DerivTradeExecutor:
             return
 
         # ── Ghost-close bypass ────────────────────────────────────────────────
-        # Reconciliation-purged contracts carry realized_pnl_usdt=0.0 and
-        # exit_reason="lost_or_ghost_closed". The PAMM allocation engine has
-        # nothing to distribute ($0 → 0% of 0 = 0), so calling it just creates
-        # noisy HTTP 500s when the frontend DB transaction conflicts on a
-        # zero-value allocation. The local closed-contracts JSON record (and
-        # frontend file-watcher) already remove the zombie from the UI, so the
-        # webhook hop is purely redundant for ghosts.
-        if (
-            str(record.get("exit_reason")) == "lost_or_ghost_closed"
-            and float(record.get("realized_pnl_usdt") or 0.0) == 0.0
-        ):
+        # Contracts whose exit couldn't be classified (no broker history found)
+        # carry zero PnL and would cause noisy HTTP 500s in the PAMM webhook.
+        # Classified ghost exits (broker_sl, broker_tp, broker_trailing_stop) DO
+        # fire the webhook so the PAMM allocation engine records the actual PnL.
+        _NO_WEBHOOK_REASONS = {"lost_or_ghost_closed", "ghost_unknown", "broker_closed_zero"}
+        if str(record.get("exit_reason")) in _NO_WEBHOOK_REASONS:
             _LOGGER.info(
-                "[deriv-trader] webhook skipped (ghost close, $0 allocation) "
+                "[deriv-trader] webhook skipped (%s, no reliable PnL) "
                 "contract_id=%s — local JSON purge already syncs UI",
-                record.get("contract_id"),
+                record.get("exit_reason"), record.get("contract_id"),
             )
             return
 
@@ -643,6 +673,106 @@ class DerivTradeExecutor:
         if status == "sold":
             return "manual_close"
         return status or "unknown"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Live WS settlement callback
+    # Called immediately when Deriv pushes is_sold=1 via the POC subscription.
+    # Settles the contract without waiting for the next reap_closed() poll.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _on_ws_contract_sold(self, poc: dict[str, Any]) -> None:
+        """Immediate settlement triggered by the live broker WS stream."""
+        cid = int(poc.get("contract_id") or 0)
+        if cid <= 0:
+            return
+
+        async with self._lock:
+            oc = self._open.pop(cid, None)
+            if oc is None:
+                return  # already settled by reaper or reconciliation
+            self._persist_open()
+
+        realized = float(poc.get("profit") or 0)
+        exit_price = float(
+            poc.get("sell_spot")
+            or poc.get("exit_tick_display_value")
+            or poc.get("exit_spot")
+            or poc.get("current_spot")
+            or poc.get("sell_price")
+            or 0
+        )
+        held = time.time() - oc.opened_at_ts
+        _was_trail = (
+            oc.trail_sl_locked > _TRAIL_INIT_SL
+            and realized <= oc.trail_sl_locked + 0.01
+        )
+        if oc.max_hold_seconds > 0 and held >= oc.max_hold_seconds:
+            exit_reason = "spike_timeout"
+        elif _was_trail:
+            exit_reason = f"trail_stop(floor={oc.trail_sl_locked:.2f})"
+        else:
+            exit_reason = self._classify_exit(poc)
+
+        record = {
+            "broker": "deriv",
+            "contract_id": cid,
+            "intent_id": oc.intent_id,
+            "symbol": oc.symbol,
+            "side": oc.side,
+            "stake_usdt": oc.stake_usdt,
+            "entry_price": oc.entry_price,
+            "exit_price": exit_price,
+            "realized_pnl_usdt": realized,
+            "exit_reason": exit_reason,
+            "opened_at_ts": oc.opened_at_ts,
+            "closed_at_ts": time.time(),
+            "score_breakdown": oc.score_breakdown,
+            "max_hold_seconds": oc.max_hold_seconds,
+            "_settled_by": "ws_subscription",
+        }
+        _LOGGER.info(
+            "[deriv-trader] WS_INSTANT_CLOSE %s symbol=%s pnl=%.4f reason=%s",
+            cid, oc.symbol, realized, exit_reason,
+        )
+        self._append_closed(record)
+        await self._post_pamm_webhook(record)
+        self._notify("close", record)
+        self._update_sym_stats(record)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Independent timeout clock
+    # Runs as a separate asyncio task every 5 s, purely comparing time.time()
+    # against max_hold_seconds.  Does NOT depend on the tick stream or the
+    # reap_closed() poll cycle — BOOM/CRASH contracts are force-sold even when
+    # the event loop is saturated with tick processing.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def timeout_clock_loop(self) -> None:
+        """Independent 5-second timer that enforces spike_timeout on BOOM/CRASH."""
+        while True:
+            await asyncio.sleep(5)
+            if self._settings.dry_run:
+                continue
+            try:
+                async with self._lock:
+                    candidates = [
+                        (cid, oc) for cid, oc in self._open.items()
+                        if oc.max_hold_seconds > 0
+                    ]
+                for cid, oc in candidates:
+                    held = time.time() - oc.opened_at_ts
+                    if held >= oc.max_hold_seconds:
+                        _LOGGER.info(
+                            "[deriv-timeout-clock] force-selling %s (%s held=%.1fs limit=%.0fs)",
+                            cid, oc.symbol, held, oc.max_hold_seconds,
+                        )
+                        try:
+                            await self._client.sell(cid)
+                        except DerivClientError as exc:
+                            _LOGGER.debug(
+                                "[deriv-timeout-clock] sell %s failed (may be already closed): %s",
+                                cid, exc,
+                            )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[deriv-timeout-clock] error: %s", exc)
 
     def _notify(self, level: str, payload: dict[str, Any]) -> None:
         if self._telemetry is None:
@@ -798,6 +928,12 @@ class DerivTradeExecutor:
                 cid, oc.symbol, oc.side, oc.stake_usdt, age_min,
             )
 
+            # Smart classification: query broker history to determine real exit reason.
+            _ghost_reason, _ghost_pnl = await self._classify_ghost_exit(cid, oc)
+            _LOGGER.info(
+                "[deriv-recon] ghost %s exit_reason=%s pnl=%.4f",
+                cid, _ghost_reason, _ghost_pnl,
+            )
             record = {
                 "broker": "deriv",
                 "contract_id": cid,
@@ -807,8 +943,8 @@ class DerivTradeExecutor:
                 "stake_usdt": oc.stake_usdt,
                 "entry_price": oc.entry_price,
                 "exit_price": 0.0,
-                "realized_pnl_usdt": 0.0,
-                "exit_reason": "lost_or_ghost_closed",
+                "realized_pnl_usdt": _ghost_pnl,
+                "exit_reason": _ghost_reason,
                 "opened_at_ts": oc.opened_at_ts,
                 "closed_at_ts": now,
                 "score_breakdown": oc.score_breakdown,
@@ -817,5 +953,50 @@ class DerivTradeExecutor:
             self._append_closed(record)
             await self._post_pamm_webhook(record)
             self._notify("ghost_closed", record)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Smart ghost-exit classifier
+    # Queries Deriv's profit_table to determine the real exit reason for a
+    # contract that the reconciliation loop found as a ghost (no longer in the
+    # broker portfolio).  Returns (exit_reason, realized_pnl) so the closed
+    # record gets accurate data instead of blanket 'lost_or_ghost_closed'.
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _classify_ghost_exit(
+        self, cid: int, oc: "DerivOpenContract"
+    ) -> tuple[str, float]:
+        """Query broker profit_table to classify a ghost contract's exit.
+
+        Returns:
+          ("broker_sl", pnl)             — negative PnL, stop-loss fired
+          ("broker_tp", pnl)             — positive PnL, take-profit fired
+          ("broker_trailing_stop", pnl)  — positive PnL, trail was active
+          ("broker_closed_zero", 0.0)    — found in history but zero PnL
+          ("ghost_unknown", 0.0)         — not found in broker history
+        """
+        try:
+            txns = await asyncio.wait_for(
+                self._client.profit_table(limit=50), timeout=10.0
+            )
+            for tx in txns:
+                if int(tx.get("contract_id", 0)) == cid:
+                    profit = float(tx.get("profit") or 0.0)
+                    _LOGGER.info(
+                        "[deriv-recon] ghost %s classified via profit_table: "
+                        "profit=%.4f trail_locked=%.3f",
+                        cid, profit, oc.trail_sl_locked,
+                    )
+                    if profit < 0:
+                        return "broker_sl", profit
+                    if profit > 0:
+                        if oc.trail_sl_locked > _TRAIL_INIT_SL:
+                            return "broker_trailing_stop", profit
+                        return "broker_tp", profit
+                    return "broker_closed_zero", 0.0
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "[deriv-recon] profit_table classify failed for %s: %s — fallback ghost_unknown",
+                cid, exc,
+            )
+        return "ghost_unknown", 0.0
 
 

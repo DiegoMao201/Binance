@@ -246,6 +246,7 @@ class DerivDaemon:
         # Spawn the reaper as a background task; cancel on shutdown.
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
+        timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
         status_task      = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
         balance_task     = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
         history_task     = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
@@ -258,7 +259,7 @@ class DerivDaemon:
         )
         stop_task        = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
-        all_tasks = {ws_task, reaper_task, recon_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task}
+        all_tasks = {ws_task, reaper_task, recon_task, timeout_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task}
         try:
             done, _pending = await asyncio.wait(
                 all_tasks,
@@ -424,7 +425,7 @@ class DerivDaemon:
                 _h_size_mult = round(1.0 - 0.40 * _zone_pos, 3)
                 snap.score = round(max(0.0, snap.score + _h_score_pen), 3)
                 snap.suggested_stake_usdt = round(
-                    max(4.50, snap.suggested_stake_usdt * _h_size_mult), 2
+                    max(1.00, snap.suggested_stake_usdt * _h_size_mult), 2
                 )
                 snap.score_breakdown["hurst_zone"] = "B-soft"
                 snap.score_breakdown["hurst_zone_pen"] = _h_score_pen

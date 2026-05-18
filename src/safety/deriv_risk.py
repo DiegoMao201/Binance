@@ -842,13 +842,14 @@ class DerivRiskManager:
             _score_sz = 1.0
         risk_usdt *= _score_sz
         snap.score_breakdown["score_size_mult"] = round(_score_sz, 3)
-        # Broker-safe absolute floor: Deriv Demo/Real minimum stake is ~$3.50–$4.30
-        # depending on symbol.  We pad with +5 % and use $4.50 as the universal
-        # safe floor so a high-probability signal is never rejected for being
-        # one cent below the broker limit.
-        _BROKER_SAFE_FLOOR = 4.50
-        min_stake = max(_BROKER_SAFE_FLOOR, float(self._settings.min_stake_usdt))
+        # Hard floor at $1.00 (DERIV_MIN_STAKE_USDT_HARD overrides).
+        # Hard cap at $3.00 (DERIV_MAX_STAKE_USDT overrides) — ABSOLUTE, unbreakable.
+        # Prevents any regime/score multiplier from producing $30+ orders.
+        _HARD_FLOOR_USDT: float = float(os.getenv("DERIV_MIN_STAKE_USDT_HARD", "1.00"))
+        _HARD_CAP_USDT: float = float(os.getenv("DERIV_MAX_STAKE_USDT", "3.00"))
+        min_stake = max(_HARD_FLOOR_USDT, float(self._settings.min_stake_usdt))
         stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
+        stake = min(stake, _HARD_CAP_USDT)   # ABSOLUTE CAP — overrides all multipliers
         snap.suggested_stake_usdt = round(stake, 2)
         # Mark mean-rev trades in score_breakdown so pipeline can apply dynamic TP
         if _mean_rev_mode:

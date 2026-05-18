@@ -137,6 +137,8 @@ class DerivClient:
         self._stopped = False
         self.last_error: str | None = None
         self.connected_at: float | None = None
+        # contract_id → async callback fired on is_sold=1 (live WS subscription)
+        self._contract_subs: dict[int, Callable[[dict[str, Any]], Awaitable[None]]] = {}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Connection lifecycle
@@ -486,6 +488,37 @@ class DerivClient:
             {"proposal_open_contract": 1, "contract_id": contract_id}
         )
 
+    async def subscribe_contract(
+        self,
+        contract_id: int,
+        on_sold_cb: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Subscribe to live broker updates for *contract_id*.
+
+        Deriv pushes a ``proposal_open_contract`` message every time the
+        contract state changes (profit moves, SL/TP hit, etc.).  When the
+        broker sends ``is_sold: 1`` the callback is scheduled immediately as
+        an independent asyncio task — no waiting for the next reap_closed()
+        cycle.
+
+        The subscription is silently discarded on reconnect (the reaper and
+        reconciliation loop serve as fallback for re-connected sessions).
+        """
+        self._contract_subs[contract_id] = on_sold_cb
+        try:
+            await self._send_no_wait({
+                "proposal_open_contract": 1,
+                "contract_id": contract_id,
+                "subscribe": 1,
+            })
+            _LOGGER.debug("[deriv] subscribe_contract %s registered", contract_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "[deriv] subscribe_contract send failed %s: %s — fallback to reaper",
+                contract_id, exc,
+            )
+            self._contract_subs.pop(contract_id, None)
+
     async def portfolio(self) -> list[int]:
         """Return contract_ids for all currently open contracts on this account.
 
@@ -674,6 +707,20 @@ class DerivClient:
                         with suppress(asyncio.QueueFull):
                             self._tick_queue.put_nowait(norm)
 
+                # 3) Live contract subscription updates (msg_type == 'proposal_open_contract')
+                # Fires immediately when Deriv reports is_sold=1 — no polling delay.
+                if msg.get("msg_type") == "proposal_open_contract":
+                    poc = msg.get("proposal_open_contract") or {}
+                    _cid = int(poc.get("contract_id") or 0)
+                    if _cid > 0 and _cid in self._contract_subs:
+                        _cb = self._contract_subs[_cid]
+                        if poc.get("is_sold"):
+                            # Remove before scheduling so duplicate fires are impossible.
+                            self._contract_subs.pop(_cid, None)
+                        asyncio.create_task(
+                            _cb(poc), name=f"poc-sold-{_cid}"
+                        )
+
         except (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK, OSError) as exc:
             _LOGGER.info("[deriv] reader: socket closed (%s)", exc)
         except Exception:  # noqa: BLE001
@@ -743,3 +790,7 @@ class DerivClient:
             if not fut.done():
                 fut.set_exception(DerivClientError("websocket reconnecting"))
         self._pending.clear()
+        # Drop contract subscriptions — they are not portable across reconnects.
+        # The reaper + reconciliation loop will catch any closes that happened
+        # during the disconnect window.
+        self._contract_subs.clear()
