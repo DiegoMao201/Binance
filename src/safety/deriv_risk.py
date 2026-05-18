@@ -259,6 +259,58 @@ class DerivRiskManager:
         except Exception as _hyd_exc:  # noqa: BLE001
             _LOGGER.warning("[risk] state hydration failed: %s — starting fresh", _hyd_exc)
 
+        # ── Demo-mode consecutive_losses auto-reset ────────────────────────
+        # In demo (DERIV_DRY_RUN=true) an accumulated streak should never
+        # permanently block trading.  If the streak is already ≥ the lockout
+        # cap we zero it on startup AND clear any stale lockout timer so the
+        # demo session starts clean without manual intervention.
+        _is_demo = os.getenv("DERIV_DRY_RUN", "true").lower() in ("1", "true", "yes")
+        _cap = settings.loss_streak_lockout
+        if _is_demo and self._loss_streak >= _cap:
+            _LOGGER.warning(
+                "[LOCKOUT_STATUS] DEMO MODE: consecutive_losses=%d >= cap=%d — "
+                "auto-resetting streak and clearing lockout timer for demo session",
+                self._loss_streak, _cap,
+            )
+            self._loss_streak = 0
+            # Patch the lockout file in-place: zero the streak and expire the
+            # lockout timer so _read_lockout() returns empty on first evaluate().
+            try:
+                lf = settings.lockout_file
+                _existing: dict = {}
+                if lf.exists():
+                    try:
+                        _existing = json.loads(lf.read_text()) or {}
+                    except Exception:  # noqa: BLE001
+                        _existing = {}
+                _existing.update({
+                    "consecutive_losses": 0,
+                    "locked": False,
+                    "until_ts": 0.0,
+                    "reason": "demo_auto_reset",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                lf.parent.mkdir(parents=True, exist_ok=True)
+                _tmp = lf.with_suffix(lf.suffix + ".tmp")
+                _tmp.write_text(json.dumps(_existing, indent=2))
+                _tmp.replace(lf)
+                _LOGGER.warning(
+                    "[LOCKOUT_STATUS] lockout file patched: consecutive_losses=0, locked=False",
+                )
+            except Exception as _rst_exc:  # noqa: BLE001
+                _LOGGER.warning("[LOCKOUT_STATUS] could not patch lockout file: %s", _rst_exc)
+
+        # ── Startup lockout status — visible in every boot log ─────────────
+        _lockout_on_start = self._read_lockout()
+        _LOGGER.warning(
+            "[LOCKOUT_STATUS] consecutive_losses=%d max=%d locked=%s%s",
+            self._loss_streak,
+            _cap,
+            _lockout_on_start.locked,
+            f" until={datetime.fromtimestamp(_lockout_on_start.until_ts, timezone.utc):%Y-%m-%dT%H:%MZ} reason={_lockout_on_start.reason!r}"
+            if _lockout_on_start.locked else "",
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router
     # ─────────────────────────────────────────────────────────────────────────
