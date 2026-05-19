@@ -808,15 +808,30 @@ class DerivTradeExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     @staticmethod
     def _classify_exit(poc: dict[str, Any]) -> str:
-        """Best-effort mapping of Deriv close codes to our internal vocabulary."""
-        status = (poc.get("status") or "").lower()
+        """Best-effort mapping of Deriv close codes to our internal vocabulary.
+
+        Phase10 FIX (2026-05-19): expanded classification — previous version
+        returned 'unknown' for any status not in {won, lost, sold}, which made
+        ~50% of close reasons opaque (expired, cancelled, settled, missing).
+        Now ALL terminal statuses get a specific label.
+        """
+        status = (poc.get("status") or "").lower().strip()
         if status == "won":
             return "take_profit"
         if status == "lost":
             return "stop_loss"
         if status == "sold":
             return "manual_close"
-        return status or "unknown"
+        if status in ("expired", "settled"):
+            return "contract_expired"
+        if status == "cancelled":
+            return "broker_cancelled"
+        if status == "open":
+            # Bug detector: settled-but-status-open should never reach here
+            return "settled_open_bug"
+        if not status:
+            return "unknown_no_status"
+        return f"broker_{status}"
 
     # ─────────────────────────────────────────────────────────────────────────
     # Live WS update callback

@@ -270,18 +270,20 @@ class DynamicPositionManager:
         ratchet params to their tightest values: ratchet activates sooner
         (ratchet_step_pct × 0.50) and locks more profit (ratchet_ratio × 1.15).
         """
+        # PHASE10 FIX (2026-05-19): aggressive_trailing was triggering ratchet at
+        # 10% gain ($0.15 on $1.50 stake) which caused premature closes at +$0.14
+        # (matching observed log floor=0.1450 / WR 26%). For Grade C the reduced
+        # stake (×0.30) is the protection — adding aggressive ratchet on top
+        # destroys edge. We keep the flag for telemetry but do NOT tighten params.
+        # ALSO FIXED: previous code had `params = _get_params(symbol)` AFTER the
+        # if-block, which silently re-overrode any modification (dead branch bug).
         params = _get_params(symbol)
         if aggressive_trailing:
-            # Tighten ratchet for Grade C: protect micro-stake profits immediately.
-            params = dict(params)  # copy — don't mutate shared dict
-            params["ratchet_step_pct"] = round(params["ratchet_step_pct"] * 0.50, 3)
-            params["ratchet_ratio"]    = min(0.75, round(params["ratchet_ratio"] * 1.15, 3))
             _LOGGER.info(
-                "[DPM] aggressive_trailing=True for %s: "
-                "ratchet_step=%.2f%% ratchet_ratio=%.2f",
+                "[DPM] aggressive_trailing=True for %s (telemetry-only — "
+                "ratchet params unchanged: step=%.2f%% ratio=%.2f) — Phase10",
                 symbol, params["ratchet_step_pct"] * 100, params["ratchet_ratio"],
             )
-        params = _get_params(symbol)
         state = _PositionState(
             contract_id=contract_id,
             symbol=symbol,
