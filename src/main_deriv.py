@@ -553,6 +553,76 @@ class DerivDaemon:
             autocorr_lag1=pre_autocorr,
         )
 
+        # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
+        # Moved from its original location (after Hurst/Strategy gates) so that
+        # geo_gate is present in score_breakdown for ALL _log_entry_block calls.
+        # Previously, geo_gate was computed too late → every ENTRY_BLOCKED log
+        # showed geo=n/a even when geo_channel_pos was calculated.
+        # Running it early also correctly applies the geo score modifier before
+        # the regime/profile/Hurst score gates instead of after them.
+        _profile_min_score_early = min_score_for(tick.symbol)
+        _asset_profile_early = get_asset_profile(tick.symbol)
+        _geo_pos = snap.score_breakdown.get("geo_channel_pos")
+        if _geo_pos is not None:
+            _geo_val  = float(_geo_pos)
+            _geo_min  = _asset_profile_early.get("geo_entry_min")
+            _geo_max  = _asset_profile_early.get("geo_entry_max")
+            _geo_gate = 0.0
+            _geo_gate_label = ""
+
+            if _geo_max is not None:
+                _gmax     = float(_geo_max)
+                _overshoot = _geo_val - _gmax
+                if _overshoot <= -0.30:
+                    _geo_gate = +1.0
+                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
+                elif _overshoot <= 0.0:
+                    _geo_gate = 0.0
+                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
+                elif _overshoot <= 0.30:
+                    _geo_gate = -1.5
+                    _geo_gate_label = (
+                        f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
+                        f"(overshoot={_overshoot:.2f}) →-1.5"
+                    )
+                else:
+                    _geo_gate = -2.0
+                    _geo_gate_label = (
+                        f"geo_hard_penalty: {_geo_val:.3f}>>{_gmax:.3f} "
+                        f"(overshoot={_overshoot:.2f}) →-2.0"
+                    )
+
+            elif _geo_min is not None:
+                _gmin       = float(_geo_min)
+                _undershoot = _gmin - _geo_val
+                if _undershoot <= -0.30:
+                    _geo_gate = +1.0
+                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≥{_gmin+0.30:.3f} →+1.0"
+                elif _undershoot <= 0.0:
+                    _geo_gate = 0.0
+                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
+                elif _undershoot <= 0.30:
+                    _geo_gate = -1.5
+                    _geo_gate_label = (
+                        f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "
+                        f"(undershoot={_undershoot:.2f}) →-1.5"
+                    )
+                else:
+                    _geo_gate = -2.0
+                    _geo_gate_label = (
+                        f"geo_hard_penalty: {_geo_val:.3f}<<{_gmin:.3f} "
+                        f"(undershoot={_undershoot:.2f}) →-2.0"
+                    )
+
+            snap.score_breakdown["geo_gate"] = round(_geo_gate, 1)
+            if _geo_gate != 0.0:
+                snap.score = round(min(10.0, max(0.0, snap.score + _geo_gate)), 3)
+                snap.reasons.append(_geo_gate_label)
+                _LOGGER.debug(
+                    "[PIPELINE] GEO_GATE %s | %s | score→%.2f",
+                    tick.symbol, _geo_gate_label, snap.score,
+                )
+
         # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 6.0) ──────
         # evaluate() sets effective_min=6.0 for mean_rev setups (+3.0 bonus
         # applied inside evaluate).  This outer gate mirrors that floor so that
@@ -851,75 +921,9 @@ class DerivDaemon:
         # authority on structural viability for BOOM/CRASH.  Removed to eliminate
         # the shadow-blocking desynchronisation described in Phase9 directive.
 
-        # ── Geo channel position gate — dynamic score (replaces hard veto) ────────
-        # Instead of blocking entry entirely, compute a graduated score penalty
-        # or bonus based on how far the current channel position deviates from
-        # the per-profile validated edge zone:
-        #   Optimal (well inside zone):     +1.0 (confirmatory bonus)
-        #   Border  (just inside/outside):  ±0.0 (neutral)
-        #   Slight penalty (0–0.3σ outside): -1.5
-        #   Hard penalty   (>0.3σ outside):  -2.0 (score≥5.8 still passes)
-        # GEO_ENTRY_VETO label kept in score_breakdown for backward compatibility.
-        _geo_pos = snap.score_breakdown.get("geo_channel_pos")
-        if _geo_pos is not None:
-            _geo_val  = float(_geo_pos)
-            _geo_min  = _asset_profile.get("geo_entry_min")
-            _geo_max  = _asset_profile.get("geo_entry_max")
-            _geo_gate = 0.0
-            _geo_gate_label = ""
-
-            if _geo_max is not None:
-                _gmax     = float(_geo_max)
-                _overshoot = _geo_val - _gmax
-                if _overshoot <= -0.30:
-                    _geo_gate = +1.0
-                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
-                elif _overshoot <= 0.0:
-                    _geo_gate = 0.0
-                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
-                elif _overshoot <= 0.30:
-                    _geo_gate = -1.5
-                    _geo_gate_label = (
-                        f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
-                        f"(overshoot={_overshoot:.2f}) →-1.5"
-                    )
-                else:
-                    _geo_gate = -2.0
-                    _geo_gate_label = (
-                        f"geo_hard_penalty: {_geo_val:.3f}>>{_gmax:.3f} "
-                        f"(overshoot={_overshoot:.2f}) →-2.0"
-                    )
-
-            elif _geo_min is not None:
-                _gmin       = float(_geo_min)
-                _undershoot = _gmin - _geo_val
-                if _undershoot <= -0.30:
-                    _geo_gate = +1.0
-                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≥{_gmin+0.30:.3f} →+1.0"
-                elif _undershoot <= 0.0:
-                    _geo_gate = 0.0
-                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
-                elif _undershoot <= 0.30:
-                    _geo_gate = -1.5
-                    _geo_gate_label = (
-                        f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "
-                        f"(undershoot={_undershoot:.2f}) →-1.5"
-                    )
-                else:
-                    _geo_gate = -2.0
-                    _geo_gate_label = (
-                        f"geo_hard_penalty: {_geo_val:.3f}<<{_gmin:.3f} "
-                        f"(undershoot={_undershoot:.2f}) →-2.0"
-                    )
-
-            snap.score_breakdown["geo_gate"] = round(_geo_gate, 1)
-            if _geo_gate != 0.0:
-                snap.score = round(min(10.0, max(0.0, snap.score + _geo_gate)), 3)
-                snap.reasons.append(_geo_gate_label)
-                _LOGGER.debug(
-                    "[PIPELINE] GEO_GATE %s | %s | score→%.2f",
-                    tick.symbol, _geo_gate_label, snap.score,
-                )
+        # (Geo channel position gate was moved earlier — see BUG-C fix above,
+        #  right after snap = self._risk.evaluate() — so that geo_gate is in
+        #  score_breakdown for all _log_entry_block calls.)
 
         # ── hurst_min_spike gate (spike markets that have a strict Hurst floor) ──
         # BOOM1000/CRASH1000 etc. can declare hurst_min_spike: 0.43 to filter out

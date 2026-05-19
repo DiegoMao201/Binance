@@ -183,6 +183,10 @@ class DerivOpenContract:
     # Trailing SL state (updated each poll cycle)
     peak_profit: float = field(default=0.0)
     trail_sl_locked: float = field(default=_TRAIL_INIT_SL)
+    # BUG-B fix: True once we have updated the broker-side SL to breakeven ($0.01)
+    # after DPM reaches Phase 2 — gives a server-level backstop that fires even
+    # when the client-side tick stream misses the exact peak tick.
+    broker_be_locked: bool = field(default=False)
 
 
 class DerivTradeExecutor:
@@ -511,6 +515,24 @@ class DerivTradeExecutor:
                     if oc_check.peak_profit != _old_peak or oc_check.trail_sl_locked != _old_sl:
                         async with self._lock:
                             self._persist_open()
+                # BUG-B fix: broker-level BE lock when DPM reaches Phase 2
+                if (
+                    _snap
+                    and _snap.get("dpm_fase") == 2
+                    and not oc_check.broker_be_locked
+                    and not self._settings.dry_run
+                ):
+                    oc_check.broker_be_locked = True
+                    asyncio.create_task(
+                        self._client.contract_update(cid, stop_loss=0.01),
+                        name=f"be-lock-reaper-{cid}",
+                    )
+                    _LOGGER.info(
+                        "[DPM-BE] broker BE locked via reaper contract_id=%s "
+                        "symbol=%s pnl=%.4f floor=%.4f",
+                        cid, oc_check.symbol, _current_profit,
+                        oc_check.trail_sl_locked,
+                    )
                 if _close_reason:
                     _LOGGER.info(
                         "[DPM-REAPER] %s closing symbol=%s reason=%s pnl=%.4f",
@@ -830,7 +852,32 @@ class DerivTradeExecutor:
             # Bug detector: settled-but-status-open should never reach here
             return "settled_open_bug"
         if not status:
-            return "unknown_no_status"
+            # BUG-A fix (2026-05-19 phase13): broker sends close events without
+            # a status field on forced multiplier-SL closes via WS push.
+            # Infer exit reason from PnL context so closed trades carry a
+            # meaningful label instead of opaque "unknown_no_status".
+            _pnl   = float(poc.get("profit") or 0)
+            _stake = float(poc.get("buy_price") or poc.get("ask_price") or 0)
+            # Prefer broker-set SL amount from limit_order (present in REST responses)
+            _sl_amount = float(
+                ((poc.get("limit_order") or {}).get("stop_loss") or {}).get(
+                    "order_amount", 0
+                )
+            )
+            if _sl_amount > 0 and _pnl <= -(_sl_amount * 0.85):
+                return "broker_sl_hit"
+            if _stake > 0:
+                if _pnl <= -(_stake * 0.28):
+                    return "broker_sl_hit"
+                if _pnl >= _stake * 0.08:
+                    return "tp_or_ratchet"
+            elif _pnl <= -0.35:
+                return "broker_sl_hit"
+            elif _pnl >= 0.05:
+                return "tp_or_ratchet"
+            if abs(_pnl) <= 0.05:
+                return "breakeven_or_zero"
+            return f"unknown_pnl_{_pnl:+.2f}"
         return f"broker_{status}"
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -859,6 +906,26 @@ class DerivTradeExecutor:
             if _snap:
                 oc_check.peak_profit     = _snap["peak_profit"]
                 oc_check.trail_sl_locked = _snap["sl_ratchet"]
+            # BUG-B fix: when DPM reaches Phase 2, push broker-level BE lock
+            # ($0.01 stop_loss) so a missed-peak tick can't result in a full
+            # loss.  Fire-and-forget task; logged below.  Only once per contract.
+            if (
+                _snap
+                and _snap.get("dpm_fase") == 2
+                and not oc_check.broker_be_locked
+                and not self._settings.dry_run
+            ):
+                oc_check.broker_be_locked = True
+                asyncio.create_task(
+                    self._client.contract_update(cid, stop_loss=0.01),
+                    name=f"be-lock-ws-{cid}",
+                )
+                _LOGGER.info(
+                    "[DPM-BE] broker BE locked via WS contract_id=%s "
+                    "symbol=%s pnl=%.4f floor=%.4f",
+                    cid, oc_check.symbol, current_profit,
+                    oc_check.trail_sl_locked,
+                )
             if close_reason:
                 _LOGGER.info(
                     "[DPM-WS] %s closing symbol=%s reason=%s pnl=%.4f "
