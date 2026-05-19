@@ -194,6 +194,9 @@ class DerivOpenContract:
     # classification uses the real reason instead of broker "sold" → "manual_close".
     # Ephemeral: not persisted to disk (safe to lose on restart).
     pending_close_reason: str | None = field(default=None)
+    # Phase 20: previous-tick profit for spike-delta detection.
+    # Default -1.0 so the first tick never triggers a false delta.
+    last_profit: float = field(default=-1.0)
 
 
 class DerivTradeExecutor:
@@ -917,19 +920,50 @@ class DerivTradeExecutor:
             if oc_check is None:
                 return
             current_profit = float(poc.get("profit") or 0)
-            # Sync external peak BEFORE on_tick so ratchet sees the true max PnL.
-            # Guards against WS profit-field lag (poc.get("profit") can be stale
-            # for multiplier contracts; floating_pnl is the authoritative source).
-            if current_profit > 0:
-                self._dpm.sync_external_peak(cid, current_profit)
             current_price  = float(poc.get("current_spot") or 0)
             # BUG-B fix: persist live PnL on every tick so dashboard shows real value
             oc_check.floating_pnl = current_profit
-            # Sync external peak BEFORE on_tick so ratchet sees the true max PnL.
-            # Guards against WS profit-field lag (poc.get("profit") can be stale
-            # for multiplier contracts; floating_pnl is the authoritative source).
+            # Phase 18: force-sync DPM peak so ratchet never lags behind floating_pnl
             if current_profit > 0:
                 self._dpm.sync_external_peak(cid, current_profit)
+
+            # ── Phase 20: Deterministic spike capture for BOOM/CRASH ──────────
+            # Spikes reverse immediately after firing. Two triggers:
+            #   A) Static TP: profit >= spike_capture_tp_usdt (default 25% of stake)
+            #   B) Tick-delta: profit jumped spike_profit_delta_usdt in ONE tick
+            #      (default 15% of stake) — catches the spike tick in real time.
+            # Both require profit > $0.10 to avoid spurious triggers near entry.
+            if is_spike_market(oc_check.symbol) and current_profit > 0.10:
+                _sc_prof  = get_asset_profile(oc_check.symbol)
+                _sc_tp    = float(_sc_prof.get(
+                    "spike_capture_tp_usdt", oc_check.stake_usdt * 0.25))
+                _sc_delta = float(_sc_prof.get(
+                    "spike_profit_delta_usdt", oc_check.stake_usdt * 0.15))
+                _tp_hit    = current_profit >= _sc_tp
+                _delta_hit = (
+                    oc_check.last_profit >= 0.0
+                    and (current_profit - oc_check.last_profit) >= _sc_delta
+                )
+                if _tp_hit or _delta_hit:
+                    _sc_why = "spike_tp" if _tp_hit else "spike_capture"
+                    _LOGGER.info(
+                        "[SPIKE-CAPTURE] cid=%s sym=%s reason=%s pnl=%.4f "
+                        "jump=%.4f tp_thresh=%.4f delta_thresh=%.4f",
+                        cid, oc_check.symbol, _sc_why, current_profit,
+                        current_profit - max(oc_check.last_profit, 0.0),
+                        _sc_tp, _sc_delta,
+                    )
+                    oc_check.pending_close_reason = _sc_why
+                    oc_check.last_profit = current_profit
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[SPIKE-CAPTURE] sell failed cid=%s: %s", cid, exc)
+                    return
+            oc_check.last_profit = current_profit
+            # ─────────────────────────────────────────────────────────────────
+
             close_reason   = self._dpm.on_tick(cid, current_profit, current_price)
             # Sync DPM state to oc for dashboard visibility
             _snap = self._dpm.get_state_snapshot(cid)

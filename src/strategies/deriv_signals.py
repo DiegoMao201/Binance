@@ -364,6 +364,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
         "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
         "min_score": 6.5,             # lowered 7.5→6.5
+        # Phase 20: deterministic spike capture
+        "spike_capture_tp_usdt": 0.40,
+        "spike_profit_delta_usdt": 0.22,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -436,6 +439,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "min_score": 6.5,             # lowered 7.5→6.5
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
+        # Phase 20: deterministic spike capture
+        "spike_capture_tp_usdt": 0.40,
+        "spike_profit_delta_usdt": 0.22,
     },
     # ── NEW: BOOM/CRASH 900 — active ───────────────────────────────────────────────
     "BOOM900": {
@@ -465,6 +471,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
+        # Phase 20: deterministic spike capture — close on spike tick or static TP
+        "spike_capture_tp_usdt": 0.50,       # TP at $0.50 (25% of $2 stake) → lock profit
+        "spike_profit_delta_usdt": 0.28,     # jump >$0.28 in one tick → spike detected
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -493,6 +502,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
+        # Phase 20: deterministic spike capture
+        "spike_capture_tp_usdt": 0.50,
+        "spike_profit_delta_usdt": 0.28,
     },
     # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {
@@ -522,6 +534,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: BOOM600 needs confirmed FVG mitigation
+        # Phase 20: deterministic spike capture
+        "spike_capture_tp_usdt": 0.50,
+        "spike_profit_delta_usdt": 0.28,
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -550,6 +565,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: CRASH600 needs confirmed FVG mitigation
+        # Phase 20: deterministic spike capture
+        "spike_capture_tp_usdt": 0.50,
+        "spike_profit_delta_usdt": 0.28,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
