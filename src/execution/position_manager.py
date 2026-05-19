@@ -54,30 +54,51 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     #   Ratchet activates at: 0.20 × $1.50 = $0.30 gain
     #   If peak=$2.40: floor = 0.50 × $2.40 = $1.20 → closes with +$1.20
     #   If peak=$3.00: floor = 0.50 × $3.00 = $1.50 → closes with +$1.50
+    # ── Phase 11 (2026-05-20): R:R recalibration ────────────────────────────
+    # ROOT CAUSE: ratchet was activating at 20% gain ($0.30) and locking 50% of
+    # that = $0.15 minimum win, while broker SL fired at -$0.54 → R:R = 3.6:1
+    # adverse. At 26% WR that requires 79% to break even — mathematically
+    # impossible.
+    #
+    # FIX STRUCTURE:
+    #   breakeven_step_pct (NEW): at 30% of stake profit, lock floor at $0.
+    #     Converts near-losers into break-even exits (no loss).
+    #   ratchet_step_pct (raised): Phase 2 only activates at 65% of stake.
+    #     Prevents ratchet from capping winners at $0.15.
+    #   ratchet_ratio (raised 0.50→0.65): captures 65% of peak when ratchet fires.
+    #   max_duration_seg (extended): more time for winners to develop.
+    #
+    # NEW MATH for R_50 on $1.50 stake:
+    #   Loser  (never reaches +$0.45):         broker SL = -$0.54
+    #   BE exit (reached $0.45, reversed < $0):  DPM BE = ~$0
+    #   Winner (reached $0.975+):              DPM ratchet = 65% × peak ≥ $0.63
+    #   At peak=$2.37: win=$1.54 → R:R=2.85:1 → breakeven WR=26% ← target
     "R_50": {
-        "sl_inicial_pct":        0.67,   # 67% stake → $1.00 room on $1.50 stake
-        "ratchet_step_pct":      0.20,   # activates at 20% gain (was 15%)
-        "ratchet_ratio":         0.50,   # locks 50% of peak — lets gains run further
-        "momentum_window":       25,     # more patience before momentum exit (was 15)
-        "agotamiento_threshold": 0.30,   # closes at 30% of peak momentum (was 35%)
-        "max_duration_seg":      720,    # 12 min max (was 8 min)
+        "sl_inicial_pct":        0.67,   # dead in practice (broker SL fires at 0.36)
+        "breakeven_step_pct":    0.30,   # NEW: lock at $0 floor when pnl >= 30% stake
+        "ratchet_step_pct":      0.65,   # was 0.20 — Phase 2 at 65% of stake ($0.975)
+        "ratchet_ratio":         0.65,   # was 0.50 — locks 65% of peak
+        "momentum_window":       25,
+        "agotamiento_threshold": 0.30,
+        "max_duration_seg":      1200,   # was 720 — 20 min to let winners develop
     },
     "R_75": {
-        # R_75 moves faster — same SL room, slightly tighter activation
         "sl_inicial_pct":        0.67,
-        "ratchet_step_pct":      0.25,   # activates at 25% gain (was 20%)
-        "ratchet_ratio":         0.52,   # 52% of peak — bit more than R_50
-        "momentum_window":       20,     # R_75 is faster, shorter window
-        "agotamiento_threshold": 0.28,   # very patient on momentum (was 40%)
-        "max_duration_seg":      900,    # 15 min — R_75 can develop big moves
+        "breakeven_step_pct":    0.30,   # NEW
+        "ratchet_step_pct":      0.65,   # was 0.25
+        "ratchet_ratio":         0.65,   # was 0.52
+        "momentum_window":       20,
+        "agotamiento_threshold": 0.28,
+        "max_duration_seg":      1500,   # was 900 — 25 min
     },
     "R_100": {
-        "sl_inicial_pct":        0.70,   # slightly wider than R_50/R_75
-        "ratchet_step_pct":      0.20,
-        "ratchet_ratio":         0.50,
+        "sl_inicial_pct":        0.70,
+        "breakeven_step_pct":    0.28,   # NEW — R_100 slightly tighter (faster market)
+        "ratchet_step_pct":      0.60,   # was 0.20
+        "ratchet_ratio":         0.65,   # was 0.50
         "momentum_window":       20,
         "agotamiento_threshold": 0.30,
-        "max_duration_seg":      720,
+        "max_duration_seg":      1200,   # was 720
     },
     # ── BOOM/CRASH — SL already 100% stake; tune ratchet patience ─────────────
     # Spikes can develop over many seconds: be patient, don't ratchet too fast.
@@ -295,10 +316,11 @@ class DynamicPositionManager:
         self._states[contract_id] = state
         _LOGGER.info(
             "[DPM] register contract_id=%s symbol=%s stake=%.2f "
-            "sl_inicial=%.2f%% ratchet_step=%.2f%% ratio=%.2f "
+            "sl_inicial=%.2f%% be_step=%.0f%% ratchet_step=%.2f%% ratio=%.2f "
             "agotamiento=%.2f max_dur=%ds sl_floor_usd=%.4f",
             contract_id, symbol, stake,
             params["sl_inicial_pct"] * 100,
+            params.get("breakeven_step_pct", 0.0) * 100,
             params["ratchet_step_pct"] * 100,
             params["ratchet_ratio"],
             params["agotamiento_threshold"],
@@ -336,8 +358,8 @@ class DynamicPositionManager:
             current_ts:    Unix timestamp of the tick (defaults to now).
 
         Returns:
-            One of: "sl_inicial" | "ratchet_sl_alcanzado" | "momentum_agotado" |
-                    "timeout_max" | None (hold position).
+            One of: "sl_inicial" | "breakeven_revert" | "ratchet_sl_alcanzado" |
+                    "momentum_agotado" | "timeout_max" | None (hold position).
         """
         state = self._states.get(contract_id)
         if state is None:
@@ -367,6 +389,29 @@ class DynamicPositionManager:
 
         # ── Phase 1: Initial SL protection ───────────────────────────────────
         if state.fase == 1:
+            # ── Break-even tier (Phase 1.5) ──────────────────────────────────
+            # When profit first reaches breakeven_step_pct × stake, lock the
+            # sl_ratchet floor at $0.  This prevents a profitable excursion from
+            # becoming a loss (converts many near-losers into $0 exits).
+            _be_step_usd = params.get("breakeven_step_pct", 0.0) * state.stake
+            if _be_step_usd > 0 and float_pnl >= _be_step_usd and state.sl_ratchet < 0:
+                state.sl_ratchet = 0.0
+                _LOGGER.info(
+                    "[DPM] BE_LOCK contract_id=%s symbol=%s "
+                    "pnl=%.4f >= be_step=%.4f → floor=$0",
+                    contract_id, state.symbol, float_pnl, _be_step_usd,
+                )
+
+            # Check BE floor: once locked at $0, close if pnl falls back to $0
+            if state.sl_ratchet >= 0 and float_pnl <= state.sl_ratchet:
+                self._log_tick(state, float_pnl, now, close_reason="breakeven_revert")
+                _LOGGER.info(
+                    "[DPM] breakeven_revert contract_id=%s symbol=%s "
+                    "pnl=%.4f <= be_floor=%.4f stake=%.2f",
+                    contract_id, state.symbol, float_pnl, state.sl_ratchet, state.stake,
+                )
+                return "breakeven_revert"
+
             sl_floor_usd = -params["sl_inicial_pct"] * state.stake
 
             # Initial SL breach
