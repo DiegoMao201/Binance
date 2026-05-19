@@ -180,7 +180,7 @@ class DerivDaemon:
             "ai_veto=%s ai_conf=%.2f ai_reason=%s | "
             "cooldown=%s elapsed=%.0fs/%.0fs | "
             "score_breakdown={trend=%.2f mom=%.2f atr=%.2f spread=%.2f stab=%.2f "
-            "streak=%.2f cd=%.2f hd=%.2f smc=%s}",
+            "streak=%.2f cd=%.2f hd=%.2f smc=%s geo=%s geo_pos=%s}",
             symbol, block_reason,
             score, effective_min_score,
             side or "?", regime, hurst,
@@ -189,8 +189,11 @@ class DerivDaemon:
             bd.get("trend", 0), bd.get("momentum", 0), bd.get("atr", 0),
             bd.get("spread", 0), bd.get("stability", 0),
             bd.get("streak_penalty", 0), bd.get("cooldown", 0),
-            bd.get("hd_bonus", 0),   # HD = Higher Direction (1H macro alignment)
+            bd.get("hd_bonus", 0),   # HD = Higher Direction (macro alignment)
             f"+{bd['smc_bonus']:.2f}" if bd.get("smc_bonus") else "—",
+            # geo_gate: +1.0 optimal / 0.0 border / -1.5 slight / -2.0 hard penalty
+            f"{bd['geo_gate']:+.1f}" if "geo_gate" in bd else "n/a",
+            f"{bd['geo_channel_pos']:.3f}" if bd.get("geo_channel_pos") is not None else "—",
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1041,12 +1044,17 @@ class DerivDaemon:
         _LOGGER.info(
             "[PIPELINE] ENTRY_ALLOWED %s | score=%.2f effective_min=%.2f | side=%s | "
             "regime=%s | H=%.3f | ai_conf=%.2f ai_model=%s | "
-            "stake=%.2f mult=%s",
+            "stake=%.2f mult=%s | geo=%s geo_pos=%s hd=%.2f smc=%s",
             tick.symbol, snap.score, snap.effective_min_score, snap.side,
             snap.regime, analysis.hurst if analysis else _eval_hurst,
             analysis.ai_confidence if analysis else 0.0,
             analysis.ai_model if analysis else "none",
             snap.suggested_stake_usdt, snap.suggested_multiplier,
+            # geo_gate: +1.0 optimal / 0.0 border / -1.5 slight / -2.0 hard penalty
+            f"{snap.score_breakdown['geo_gate']:+.1f}" if "geo_gate" in snap.score_breakdown else "n/a",
+            f"{snap.score_breakdown['geo_channel_pos']:.3f}" if snap.score_breakdown.get("geo_channel_pos") is not None else "—",
+            snap.score_breakdown.get("hd_bonus", 0.0),
+            f"+{snap.score_breakdown['smc_bonus']:.2f}" if snap.score_breakdown.get("smc_bonus") else "—",
         )
         self._record_decision(
             symbol=tick.symbol, allowed=True, side=snap.side,

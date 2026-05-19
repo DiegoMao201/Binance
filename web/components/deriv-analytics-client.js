@@ -1349,6 +1349,19 @@ function SymbolStateCard({ sym, dec }) {
   const bd = dec?.score_breakdown || {};
   const regColor = REGIME_COLORS[dec?.regime] || T.cyan;
   const scoreColor = (dec?.score || 0) >= 7 ? T.green : (dec?.score || 0) >= 5 ? T.amber : T.red;
+  // geo_gate colour: +1.0 = green, 0 = muted, <0 = red scale
+  const geoGate = bd.geo_gate != null ? Number(bd.geo_gate) : null;
+  const geoGateColor = geoGate == null ? T.mute
+    : geoGate >= 1.0 ? T.green
+    : geoGate === 0  ? T.mute
+    : geoGate >= -1.5 ? T.amber
+    : T.red;
+  const geoGateLabel = geoGate == null ? "n/a"
+    : geoGate >= 1.0 ? `+${geoGate.toFixed(1)} ✓`
+    : geoGate === 0  ? "±0.0"
+    : `${geoGate.toFixed(1)}`;
+  const geoPos = bd.geo_channel_pos != null ? Number(bd.geo_channel_pos) : null;
+  const spikeFamilyInterval = bd.spike_family_interval || 0;
   return (
     <div style={{
       background: T.panel2, border: `1px solid ${dec?.allowed ? T.green + "44" : T.border}`,
@@ -1357,7 +1370,14 @@ function SymbolStateCard({ sym, dec }) {
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{sym}</span>
-        <Pill color={dec?.allowed ? T.green : T.red} size="sm">{dec?.allowed ? "GO" : "BLOCK"}</Pill>
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {spikeFamilyInterval > 0 && (
+            <Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">
+              {spikeFamilyInterval}
+            </Pill>
+          )}
+          <Pill color={dec?.allowed ? T.green : T.red} size="sm">{dec?.allowed ? "GO" : "BLOCK"}</Pill>
+        </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
         <MicroStat lbl="SCORE" val={n(dec?.score, 2)} color={scoreColor} />
@@ -1369,6 +1389,14 @@ function SymbolStateCard({ sym, dec }) {
         <MicroStat lbl="SIZE×S" val={bd.score_size_mult != null ? n(bd.score_size_mult, 2) : "–"} />
         <MicroStat lbl="ZONE" val={bd.hurst_zone || "—"} color={String(bd.hurst_zone).includes("C") ? T.green : String(bd.hurst_zone).includes("B") ? T.amber : T.textD} />
       </div>
+      {/* Geo gate row — always shown when geo_channel_pos is present */}
+      {(geoGate != null || geoPos != null) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+          <MicroStat lbl="GEO GATE" val={geoGateLabel} color={geoGateColor} />
+          <MicroStat lbl="GEO POS" val={geoPos != null ? n(geoPos, 3) : "–"} color={geoPos != null ? (geoPos < -0.5 ? T.green : geoPos < 0 ? T.amber : T.red) : T.mute} />
+          <MicroStat lbl="HD" val={bd.hd_bonus != null ? (bd.hd_bonus >= 0 ? `+${n(bd.hd_bonus, 2)}` : n(bd.hd_bonus, 2)) : "–"} color={bd.hd_bonus > 0 ? T.green : bd.hd_bonus < 0 ? T.red : T.mute} />
+        </div>
+      )}
       {dec?.reason && !dec.allowed && (
         <div style={{
           fontSize: 9, color: T.redD, background: "rgba(255,93,108,0.06)",
@@ -1382,6 +1410,7 @@ function SymbolStateCard({ sym, dec }) {
           {bd.spike_entry && <Pill color={T.amber} size="sm">SPIKE</Pill>}
           {bd.mean_rev_mode && <Pill color={T.cyan} size="sm">MR</Pill>}
           {bd.micro_scalp && <Pill color={T.blue} size="sm">SCALP</Pill>}
+          {bd.spike_family && <Pill color={T.textD} size="sm">{bd.spike_family}</Pill>}
         </div>
       )}
       <div style={{ fontSize: 9, color: T.mute, textAlign: "right" }}>{fmtT(dec?.ts)}</div>
