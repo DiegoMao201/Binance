@@ -262,8 +262,25 @@ class DynamicPositionManager:
         stake: float,
         entry_price: float,
         entry_ts: float | None = None,
+        aggressive_trailing: bool = False,
     ) -> None:
-        """Register a newly opened contract for dynamic management."""
+        """Register a newly opened contract for dynamic management.
+
+        aggressive_trailing=True (set for Grade C entries by risk engine) overrides
+        ratchet params to their tightest values: ratchet activates sooner
+        (ratchet_step_pct × 0.50) and locks more profit (ratchet_ratio × 1.15).
+        """
+        params = _get_params(symbol)
+        if aggressive_trailing:
+            # Tighten ratchet for Grade C: protect micro-stake profits immediately.
+            params = dict(params)  # copy — don't mutate shared dict
+            params["ratchet_step_pct"] = round(params["ratchet_step_pct"] * 0.50, 3)
+            params["ratchet_ratio"]    = min(0.75, round(params["ratchet_ratio"] * 1.15, 3))
+            _LOGGER.info(
+                "[DPM] aggressive_trailing=True for %s: "
+                "ratchet_step=%.2f%% ratchet_ratio=%.2f",
+                symbol, params["ratchet_step_pct"] * 100, params["ratchet_ratio"],
+            )
         params = _get_params(symbol)
         state = _PositionState(
             contract_id=contract_id,

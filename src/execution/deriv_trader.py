@@ -389,12 +389,15 @@ class DerivTradeExecutor:
             self._persist_open()
 
         # Register with DynamicPositionManager for ratchet SL + momentum tracking.
+        # Grade C setups carry aggressive_trailing=True from risk engine → tighter ratchet.
+        _aggressive_trail = bool((order.score_breakdown or {}).get("aggressive_trailing", False))
         self._dpm.register(
             contract_id=contract_id,
             symbol=order.symbol,
             stake=actual_stake,
             entry_price=entry_price,
             entry_ts=oc.opened_at_ts,
+            aggressive_trailing=_aggressive_trail,
         )
 
         # Subscribe to live broker stream for this contract so we settle

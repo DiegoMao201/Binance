@@ -359,6 +359,27 @@ def _detect_bos(prices: np.ndarray) -> tuple[bool, str]:
 
 # ─── Public entry point ───────────────────────────────────────────────────────
 
+def _tiered_overextension_penalty(channel_pos: float) -> float:
+    """Tiered score penalty for channel overextension.
+
+    Replaces the previous hard -1.0 block for all overextension levels.
+    Graduated deductions prevent catastrophic destruction of valid setups
+    that are slightly extended but structurally sound.
+
+    Returns a negative penalty value (or 0.0 when not overextended).
+    """
+    apos = abs(channel_pos)
+    if apos > 1.20:
+        return -1.50   # extreme overextension: spike market blowoff zone
+    if apos > 0.90:
+        return -1.00   # strong overextension (same as previous hard penalty)
+    if apos > 0.75:
+        return -0.50   # moderate overextension (was -1.0 — main calibration fix)
+    if apos > 0.60:
+        return -0.25   # mild overextension — new soft zone (was 0.0)
+    return 0.0
+
+
 def compute_geometry(
     ticks: Sequence[float],
     hurst: float | None = None,
@@ -434,11 +455,11 @@ def compute_geometry(
                     f"trend_pullback_buy: slope={slope_pct:+.4f}%/tick "
                     f"channel_pos={channel_pos:.2f}"
                 )
-            elif channel_pos > 0.70:
-                # Near channel ceiling — reduce conviction to buy
-                geo_score_delta = -1.0
+            elif channel_pos > 0.60:
+                # Channel ceiling zone — tiered penalty (was hard -1.0)
+                geo_score_delta = _tiered_overextension_penalty(channel_pos)
                 reasons.append(
-                    f"trend_channel_ceiling: pos={channel_pos:.2f} → conviction-1.0"
+                    f"trend_channel_ceiling: pos={channel_pos:.2f} penalty={geo_score_delta:.2f}"
                 )
             else:
                 geo_side = "MULTUP"
@@ -453,10 +474,11 @@ def compute_geometry(
                     f"trend_pullback_sell: slope={slope_pct:+.4f}%/tick "
                     f"channel_pos={channel_pos:.2f}"
                 )
-            elif channel_pos < -0.70:
-                geo_score_delta = -1.0
+            elif channel_pos < -0.60:
+                # Channel floor zone — tiered penalty (was hard -1.0)
+                geo_score_delta = _tiered_overextension_penalty(channel_pos)
                 reasons.append(
-                    f"trend_channel_floor: pos={channel_pos:.2f} → conviction-1.0"
+                    f"trend_channel_floor: pos={channel_pos:.2f} penalty={geo_score_delta:.2f}"
                 )
             else:
                 geo_side = "MULTDOWN"
@@ -512,14 +534,15 @@ def compute_geometry(
             reasons.append(f"mr_near_mean: pos={channel_pos:.2f}")
 
     else:
-        # Neutral Hurst — mild signal from micro channel only
-        if micro is not None:
-            if channel_pos > 0.70:
-                geo_score_delta = -0.3
-                reasons.append(f"neutral_extended_up: pos={channel_pos:.2f}")
-            elif channel_pos < -0.70:
-                geo_score_delta = -0.3
-                reasons.append(f"neutral_extended_down: pos={channel_pos:.2f}")
+        # Neutral Hurst (and BOOM/CRASH which bypass Hurst routing)
+        # Apply tiered overextension penalty when price is pushed beyond 0.60 of channel.
+        # Previously: hard -0.3 at |pos|>0.70; now: tiered -0.25 to -1.50.
+        if abs(channel_pos) > 0.60:
+            geo_score_delta = _tiered_overextension_penalty(channel_pos)
+            _direction = "up" if channel_pos > 0 else "down"
+            reasons.append(
+                f"neutral_extended_{_direction}: pos={channel_pos:.2f} penalty={geo_score_delta:.2f}"
+            )
 
     # ── SMC / Microstructure layer (advisory) ────────────────────────────
     fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr)

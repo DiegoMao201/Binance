@@ -963,18 +963,26 @@ class DerivRiskManager:
                 )
             else:
                 effective_min_score = min(effective_min_score, 5.8)  # spike edge ≠ trend edge
-        elif "R_100" in _su_sym:
-            if regime == "calm":
-                effective_min_score = min(effective_min_score, 5.50)
+        elif not _is_boom_crash_sym:
+            # ── R_* and other non-spike symbols: Hurst-based dynamic effective_min ──
+            # Dynamic scaling: the Hurst regime directly informs the confidence bar.
+            # H < 0.44  → strong mean-reversion → lower bar (fade edge is clear)
+            # 0.46-0.54 → transitional / neutral → moderate bar
+            # H > 0.56  → confirmed trend       → slightly higher bar (trend needs more confirmation)
+            # No Hurst  → conservative fallback
+            if hurst is not None and math.isfinite(hurst):
+                if hurst < 0.44:
+                    _hurst_eff_min = 5.50   # strong mean-rev: lowest bar
+                elif hurst <= 0.54:
+                    _hurst_eff_min = 5.75   # neutral/transitional zone
+                elif hurst <= 0.56:
+                    _hurst_eff_min = 5.80   # 0.54-0.56 transition band
+                else:
+                    _hurst_eff_min = 6.10   # strong trend: requires more conviction
             else:
-                effective_min_score = min(effective_min_score, 5.5)
-        elif "R_75" in _su_sym:
-            if regime == "calm":
-                effective_min_score = min(effective_min_score, 5.50)
-            else:
-                effective_min_score = min(effective_min_score, 6.0)
-        elif "R_25" in _su_sym or "R_50" in _su_sym:
-            effective_min_score = min(effective_min_score, 5.5)       # mean-rev edge
+                _hurst_eff_min = 5.80  # no Hurst data — conservative fallback
+            effective_min_score = min(effective_min_score, _hurst_eff_min)
+            snap.score_breakdown["hurst_eff_min"] = _hurst_eff_min
         snap.effective_min_score = round(effective_min_score, 2)
         _LOGGER.debug(
             "[EFFECTIVE_MIN_CALC] %s regime=%s profile_min=%.2f settings_min=%.2f "
@@ -1130,6 +1138,12 @@ class DerivRiskManager:
         # not Hurst-based trend.
         _rw_lo = float(os.getenv("DERIV_RANDOM_WALK_LO", "0.45"))
         _rw_hi = float(os.getenv("DERIV_RANDOM_WALK_HI", "0.55"))
+        # Neutral zone [0.47, 0.53]: no hard block — apply -0.5 penalty and tag
+        # regime=neutral, then continue with structural processing (macro/SMC/geo).
+        # Outer edges [0.45, 0.47) and (0.53, 0.55] remain a hard veto unless
+        # the z-score bypass (deep mean-reversion) is active.
+        _neutral_lo = float(os.getenv("DERIV_NEUTRAL_ZONE_LO", "0.47"))
+        _neutral_hi = float(os.getenv("DERIV_NEUTRAL_ZONE_HI", "0.53"))
         if (
             hurst is not None
             and _rw_lo <= hurst <= _rw_hi
@@ -1148,9 +1162,30 @@ class DerivRiskManager:
                 snap.reasons.append(
                     f"rw_veto_bypassed: H={hurst:.3f} MEAN_REV z={_z_score:+.2f} (|z|≥2.0) — deep reversion valid"
                 )
-            else:
+            elif _neutral_lo <= hurst <= _neutral_hi:
+                # ── NEUTRAL zone: no hard block, apply -0.5 confidence penalty ──
+                # H in [0.47, 0.53] is the inner noise band — pseudo-random walk
+                # but macro/SMC/geometry can still provide a structural edge.
+                # Tag regime=neutral so effective_min is tuned lower (C3) and
+                # the pipeline continues with full scoring.
+                score = max(0.0, score - 0.5)
+                snap.score = round(score, 3)
+                regime = "neutral"
+                snap.regime = "neutral"
+                snap.score_breakdown["neutral_zone_penalty"] = -0.5
                 snap.reasons.append(
-                    f"random_walk_veto: H={hurst:.3f} ∈ [{_rw_lo:.2f},{_rw_hi:.2f}] — no statistical edge"
+                    f"neutral_zone: H={hurst:.3f} ∈ [{_neutral_lo:.2f},{_neutral_hi:.2f}] "
+                    f"— noise penalty=-0.5 regime=neutral pipeline_continues"
+                )
+                _LOGGER.info(
+                    "[NEUTRAL_ZONE] %s H=%.3f penalty=-0.5 regime=neutral "
+                    "score_after=%.2f z=%.2f (structural processing continues)",
+                    symbol, hurst, score, _z_score,
+                )
+            else:
+                # Outer random-walk zone [0.45, 0.47) or (0.53, 0.55] — hard veto
+                snap.reasons.append(
+                    f"random_walk_veto: H={hurst:.3f} ∈ [{_rw_lo:.2f},{_rw_hi:.2f}] outer zone — no statistical edge"
                 )
                 snap.allowed = False
                 return snap
@@ -1446,39 +1481,46 @@ class DerivRiskManager:
 
             if not _has_fvg_active and not _has_spike_hunter:
                 # ── Tier 0: No FVG detected, no EMA200 spike-hunter ──────────
-                # Only allow if the rest of the setup is exceptional (score ≥ profile_min + premium).
-                # Premium is configurable via DERIV_STRUCTURAL_VETO_PREMIUM (default 2.50).
-                # Rationale for 2.50: without FVG the setup is pure momentum — needs
-                # exceptional score to justify risk.  With hd=1.50 + macro 1.50 a
-                # typical entry at profile_min+1.50 would be 7.50 — too low.
-                _veto_premium = float(os.getenv("DERIV_STRUCTURAL_VETO_PREMIUM", "2.50"))
-                _tier0_threshold = _profile_min + _veto_premium
-                if snap.score >= _tier0_threshold:
-                    snap.score_breakdown["fvg_tier"] = "no_fvg_high_score"
-                    snap.reasons.append(
-                        f"fvg_tier=no_fvg_high_score: score={snap.score:.2f} ≥ {_tier0_threshold:.2f} "
-                        f"— exceptional setup, no FVG required"
-                    )
-                    _LOGGER.info(
-                        "[PIPELINE] FVG_TIER0_OVERRIDE %s score=%.2f threshold=%.2f "
-                        "— no FVG but exceptional score allows entry",
-                        symbol, snap.score, _tier0_threshold,
-                    )
-                else:
-                    snap.score_breakdown["fvg_tier"] = "no_fvg_blocked"
-                    snap.reasons.append(
-                        f"boom_crash_structural_veto: no FVG and score {snap.score:.2f} "
-                        f"< {_tier0_threshold:.2f} (profile_min={_profile_min:.2f}+{_veto_premium:.2f})"
-                    )
-                    _LOGGER.info(
-                        "[STRUCTURAL_VETO] %s score=%.2f min_with_fvg=%.2f "
-                        "min_without_fvg=%.2f (profile_min=%.2f + premium=%.2f) "
-                        "fvg_active=False spike_hunter=False → blocked",
-                        symbol, snap.score, _profile_min, _tier0_threshold,
-                        _profile_min, _veto_premium,
-                    )
-                    snap.allowed = False
-                    return snap
+                # MOMENTUM ESCAPE VALVE: replaces the hard block with a weighted
+                # score penalty.  The setup is still allowed through the pipeline;
+                # the effective_min_score gate at the bottom decides final pass/fail.
+                #
+                # Escape valve condition (raw momentum compensates missing FVG):
+                #   macro aligned (hd_bonus >= 1.5) AND momentum >= 1.20 AND atr >= 1.50
+                #   → penalty = 0.50  (DERIV_NO_FVG_ESCAPE_PENALTY, default 0.50)
+                # Otherwise:
+                #   → penalty = 1.00  (DERIV_NO_FVG_STANDARD_PENALTY, default 1.00)
+                #   Capped at 1.25 to prevent catastrophic destruction of valid setups.
+                _hd_bonus_val = float(snap.score_breakdown.get("hd_bonus", 0.0))
+                _escape_valve = (
+                    _hd_bonus_val >= 1.5
+                    and momentum_score >= 1.20
+                    and atr_score >= 1.50
+                )
+                _no_fvg_penalty = (
+                    float(os.getenv("DERIV_NO_FVG_ESCAPE_PENALTY", "0.50"))
+                    if _escape_valve else
+                    float(os.getenv("DERIV_NO_FVG_STANDARD_PENALTY", "1.00"))
+                )
+                _no_fvg_penalty = min(_no_fvg_penalty, 1.25)  # absolute cap
+                score = max(0.0, score - _no_fvg_penalty)
+                snap.score = round(score, 3)
+                _fvg_tier_tag = "no_fvg_escape_valve" if _escape_valve else "no_fvg_penalized"
+                snap.score_breakdown["fvg_tier"] = _fvg_tier_tag
+                snap.score_breakdown["no_fvg_penalty"] = round(_no_fvg_penalty, 2)
+                snap.reasons.append(
+                    f"no_fvg_penalty={_no_fvg_penalty:.2f} escape_valve={_escape_valve} "
+                    f"score_after={score:.2f} (hd={_hd_bonus_val:.1f} "
+                    f"mom={momentum_score:.2f} atr={atr_score:.2f})"
+                )
+                _LOGGER.info(
+                    "[STRUCTURAL_VETO] %s no_fvg penalty=%.2f escape_valve=%s "
+                    "score_after=%.2f hd=%.1f mom=%.2f atr=%.2f "
+                    "(effective_min=%.2f)",
+                    symbol, _no_fvg_penalty, _escape_valve,
+                    score, _hd_bonus_val, momentum_score, atr_score,
+                    snap.effective_min_score,
+                )
             elif _has_fvg_active and not _has_fvg_mitigated and not _has_spike_hunter:
                 # ── Tier 1: FVG detected but not yet mitigated ───────────────
                 # Check if the profile requires mitigated FVG (e.g. BOOM600/CRASH600).
@@ -1642,19 +1684,38 @@ class DerivRiskManager:
         }.get(regime, 1.00)
         risk_usdt *= _regime_mult
         snap.score_breakdown["regime_size_mult"] = _regime_mult
-        # ── Score → position size (confidence-proportional) ──────────────────
-        # Compressed score drives a ±20% size adjustment so top-tier setups
-        # trade larger while mediocre ones trade smaller.
-        #   score ≥ 8.5 → up to +20% (linear to score 10)
-        #   score < 6.5 → down to −25% (linear from 6.5 to 5.5)
-        if score >= 8.5:
-            _score_sz = 1.0 + 0.20 * min(1.0, (score - 8.5) / 1.5)
-        elif score < 6.5:
-            _score_sz = max(0.75, 1.0 - 0.25 * (6.5 - score))
+        # ── Graded execution A / B / C — DPM hook ────────────────────────────
+        # Replaces the ±20% linear size adjustment with three discrete grades
+        # that map directly to the DPM's position sizing and trailing behaviour.
+        #
+        # Grade A (score >= 7.50): full stake (1.0×)  — high-confidence institutional
+        # Grade B (6.20 <= s < 7.50): 60% stake (0.60×) — valid but moderate setup
+        # Grade C (s < 6.20): micro stake (0.30×) + aggressive_trailing=True
+        #   Grade C only reaches execution when effective_min_score <= 5.75
+        #   (Hurst neutral/mean-rev path or per-symbol calibrated floor).
+        # Thresholds are configurable via env vars for live tuning without redeploy.
+        _grade_a_th = float(os.getenv("DERIV_GRADE_A_SCORE", "7.50"))
+        _grade_b_th = float(os.getenv("DERIV_GRADE_B_SCORE", "6.20"))
+        if score >= _grade_a_th:
+            _exec_grade = "A"
+            _score_sz = 1.00
+        elif score >= _grade_b_th:
+            _exec_grade = "B"
+            _score_sz = 0.60
         else:
-            _score_sz = 1.0
+            _exec_grade = "C"
+            _score_sz = 0.30
+            # DPM hook: aggressive_trailing=True tells DynamicPositionManager
+            # to use tightest ratchet (smallest ratchet_step, highest ratchet_ratio)
+            # ensuring any Grade C profit is protected immediately.
+            snap.score_breakdown["aggressive_trailing"] = True
         risk_usdt *= _score_sz
+        snap.score_breakdown["execution_grade"] = _exec_grade
         snap.score_breakdown["score_size_mult"] = round(_score_sz, 3)
+        _LOGGER.info(
+            "[EXEC_GRADE] %s grade=%s score=%.2f stake_mult=%.2f regime=%s",
+            symbol, _exec_grade, score, _score_sz, regime,
+        )
         # Hard floor at $1.00 (DERIV_MIN_STAKE_USDT_HARD overrides).
         # Hard cap at $3.00 (DERIV_MAX_STAKE_USDT overrides) — ABSOLUTE, unbreakable.
         # Prevents any regime/score multiplier from producing $30+ orders.
@@ -1820,7 +1881,7 @@ class DerivRiskManager:
 
         macro_dir = 1 if slope_pct > 0 else -1
         if macro_dir == trade_dir:
-            return 1.5    # ← HD aligned: macro trend confirms trade direction
+            return 2.0    # ← HD aligned: macro trend confirms trade direction (+2.0, boosted from 1.5)
         return -0.5       # ← HD opposed: macro trend contradicts trade direction
 
     @staticmethod

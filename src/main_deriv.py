@@ -591,7 +591,26 @@ class DerivDaemon:
         # ATR between spikes; the default p40 was blocking valid setups.
         _atr_base_th = int(os.getenv("DERIV_ATR_PERCENTILE_THRESHOLD", "40"))
         _atr_calm_th = int(os.getenv("DERIV_ATR_PERCENTILE_CALM", str(max(10, round(_atr_base_th * 0.70)))))
-        _atr_threshold = _atr_calm_th if (snap.score > 5.50 and not _atr_calm_bypassed) else _atr_base_th
+        # ── Per-symbol ATR percentile overrides ──────────────────────────────
+        # Spike markets naturally compress ATR between spikes; the default p40
+        # is too aggressive for otherwise-valid institutional setups.
+        # Per-symbol thresholds below the global calm threshold are configured
+        # per telemetry of missed entries (19/5 diagnostic).
+        # Also configurable via DERIV_ATR_TH_{SYMBOL} env vars for live tuning.
+        _sym_upper = tick.symbol.upper()
+        _per_sym_atr_defaults = {
+            "BOOM600":  32,
+            "BOOM900":  30,
+            "BOOM1000": 30,
+            "CRASH500": 28,
+        }
+        _env_sym_th = os.getenv(f"DERIV_ATR_TH_{_sym_upper}")
+        if _env_sym_th and _env_sym_th.isdigit():
+            _atr_threshold = int(_env_sym_th)
+        elif _sym_upper in _per_sym_atr_defaults:
+            _atr_threshold = _per_sym_atr_defaults[_sym_upper]
+        else:
+            _atr_threshold = _atr_calm_th if (snap.score > 5.50 and not _atr_calm_bypassed) else _atr_base_th
         _atr_ok, _atr_reason = passes_atr_volatility_filter(
             tick.symbol, _atr_current, _atr_hist,
             percentile_threshold=_atr_threshold,
