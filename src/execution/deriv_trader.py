@@ -183,6 +183,9 @@ class DerivOpenContract:
     # Trailing SL state (updated each poll cycle)
     peak_profit: float = field(default=0.0)
     trail_sl_locked: float = field(default=_TRAIL_INIT_SL)
+    # BUG-B fix: live floating PnL — updated on every WS tick, exposed to
+    # the dashboard via get_open_contracts_for_status() and _persist_open().
+    floating_pnl: float = field(default=0.0)
     # BUG-B fix: True once we have updated the broker-side SL to breakeven ($0.01)
     # after DPM reaches Phase 2 — gives a server-level backstop that fires even
     # when the client-side tick stream misses the exact peak tick.
@@ -278,34 +281,21 @@ class DerivTradeExecutor:
                 f"max_open_contracts={self._settings.max_open_contracts} reached"
             )
 
-        # Also block a second contract on the same symbol — synthetic indices are
-        # independent but doubling up on the same underlying adds no edge.
-        # Age-based bypass: if the "open" contract on this symbol is stale (past
-        # its expected max_hold or older than 300 s), the reaper likely hasn't
-        # caught up yet after a restart. Allow the new trade through so the bot
-        # doesn't stay permanently frozen on that symbol.
-        open_on_symbol = sum(1 for oc in self._open.values() if oc.symbol == order.symbol)
-        if open_on_symbol >= 1:
-            _stale_threshold = 300.0
-            _all_stale = all(
-                (time.time() - oc.opened_at_ts) > (
-                    oc.max_hold_seconds * 1.5 if oc.max_hold_seconds > 0 else _stale_threshold
-                )
-                for oc in self._open.values()
-                if oc.symbol == order.symbol
+        # BUG-A fix: hard block — one position per symbol, no stale bypass.
+        # The per-symbol asyncio lock in _evaluate_and_trade prevents the race
+        # but this is the final backstop in execute_order itself.
+        # Previous "stale bypass" allowed a second trade when the first contract
+        # looked old — removed because it caused opposing positions.
+        open_on_symbol = [oc for oc in self._open.values() if oc.symbol == order.symbol]
+        if open_on_symbol:
+            _LOGGER.info(
+                "[deriv-trader] SYMBOL_ALREADY_OPEN: blocked duplicate entry on %s "
+                "(open contract(s)=%s) — waiting for close before re-evaluating",
+                order.symbol,
+                [oc.contract_id for oc in open_on_symbol],
             )
-            if _all_stale:
-                _LOGGER.warning(
-                    "[deriv-trader] skipped_duplicate bypass: stale open contract on %s "
-                    "(threshold=%.0fs) — allowing new trade through",
-                    order.symbol, _stale_threshold,
-                )
-            else:
-                _LOGGER.debug(
-                    "[deriv-trader] %s already open — skipping duplicate order",
-                    order.symbol,
-                )
-                return {"status": "skipped_duplicate", "symbol": order.symbol}
+            return {"status": "symbol_already_open", "symbol": order.symbol,
+                    "open_contracts": [oc.contract_id for oc in open_on_symbol]}
 
         # All synthetic indices (R_*, BOOM*, CRASH*) use MULTUP/MULTDOWN
         # multiplier contracts.  BOOM/CRASH directional restriction is enforced
@@ -504,6 +494,8 @@ class DerivTradeExecutor:
             if not is_sold and oc_check is not None:
                 _current_profit = float(poc.get("profit") or 0)
                 _current_price  = float(poc.get("current_spot") or 0)
+                # BUG-B fix: update floating PnL on poll path (safety-net for WS gaps)
+                oc_check.floating_pnl = _current_profit
                 _close_reason   = self._dpm.on_tick(cid, _current_profit, _current_price)
                 # Sync DPM state back to oc for dashboard/persistence
                 _snap = self._dpm.get_state_snapshot(cid)
@@ -688,6 +680,7 @@ class DerivTradeExecutor:
 
     def get_open_contracts_for_status(self) -> list[dict[str, Any]]:
         """Return a safe serialisable snapshot of all open contracts."""
+        _now = time.time()
         return [
             {
                 "contract_id": oc.contract_id,
@@ -697,6 +690,12 @@ class DerivTradeExecutor:
                 "multiplier": oc.multiplier,
                 "entry_price": oc.entry_price,
                 "opened_at_ts": oc.opened_at_ts,
+                # BUG-B fix: live floating PnL for dashboard display
+                "floating_pnl": round(oc.floating_pnl, 4),
+                "peak_profit": round(oc.peak_profit, 4),
+                "trail_sl": round(oc.trail_sl_locked, 4),
+                "duration_sec": round(_now - oc.opened_at_ts, 1),
+                "broker_be_locked": oc.broker_be_locked,
             }
             for oc in self._open.values()
         ]
@@ -722,6 +721,9 @@ class DerivTradeExecutor:
                 "max_hold_seconds": oc.max_hold_seconds,
                 "peak_profit": oc.peak_profit,
                 "trail_sl_locked": oc.trail_sl_locked,
+                # BUG-B fix: include live floating PnL so deriv_open_contracts.json
+                # always has the last-known PnL when the file is written
+                "floating_pnl": round(oc.floating_pnl, 4),
             }
             for oc in self._open.values()
         ]
@@ -900,6 +902,8 @@ class DerivTradeExecutor:
                 return
             current_profit = float(poc.get("profit") or 0)
             current_price  = float(poc.get("current_spot") or 0)
+            # BUG-B fix: persist live PnL on every tick so dashboard shows real value
+            oc_check.floating_pnl = current_profit
             close_reason   = self._dpm.on_tick(cid, current_profit, current_price)
             # Sync DPM state to oc for dashboard visibility
             _snap = self._dpm.get_state_snapshot(cid)

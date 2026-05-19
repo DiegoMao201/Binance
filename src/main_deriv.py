@@ -133,6 +133,12 @@ class DerivDaemon:
         # Tracks last fired override per symbol. Checked FIRST in _pipeline() so
         # neither math nor AI evaluation runs on cooling-down symbols.
         self._signal_cooldown: dict[str, float] = {}
+        # ── Per-symbol evaluation lock (BUG-A fix) ──────────────────────────
+        # Prevents concurrent pipeline runs for the same symbol when ticks fire
+        # faster than one evaluation cycle. At most ONE pipeline runs per symbol
+        # at any time; subsequent ticks for the same symbol are silently dropped
+        # until the in-flight pipeline completes.
+        self._sym_eval_locks: dict[str, asyncio.Lock] = {}
 
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
                          score: float, reason: str,
@@ -445,10 +451,22 @@ class DerivDaemon:
     async def _evaluate_and_trade(self, tick: NormalisedTick) -> None:
         """Full signal evaluation + order pipeline for one tick.  Runs concurrently
         per symbol; never called directly by the WS reader."""
-        try:
-            await self._pipeline(tick)
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
+        # BUG-A fix: per-symbol lock prevents two concurrent pipelines from
+        # racing past the cooldown/open-contract guard on the same symbol.
+        # If a pipeline is already in flight for this symbol we drop the tick
+        # — the next tick will re-evaluate once the lock is released.
+        lock = self._sym_eval_locks.setdefault(tick.symbol, asyncio.Lock())
+        if lock.locked():
+            _LOGGER.debug(
+                "[deriv-daemon] SYMBOL_LOCKED %s — pipeline already in flight, dropping tick",
+                tick.symbol,
+            )
+            return
+        async with lock:
+            try:
+                await self._pipeline(tick)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
 
     async def _pipeline(self, tick: NormalisedTick) -> None:
         # ═══════════════════════════════════════════════════════════════════
@@ -1276,6 +1294,12 @@ class DerivDaemon:
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=None, separators=(",", ":")))
             tmp.replace(path)
+            # BUG-B fix: also refresh deriv_open_contracts.json every cycle so the
+            # frontend's derivOpenContracts has live floating_pnl (every 10s).
+            oc_path = self._settings.open_contracts_file
+            oc_tmp  = oc_path.with_suffix(oc_path.suffix + ".tmp")
+            oc_tmp.write_text(json.dumps(open_contracts, indent=None, separators=(",", ":")))
+            oc_tmp.replace(oc_path)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("[deriv-daemon] failed to write status file")
 
