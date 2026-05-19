@@ -36,6 +36,17 @@ OPTIONAL safety knobs (all have defensive defaults):
   DERIV_TAKE_PROFIT_PCT          default 0.012 (1.2 %)
   DERIV_STOP_LOSS_PCT            default 0.008 (0.8 %)
   DERIV_POLL_SECONDS             default 1.0 — how often the engine evaluates
+
+BOOM/CRASH spike-gate knobs (Phase 12):
+  DERIV_BOOM_CRASH_ESCAPE_VALVE       true/false (default false) — force escape path
+                                       for BOOM/CRASH when no FVG present. Skips the
+                                       hd/mom/atr condition, applies spike-specific
+                                       penalty (DERIV_BOOM_CRASH_NO_FVG_PENALTY).
+  DERIV_BOOM_CRASH_NO_FVG_PENALTY     float (default 0.20) — penalty when escape path
+                                       is env-forced. Lower than generic escape (0.50).
+  DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN float (default 5.25, min 5.25) — score floor for
+                                       BOOM/CRASH in calm Grade-C territory.
+                                       Math: 5.48 base − 0.20 penalty = 5.28 ≥ 5.25 → PASS.
 """
 
 from __future__ import annotations
@@ -128,6 +139,13 @@ class DerivSettings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ── BOOM/CRASH spike-gate (Phase 12) ─────────────────────────────────────
+    # These mirror the os.getenv() calls in deriv_risk.py so the effective values
+    # are visible in one place and logged at boot.
+    boom_crash_escape_valve: bool = False          # DERIV_BOOM_CRASH_ESCAPE_VALVE
+    boom_crash_no_fvg_penalty: float = 0.20        # DERIV_BOOM_CRASH_NO_FVG_PENALTY
+    boom_crash_calm_effective_min: float = 5.25    # DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
+
     # ── Derived paths ───────────────────────────────────────────────────────
     @property
     def state_file(self) -> Path:
@@ -197,4 +215,9 @@ def load_deriv_settings() -> DerivSettings:
         telegram_enabled=_get_bool("TELEGRAM_ENABLED", False),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+        boom_crash_escape_valve=_get_bool("DERIV_BOOM_CRASH_ESCAPE_VALVE", False),
+        boom_crash_no_fvg_penalty=_get_float("DERIV_BOOM_CRASH_NO_FVG_PENALTY", 0.20),
+        boom_crash_calm_effective_min=max(
+            _get_float("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", 5.25), 5.25
+        ),
     )

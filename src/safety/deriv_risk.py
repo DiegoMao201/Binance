@@ -967,7 +967,15 @@ class DerivRiskManager:
                 _high_spread = spread_pct > self._settings.max_spread_pct * 0.75
                 _allow_grade_c_floor = score < _grade_b_th_local and not _high_spread
                 if _allow_grade_c_floor:
-                    _bc_calm_floor = 5.75
+                    # Phase 12: configurable via DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
+                    # (default 5.25 — was hardcoded 5.75).  Combined with the
+                    # no-fvg escape penalty of 0.20 (DERIV_BOOM_CRASH_NO_FVG_PENALTY)
+                    # the math becomes: 5.48 − 0.20 = 5.28 ≥ 5.25 → PASS.
+                    # Constraint: floor must never go below 5.25 per design.
+                    _bc_calm_floor = max(
+                        float(os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "5.25")),
+                        5.25,   # absolute safety floor — never below 5.25
+                    )
                 else:
                     _bc_calm_floor = max(
                         float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.80")),
@@ -1518,11 +1526,32 @@ class DerivRiskManager:
                     and momentum_score >= 1.20
                     and atr_score >= 1.50
                 )
-                _no_fvg_penalty = (
-                    float(os.getenv("DERIV_NO_FVG_ESCAPE_PENALTY", "0.50"))
-                    if _escape_valve else
-                    float(os.getenv("DERIV_NO_FVG_STANDARD_PENALTY", "1.00"))
+                # Phase 12: BOOM/CRASH env override.
+                # When DERIV_BOOM_CRASH_ESCAPE_VALVE=true the escape path is forced
+                # regardless of hd/mom/atr conditions.  A lower spike-specific penalty
+                # (DERIV_BOOM_CRASH_NO_FVG_PENALTY, default 0.20) is used — less than
+                # the generic escape penalty (0.50) because BOOM/CRASH don't rely on
+                # FVG structure to find their edge (they hunt the spike itself).
+                # Math: base_score≈5.48 − 0.20 = 5.28 ≥ effective_min(5.25) → PASS.
+                _bc_escape_env = (
+                    _is_boom_crash_sym
+                    and os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").lower()
+                    in ("1", "true", "yes")
                 )
+                if _bc_escape_env and not _escape_valve:
+                    _escape_valve = True
+                    snap.score_breakdown["bc_escape_env"] = True
+                if _bc_escape_env:
+                    # Use spike-specific lower penalty for BOOM/CRASH escape path.
+                    _no_fvg_penalty = float(
+                        os.getenv("DERIV_BOOM_CRASH_NO_FVG_PENALTY", "0.20")
+                    )
+                else:
+                    _no_fvg_penalty = (
+                        float(os.getenv("DERIV_NO_FVG_ESCAPE_PENALTY", "0.50"))
+                        if _escape_valve else
+                        float(os.getenv("DERIV_NO_FVG_STANDARD_PENALTY", "1.00"))
+                    )
                 _no_fvg_penalty = min(_no_fvg_penalty, 1.25)  # absolute cap
                 score = max(0.0, score - _no_fvg_penalty)
                 snap.score = round(score, 3)

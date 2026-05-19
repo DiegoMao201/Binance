@@ -302,6 +302,20 @@ class DerivDaemon:
             "Mismo fix que R_50/R_75: SL = 0.36 × $1.50 = $0.54 > $0.50 floor broker. "
             "R_100 score=8.83 puede entrar cuando hd suba → sin este fix cerraría en 2-3 min.",
         )
+        # ── BOOM_CRASH_GATE — Phase 12 escape_valve config ──────────────────────
+        import os as _os
+        _LOGGER.info(
+            "[BOOM_CRASH_GATE] Phase12 escape_valve=%s no_fvg_penalty=%.2f "
+            "calm_effective_min=%.2f  "
+            "(DERIV_BOOM_CRASH_ESCAPE_VALVE=%s DERIV_BOOM_CRASH_NO_FVG_PENALTY=%s "
+            "DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=%s)",
+            self._settings.boom_crash_escape_valve,
+            self._settings.boom_crash_no_fvg_penalty,
+            self._settings.boom_crash_calm_effective_min,
+            _os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "unset"),
+            _os.getenv("DERIV_BOOM_CRASH_NO_FVG_PENALTY", "unset"),
+            _os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "unset"),
+        )
         # ── DPM_CONFIG — log ratchet params for every DPM-registered symbol ─────
         # T4 2026-05-19: visible on every boot to confirm DPM is active.
         _LOGGER.info("[DPM_CONFIG] DynamicPositionManager activo para todos los símbolos:")
