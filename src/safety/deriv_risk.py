@@ -474,6 +474,13 @@ class DerivRiskManager:
         # Per-symbol trade timestamp for independent cooldown_bonus tracking.
         # Prevents R_50/R_75 active trading from stealing BOOM/CRASH cooldown bonus.
         self._last_trade_ts_per_symbol: dict[str, float] = {}
+        # ── FVG credit cache ───────────────────────────────────────────────
+        # When a BOOM/CRASH symbol detects an active FVG with score >= threshold,
+        # we store a credit for N cycles so that if ATR passes within that window
+        # the entry is still valid (fixes the race condition where SMC fires in
+        # cycle K but ATR only passes in cycle K+3).
+        # Format: {symbol: {"cycles_remaining": int, "score_at_detection": float}}
+        self._fvg_credit: dict[str, dict] = {}
         self._daily_realized_pnl = 0.0
         self._daily_anchor_date = datetime.now(timezone.utc).date()
         # Per-symbol rolling tick window for synthetic ATR / trend.
@@ -645,6 +652,27 @@ class DerivRiskManager:
             del buf[: len(buf) - self._max_window]
         # Increment per-symbol tick counter
         self._ingest_tick_count[symbol] = self._ingest_tick_count.get(symbol, 0) + 1
+        # ── FEED_QUALITY: duplicate/stale tick detector ────────────────────
+        # H=0.200 anomalies (BOOM1000 18/5, BOOM900 19/5) are caused by the
+        # broker feed repeating the same price for many consecutive ticks.
+        # Detect this and log a WARNING every 100 ticks when quality is poor.
+        _tick_n = self._ingest_tick_count[symbol]
+        if _tick_n % 100 == 0 and len(buf) >= 50:
+            _last50 = buf[-50:]
+            _dup_count = sum(1 for i in range(1, len(_last50)) if _last50[i] == _last50[i - 1])
+            _dup_pct = _dup_count / (len(_last50) - 1)
+            _quality = "poor" if _dup_pct > 0.30 else ("degraded" if _dup_pct > 0.10 else "good")
+            if _quality != "good":
+                _LOGGER.warning(
+                    "[FEED_QUALITY] %s duplicate_ticks=%d/50 (%.0f%%) quality=%s "
+                    "— may cause H anomaly; tick_n=%d",
+                    symbol, _dup_count, _dup_pct * 100, _quality, _tick_n,
+                )
+            else:
+                _LOGGER.debug(
+                    "[FEED_QUALITY] %s duplicate_ticks=%d/50 (%.0f%%) quality=%s tick_n=%d",
+                    symbol, _dup_count, _dup_pct * 100, _quality, _tick_n,
+                )
         # Update ATR history every 30 ticks
         if len(buf) >= 30 and len(buf) % 10 == 0:
             atr = self._synthetic_atr(buf)
@@ -1366,7 +1394,7 @@ class DerivRiskManager:
 
         # ── BOOM/CRASH FVG 4-tier gate (replaces hard structural veto) ──────
         # Graduated entry permission based on FVG quality.
-        # Tier 0: No FVG at all → only allow if score is exceptional (profile_min + 2.50)
+        # Tier 0: No FVG at all → only allow if score is exceptional (profile_min + premium)
         # Tier 1: FVG detected but NOT yet mitigated → allow at normal effective_min
         # Tier 2: FVG mitigated, no EMA200 → smc_bonus already applied (+1.00 equivalent)
         # Tier 3: FVG mitigated + EMA200 spike-hunter → full smc_bonus (+3.00)
@@ -1380,10 +1408,51 @@ class DerivRiskManager:
             _has_spike_hunter  = bool(snap.score_breakdown.get("spike_entry"))
             _profile_min       = float(_get_asset_profile(symbol).get("min_score", snap.effective_min_score))
 
+            # ── FVG credit check and update ────────────────────────────────
+            # When FVG is active NOW with score >= 7.0: issue/refresh a 5-cycle credit.
+            # When FVG is absent but credit remains: treat as FVG active (fvg_credit window).
+            # This fixes the race: CRASH600 had score=8.50+SMC in cycle K but
+            # ATR failed → 3 cycles later ATR passes but SMC gone.  Credit bridges the gap.
+            _FVG_CREDIT_CYCLES = int(os.getenv("DERIV_FVG_CREDIT_CYCLES", "5"))
+            _FVG_CREDIT_SCORE_MIN = float(os.getenv("DERIV_FVG_CREDIT_SCORE_MIN", "7.0"))
+            _su_credit = symbol.upper()
+            _credit = self._fvg_credit.get(_su_credit)
+            if _has_fvg_active and snap.score >= _FVG_CREDIT_SCORE_MIN:
+                # Issue or refresh credit
+                self._fvg_credit[_su_credit] = {
+                    "cycles_remaining": _FVG_CREDIT_CYCLES,
+                    "score_at_detection": snap.score,
+                }
+                _LOGGER.info(
+                    "[FVG_CREDIT] %s ISSUED cycles=%d score_at_detection=%.2f "
+                    "(fvg_active=True score>=%.1f)",
+                    symbol, _FVG_CREDIT_CYCLES, snap.score, _FVG_CREDIT_SCORE_MIN,
+                )
+            elif not _has_fvg_active and _credit and _credit.get("cycles_remaining", 0) > 0:
+                # Consume credit cycle — treat as FVG active
+                _credit["cycles_remaining"] -= 1
+                _has_fvg_active = True   # override for Tier gate below
+                _has_fvg_mitigated = True  # credit implies previously mitigated
+                _LOGGER.info(
+                    "[FVG_CREDIT] %s ACTIVE cycles_remaining=%d score_at_detection=%.2f "
+                    "— bridging ATR race (fvg_active reinstated for this cycle)",
+                    symbol, _credit["cycles_remaining"], _credit.get("score_at_detection", 0),
+                )
+                snap.score_breakdown["fvg_credit_active"] = True
+                snap.score_breakdown["fvg_credit_cycles"] = _credit["cycles_remaining"]
+            elif _credit and _credit.get("cycles_remaining", 0) <= 0:
+                # Credit expired — remove
+                del self._fvg_credit[_su_credit]
+
             if not _has_fvg_active and not _has_spike_hunter:
                 # ── Tier 0: No FVG detected, no EMA200 spike-hunter ──────────
-                # Only allow if the rest of the setup is exceptional (score ≥ profile_min + 2.50)
-                _tier0_threshold = _profile_min + 2.50
+                # Only allow if the rest of the setup is exceptional (score ≥ profile_min + premium).
+                # Premium is configurable via DERIV_STRUCTURAL_VETO_PREMIUM (default 2.50).
+                # Rationale for 2.50: without FVG the setup is pure momentum — needs
+                # exceptional score to justify risk.  With hd=1.50 + macro 1.50 a
+                # typical entry at profile_min+1.50 would be 7.50 — too low.
+                _veto_premium = float(os.getenv("DERIV_STRUCTURAL_VETO_PREMIUM", "2.50"))
+                _tier0_threshold = _profile_min + _veto_premium
                 if snap.score >= _tier0_threshold:
                     snap.score_breakdown["fvg_tier"] = "no_fvg_high_score"
                     snap.reasons.append(
@@ -1399,7 +1468,14 @@ class DerivRiskManager:
                     snap.score_breakdown["fvg_tier"] = "no_fvg_blocked"
                     snap.reasons.append(
                         f"boom_crash_structural_veto: no FVG and score {snap.score:.2f} "
-                        f"< {_tier0_threshold:.2f} (profile_min={_profile_min:.2f}+2.50)"
+                        f"< {_tier0_threshold:.2f} (profile_min={_profile_min:.2f}+{_veto_premium:.2f})"
+                    )
+                    _LOGGER.info(
+                        "[STRUCTURAL_VETO] %s score=%.2f min_with_fvg=%.2f "
+                        "min_without_fvg=%.2f (profile_min=%.2f + premium=%.2f) "
+                        "fvg_active=False spike_hunter=False → blocked",
+                        symbol, snap.score, _profile_min, _tier0_threshold,
+                        _profile_min, _veto_premium,
                     )
                     snap.allowed = False
                     return snap

@@ -286,6 +286,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 1.5,
         "tp_multiplier": 3.0,
         "trailing_mode": "atr_wide",
+        # ── SL floor fix 2026-05-19 ─────────────────────────────────────
+        # Without override: sl_pct=0.004 (mean_rev) → sl_usd ≪ $0.50 (broker floor)
+        # Result: trade closes at SL in 2-3 min hitting the floor.
+        # Fix: stop_loss_pct_override=0.36 → sl_usd = 0.36 × $1.50 = $0.54 > $0.50 ✔
+        "stop_loss_pct_override": 0.36,
+        "stake_max_usdt": 1.50,
     },
     # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
     # Spike markets: NO mean-reversion, NO breakout — only SMC + spike-hunter.

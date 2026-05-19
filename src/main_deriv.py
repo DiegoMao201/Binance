@@ -297,6 +297,11 @@ class DerivDaemon:
             "Causa raíz: mean_rev stop_loss_pct=0.004 producía sl_usd≪$0.50 (floor) "
             "→ trade cerraba en SL a los 2-3 min por floor del broker.",
         )
+        _LOGGER.info(
+            "[R100_SL_FIX] R_100 stop_loss_pct_override=0.36 stake_max=$1.50 aplicado. "
+            "Mismo fix que R_50/R_75: SL = 0.36 × $1.50 = $0.54 > $0.50 floor broker. "
+            "R_100 score=8.83 puede entrar cuando hd suba → sin este fix cerraría en 2-3 min.",
+        )
         # ── DPM_CONFIG — log ratchet params for every DPM-registered symbol ─────
         # T4 2026-05-19: visible on every boot to confirm DPM is active.
         _LOGGER.info("[DPM_CONFIG] DynamicPositionManager activo para todos los símbolos:")
@@ -312,7 +317,7 @@ class DerivDaemon:
                 _dpm_p["agotamiento_threshold"] * 100,
                 _dpm_p["max_duration_seg"],
             )
-        # ── PROFILE_SCORE_MIN — log score_min for all active BOOM/CRASH profiles ─
+        # ── PROFILE_SCORE_MIN — log score_min for all active BOOM/CRASH + R_* profiles ─
         # Confirms which minimum is active in the deployed container vs what's coded.
         _SPIKE_SYMS = [
             "BOOM300", "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
@@ -329,6 +334,15 @@ class DerivDaemon:
                 float(_prf.get("stake_max_usdt") or 0.0),
                 str(_prf.get("geo_entry_max", "n/a")),
                 str(_prf.get("stop_loss_pct_override", "default")),
+            )
+        for _rsym in ("R_50", "R_75", "R_100"):
+            _rprf = get_asset_profile(_rsym)
+            _LOGGER.info(
+                "[PROFILE_SCORE_MIN] %s score_min=%.2f stake_max=$%.2f sl_override=%s",
+                _rsym,
+                float(_rprf.get("min_score", 0.0)),
+                float(_rprf.get("stake_max_usdt") or 0.0),
+                str(_rprf.get("stop_loss_pct_override", "default")),
             )
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
