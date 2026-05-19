@@ -40,13 +40,15 @@ from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator, MacroHDCalibrator
+from src.execution.position_manager import SYMBOL_RATCHET_PARAMS as _DPM_PARAMS
 from src.strategies.deriv_signals import (
     adaptive_max_hold,
     extreme_mr_penalty,
     get_asset_profile,
     is_spike_market,
     min_score_for,
-    min_score_for_regime,
+    # min_score_for_regime REMOVED (T6): returned stale hardcoded 7.50 for calm
+    # and was never actually called — _regime_min = snap.effective_min_score instead.
     passes_atr_volatility_filter,
     spike_timeout_sec,
 )
@@ -295,6 +297,21 @@ class DerivDaemon:
             "Causa raíz: mean_rev stop_loss_pct=0.004 producía sl_usd≪$0.50 (floor) "
             "→ trade cerraba en SL a los 2-3 min por floor del broker.",
         )
+        # ── DPM_CONFIG — log ratchet params for every DPM-registered symbol ─────
+        # T4 2026-05-19: visible on every boot to confirm DPM is active.
+        _LOGGER.info("[DPM_CONFIG] DynamicPositionManager activo para todos los símbolos:")
+        for _dpm_sym, _dpm_p in sorted(_DPM_PARAMS.items()):
+            _LOGGER.info(
+                "[DPM_CONFIG] %s ratchet=True sl_inicial=%.0f%% step=%.0f%% "
+                "ratio=%.2f window=%dt threshold=%.0f%% dur=%ds",
+                _dpm_sym,
+                _dpm_p["sl_inicial_pct"] * 100,
+                _dpm_p["ratchet_step_pct"] * 100,
+                _dpm_p["ratchet_ratio"],
+                _dpm_p["momentum_window"],
+                _dpm_p["agotamiento_threshold"] * 100,
+                _dpm_p["max_duration_seg"],
+            )
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
@@ -527,11 +544,31 @@ class DerivDaemon:
         # EXCEPTION: if the risk engine already bypassed the ATR gate for a
         # spike market in calm regime (atr_calm_bypassed=True), we must NOT
         # re-apply the filter here — that would create a phantom double-gate.
+        #
+        # T2 FIX 2026-05-19: Lower percentile threshold from 40→28 (−30%) for
+        # borderline-high-quality setups (score > 5.50) that are NOT already
+        # atr_calm_bypassed.  BOOM/CRASH naturally compress ATR between spikes;
+        # p40 was too aggressive for otherwise-valid institutional setups.
         _atr_calm_bypassed = bool(snap.score_breakdown.get("atr_calm_bypassed", False))
         _atr_current = float(snap.score_breakdown.get("atr_abs") or 0.0)
         _atr_hist = self._risk._atr_history.get(tick.symbol, [])
+        _atr_threshold = 28 if (snap.score > 5.50 and not _atr_calm_bypassed) else 40
         _atr_ok, _atr_reason = passes_atr_volatility_filter(
             tick.symbol, _atr_current, _atr_hist,
+            percentile_threshold=_atr_threshold,
+        )
+        # [ATR_FILTER_DETAIL] — always emit so exact values are visible in logs
+        _atr_p_req = 0.0
+        _sorted_atr = sorted(_atr_hist) if len(_atr_hist) >= 10 else []
+        if _sorted_atr:
+            _p_idx = max(0, min(len(_sorted_atr) - 1,
+                                int(len(_sorted_atr) * _atr_threshold / 100)))
+            _atr_p_req = _sorted_atr[_p_idx]
+        _LOGGER.info(
+            "[ATR_FILTER_DETAIL] %s atr_abs=%.6f required_p%d=%.6f pass=%s "
+            "score=%.2f atr_bypassed=%s hist_n=%d",
+            tick.symbol, _atr_current, _atr_threshold, _atr_p_req, _atr_ok,
+            snap.score, _atr_calm_bypassed, len(_atr_hist),
         )
         if not _atr_ok and not _atr_calm_bypassed:
             self._log_entry_block(

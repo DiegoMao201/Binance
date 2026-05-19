@@ -901,21 +901,22 @@ class DerivRiskManager:
         _calm_bc_floor_used: float | None = None
         if _is_boom_crash_sym:
             if regime == "calm":
-                # Hard floor: never let the env-var push below 5.80.
-                # Values below 5.80 introduce over-triggering risk; any
-                # DERIV_CALM_STRUCTURAL_MIN_SCORE < 5.80 is silently clamped.
-                _CALM_MIN_HARD_FLOOR: float = 5.80
+                # T3 FIX 2026-05-19: cap at max(env_floor, 6.00) so no spike symbol
+                # requires more than 6.00 in calm — regardless of profile min_score.
+                # Prior behavior: max(5.80, env_var) = 5.80 was being overridden by
+                # stale 6.20 (DERIV_MIN_SCORE env var) in some code paths.
+                # Direct assignment (not min()) replaces any upstream value.
                 _bc_calm_floor = max(
-                    _CALM_MIN_HARD_FLOOR,
                     float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.80")),
+                    6.00,   # hard cap for calm: never require more than 6.00
                 )
                 effective_min_score = _bc_calm_floor   # direct override — no min()
                 _calm_bc_floor_used = _bc_calm_floor
                 _LOGGER.info(
                     "[PIPELINE] [REGIME_SCORE_GATE_calm] %s regime=calm "
-                    "effective_min=%.2f (floor=%.2f DERIV_CALM_STRUCTURAL_MIN_SCORE) "
+                    "effective_min=%.2f (floor=max(env,6.00)) "
                     "atr_bypassed=%s",
-                    symbol, effective_min_score, _CALM_MIN_HARD_FLOOR, _atr_calm_bypassed,
+                    symbol, effective_min_score, _atr_calm_bypassed,
                 )
             else:
                 effective_min_score = min(effective_min_score, 5.8)  # spike edge ≠ trend edge
@@ -932,6 +933,15 @@ class DerivRiskManager:
         elif "R_25" in _su_sym or "R_50" in _su_sym:
             effective_min_score = min(effective_min_score, 5.5)       # mean-rev edge
         snap.effective_min_score = round(effective_min_score, 2)
+        _LOGGER.debug(
+            "[EFFECTIVE_MIN_CALC] %s regime=%s profile_min=%.2f settings_min=%.2f "
+            "→ effective_min=%.2f (calm_floor=%s)",
+            symbol, regime,
+            float(_get_asset_profile(symbol).get("min_score", 0.0)),
+            self._settings.min_score,
+            effective_min_score,
+            f"{_calm_bc_floor_used:.2f}" if _calm_bc_floor_used is not None else "n/a",
+        )
 
         # ── Mean-reversion dual router ────────────────────────────────────
         # When H < 0.45 (mean_reverting / ranging), the market oscillates around

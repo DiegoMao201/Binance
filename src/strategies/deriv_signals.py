@@ -436,21 +436,23 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 810,        # 90 % × 900 ticks ≈ 810 s
+        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 810) — conservative limit
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,               # +0.5 over standard 6.5 — no own history yet
+        "min_score": 6.00,              # T5 2026-05-19: lowered 7.0→6.00 (in line with calm floor)
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # same as BOOM1000 (3 losses had H<0.44)
-        "geo_entry_max": 0.40,          # BOOM needs price below channel mid
-        "stake_max_usdt": 8.0,
+        "hurst_min_spike": 0.43,        # confirmed same as BOOM1000
+        "geo_entry_max": 0.50,          # T5: widened 0.40→0.50 to allow more setups
+        "stake_max_usdt": 2.00,         # T5: conservative 8.0→2.00 until edge confirmed
+        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
+        "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
@@ -460,46 +462,50 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 810,
+        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 810)
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.0,
+        "min_score": 6.00,              # T5 2026-05-19: lowered 7.0→6.00
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # same as CRASH1000 (win H=0.437)
-        "geo_entry_max": -1.00,         # CRASH needs price well below mid
-        "stake_max_usdt": 8.0,
+        "hurst_min_spike": 0.43,        # confirmed same as CRASH1000
+        "geo_entry_max": -1.00,         # CRASH needs price ≤ −1.00σ below mid
+        "stake_max_usdt": 2.00,         # T5: conservative until edge confirmed
+        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
+        "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
     },
-    # ── NEW: BOOM/CRASH 600 — active, more conservative ─────────────────────────
+    # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {
         "type": "spike_boom",
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 540,        # 90 % × 600 ticks ≈ 540 s
+        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 540)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.5,               # more conservative: higher frequency = more noise
+        "min_score": 6.00,              # T5 2026-05-19: lowered 7.5→6.00
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.47,
-        "geo_entry_max": 0.40,
-        "stake_max_usdt": 6.0,
+        "hurst_min_spike": 0.43,        # T5: aligned with BOOM1000 (was 0.47)
+        "geo_entry_max": 0.50,          # T5: widened 0.40→0.50
+        "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
+        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
+        "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: BOOM600 needs confirmed FVG mitigation
@@ -509,21 +515,23 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 540,
+        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 540)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.5,
+        "min_score": 6.00,              # T5 2026-05-19: lowered 7.5→6.00
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.42,        # interpolated CRASH1000(0.43)↔CRASH500(0.41)
-        "geo_entry_max": -1.10,         # stricter than CRASH900: interpolated
-        "stake_max_usdt": 6.0,
+        "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
+        "geo_entry_max": -1.00,         # T5: relaxed -1.10→-1.00
+        "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
+        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
+        "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: CRASH600 needs confirmed FVG mitigation
