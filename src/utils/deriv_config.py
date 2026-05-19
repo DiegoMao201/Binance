@@ -151,6 +151,15 @@ class DerivSettings:
     boom_crash_ai_min_score: float = 6.00          # DERIV_BOOM_CRASH_AI_MIN_SCORE
     r_indices_ai_min_score: float = 7.50           # DERIV_R_INDICES_AI_MIN_SCORE
 
+    # ── Per-symbol SL width (Phase 16) ─────────────────────────────────────
+    # Wider SL so normal tick noise ($0.002–$0.005/s on R_50) cannot stop the
+    # trade before the directional edge materialises.  Formula applied inside
+    # main_deriv: sl_pct = sl_usd / actual_stake (so it scales with stake).
+    # Floor enforced at $0.50 (Deriv demo minimum) by deriv_client.buy().
+    r50_sl_usd:  float = 1.00   # DERIV_R50_SL_USD  — was $0.54 (pct_ov 0.36)
+    r75_sl_usd:  float = 1.00   # DERIV_R75_SL_USD  — was $0.54 (pct_ov 0.36)
+    r100_sl_usd: float = 1.20   # DERIV_R100_SL_USD — was $0.54 (pct_ov 0.36)
+
     # ── Derived paths ───────────────────────────────────────────────────────
     @property
     def state_file(self) -> Path:
@@ -231,4 +240,7 @@ def load_deriv_settings() -> DerivSettings:
         r_indices_ai_min_score=max(
             _get_float("DERIV_R_INDICES_AI_MIN_SCORE", 7.50), 5.25
         ),
+        r50_sl_usd=max(_get_float("DERIV_R50_SL_USD", 1.00), 0.50),
+        r75_sl_usd=max(_get_float("DERIV_R75_SL_USD", 1.00), 0.50),
+        r100_sl_usd=max(_get_float("DERIV_R100_SL_USD", 1.20), 0.50),
     )

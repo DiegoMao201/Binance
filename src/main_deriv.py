@@ -1021,6 +1021,22 @@ class DerivDaemon:
             # Per-profile override: some symbols need a wider SL to clear the
             # broker minimum floor (e.g. R_75 with stop_loss_pct_override=0.36).
             _sl_pct_ov = float(_asset_profile.get("stop_loss_pct_override") or _sl_pct_ov)
+            # Phase 16: env-var USD-based SL override for R_50/R_75/R_100.
+            # Converts $USD target → pct so deriv_client.buy() gets the right
+            # absolute SL regardless of how stop_loss_pct_override is set.
+            _sym_sl_ov = tick.symbol.upper()
+            _sl_usd_cfg_ov = (
+                self._settings.r50_sl_usd  if "R_50"  in _sym_sl_ov else
+                self._settings.r75_sl_usd  if "R_75"  in _sym_sl_ov else
+                self._settings.r100_sl_usd if "R_100" in _sym_sl_ov else 0.0
+            )
+            if not _is_boom_crash_ov and _sl_usd_cfg_ov > 0:
+                _eff_stake_ov = float(snap.suggested_stake_usdt or 1.50)
+                _sl_pct_ov = round(_sl_usd_cfg_ov / max(_eff_stake_ov, 0.01), 4)
+                _LOGGER.info(
+                    "[SL_WIDE] %s sl_usd=%.2f → sl_pct=%.4f (stake=%.2f) [override path]",
+                    tick.symbol, _sl_usd_cfg_ov, _sl_pct_ov, _eff_stake_ov,
+                )
             _tp_pct_ov = (
                 _BOOM_CRASH_TP_PCT if _is_boom_crash_ov
                 else (0.004 if _is_mean_rev_ov else self._settings.take_profit_pct)
@@ -1138,6 +1154,20 @@ class DerivDaemon:
         # Per-profile override: some symbols need a wider SL to clear the
         # broker minimum floor (e.g. R_75 with stop_loss_pct_override=0.36).
         _sl_pct = float(_asset_profile.get("stop_loss_pct_override") or _sl_pct)
+        # Phase 16: env-var USD-based SL override for R_50/R_75/R_100.
+        _sym_sl = tick.symbol.upper()
+        _sl_usd_cfg = (
+            self._settings.r50_sl_usd  if "R_50"  in _sym_sl else
+            self._settings.r75_sl_usd  if "R_75"  in _sym_sl else
+            self._settings.r100_sl_usd if "R_100" in _sym_sl else 0.0
+        )
+        if not _is_boom_crash and _sl_usd_cfg > 0:
+            _eff_stake = float(snap.suggested_stake_usdt or 1.50)
+            _sl_pct = round(_sl_usd_cfg / max(_eff_stake, 0.01), 4)
+            _LOGGER.info(
+                "[SL_WIDE] %s sl_usd=%.2f → sl_pct=%.4f (stake=%.2f) [AI path]",
+                tick.symbol, _sl_usd_cfg, _sl_pct, _eff_stake,
+            )
         _tp_pct = (
             _BOOM_CRASH_TP_PCT if _is_boom_crash
             else (0.004 if _is_mean_rev else self._settings.take_profit_pct)

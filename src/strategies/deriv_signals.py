@@ -239,9 +239,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── SL floor fix 2026-05-18 (mismo bug que R_75) ──────────────────
         # stop_loss_pct=0.004 (mean_rev) × stake prodíca sl_usd≪$0.50 (floor broker)
         # → SL se flooreaba a $0.50 que es 33-50% del stake → trade cerraba en SL rápido.
-        # SL floor del broker = $0.50 — stake mínimo $1.40 para superarlo.
-        # Fix: stop_loss_pct_override=0.36 → SL = 0.36 × $1.50 = $0.54 > $0.50 ✅
-        "stop_loss_pct_override": 0.36,  # 36% de stake → SL $0.54 en stake $1.50
+        # Phase 16: widened to $1.00 so normal R_50 noise ($0.002–$0.005/pt) cannot
+        # stop the position before the directional edge materialises.
+        # DERIV_R50_SL_USD=1.00 in Coolify overrides this at runtime.
+        "stop_loss_pct_override": 0.6667,  # 66.7% of $1.50 stake → SL $1.00
         "stake_max_usdt": 1.50,
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
@@ -265,9 +266,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Causa raíz: stop_loss_pct=0.004 (mean_rev) × stake producía sl_usd=$0.026
         # → flooreado a $0.50 mínimo Deriv = 33% del stake en cada trade.
         # Con ATR_abs≈4.1 y 200× apalancamiento, el floor era alcanzable en 1-2 min.
-        # Fix: stop_loss_pct_override=0.36 → sl_usd=$0.54 en stake $1.50 (supera floor).
-        # stake_max_usdt=1.50 reduce exposición mientras se valida el nuevo SL.
-        "stop_loss_pct_override": 0.36,  # 36% de stake → SL $0.54 en stake $1.50
+        # Phase 16: widened to $1.00 — same rationale as R_50.
+        # DERIV_R75_SL_USD=1.00 in Coolify overrides this at runtime.
+        "stop_loss_pct_override": 0.6667,  # 66.7% of $1.50 stake → SL $1.00
         "stake_max_usdt": 1.50,
     },
     # R_100: trending, long moves, better persistence → trend following.
@@ -287,10 +288,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 3.0,
         "trailing_mode": "atr_wide",
         # ── SL floor fix 2026-05-19 ─────────────────────────────────────
-        # Without override: sl_pct=0.004 (mean_rev) → sl_usd ≪ $0.50 (broker floor)
-        # Result: trade closes at SL in 2-3 min hitting the floor.
-        # Fix: stop_loss_pct_override=0.36 → sl_usd = 0.36 × $1.50 = $0.54 > $0.50 ✔
-        "stop_loss_pct_override": 0.36,
+        # Phase 16: widened to $1.20 — R_100 is more volatile so needs
+        # an extra 20 cents of breathing room vs R_50/R_75.
+        # DERIV_R100_SL_USD=1.20 in Coolify overrides this at runtime.
+        "stop_loss_pct_override": 0.80,    # 80% of $1.50 stake → SL $1.20
         "stake_max_usdt": 1.50,
     },
     # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
