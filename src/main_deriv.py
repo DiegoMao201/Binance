@@ -39,7 +39,7 @@ from src.analysis.tick_velocity import TickVelocityAnalyzer
 from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
-from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator
+from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator, MacroHDCalibrator
 from src.strategies.deriv_signals import (
     adaptive_max_hold,
     extreme_mr_penalty,
@@ -62,10 +62,11 @@ _LOGGER = logging.getLogger("deriv.daemon")
 # With a $3 hard cap and 200× multiplier, a price-% SL always hits the Deriv minimum
 # ($0.50) and gets wicked out by 1–2 ticks of inter-spike noise.
 # Stake-relative values:
-#   SL 60% of stake  → $1.80 on $3 — survives 5–10 adverse ticks before the spike.
-#   TP 250% of stake → $7.50 on $3 — realistic spike target at 200×.
+#   SL 100% of stake  → full-stake protection — wider oxygen zone for pre-spike
+#                       accumulation; DPM ratchets the floor once profit accrues.
+#   TP 250% of stake  → $7.50 on $3 — realistic spike target at 200×.
 # Both tunable via env vars without a code change.
-_BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "0.60"))
+_BOOM_CRASH_SL_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_SL_PCT", "1.00"))
 _BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "2.50"))
 
 # ─── Anti-slippage spread veto (institutional execution gate) ────────────────
@@ -302,13 +303,16 @@ class DerivDaemon:
         calibrator_task  = asyncio.create_task(
             HurstCalibrator().calibration_loop(), name="deriv-hurst-calib"
         )
+        macro_hd_task    = asyncio.create_task(
+            MacroHDCalibrator().calibration_loop(), name="deriv-macro-hd"
+        )
         ttl_task         = asyncio.create_task(self._snapshot_ttl_loop(), name="deriv-ttl")
         ws_task          = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
         stop_task        = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
-        all_tasks = {ws_task, reaper_task, recon_task, timeout_task, stop_task, status_task, balance_task, history_task, calibrator_task, ttl_task, heartbeat_task}
+        all_tasks = {ws_task, reaper_task, recon_task, timeout_task, stop_task, status_task, balance_task, history_task, calibrator_task, macro_hd_task, ttl_task, heartbeat_task}
         try:
             done, _pending = await asyncio.wait(
                 all_tasks,
@@ -746,39 +750,75 @@ class DerivDaemon:
                 )
                 return
 
-        # ── Geo channel position gate (per-symbol, from ASSET_INTEL_PROFILES) ──
-        # Filters entries when the macro-channel position is outside the validated
-        # edge zone derived from batch analysis. Spike markets use it as a downside
-        # extension filter; R_50 uses a symmetric band around the channel mid.
+        # ── Geo channel position gate — dynamic score (replaces hard veto) ────────
+        # Instead of blocking entry entirely, compute a graduated score penalty
+        # or bonus based on how far the current channel position deviates from
+        # the per-profile validated edge zone:
+        #   Optimal (well inside zone):     +1.0 (confirmatory bonus)
+        #   Border  (just inside/outside):  ±0.0 (neutral)
+        #   Slight penalty (0–0.3σ outside): -1.5
+        #   Hard penalty   (>0.3σ outside):  -2.0 (score≥5.8 still passes)
+        # GEO_ENTRY_VETO label kept in score_breakdown for backward compatibility.
         _geo_pos = snap.score_breakdown.get("geo_channel_pos")
         if _geo_pos is not None:
-            _geo_ok = True
-            _geo_veto_reason = ""
-            _geo_min = _asset_profile.get("geo_entry_min")
-            _geo_max = _asset_profile.get("geo_entry_max")
-            if _geo_min is not None and float(_geo_pos) < float(_geo_min):
-                _geo_ok = False
-                _geo_veto_reason = (
-                    f"GEO_ENTRY_VETO: {tick.symbol} geo={_geo_pos:.3f} < min={_geo_min:.3f}"
+            _geo_val  = float(_geo_pos)
+            _geo_min  = _asset_profile.get("geo_entry_min")
+            _geo_max  = _asset_profile.get("geo_entry_max")
+            _geo_gate = 0.0
+            _geo_gate_label = ""
+
+            if _geo_max is not None:
+                _gmax     = float(_geo_max)
+                _overshoot = _geo_val - _gmax
+                if _overshoot <= -0.30:
+                    _geo_gate = +1.0
+                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
+                elif _overshoot <= 0.0:
+                    _geo_gate = 0.0
+                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
+                elif _overshoot <= 0.30:
+                    _geo_gate = -1.5
+                    _geo_gate_label = (
+                        f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
+                        f"(overshoot={_overshoot:.2f}) →-1.5"
+                    )
+                else:
+                    _geo_gate = -2.0
+                    _geo_gate_label = (
+                        f"geo_hard_penalty: {_geo_val:.3f}>>{_gmax:.3f} "
+                        f"(overshoot={_overshoot:.2f}) →-2.0"
+                    )
+
+            elif _geo_min is not None:
+                _gmin       = float(_geo_min)
+                _undershoot = _gmin - _geo_val
+                if _undershoot <= -0.30:
+                    _geo_gate = +1.0
+                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≥{_gmin+0.30:.3f} →+1.0"
+                elif _undershoot <= 0.0:
+                    _geo_gate = 0.0
+                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
+                elif _undershoot <= 0.30:
+                    _geo_gate = -1.5
+                    _geo_gate_label = (
+                        f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "
+                        f"(undershoot={_undershoot:.2f}) →-1.5"
+                    )
+                else:
+                    _geo_gate = -2.0
+                    _geo_gate_label = (
+                        f"geo_hard_penalty: {_geo_val:.3f}<<{_gmin:.3f} "
+                        f"(undershoot={_undershoot:.2f}) →-2.0"
+                    )
+
+            snap.score_breakdown["geo_gate"] = round(_geo_gate, 1)
+            if _geo_gate != 0.0:
+                snap.score = round(min(10.0, max(0.0, snap.score + _geo_gate)), 3)
+                snap.reasons.append(_geo_gate_label)
+                _LOGGER.debug(
+                    "[PIPELINE] GEO_GATE %s | %s | score→%.2f",
+                    tick.symbol, _geo_gate_label, snap.score,
                 )
-            elif _geo_max is not None and float(_geo_pos) > float(_geo_max):
-                _geo_ok = False
-                _geo_veto_reason = (
-                    f"GEO_ENTRY_VETO: {tick.symbol} geo={_geo_pos:.3f} > max={_geo_max:.3f}"
-                )
-            if not _geo_ok:
-                self._log_entry_block(
-                    tick.symbol, "GEO_ENTRY_VETO",
-                    score=snap.score, effective_min_score=snap.effective_min_score,
-                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                    score_breakdown=snap.score_breakdown,
-                )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score, reason=_geo_veto_reason,
-                    extra={"geo_channel_pos": _geo_pos, "profile": _asset_profile},
-                )
-                return
 
         # ── hurst_min_spike gate (spike markets that have a strict Hurst floor) ──
         # BOOM1000/CRASH1000 etc. can declare hurst_min_spike: 0.43 to filter out

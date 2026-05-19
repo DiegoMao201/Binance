@@ -44,6 +44,8 @@ from src.strategies.deriv_signals import (
     forced_side as _spike_forced_side,
     get_eval_mode as _get_eval_mode,
     is_spike_market as _is_spike_market,
+    spike_interval_ticks as _spike_interval_ticks,
+    get_asset_profile as _get_asset_profile,
 )
 from src.utils.deriv_config import DerivSettings
 from src.analysis.market_geometry import compute_geometry as _compute_geometry
@@ -176,6 +178,260 @@ class HurstCalibrator:
         if _hurst_calibration_ts == 0:
             return float("inf")
         return time.time() - _hurst_calibration_ts
+
+
+# ─── Macro HD Slope calibrator from PostgreSQL ────────────────────────────────
+# Fetches the last N snapshots from deriv_tick_snapshots and runs OLS on
+# last_price to compute a macro trend slope equivalent to 3000-5000 ticks of
+# history — much more stable than the 500-tick in-memory OLS fallback.
+# Runs as an independent asyncio Task every 5 minutes (configurable).
+#
+# Cached structure: {SYMBOL: (slope_pct_per_snapshot, epoch_ts)}
+_macro_hd_slope_cache: dict[str, tuple[float, float]] = {}
+_MACRO_HD_REFRESH_SEC     = int(os.getenv("DERIV_MACRO_HD_REFRESH_SEC", "300"))   # 5 min
+_MACRO_HD_SNAPSHOTS       = int(os.getenv("DERIV_MACRO_HD_SNAPSHOTS", "150"))    # ~4500t equiv
+_MACRO_HD_FLAT_THRESHOLD  = float(os.getenv("DERIV_MACRO_HD_FLAT_PCT", "0.0001"))  # % per step
+
+
+class MacroHDCalibrator:
+    """Background task that computes per-symbol macro slope from PostgreSQL.
+
+    Every `_MACRO_HD_REFRESH_SEC` seconds it fetches the last
+    `_MACRO_HD_SNAPSHOTS` rows of `deriv_tick_snapshots` (one price point ~
+    every 30 live ticks) and runs a simple OLS regression over `last_price`
+    to determine the macro trend direction.  The result is stored in
+    `_macro_hd_slope_cache` so `DerivRiskManager._higher_direction_bonus()`
+    can use a genuinely long-memory view instead of the capped 500-tick
+    in-memory buffer.
+
+    Falls back gracefully when DATABASE_URL is not set or asyncpg is absent.
+    """
+
+    async def calibration_loop(self) -> None:
+        """Long-running task: calibrate immediately, then every _MACRO_HD_REFRESH_SEC."""
+        _LOGGER.info(
+            "[macro-hd] starting calibration loop (snapshots=%d interval=%ds)",
+            _MACRO_HD_SNAPSHOTS, _MACRO_HD_REFRESH_SEC,
+        )
+        while True:
+            try:
+                await self._run_once()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[macro-hd] refresh failed: %s — using in-memory fallback", exc)
+            await asyncio.sleep(_MACRO_HD_REFRESH_SEC)
+
+    async def _run_once(self) -> None:
+        global _macro_hd_slope_cache
+
+        if not _DERIV_DATABASE_URL:
+            _LOGGER.debug("[macro-hd] DATABASE_URL not set — calibration skipped")
+            return
+
+        try:
+            import asyncpg  # optional dep
+        except ImportError:
+            _LOGGER.warning("[macro-hd] asyncpg not installed — calibration skipped")
+            return
+
+        conn = await asyncio.wait_for(
+            asyncpg.connect(_DERIV_DATABASE_URL), timeout=8.0
+        )
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT symbol, last_price
+                FROM (
+                    SELECT symbol, last_price,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY symbol ORDER BY captured_at DESC
+                           ) AS rn
+                    FROM deriv_tick_snapshots
+                    WHERE last_price > 0
+                ) ranked
+                WHERE rn <= $1
+                ORDER BY symbol, rn DESC
+                """,
+                _MACRO_HD_SNAPSHOTS,
+            )
+        finally:
+            await conn.close()
+
+        # Group prices per symbol (rows come back newest-first per symbol,
+        # but we ordered rn DESC so they are in chronological order: oldest first
+        # when rn=N is oldest, rn=1 is newest — we reverse back below).
+        by_symbol: dict[str, list[float]] = {}
+        for row in rows:
+            sym = str(row["symbol"]).upper()
+            p = float(row["last_price"])
+            if p > 0:
+                by_symbol.setdefault(sym, []).append(p)
+
+        new_cache: dict[str, tuple[float, float]] = {}
+        ts_now = time.time()
+        for sym, prices_desc in by_symbol.items():
+            # prices_desc is newest→oldest (rn DESC); reverse for OLS x-axis = time
+            prices = list(reversed(prices_desc))
+            n = len(prices)
+            if n < 20:
+                continue
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(prices) / n
+            if y_mean == 0:
+                continue
+            ss_xy = sum((i - x_mean) * (prices[i] - y_mean) for i in range(n))
+            ss_xx = sum((i - x_mean) ** 2 for i in range(n))
+            if ss_xx == 0:
+                continue
+            slope_pct = (ss_xy / ss_xx) / y_mean * 100.0
+            new_cache[sym] = (slope_pct, ts_now)
+
+        _macro_hd_slope_cache = new_cache
+        _LOGGER.info(
+            "[macro-hd] refreshed %d symbols | slopes=%s | %s",
+            len(new_cache),
+            {s: f"{v[0]:+.5f}%" for s, v in new_cache.items()},
+            datetime.now(timezone.utc).strftime("%H:%M UTC"),
+        )
+
+    @staticmethod
+    def get_slope(symbol: str) -> float | None:
+        """Return cached macro slope_pct for symbol, or None if missing/stale."""
+        entry = _macro_hd_slope_cache.get(symbol.upper())
+        if entry is None:
+            return None
+        slope_pct, ts = entry
+        # Treat as stale after 3 refresh intervals (15 min default)
+        if time.time() - ts > _MACRO_HD_REFRESH_SEC * 3:
+            return None
+        return slope_pct
+
+
+
+# ─── Macro HD Slope calibrator from PostgreSQL ────────────────────────────────
+# Fetches the last N snapshots from deriv_tick_snapshots and runs OLS on
+# last_price to compute a macro trend slope equivalent to 3000-5000 ticks of
+# history — much more stable than the 500-tick in-memory OLS fallback.
+# Runs as an independent asyncio Task every 5 minutes (configurable).
+#
+# Cached structure: {SYMBOL: (slope_pct_per_snapshot, epoch_ts)}
+_macro_hd_slope_cache: dict[str, tuple[float, float]] = {}
+_MACRO_HD_REFRESH_SEC     = int(os.getenv("DERIV_MACRO_HD_REFRESH_SEC", "300"))   # 5 min
+_MACRO_HD_SNAPSHOTS       = int(os.getenv("DERIV_MACRO_HD_SNAPSHOTS", "150"))    # ~4500t equiv
+_MACRO_HD_FLAT_THRESHOLD  = float(os.getenv("DERIV_MACRO_HD_FLAT_PCT", "0.0001"))  # % per step
+
+
+class MacroHDCalibrator:
+    """Background task that computes per-symbol macro slope from PostgreSQL.
+
+    Every `_MACRO_HD_REFRESH_SEC` seconds it fetches the last
+    `_MACRO_HD_SNAPSHOTS` rows of `deriv_tick_snapshots` (one price point ~
+    every 30 live ticks) and runs a simple OLS regression over `last_price`
+    to determine the macro trend direction.  The result is stored in
+    `_macro_hd_slope_cache` so `DerivRiskManager._higher_direction_bonus()`
+    can use a genuinely long-memory view instead of the capped 500-tick
+    in-memory buffer.
+
+    Falls back gracefully when DATABASE_URL is not set or asyncpg is absent.
+    """
+
+    async def calibration_loop(self) -> None:
+        """Long-running task: calibrate immediately, then every _MACRO_HD_REFRESH_SEC."""
+        _LOGGER.info(
+            "[macro-hd] starting calibration loop (snapshots=%d interval=%ds)",
+            _MACRO_HD_SNAPSHOTS, _MACRO_HD_REFRESH_SEC,
+        )
+        while True:
+            try:
+                await self._run_once()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("[macro-hd] refresh failed: %s — using in-memory fallback", exc)
+            await asyncio.sleep(_MACRO_HD_REFRESH_SEC)
+
+    async def _run_once(self) -> None:
+        global _macro_hd_slope_cache
+
+        if not _DERIV_DATABASE_URL:
+            _LOGGER.debug("[macro-hd] DATABASE_URL not set — calibration skipped")
+            return
+
+        try:
+            import asyncpg  # optional dep
+        except ImportError:
+            _LOGGER.warning("[macro-hd] asyncpg not installed — calibration skipped")
+            return
+
+        conn = await asyncio.wait_for(
+            asyncpg.connect(_DERIV_DATABASE_URL), timeout=8.0
+        )
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT symbol, last_price
+                FROM (
+                    SELECT symbol, last_price,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY symbol ORDER BY captured_at DESC
+                           ) AS rn
+                    FROM deriv_tick_snapshots
+                    WHERE last_price > 0
+                ) ranked
+                WHERE rn <= $1
+                ORDER BY symbol, rn DESC
+                """,
+                _MACRO_HD_SNAPSHOTS,
+            )
+        finally:
+            await conn.close()
+
+        # Group prices per symbol (rows come back newest-first per symbol,
+        # but we ordered rn DESC so they are in chronological order: oldest first
+        # when rn=N is oldest, rn=1 is newest — we reverse back below).
+        by_symbol: dict[str, list[float]] = {}
+        for row in rows:
+            sym = str(row["symbol"]).upper()
+            p = float(row["last_price"])
+            if p > 0:
+                by_symbol.setdefault(sym, []).append(p)
+
+        new_cache: dict[str, tuple[float, float]] = {}
+        ts_now = time.time()
+        for sym, prices_desc in by_symbol.items():
+            # prices_desc is newest→oldest (rn DESC); reverse for OLS x-axis = time
+            prices = list(reversed(prices_desc))
+            n = len(prices)
+            if n < 20:
+                continue
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(prices) / n
+            if y_mean == 0:
+                continue
+            ss_xy = sum((i - x_mean) * (prices[i] - y_mean) for i in range(n))
+            ss_xx = sum((i - x_mean) ** 2 for i in range(n))
+            if ss_xx == 0:
+                continue
+            slope_pct = (ss_xy / ss_xx) / y_mean * 100.0
+            new_cache[sym] = (slope_pct, ts_now)
+
+        _macro_hd_slope_cache = new_cache
+        _LOGGER.info(
+            "[macro-hd] refreshed %d symbols | slopes=%s | %s",
+            len(new_cache),
+            {s: f"{v[0]:+.5f}%" for s, v in new_cache.items()},
+            datetime.now(timezone.utc).strftime("%H:%M UTC"),
+        )
+
+    @staticmethod
+    def get_slope(symbol: str) -> float | None:
+        """Return cached macro slope_pct for symbol, or None if missing/stale."""
+        entry = _macro_hd_slope_cache.get(symbol.upper())
+        if entry is None:
+            return None
+        slope_pct, ts = entry
+        # Treat as stale after 3 refresh intervals (15 min default)
+        if time.time() - ts > _MACRO_HD_REFRESH_SEC * 3:
+            return None
+        return slope_pct
+
 
 
 # ─── Snapshot returned to the trader ──────────────────────────────────────────
@@ -738,11 +994,11 @@ class DerivRiskManager:
             _setup_type = "MEAN_REV"
 
         # ── Higher-Direction (HD) bonus — multi-timeframe macro alignment ──────
-        # Uses the 500-tick (~1H) macro trend to confirm or penalise the proposed
-        # direction AFTER trend_dir has been fully resolved (spike forced-side /
-        # mean-rev fade / OLS trend).  Applied BEFORE score_breakdown is built so
-        # both the score and the breakdown dict reflect the correct HD value.
-        _hd_bonus = self._higher_direction_bonus(ticks, trend_dir)
+        # Preferred source: PostgreSQL macro slope (3000-5000 tick equivalent).
+        # Fallback: in-memory 500-tick OLS slope.
+        # Applied AFTER trend_dir is fully resolved; BEFORE score_breakdown is built.
+        _macro_slope = MacroHDCalibrator.get_slope(symbol)
+        _hd_bonus = self._higher_direction_bonus(ticks, trend_dir, macro_slope_pct=_macro_slope)
         if _hd_bonus != 0.0:
             score = max(0.0, min(10.0, score + _hd_bonus))
             if _hd_bonus > 0:
@@ -769,6 +1025,10 @@ class DerivRiskManager:
             "hurst": round(hurst, 3) if (hurst is not None and math.isfinite(hurst)) else 0.5,
             "effective_min_score": round(effective_min_score, 2),
             "mean_rev_mode": _mean_rev_mode,
+            # ── Spike-family diagnostics (Bloque 7) ────────────────────────
+            # Allows post-trade analysis to split 600/900/300 vs 1000/500.
+            "spike_family_interval": _spike_interval_ticks(symbol) if _is_spike else 0,
+            "spike_family": _get_asset_profile(symbol).get("spike_family", ""),
             # ── Telemetry (CALIBRATION SAMPLING MODE) ──────────────────────
             "setup_type": _setup_type,  # overridden below if SMC/spike/scalp fires
             "symbol": symbol,
@@ -1352,38 +1612,57 @@ class DerivRiskManager:
     def _higher_direction_bonus(
         ticks: list[float],
         trade_dir: int | None,
+        macro_slope_pct: float | None = None,
     ) -> float:
         """Multi-timeframe Higher Direction (HD) score.
 
-        Uses the last 500 ticks (~1H equivalent at ~1 tick/s on Deriv synthetics)
-        to determine the macro trend direction via OLS slope.  When the macro
-        slope aligns with the proposed trade direction, award +1.5.  When it
-        opposes, apply a mild -0.5 penalty.  A near-flat slope (< 0.001% per
-        tick) returns 0.0 so the bonus only activates on genuine trends.
+        Uses the macro OLS slope to confirm (+1.5) or oppose (-0.5) the
+        proposed trade direction.  Slope source priority:
+
+        1. `macro_slope_pct` from MacroHDCalibrator (PostgreSQL last 150
+           snapshots ≈ 3000–5000 tick equivalent).  This is the primary
+           source — provides genuine long-memory view.
+        2. In-memory OLS over the last 500 ticks (fallback at startup or
+           when DATABASE_URL is not set).
+
+        Flat threshold is DERIV_MACRO_HD_FLAT_PCT (default 0.0001 % per step)
+        — corrects the prior 0.001 % threshold that caused hd=0.00 on
+        Deriv synthetics where price moves are ≪ 0.001 %/tick.
 
         Parameters
         ----------
-        ticks     : full tick buffer (most recent = last element)
-        trade_dir : +1 = MULTUP (bullish), -1 = MULTDOWN (bearish), None = unknown
+        ticks            : in-memory tick buffer (most recent = last)
+        trade_dir        : +1 = MULTUP, -1 = MULTDOWN, None = unknown
+        macro_slope_pct  : pre-computed macro slope from MacroHDCalibrator;
+                           when provided, the in-memory OLS is skipped.
         """
-        if trade_dir is None or len(ticks) < 100:
+        if trade_dir is None:
             return 0.0
 
-        macro = ticks[-min(500, len(ticks)):]
-        n = len(macro)
-        if n < 20:
+        # ── Source 1: PostgreSQL macro slope (preferred) ──────────────────
+        if macro_slope_pct is not None:
+            slope_pct = macro_slope_pct
+        elif len(ticks) >= 100:
+            # ── Source 2: in-memory OLS fallback ─────────────────────────
+            macro = ticks[-min(500, len(ticks)):]
+            n = len(macro)
+            if n < 20:
+                return 0.0
+            x_mean = (n - 1) / 2.0
+            y_mean = sum(macro) / n
+            if y_mean == 0:
+                return 0.0
+            ss_xy = sum((i - x_mean) * (macro[i] - y_mean) for i in range(n))
+            ss_xx = sum((i - x_mean) ** 2 for i in range(n))
+            if ss_xx == 0:
+                return 0.0
+            slope_pct = (ss_xy / ss_xx) / y_mean * 100.0
+        else:
             return 0.0
 
-        # OLS slope via normal equations (vectorised, no NumPy dep at this level)
-        x_mean = (n - 1) / 2.0
-        y_mean = sum(macro) / n
-        ss_xy = sum((i - x_mean) * (macro[i] - y_mean) for i in range(n))
-        ss_xx = sum((i - x_mean) ** 2 for i in range(n))
-        if ss_xx == 0 or y_mean == 0:
-            return 0.0
-        slope_pct = (ss_xy / ss_xx) / y_mean * 100.0  # % per tick
-
-        if abs(slope_pct) < 0.001:   # near-flat → neutral
+        # Flat threshold: 0.0001 %/step — permissive enough to catch genuine
+        # macro trends on Deriv synthetics (price moves ≪ 0.001 %/tick).
+        if abs(slope_pct) < _MACRO_HD_FLAT_THRESHOLD:
             return 0.0
 
         macro_dir = 1 if slope_pct > 0 else -1

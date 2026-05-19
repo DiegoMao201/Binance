@@ -55,6 +55,37 @@ _CRASH_SIDE: str = "MULTDOWN"   # spike fires DOWN  → only short
 _SPIKE_TIMEOUT_SEC: int = int(os.getenv("BOOM_CRASH_SPIKE_TIMEOUT_SEC", "450"))
 
 
+# ─── Symbol classification dictionaries ──────────────────────────────────────────────
+SYMBOL_FAMILY: dict[str, str] = {
+    # Volatility continuous indices
+    "R_10":  "volatility", "R_25":  "volatility", "R_50":  "volatility",
+    "R_75":  "volatility", "R_100": "volatility",
+    # BOOM family — all variants
+    "BOOM300":  "boom_crash", "BOOM500":  "boom_crash",
+    "BOOM600":  "boom_crash", "BOOM900":  "boom_crash",
+    "BOOM1000": "boom_crash",
+    # CRASH family — all variants
+    "CRASH300":  "boom_crash", "CRASH500":  "boom_crash",
+    "CRASH600":  "boom_crash", "CRASH900":  "boom_crash",
+    "CRASH1000": "boom_crash",
+}
+
+# Approximate spike interval in ticks (1 tick ≈ 1 s on Deriv synthetics).
+# Used for max_hold and diagnostics: spike_family_interval field in logs.
+SPIKE_INTERVAL_TICKS: dict[str, int] = {
+    "BOOM300": 300,  "CRASH300": 300,
+    "BOOM500": 500,  "CRASH500": 500,
+    "BOOM600": 600,  "CRASH600": 600,
+    "BOOM900": 900,  "CRASH900": 900,
+    "BOOM1000": 1000, "CRASH1000": 1000,
+}
+
+
+def spike_interval_ticks(symbol: str) -> int:
+    """Return the approximate tick interval between spikes for spike markets."""
+    return SPIKE_INTERVAL_TICKS.get(symbol.upper(), 0)
+
+
 # ─── Public helpers ───────────────────────────────────────────────────────────
 
 def is_spike_market(symbol: str) -> bool:
@@ -396,6 +427,134 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Confirmed: edge only when price is well below channel midpoint.
         "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid
         "min_score": 6.5,             # lowered 7.5→6.5
+        "spike_family": "boom_crash",
+        "spike_interval_ticks": 1000,
+    },
+    # ── NEW: BOOM/CRASH 900 — active ───────────────────────────────────────────────
+    "BOOM900": {
+        "type": "spike_boom",
+        "strategy_mode": "spike",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 18,
+        "max_hold_seconds": 810,        # 90 % × 900 ticks ≈ 810 s
+        "ema_distance_pct": 0.04,
+        "require_fvg_mitigation": True,
+        "allow_mean_reversion": False,
+        "allow_breakout": False,
+        "min_score": 7.0,               # +0.5 over standard 6.5 — no own history yet
+        "min_hurst": 0.0,
+        "atr_min": 0.0,
+        "cooldown_sec": 240,
+        "sl_multiplier": 3.0,
+        "tp_multiplier": 6.0,
+        "trailing_mode": "none",
+        "hurst_min_spike": 0.43,        # same as BOOM1000 (3 losses had H<0.44)
+        "geo_entry_max": 0.40,          # BOOM needs price below channel mid
+        "stake_max_usdt": 8.0,
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 900,
+    },
+    "CRASH900": {
+        "type": "spike_crash",
+        "strategy_mode": "spike",
+        "forced_side": "MULTDOWN",
+        "max_hold_ticks": 18,
+        "max_hold_seconds": 810,
+        "ema_distance_pct": 0.04,
+        "require_fvg_mitigation": True,
+        "allow_mean_reversion": False,
+        "allow_breakout": False,
+        "min_score": 7.0,
+        "min_hurst": 0.0,
+        "atr_min": 0.0,
+        "cooldown_sec": 300,
+        "sl_multiplier": 3.0,
+        "tp_multiplier": 6.0,
+        "trailing_mode": "none",
+        "hurst_min_spike": 0.43,        # same as CRASH1000 (win H=0.437)
+        "geo_entry_max": -1.00,         # CRASH needs price well below mid
+        "stake_max_usdt": 8.0,
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 900,
+    },
+    # ── NEW: BOOM/CRASH 600 — active, more conservative ─────────────────────────
+    "BOOM600": {
+        "type": "spike_boom",
+        "strategy_mode": "spike",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 15,
+        "max_hold_seconds": 540,        # 90 % × 600 ticks ≈ 540 s
+        "ema_distance_pct": 0.03,
+        "require_fvg_mitigation": True,
+        "allow_mean_reversion": False,
+        "allow_breakout": False,
+        "min_score": 7.5,               # more conservative: higher frequency = more noise
+        "min_hurst": 0.0,
+        "atr_min": 0.0,
+        "cooldown_sec": 240,
+        "sl_multiplier": 3.0,
+        "tp_multiplier": 6.0,
+        "trailing_mode": "none",
+        "hurst_min_spike": 0.47,
+        "geo_entry_max": 0.40,
+        "stake_max_usdt": 6.0,
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 600,
+    },
+    "CRASH600": {
+        "type": "spike_crash",
+        "strategy_mode": "spike",
+        "forced_side": "MULTDOWN",
+        "max_hold_ticks": 15,
+        "max_hold_seconds": 540,
+        "ema_distance_pct": 0.03,
+        "require_fvg_mitigation": True,
+        "allow_mean_reversion": False,
+        "allow_breakout": False,
+        "min_score": 7.5,
+        "min_hurst": 0.0,
+        "atr_min": 0.0,
+        "cooldown_sec": 300,
+        "sl_multiplier": 3.0,
+        "tp_multiplier": 6.0,
+        "trailing_mode": "none",
+        "hurst_min_spike": 0.42,        # interpolated CRASH1000(0.43)↔CRASH500(0.41)
+        "geo_entry_max": -1.10,         # stricter than CRASH900: interpolated
+        "stake_max_usdt": 6.0,
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 600,
+    },
+    # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
+    # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
+    # Defined so DPM params are ready; active=False + score_min=8.50 = effective block.
+    # To activate: set active=True + min_score=7.50 + hurst_min_spike=0.45 after
+    # seeing ≥20 trades with geo_channel_pos<-0.70 for BOOM / <-1.40 for CRASH.
+    "BOOM300_new": {
+        # NOTE: registered as BOOM300_new to avoid conflict with existing BOOM300 profile.
+        # Existing BOOM300 profile (above) inherited from original codebase with different
+        # parameters. This profile is for the new 300-tick variants to be activated later.
+        "type": "spike_boom",
+        "strategy_mode": "spike",
+        "forced_side": "MULTUP",
+        "max_hold_ticks": 10,
+        "max_hold_seconds": 270,        # 90 % × 300 ticks ≈ 270 s
+        "ema_distance_pct": 0.02,
+        "require_fvg_mitigation": True,
+        "allow_mean_reversion": False,
+        "allow_breakout": False,
+        "min_score": 8.50,              # impossible threshold = effective block
+        "min_hurst": 0.0,
+        "atr_min": 0.0,
+        "cooldown_sec": 240,
+        "sl_multiplier": 3.0,
+        "tp_multiplier": 6.0,
+        "trailing_mode": "none",
+        "hurst_min_spike": 0.99,        # impossible = extra block
+        "geo_entry_max": 0.40,
+        "stake_max_usdt": 4.0,
+        "disabled": True,               # ← DISABLED
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 300,
     },
 }
 
@@ -485,7 +644,10 @@ def spike_contract_type(symbol: str, multside: str) -> str:
 # Symbols subject to the ATR-percentile gate. BOOM300/CRASH300 are excluded
 # because their accumulation windows are short and the ATR filter would
 # starve them of valid setups.
-_ATR_FILTER_SYMBOLS: set[str] = {"BOOM500", "BOOM1000", "CRASH500", "CRASH1000"}
+_ATR_FILTER_SYMBOLS: set[str] = {
+    "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
+    "CRASH500", "CRASH600", "CRASH900", "CRASH1000",
+}
 
 
 def passes_atr_volatility_filter(

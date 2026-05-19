@@ -102,6 +102,57 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "agotamiento_threshold": 0.45,
         "max_duration_seg":     900,
     },
+    # ── NEW: BOOM/CRASH 900 ─────────────────────────────────────────────────
+    "BOOM900": {
+        "sl_inicial_pct":       1.00,   # 100% stake = full oxygen (Phase 2 scoring)
+        "ratchet_step_pct":     0.30,   # same as BOOM1000
+        "ratchet_ratio":        0.65,
+        "momentum_window":      30,
+        "agotamiento_threshold": 0.45,
+        "max_duration_seg":     810,    # 90% × 900 ticks
+    },
+    "CRASH900": {
+        "sl_inicial_pct":       1.00,
+        "ratchet_step_pct":     0.30,
+        "ratchet_ratio":        0.65,
+        "momentum_window":      30,
+        "agotamiento_threshold": 0.45,
+        "max_duration_seg":     810,
+    },
+    # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
+    "BOOM600": {
+        "sl_inicial_pct":       1.00,
+        "ratchet_step_pct":     0.25,   # slightly less aggressive (shorter duration)
+        "ratchet_ratio":        0.62,
+        "momentum_window":      25,
+        "agotamiento_threshold": 0.43,
+        "max_duration_seg":     540,    # 90% × 600 ticks
+    },
+    "CRASH600": {
+        "sl_inicial_pct":       1.00,
+        "ratchet_step_pct":     0.25,
+        "ratchet_ratio":        0.62,
+        "momentum_window":      25,
+        "agotamiento_threshold": 0.43,
+        "max_duration_seg":     540,
+    },
+    # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
+    "BOOM300": {
+        "sl_inicial_pct":       1.00,
+        "ratchet_step_pct":     0.20,   # faster ratchet for short-duration spikes
+        "ratchet_ratio":        0.58,
+        "momentum_window":      20,
+        "agotamiento_threshold": 0.40,
+        "max_duration_seg":     270,    # 90% × 300 ticks
+    },
+    "CRASH300": {
+        "sl_inicial_pct":       1.00,
+        "ratchet_step_pct":     0.20,
+        "ratchet_ratio":        0.58,
+        "momentum_window":      20,
+        "agotamiento_threshold": 0.40,
+        "max_duration_seg":     270,
+    },
 }
 
 _DEFAULT_PARAMS: dict[str, Any] = {
