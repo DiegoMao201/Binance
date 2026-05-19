@@ -190,6 +190,10 @@ class DerivOpenContract:
     # after DPM reaches Phase 2 — gives a server-level backstop that fires even
     # when the client-side tick stream misses the exact peak tick.
     broker_be_locked: bool = field(default=False)
+    # DPM-initiated close reason — set BEFORE sell() is called so the exit
+    # classification uses the real reason instead of broker "sold" → "manual_close".
+    # Ephemeral: not persisted to disk (safe to lose on restart).
+    pending_close_reason: str | None = field(default=None)
 
 
 class DerivTradeExecutor:
@@ -533,6 +537,7 @@ class DerivTradeExecutor:
                         "[DPM-REAPER] %s closing symbol=%s reason=%s pnl=%.4f",
                         cid, oc_check.symbol, _close_reason, _current_profit,
                     )
+                    oc_check.pending_close_reason = _close_reason
                     try:
                         await self._client.sell(cid)
                     except DerivClientError as exc:
@@ -560,14 +565,9 @@ class DerivTradeExecutor:
             # ── Exit reason classification (DPM-aware) ─────────────────────────
             # Priority order:
             #   1. spike_timeout (max_hold_seconds breached)
-            #   2. ratchet_sl_alcanzado (DPM ratchet floor hit — supersedes trail_stop)
-            #   3. broker-classified exit (won/lost/sold/broker_sl/broker_tp)
-            #
-            # NOTE: The legacy "trail_stop" label is intentionally REMOVED for all
-            # DPM-registered symbols.  When DPM manages the SL floor via sl_ratchet,
-            # the correct label is "ratchet_sl_alcanzado" (Phase 2) or "sl_inicial"
-            # (Phase 1).  The trail_stop condition below is kept ONLY as a dead-code
-            # fallback for symbols not registered with DPM — currently none.
+            #   2. pending_close_reason (DPM-set before sell() call — real reason)
+            #   3. ratchet_sl_alcanzado (legacy ratchet floor detection)
+            #   4. broker-classified exit (won/lost/sold → manual_close only if none above)
             _was_ratchet_reaper = (
                 oc_check is not None
                 and oc_check.trail_sl_locked > _TRAIL_INIT_SL   # DPM Phase 2 activated
@@ -577,10 +577,14 @@ class DerivTradeExecutor:
                 held = time.time() - oc_check.opened_at_ts
                 if held >= oc_check.max_hold_seconds:
                     exit_reason = "spike_timeout"
+                elif oc_check.pending_close_reason:
+                    exit_reason = oc_check.pending_close_reason
                 elif _was_ratchet_reaper:
                     exit_reason = f"ratchet_sl_alcanzado(floor={oc_check.trail_sl_locked:.4f})"
                 else:
                     exit_reason = self._classify_exit(poc)
+            elif oc_check is not None and oc_check.pending_close_reason:
+                exit_reason = oc_check.pending_close_reason
             elif _was_ratchet_reaper:
                 # Non-spike DPM symbol (R_50/R_75/R_100) — ratchet hit
                 exit_reason = f"ratchet_sl_alcanzado(floor={oc_check.trail_sl_locked:.4f})"
@@ -943,6 +947,7 @@ class DerivTradeExecutor:
                     cid, oc_check.symbol, close_reason, current_profit,
                     _snap.get("dpm_fase", "?"), _snap.get("sl_ratchet", 0),
                 )
+                oc_check.pending_close_reason = close_reason
                 try:
                     await self._client.sell(cid)
                 except DerivClientError as exc:
@@ -977,6 +982,8 @@ class DerivTradeExecutor:
         )
         if oc.max_hold_seconds > 0 and held >= oc.max_hold_seconds:
             exit_reason = "spike_timeout"
+        elif oc.pending_close_reason:
+            exit_reason = oc.pending_close_reason
         elif _was_ratchet:
             exit_reason = f"ratchet_sl_alcanzado(floor={oc.trail_sl_locked:.4f})"
         else:
