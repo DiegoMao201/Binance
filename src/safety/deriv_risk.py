@@ -632,7 +632,21 @@ class DerivRiskManager:
                 "regime": "trending",
                 "hurst": h,
             }
-        # 0.45 ≤ h ≤ 0.55 — absolute noise zone
+        # 0.45 ≤ h ≤ 0.55 — split into inner neutral zone and outer hard veto.
+        # Inner [DERIV_NEUTRAL_ZONE_LO, DERIV_NEUTRAL_ZONE_HI] = [0.47, 0.53]:
+        #   no hard block — delegate -0.5 penalty to evaluate() (C5 logic).
+        # Outer [0.45, 0.47) and (0.53, 0.55]: hard veto (no statistical edge).
+        _neutral_lo_pre = float(os.getenv("DERIV_NEUTRAL_ZONE_LO", "0.47"))
+        _neutral_hi_pre = float(os.getenv("DERIV_NEUTRAL_ZONE_HI", "0.53"))
+        if _neutral_lo_pre <= h <= _neutral_hi_pre:
+            # Inner neutral zone: passes to evaluate() which applies -0.5 penalty
+            # and tags regime=neutral.  Macro/SMC/geo can still provide edge.
+            return {
+                "block": False,
+                "regime": "neutral",
+                "hurst": h,
+            }
+        # Outer random-walk band — still hard veto
         return {
             "block": True,
             "regime": "random_walk",
@@ -944,22 +958,29 @@ class DerivRiskManager:
         _calm_bc_floor_used: float | None = None
         if _is_boom_crash_sym:
             if regime == "calm":
-                # T3 FIX 2026-05-19: cap at max(env_floor, 6.00) so no spike symbol
-                # requires more than 6.00 in calm — regardless of profile min_score.
-                # Prior behavior: max(5.80, env_var) = 5.80 was being overridden by
-                # stale 6.20 (DERIV_MIN_SCORE env var) in some code paths.
-                # Direct assignment (not min()) replaces any upstream value.
-                _bc_calm_floor = max(
-                    float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.80")),
-                    6.00,   # hard cap for calm: never require more than 6.00
-                )
+                # REGIME_SCORE_GATE_calm: determine floor based on current score.
+                # Grade C territory (score < GRADE_B threshold = 6.20) → floor = 5.75
+                # to allow DPM aggressive_trailing execution (micro-stake, tight ratchet).
+                # Grade B/A territory (score >= 6.20) → floor = max(env, 6.00) as before.
+                # 'not high_spread' guard: only drop to 5.75 when spread is < 75% of veto.
+                _grade_b_th_local = float(os.getenv("DERIV_GRADE_B_SCORE", "6.20"))
+                _high_spread = spread_pct > self._settings.max_spread_pct * 0.75
+                _allow_grade_c_floor = score < _grade_b_th_local and not _high_spread
+                if _allow_grade_c_floor:
+                    _bc_calm_floor = 5.75
+                else:
+                    _bc_calm_floor = max(
+                        float(os.getenv("DERIV_CALM_STRUCTURAL_MIN_SCORE", "5.80")),
+                        6.00,   # hard cap for normal B/A: never require more than 6.00
+                    )
                 effective_min_score = _bc_calm_floor   # direct override — no min()
                 _calm_bc_floor_used = _bc_calm_floor
                 _LOGGER.info(
                     "[PIPELINE] [REGIME_SCORE_GATE_calm] %s regime=calm "
-                    "effective_min=%.2f (floor=max(env,6.00)) "
+                    "effective_min=%.2f (grade_c=%s high_spread=%s) "
                     "atr_bypassed=%s",
-                    symbol, effective_min_score, _atr_calm_bypassed,
+                    symbol, effective_min_score, _allow_grade_c_floor,
+                    _high_spread, _atr_calm_bypassed,
                 )
             else:
                 effective_min_score = min(effective_min_score, 5.8)  # spike edge ≠ trend edge

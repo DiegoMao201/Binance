@@ -608,8 +608,22 @@ class DerivTradeExecutor:
         sym = record.get("symbol", "unknown")
         pnl = float(record.get("realized_pnl_usdt") or 0)
         if sym not in self._sym_stats:
-            self._sym_stats[sym] = {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "best": None, "worst": None}
+            self._sym_stats[sym] = {
+                "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "best": None, "worst": None,
+                "grades": {
+                    "A": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                    "B": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                    "C": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                },
+            }
         s = self._sym_stats[sym]
+        # Ensure legacy entries (pre-phase9) have the grades subdict
+        if "grades" not in s:
+            s["grades"] = {
+                "A": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                "B": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+                "C": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+            }
         s["trades"] += 1
         s["pnl"] = round(s["pnl"] + pnl, 6)
         if pnl > 0:
@@ -620,6 +634,16 @@ class DerivTradeExecutor:
             s["best"] = pnl
         if s["worst"] is None or pnl < s["worst"]:
             s["worst"] = pnl
+        # Per-grade tracking (execution_grade injected into record by _append_closed)
+        _grade = str(record.get("execution_grade") or "").upper()
+        if _grade in ("A", "B", "C"):
+            _gs = s["grades"][_grade]
+            _gs["trades"] += 1
+            _gs["pnl"] = round(_gs["pnl"] + pnl, 6)
+            if pnl > 0:
+                _gs["wins"] += 1
+            elif pnl < 0:
+                _gs["losses"] += 1
         self._session_pnl = round(self._session_pnl + pnl, 6)
         self._session_trades += 1
 
@@ -628,7 +652,12 @@ class DerivTradeExecutor:
         result: dict[str, Any] = {}
         for sym, s in self._sym_stats.items():
             wr = round(s["wins"] / s["trades"], 4) if s["trades"] > 0 else 0.0
-            result[sym] = {**s, "win_rate": wr}
+            # Compute per-grade win-rates inline so the frontend can display EV by grade
+            grades_out: dict[str, Any] = {}
+            for grade, gdata in s.get("grades", {}).items():
+                g_wr = round(gdata["wins"] / gdata["trades"], 4) if gdata["trades"] > 0 else 0.0
+                grades_out[grade] = {**gdata, "win_rate": g_wr}
+            result[sym] = {**s, "win_rate": wr, "grades": grades_out}
         result["_session"] = {
             "pnl": self._session_pnl,
             "trades": self._session_trades,
@@ -678,6 +707,16 @@ class DerivTradeExecutor:
         tmp.replace(path)
 
     def _append_closed(self, record: dict[str, Any]) -> None:
+        # ── Telemetry injection: surface grade-level audit fields as top-level keys ──
+        # Allows post-trade analysis to filter deriv_closed_contracts.json by grade
+        # without parsing score_breakdown JSONB.  setdefault() prevents overwrite
+        # when caller already populated the field (ghost/reconciliation paths).
+        _sb = record.get("score_breakdown") or {}
+        record.setdefault("execution_grade", _sb.get("execution_grade", "?"))
+        _fvg_tier = str(_sb.get("fvg_tier", ""))
+        record.setdefault("fvg_bypassed", _fvg_tier in ("no_fvg_escape_valve", "no_fvg_penalized"))
+        record.setdefault("hurst_penalty_applied", "neutral_zone_penalty" in _sb)
+        # ── Append to JSON file ────────────────────────────────────────────
         path = self._settings.closed_contracts_file
         path.parent.mkdir(parents=True, exist_ok=True)
         try:

@@ -539,13 +539,17 @@ class DerivDaemon:
             autocorr_lag1=pre_autocorr,
         )
 
-        # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 9.0) ──────
-        # When the prefilter passed because H < 0.45 (mean_reverting), only
-        # high-conviction MEAN_REV setups are allowed (SMC score ≥ 9.0).
-        if _rw_regime == "mean_reverting" and snap.score < 9.0:
+        # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 6.0) ──────
+        # evaluate() sets effective_min=6.0 for mean_rev setups (+3.0 bonus
+        # applied inside evaluate).  This outer gate mirrors that floor so that
+        # snap.allowed=False setups are surfaced in _log_entry_block.
+        # Changed 9.0 → 6.0 (Phase9): requiring 9.0 was blocking every valid
+        # Grade A mean-rev setup (e.g. R_100 H=0.41 scoring 8.72 after the
+        # +3.0 mean-rev bonus — the bonus already compensates for absent trend).
+        if _rw_regime == "mean_reverting" and snap.score < 6.0:
             self._log_entry_block(
                 tick.symbol, "MEAN_REV_SCORE_GATE",
-                score=snap.score, effective_min_score=9.0,
+                score=snap.score, effective_min_score=6.0,
                 side=snap.side, regime=snap.regime,
                 hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
@@ -553,7 +557,7 @@ class DerivDaemon:
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
                 score=snap.score,
-                reason=f"MEAN_REV_SCORE_GATE: H={_eval_hurst:.3f} mean_reverting requires≥9.00 got={snap.score:.2f}",
+                reason=f"MEAN_REV_SCORE_GATE: H={_eval_hurst:.3f} mean_reverting requires≥6.00 got={snap.score:.2f}",
                 extra={"hurst": _eval_hurst, "regime": "mean_reverting"},
             )
             return
@@ -825,28 +829,13 @@ class DerivDaemon:
                 },
             )
             return
-        # spike strategy: must be spike_entry OR SMC active; structural veto in
-        # risk engine already enforces this — extra defensive log here is fine.
-        if snap.allowed and _strat == "spike":
-            _has_smc = bool(snap.score_breakdown.get("fvg_active"))
-            if not (_spike_entry or _has_smc):
-                self._log_entry_block(
-                    tick.symbol, "STRATEGY_GATE_spike_requires_spike_or_fvg",
-                    score=snap.score, effective_min_score=_profile_min_score,
-                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                    score_breakdown=snap.score_breakdown,
-                )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score,
-                    reason="STRATEGY_GATE: spike requires spike_entry or fvg",
-                    extra={
-                        "score_breakdown": snap.score_breakdown,
-                        "regime": snap.regime,
-                        "profile": _asset_profile,
-                    },
-                )
-                return
+        # spike strategy gate REMOVED (2026-05-19, Phase9):
+        # DerivRiskManager now handles no-FVG entries with Momentum Escape Valve
+        # (C1 — Phase8).  A hard boolean block here was shadow-blocking valid
+        # Tier-0 entries that the risk engine scored above effective_min after
+        # applying the weighted 0.50/1.00 penalty.  The risk engine is the sole
+        # authority on structural viability for BOOM/CRASH.  Removed to eliminate
+        # the shadow-blocking desynchronisation described in Phase9 directive.
 
         # ── Geo channel position gate — dynamic score (replaces hard veto) ────────
         # Instead of blocking entry entirely, compute a graduated score penalty
