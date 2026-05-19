@@ -449,8 +449,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # confirmed same as BOOM1000
+        "geo_entry_min": -999,           # no lower bound — BOOM spikes can come from any depth
         "geo_entry_max": 0.50,          # T5: widened 0.40→0.50 to allow more setups
         "stake_max_usdt": 2.00,         # T5: conservative 8.0→2.00 until edge confirmed
+        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75 → sl_usd > broker floor
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
@@ -475,8 +477,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # confirmed same as CRASH1000
+        "geo_entry_min": -999,           # no upper floor needed — use geo_max only
         "geo_entry_max": -1.00,         # CRASH needs price ≤ −1.00σ below mid
         "stake_max_usdt": 2.00,         # T5: conservative until edge confirmed
+        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
@@ -502,8 +506,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # T5: aligned with BOOM1000 (was 0.47)
+        "geo_entry_min": -999,           # no lower bound — BOOM spikes valid from any depth
         "geo_entry_max": 0.50,          # T5: widened 0.40→0.50
         "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
+        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75 → sl_usd > broker floor
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
@@ -528,8 +534,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
+        "geo_entry_min": -999,           # no upper floor — use geo_max only
         "geo_entry_max": -1.00,         # T5: relaxed -1.10→-1.00
         "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
+        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",

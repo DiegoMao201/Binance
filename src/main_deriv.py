@@ -312,6 +312,24 @@ class DerivDaemon:
                 _dpm_p["agotamiento_threshold"] * 100,
                 _dpm_p["max_duration_seg"],
             )
+        # ── PROFILE_SCORE_MIN — log score_min for all active BOOM/CRASH profiles ─
+        # Confirms which minimum is active in the deployed container vs what's coded.
+        _SPIKE_SYMS = [
+            "BOOM300", "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
+            "CRASH300", "CRASH500", "CRASH600", "CRASH900", "CRASH1000",
+        ]
+        for _psym in _SPIKE_SYMS:
+            _prf = get_asset_profile(_psym)
+            _LOGGER.info(
+                "[PROFILE_SCORE_MIN] %s score_min=%.2f hurst_min_spike=%.3f "
+                "stake_max=$%.2f geo_max=%s sl_override=%s",
+                _psym,
+                float(_prf.get("min_score", 0.0)),
+                float(_prf.get("hurst_min_spike") or 0.0),
+                float(_prf.get("stake_max_usdt") or 0.0),
+                str(_prf.get("geo_entry_max", "n/a")),
+                str(_prf.get("stop_loss_pct_override", "default")),
+            )
         reaper_task      = asyncio.create_task(self._reaper_loop(), name="deriv-reaper")
         recon_task       = asyncio.create_task(self._executor.reconciliation_loop(), name="deriv-recon")
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
@@ -552,7 +570,14 @@ class DerivDaemon:
         _atr_calm_bypassed = bool(snap.score_breakdown.get("atr_calm_bypassed", False))
         _atr_current = float(snap.score_breakdown.get("atr_abs") or 0.0)
         _atr_hist = self._risk._atr_history.get(tick.symbol, [])
-        _atr_threshold = 28 if (snap.score > 5.50 and not _atr_calm_bypassed) else 40
+        # ATR percentile threshold — configurable via env vars:
+        #   DERIV_ATR_PERCENTILE_THRESHOLD      base threshold (default 40)
+        #   DERIV_ATR_PERCENTILE_CALM           calm-regime threshold (default 28 = 70% of base)
+        # Lowering in calm is justified because BOOM/CRASH naturally compress
+        # ATR between spikes; the default p40 was blocking valid setups.
+        _atr_base_th = int(os.getenv("DERIV_ATR_PERCENTILE_THRESHOLD", "40"))
+        _atr_calm_th = int(os.getenv("DERIV_ATR_PERCENTILE_CALM", str(max(10, round(_atr_base_th * 0.70)))))
+        _atr_threshold = _atr_calm_th if (snap.score > 5.50 and not _atr_calm_bypassed) else _atr_base_th
         _atr_ok, _atr_reason = passes_atr_volatility_filter(
             tick.symbol, _atr_current, _atr_hist,
             percentile_threshold=_atr_threshold,
@@ -1295,7 +1320,7 @@ class DerivDaemon:
                             rec.get("symbol"), rec.get("contract_id"),
                             _duration, _pnl, rec.get("side"),
                         )
-                    self._risk.register_close(_pnl)
+                    self._risk.register_close(_pnl, symbol=str(rec.get("symbol") or ""))
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("[deriv-daemon] reaper iteration failed")
             try:

@@ -471,6 +471,9 @@ class DerivRiskManager:
         self._settings = settings
         self._loss_streak = 0
         self._last_trade_ts = 0.0
+        # Per-symbol trade timestamp for independent cooldown_bonus tracking.
+        # Prevents R_50/R_75 active trading from stealing BOOM/CRASH cooldown bonus.
+        self._last_trade_ts_per_symbol: dict[str, float] = {}
         self._daily_realized_pnl = 0.0
         self._daily_anchor_date = datetime.now(timezone.utc).date()
         # Per-symbol rolling tick window for synthetic ATR / trend.
@@ -756,6 +759,18 @@ class DerivRiskManager:
             snap.reasons.append(f"insufficient ticks ({len(ticks)}/{_warmup_needed})")
             return snap
 
+        # ── Hurst anomaly detector ─────────────────────────────────────────
+        # H < 0.30 is structurally impossible for real price series and is a
+        # sign of a stale/thin tick buffer (e.g. CRASH600 showed H=0.200 after
+        # cold-start — same pattern as BOOM1000 on 2026-05-18 which normalized
+        # after the window filled).  Log it to track recovery.
+        if hurst is not None and hurst < 0.30:
+            _LOGGER.warning(
+                "[HURST_ANOMALY] %s H=%.3f ticks=%d — anomalously low Hurst; "
+                "buffer may be thin or feed stale.  Score will be suppressed.",
+                symbol, hurst, len(ticks),
+            )
+
         # ── Spike-cycle gate (BOOM/CRASH only) ────────────────────────────
         # After a spike fires the market needs to re-accumulate before the
         # next spike is statistically due.  Minimum safe wait =
@@ -817,7 +832,7 @@ class DerivRiskManager:
         atr_score = self._atr_adaptive_score(atr, ticks[-1], symbol)
         stability_score = self._stability_score(ticks)
         streak_penalty = self._streak_penalty()
-        cooldown_bonus = self._cooldown_bonus()
+        cooldown_bonus = self._cooldown_bonus(symbol)
         headroom_bonus = self._headroom_bonus(dd_cap)
 
         # ── ATR bypass for spike markets in calm regime ─────────────────────
@@ -1588,7 +1603,7 @@ class DerivRiskManager:
         snap.reasons.append(f"GO — trend={side} score={score:.2f} regime={regime}")
         return snap
 
-    def register_close(self, realized_pnl_usdt: float) -> None:
+    def register_close(self, realized_pnl_usdt: float, symbol: str = "") -> None:
         """Update streak + daily DD after a contract closes.
 
         Streak logic (institutional refactor 2026-05-18):
@@ -1603,6 +1618,10 @@ class DerivRiskManager:
         self._roll_daily_anchor_if_needed()
         self._daily_realized_pnl += realized_pnl_usdt
         self._last_trade_ts = time.time()
+        # Also update per-symbol tracker so BOOM/CRASH cooldown_bonus is
+        # independent of R_50/R_75 trade frequency.
+        if symbol:
+            self._last_trade_ts_per_symbol[symbol.upper()] = self._last_trade_ts
 
         # ── Significance threshold (anti-noise) ───────────────────────────
         # sl_typical: representative dollar-loss for a BOOM/CRASH contract.
@@ -1932,12 +1951,35 @@ class DerivRiskManager:
         raw = -min(2.0, 0.7 * self._loss_streak)
         return max(-0.20, raw)  # CALIBRATION SAMPLING: clamp — never freeze below -0.20
 
-    def _cooldown_bonus(self) -> float:
-        if self._last_trade_ts == 0:
-            return 0.5
-        if time.time() - self._last_trade_ts > 300:  # >5 min calm
-            return 1.0
-        return 0.0
+    def _cooldown_bonus(self, symbol: str = "") -> float:
+        """Per-symbol cooldown bonus.
+
+        Uses the per-symbol trade timestamp when available so that
+        high-frequency R_50/R_75 trades don't starve BOOM/CRASH of their
+        cooldown bonus (which counts as +0.5→+1.0 in the total score).
+        Falls back to the global _last_trade_ts for backward compatibility.
+        """
+        _su = symbol.upper() if symbol else ""
+        _ts = self._last_trade_ts_per_symbol.get(_su, 0.0) if _su else self._last_trade_ts
+        # If no per-symbol record yet, treat as fresh start → 0.5
+        if _ts == 0.0:
+            _cd = 0.5
+        elif time.time() - _ts > 300:  # >5 min since last trade on this symbol
+            _cd = 1.0
+        else:
+            _cd = 0.0
+        if _su:
+            _elapsed = round(time.time() - _ts, 1) if _ts > 0 else 9999.0
+            _LOGGER.debug(
+                "[CD_STATUS] %s cd_bonus=%.1f last_trade_ts=%s elapsed=%.0fs "
+                "(global_ts=%.0f per_sym_ts=%.0f)",
+                _su, _cd,
+                "never" if _ts == 0.0 else datetime.fromtimestamp(_ts).strftime("%H:%M:%S"),
+                _elapsed,
+                self._last_trade_ts,
+                self._last_trade_ts_per_symbol.get(_su, 0.0),
+            )
+        return _cd
 
     def _headroom_bonus(self, dd_cap: float) -> float:
         if dd_cap <= 0:
