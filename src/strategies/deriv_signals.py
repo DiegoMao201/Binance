@@ -323,7 +323,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 600,        # Phase 19: MTBS≈500 ticks → 10 min (was 7.5)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -346,7 +346,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 1380,       # Phase 19: MTBS≈1000 ticks → 23 min (was 7.5)
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -393,7 +393,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 600,        # Phase 19: MTBS≈500 ticks → 10 min (was 7.5)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -417,7 +417,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 1380,       # Phase 19: MTBS≈1000 ticks → 23 min (was 7.5)
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -443,7 +443,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 810) — conservative limit
+        "max_hold_seconds": 1200,       # Phase 19: MTBS≈900 ticks → 20 min (was 450 s)
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -471,7 +471,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 810)
+        "max_hold_seconds": 1200,       # Phase 19: MTBS≈900 ticks → 20 min (was 450 s)
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -500,7 +500,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 540)
+        "max_hold_seconds": 780,        # Phase 19: MTBS≈600 ticks → 13 min (was 450 s)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -528,7 +528,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 450,        # T5 2026-05-19: 450 s (was 540)
+        "max_hold_seconds": 780,        # Phase 19: MTBS≈600 ticks → 13 min (was 450 s)
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
