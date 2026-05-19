@@ -453,6 +453,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_max_usdt": 8.0,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
+        "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -476,6 +477,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_max_usdt": 8.0,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
+        "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
     },
     # ── NEW: BOOM/CRASH 600 — active, more conservative ─────────────────────────
     "BOOM600": {
@@ -500,6 +502,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_max_usdt": 6.0,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
+        "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: BOOM600 needs confirmed FVG mitigation
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -523,6 +526,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_max_usdt": 6.0,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
+        "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: CRASH600 needs confirmed FVG mitigation
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.

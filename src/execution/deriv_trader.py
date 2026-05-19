@@ -537,20 +537,33 @@ class DerivTradeExecutor:
                 or poc.get("sell_price")
                 or 0
             )
-            # Label spike-timeout exits distinctly for analytics
-            _was_trail_stop = (
+            # ── Exit reason classification (DPM-aware) ─────────────────────────
+            # Priority order:
+            #   1. spike_timeout (max_hold_seconds breached)
+            #   2. ratchet_sl_alcanzado (DPM ratchet floor hit — supersedes trail_stop)
+            #   3. broker-classified exit (won/lost/sold/broker_sl/broker_tp)
+            #
+            # NOTE: The legacy "trail_stop" label is intentionally REMOVED for all
+            # DPM-registered symbols.  When DPM manages the SL floor via sl_ratchet,
+            # the correct label is "ratchet_sl_alcanzado" (Phase 2) or "sl_inicial"
+            # (Phase 1).  The trail_stop condition below is kept ONLY as a dead-code
+            # fallback for symbols not registered with DPM — currently none.
+            _was_ratchet_reaper = (
                 oc_check is not None
-                and oc_check.max_hold_seconds == 0
-                and realized < oc_check.trail_sl_locked + 0.01
+                and oc_check.trail_sl_locked > _TRAIL_INIT_SL   # DPM Phase 2 activated
+                and realized <= oc_check.trail_sl_locked + 0.01  # hit the floor
             )
             if oc_check is not None and oc_check.max_hold_seconds > 0:
                 held = time.time() - oc_check.opened_at_ts
                 if held >= oc_check.max_hold_seconds:
                     exit_reason = "spike_timeout"
+                elif _was_ratchet_reaper:
+                    exit_reason = f"ratchet_sl_alcanzado(floor={oc_check.trail_sl_locked:.4f})"
                 else:
                     exit_reason = self._classify_exit(poc)
-            elif _was_trail_stop:
-                exit_reason = f"trail_stop(floor={oc_check.trail_sl_locked:.2f})"
+            elif _was_ratchet_reaper:
+                # Non-spike DPM symbol (R_50/R_75/R_100) — ratchet hit
+                exit_reason = f"ratchet_sl_alcanzado(floor={oc_check.trail_sl_locked:.4f})"
             else:
                 exit_reason = self._classify_exit(poc)
 

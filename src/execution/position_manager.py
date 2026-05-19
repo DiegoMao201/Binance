@@ -46,112 +46,123 @@ _LOGGER = logging.getLogger(__name__)
 # All pct values are fractions of stake_usdt (not price %).
 # max_duration_seg: hard timeout in seconds (safety net for stagnant trades).
 SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
+    # ── Volatility indices (R_*) ──────────────────────────────────────────────
+    # Tuned 2026-05-18: wider SL initial (more oxygen), slower ratchet activation,
+    # lower ratchet_ratio (lets gains run toward $2-3), more patience on momentum.
+    # Example R_50 stake=$1.50:
+    #   Fase 1: SL = -0.67 × $1.50 = -$1.00  (before: -$0.52)
+    #   Ratchet activates at: 0.20 × $1.50 = $0.30 gain
+    #   If peak=$2.40: floor = 0.50 × $2.40 = $1.20 → closes with +$1.20
+    #   If peak=$3.00: floor = 0.50 × $3.00 = $1.50 → closes with +$1.50
     "R_50": {
-        "sl_inicial_pct":       0.35,
-        "ratchet_step_pct":     0.15,
-        "ratchet_ratio":        0.55,
-        "momentum_window":      15,
-        "agotamiento_threshold": 0.35,
-        "max_duration_seg":     480,
+        "sl_inicial_pct":        0.67,   # 67% stake → $1.00 room on $1.50 stake
+        "ratchet_step_pct":      0.20,   # activates at 20% gain (was 15%)
+        "ratchet_ratio":         0.50,   # locks 50% of peak — lets gains run further
+        "momentum_window":       25,     # more patience before momentum exit (was 15)
+        "agotamiento_threshold": 0.30,   # closes at 30% of peak momentum (was 35%)
+        "max_duration_seg":      720,    # 12 min max (was 8 min)
     },
     "R_75": {
-        "sl_inicial_pct":       0.30,
-        "ratchet_step_pct":     0.20,
-        "ratchet_ratio":        0.60,
-        "momentum_window":      20,
-        "agotamiento_threshold": 0.40,
-        "max_duration_seg":     600,
+        # R_75 moves faster — same SL room, slightly tighter activation
+        "sl_inicial_pct":        0.67,
+        "ratchet_step_pct":      0.25,   # activates at 25% gain (was 20%)
+        "ratchet_ratio":         0.52,   # 52% of peak — bit more than R_50
+        "momentum_window":       20,     # R_75 is faster, shorter window
+        "agotamiento_threshold": 0.28,   # very patient on momentum (was 40%)
+        "max_duration_seg":      900,    # 15 min — R_75 can develop big moves
     },
     "R_100": {
-        "sl_inicial_pct":       0.40,
-        "ratchet_step_pct":     0.20,
-        "ratchet_ratio":        0.50,
-        "momentum_window":      15,
-        "agotamiento_threshold": 0.35,
-        "max_duration_seg":     480,
+        "sl_inicial_pct":        0.70,   # slightly wider than R_50/R_75
+        "ratchet_step_pct":      0.20,
+        "ratchet_ratio":         0.50,
+        "momentum_window":       20,
+        "agotamiento_threshold": 0.30,
+        "max_duration_seg":      720,
     },
+    # ── BOOM/CRASH — SL already 100% stake; tune ratchet patience ─────────────
+    # Spikes can develop over many seconds: be patient, don't ratchet too fast.
     "BOOM1000": {
-        "sl_inicial_pct":       0.25,
-        "ratchet_step_pct":     0.30,
-        "ratchet_ratio":        0.65,
-        "momentum_window":      30,
-        "agotamiento_threshold": 0.45,
-        "max_duration_seg":     900,
+        "sl_inicial_pct":        1.00,   # full stake — unchanged
+        "ratchet_step_pct":      0.35,   # activates after 35% gain (was 30%)
+        "ratchet_ratio":         0.55,   # locks 55% of peak (was 65% — too tight)
+        "momentum_window":       35,     # very patient
+        "agotamiento_threshold": 0.35,   # 35% of momentum peak before exit
+        "max_duration_seg":      900,
     },
     "CRASH1000": {
-        "sl_inicial_pct":       0.25,
-        "ratchet_step_pct":     0.30,
-        "ratchet_ratio":        0.65,
-        "momentum_window":      30,
-        "agotamiento_threshold": 0.45,
-        "max_duration_seg":     900,
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.35,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       35,
+        "agotamiento_threshold": 0.35,
+        "max_duration_seg":      900,
     },
     "CRASH500": {
-        "sl_inicial_pct":       0.30,
-        "ratchet_step_pct":     0.25,
-        "ratchet_ratio":        0.60,
-        "momentum_window":      25,
-        "agotamiento_threshold": 0.40,
-        "max_duration_seg":     720,
+        "sl_inicial_pct":        1.00,   # was 0.30 — corrected to match spike profile
+        "ratchet_step_pct":      0.30,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       30,
+        "agotamiento_threshold": 0.35,
+        "max_duration_seg":      720,
     },
     "BOOM500": {
-        "sl_inicial_pct":       0.25,
-        "ratchet_step_pct":     0.30,
-        "ratchet_ratio":        0.65,
-        "momentum_window":      30,
-        "agotamiento_threshold": 0.45,
-        "max_duration_seg":     900,
+        "sl_inicial_pct":        1.00,   # was 0.25 — corrected to match spike profile
+        "ratchet_step_pct":      0.30,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       30,
+        "agotamiento_threshold": 0.35,
+        "max_duration_seg":      720,
     },
     # ── NEW: BOOM/CRASH 900 ─────────────────────────────────────────────────
     "BOOM900": {
-        "sl_inicial_pct":       1.00,   # 100% stake = full oxygen (Phase 2 scoring)
-        "ratchet_step_pct":     0.30,   # same as BOOM1000
-        "ratchet_ratio":        0.65,
-        "momentum_window":      30,
-        "agotamiento_threshold": 0.45,
-        "max_duration_seg":     810,    # 90% × 900 ticks
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.30,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       30,
+        "agotamiento_threshold": 0.35,
+        "max_duration_seg":      810,    # 90% × 900 ticks
     },
     "CRASH900": {
-        "sl_inicial_pct":       1.00,
-        "ratchet_step_pct":     0.30,
-        "ratchet_ratio":        0.65,
-        "momentum_window":      30,
-        "agotamiento_threshold": 0.45,
-        "max_duration_seg":     810,
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.30,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       30,
+        "agotamiento_threshold": 0.35,
+        "max_duration_seg":      810,
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
-        "sl_inicial_pct":       1.00,
-        "ratchet_step_pct":     0.25,   # slightly less aggressive (shorter duration)
-        "ratchet_ratio":        0.62,
-        "momentum_window":      25,
-        "agotamiento_threshold": 0.43,
-        "max_duration_seg":     540,    # 90% × 600 ticks
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.25,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       25,
+        "agotamiento_threshold": 0.38,
+        "max_duration_seg":      540,    # 90% × 600 ticks
     },
     "CRASH600": {
-        "sl_inicial_pct":       1.00,
-        "ratchet_step_pct":     0.25,
-        "ratchet_ratio":        0.62,
-        "momentum_window":      25,
-        "agotamiento_threshold": 0.43,
-        "max_duration_seg":     540,
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.25,
+        "ratchet_ratio":         0.55,
+        "momentum_window":       25,
+        "agotamiento_threshold": 0.38,
+        "max_duration_seg":      540,
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
-        "sl_inicial_pct":       1.00,
-        "ratchet_step_pct":     0.20,   # faster ratchet for short-duration spikes
-        "ratchet_ratio":        0.58,
-        "momentum_window":      20,
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.20,
+        "ratchet_ratio":         0.58,
+        "momentum_window":       20,
         "agotamiento_threshold": 0.40,
-        "max_duration_seg":     270,    # 90% × 300 ticks
+        "max_duration_seg":      270,    # 90% × 300 ticks
     },
     "CRASH300": {
-        "sl_inicial_pct":       1.00,
-        "ratchet_step_pct":     0.20,
-        "ratchet_ratio":        0.58,
-        "momentum_window":      20,
+        "sl_inicial_pct":        1.00,
+        "ratchet_step_pct":      0.20,
+        "ratchet_ratio":         0.58,
+        "momentum_window":       20,
         "agotamiento_threshold": 0.40,
-        "max_duration_seg":     270,
+        "max_duration_seg":      270,
     },
 }
 

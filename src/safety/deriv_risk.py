@@ -1339,22 +1339,70 @@ class DerivRiskManager:
                     symbol, side, _override_reason, _ai_disp,
                 )
 
-        # ── BOOM/CRASH structural gate ────────────────────────────────
-        # BOOM and CRASH indices have a structural edge ONLY when entered at:
-        #   (a) an unmitigated FVG (Smart Money Concept liquidity zone), OR
-        #   (b) an EMA-200 spike-hunter setup (price dipping into support/resistance)
-        # Random entries on these symbols statistically lose to spike_timeout
-        # because the slow-drift phase between spikes wears down the position.
-        # If neither structural setup is active, veto the trade.
+        # ── BOOM/CRASH FVG 4-tier gate (replaces hard structural veto) ──────
+        # Graduated entry permission based on FVG quality.
+        # Tier 0: No FVG at all → only allow if score is exceptional (profile_min + 2.50)
+        # Tier 1: FVG detected but NOT yet mitigated → allow at normal effective_min
+        # Tier 2: FVG mitigated, no EMA200 → smc_bonus already applied (+1.00 equivalent)
+        # Tier 3: FVG mitigated + EMA200 spike-hunter → full smc_bonus (+3.00)
+        #
+        # Key change vs prior hard veto: a BOOM1000 with score=8.39 and FVG_DETECTED
+        # (Tier 1) now passes instead of being vetoed. Only truly structureless entries
+        # (Tier 0, no FVG at all) are hard-blocked unless score is exceptional.
         if _is_spike_market(symbol):
-            _has_smc = bool(snap.score_breakdown.get("fvg_active"))
-            _has_spike_hunter = bool(snap.score_breakdown.get("spike_entry"))
-            if not (_has_smc or _has_spike_hunter):
-                snap.reasons.append(
-                    "boom_crash_structural_veto: no FVG mitigation and no EMA200 spike-hunter setup"
+            _has_fvg_active    = bool(snap.score_breakdown.get("fvg_active"))
+            _has_fvg_mitigated = bool(snap.score_breakdown.get("gap_mitigated"))
+            _has_spike_hunter  = bool(snap.score_breakdown.get("spike_entry"))
+            _profile_min       = float(_get_asset_profile(symbol).get("min_score", snap.effective_min_score))
+
+            if not _has_fvg_active and not _has_spike_hunter:
+                # ── Tier 0: No FVG detected, no EMA200 spike-hunter ──────────
+                # Only allow if the rest of the setup is exceptional (score ≥ profile_min + 2.50)
+                _tier0_threshold = _profile_min + 2.50
+                if snap.score >= _tier0_threshold:
+                    snap.score_breakdown["fvg_tier"] = "no_fvg_high_score"
+                    snap.reasons.append(
+                        f"fvg_tier=no_fvg_high_score: score={snap.score:.2f} ≥ {_tier0_threshold:.2f} "
+                        f"— exceptional setup, no FVG required"
+                    )
+                    _LOGGER.info(
+                        "[PIPELINE] FVG_TIER0_OVERRIDE %s score=%.2f threshold=%.2f "
+                        "— no FVG but exceptional score allows entry",
+                        symbol, snap.score, _tier0_threshold,
+                    )
+                else:
+                    snap.score_breakdown["fvg_tier"] = "no_fvg_blocked"
+                    snap.reasons.append(
+                        f"boom_crash_structural_veto: no FVG and score {snap.score:.2f} "
+                        f"< {_tier0_threshold:.2f} (profile_min={_profile_min:.2f}+2.50)"
+                    )
+                    snap.allowed = False
+                    return snap
+            elif _has_fvg_active and not _has_fvg_mitigated and not _has_spike_hunter:
+                # ── Tier 1: FVG detected but not yet mitigated ───────────────
+                # Check if the profile requires mitigated FVG (e.g. BOOM600/CRASH600).
+                _fvg_tier_min = _get_asset_profile(symbol).get("fvg_tier_minimo", "fvg_detected")
+                if _fvg_tier_min == "fvg_mitigated":
+                    snap.score_breakdown["fvg_tier"] = "fvg_detected_insufficient"
+                    snap.reasons.append(
+                        f"boom_crash_structural_veto: {symbol} requires fvg_tier=fvg_mitigated, "
+                        f"only fvg_detected active — awaiting mitigation"
+                    )
+                    snap.allowed = False
+                    return snap
+                # Tier 1 OK — allow at normal effective_min (no extra SMC bonus).
+                snap.score_breakdown["fvg_tier"] = "fvg_detected"
+                _LOGGER.debug(
+                    "[PIPELINE] FVG_TIER1 %s score=%.2f — FVG detected, not mitigated "
+                    "— allowing at effective_min=%.2f",
+                    symbol, snap.score, snap.effective_min_score,
                 )
-                snap.allowed = False
-                return snap
+            elif _has_fvg_mitigated and not _has_spike_hunter:
+                # ── Tier 2: FVG mitigated (smc_bonus already applied ~+1.0 to +3.0) ──
+                snap.score_breakdown["fvg_tier"] = "fvg_mitigated"
+            else:
+                # ── Tier 3: EMA200 spike-hunter active (full confluence) ──────
+                snap.score_breakdown["fvg_tier"] = "fvg_full_confluence"
 
         # ── Spike-cycle gate resolution ────────────────────────────────────
         # Now that the full scoring pipeline has run (EMA200 hunter + SMC FVG)
