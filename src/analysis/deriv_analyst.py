@@ -491,6 +491,21 @@ def _build_ai_prompt(
     n_ticks: int,
     ai_threshold: float = 7.5,
 ) -> str:
+    # Spike markets (BOOM/CRASH) don't require trending Hurst — spikes are stochastic.
+    # Use the hurst_min_spike value (0.43) for those; trend requirement only for R_*.
+    _is_spike = any(x in symbol.upper() for x in ("BOOM", "CRASH"))
+    if _is_spike:
+        _approve_cond = (
+            f"Approve (true) if: score>={ai_threshold} AND Hurst>={0.43:.2f} "
+            f"AND regime not 'volatile'. "
+            f"NOTE: This is a SPIKE market — Hurst>0.52 (trending) is NOT required. "
+            f"Spikes occur at any Hurst value. Focus on score, geo position, and regime."
+        )
+    else:
+        _approve_cond = (
+            f"Approve (true) if: score>={ai_threshold} AND Hurst>0.52 "
+            f"AND autocorr aligned with side AND regime not 'volatile'."
+        )
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -513,7 +528,7 @@ Edge comes from autocorrelation and short-term momentum patterns.
 Respond ONLY with a JSON object:
 {{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
 
-Approve (true) if: score>={ai_threshold} AND Hurst>0.52 AND autocorr aligned with side AND regime not "volatile".
+{_approve_cond}
 Do NOT approve if confidence <0.65 or if mathematical signals conflict."""
 
 

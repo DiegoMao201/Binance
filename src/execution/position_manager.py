@@ -539,6 +539,20 @@ class DynamicPositionManager:
             "elapsed_seg":    round(time.time() - state.entry_ts, 1),
         }
 
+    def sync_external_peak(self, contract_id: int, profit: float) -> bool:
+        """Force-sync an external profit reading to state.peak_profit.
+
+        Called from the WS and reaper paths with the authoritative floating_pnl
+        so that ratchet calculations can never lag behind what the dashboard shows.
+        Monotonic: only raises peak, never lowers it.
+        Returns True if the peak was updated (useful for FASE promotion check).
+        """
+        state = self._states.get(contract_id)
+        if state is None or profit <= state.peak_profit:
+            return False
+        state.peak_profit = profit
+        return True
+
     def get_tick_log(self, contract_id: int) -> list[dict[str, Any]]:
         """Return the per-tick audit log for a contract (read-only copy)."""
         state = self._states.get(contract_id)

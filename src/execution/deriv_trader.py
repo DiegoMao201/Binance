@@ -503,6 +503,12 @@ class DerivTradeExecutor:
                 _current_price  = float(poc.get("current_spot") or 0)
                 # BUG-B fix: update floating PnL on poll path (safety-net for WS gaps)
                 oc_check.floating_pnl = _current_profit
+                # Sync peak directly so ratchet can never lag behind dashboard PnL.
+                if _current_profit > 0:
+                    self._dpm.sync_external_peak(cid, _current_profit)
+                # Sync peak directly so ratchet can never lag behind dashboard PnL.
+                if _current_profit > 0:
+                    self._dpm.sync_external_peak(cid, _current_profit)
                 _close_reason   = self._dpm.on_tick(cid, _current_profit, _current_price)
                 # Sync DPM state back to oc for dashboard/persistence
                 _snap = self._dpm.get_state_snapshot(cid)
@@ -911,9 +917,19 @@ class DerivTradeExecutor:
             if oc_check is None:
                 return
             current_profit = float(poc.get("profit") or 0)
+            # Sync external peak BEFORE on_tick so ratchet sees the true max PnL.
+            # Guards against WS profit-field lag (poc.get("profit") can be stale
+            # for multiplier contracts; floating_pnl is the authoritative source).
+            if current_profit > 0:
+                self._dpm.sync_external_peak(cid, current_profit)
             current_price  = float(poc.get("current_spot") or 0)
             # BUG-B fix: persist live PnL on every tick so dashboard shows real value
             oc_check.floating_pnl = current_profit
+            # Sync external peak BEFORE on_tick so ratchet sees the true max PnL.
+            # Guards against WS profit-field lag (poc.get("profit") can be stale
+            # for multiplier contracts; floating_pnl is the authoritative source).
+            if current_profit > 0:
+                self._dpm.sync_external_peak(cid, current_profit)
             close_reason   = self._dpm.on_tick(cid, current_profit, current_price)
             # Sync DPM state to oc for dashboard visibility
             _snap = self._dpm.get_state_snapshot(cid)
