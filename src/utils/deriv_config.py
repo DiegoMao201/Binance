@@ -44,9 +44,9 @@ BOOM/CRASH spike-gate knobs (Phase 12):
                                        penalty (DERIV_BOOM_CRASH_NO_FVG_PENALTY).
   DERIV_BOOM_CRASH_NO_FVG_PENALTY     float (default 0.20) — penalty when escape path
                                        is env-forced. Lower than generic escape (0.50).
-  DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN float (default 5.25, min 5.25) — score floor for
+  DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN float (default 4.50, min 4.00) — score floor for
                                        BOOM/CRASH in calm Grade-C territory.
-                                       Math: 5.48 base − 0.20 penalty = 5.28 ≥ 5.25 → PASS.
+                                       Phase 17: lowered from 5.25/5.25 — live scores 4.71-4.90.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ class DerivSettings:
     # are visible in one place and logged at boot.
     boom_crash_escape_valve: bool = False          # DERIV_BOOM_CRASH_ESCAPE_VALVE
     boom_crash_no_fvg_penalty: float = 0.20        # DERIV_BOOM_CRASH_NO_FVG_PENALTY
-    boom_crash_calm_effective_min: float = 5.25    # DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
+    boom_crash_calm_effective_min: float = 4.50    # DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
     # AI gate thresholds — separate so BOOM/CRASH can use a lower bar than R_*
     # BOOM/CRASH have their own protection (spike_timeout + broker SL) so a
     # lower AI gate is mathematically justified.  R_* retain the stricter 7.5.
@@ -232,7 +232,7 @@ def load_deriv_settings() -> DerivSettings:
         boom_crash_escape_valve=_get_bool("DERIV_BOOM_CRASH_ESCAPE_VALVE", False),
         boom_crash_no_fvg_penalty=_get_float("DERIV_BOOM_CRASH_NO_FVG_PENALTY", 0.20),
         boom_crash_calm_effective_min=max(
-            _get_float("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", 5.25), 5.25
+            _get_float("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", 4.50), 4.00
         ),
         boom_crash_ai_min_score=max(
             _get_float("DERIV_BOOM_CRASH_AI_MIN_SCORE", 6.00), 5.25

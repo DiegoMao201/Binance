@@ -967,14 +967,13 @@ class DerivRiskManager:
                 _high_spread = spread_pct > self._settings.max_spread_pct * 0.75
                 _allow_grade_c_floor = score < _grade_b_th_local and not _high_spread
                 if _allow_grade_c_floor:
-                    # Phase 12: configurable via DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
-                    # (default 5.25 — was hardcoded 5.75).  Combined with the
-                    # no-fvg escape penalty of 0.20 (DERIV_BOOM_CRASH_NO_FVG_PENALTY)
-                    # the math becomes: 5.48 − 0.20 = 5.28 ≥ 5.25 → PASS.
-                    # Constraint: floor must never go below 5.25 per design.
+                    # Phase 17: default lowered 5.25→4.50, floor lowered 5.25→4.00.
+                    # Logs show best BOOM scores are 4.71-4.90; 5.25 floor was
+                    # physically unreachable via env var and blocked ALL BOOM entries.
+                    # CRASH entries remain self-gated by geo (need price above channel).
                     _bc_calm_floor = max(
-                        float(os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "5.25")),
-                        5.25,   # absolute safety floor — never below 5.25
+                        float(os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "4.50")),
+                        4.00,   # absolute safety floor — never below 4.00
                     )
                 else:
                     _bc_calm_floor = max(
