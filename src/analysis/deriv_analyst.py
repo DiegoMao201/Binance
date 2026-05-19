@@ -489,6 +489,7 @@ def _build_ai_prompt(
     slope: float,
     r2: float,
     n_ticks: int,
+    ai_threshold: float = 7.5,
 ) -> str:
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
@@ -512,7 +513,7 @@ Edge comes from autocorrelation and short-term momentum patterns.
 Respond ONLY with a JSON object:
 {{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
 
-Approve (true) if: score>=7.5 AND Hurst>0.52 AND autocorr aligned with side AND regime not "volatile".
+Approve (true) if: score>={ai_threshold} AND Hurst>0.52 AND autocorr aligned with side AND regime not "volatile".
 Do NOT approve if confidence <0.65 or if mathematical signals conflict."""
 
 
@@ -779,6 +780,18 @@ class DerivAnalyst:
             return analysis
 
         # Cache miss — call the LLM and store result
+        # Phase 15: use per-symbol-type AI threshold so BOOM/CRASH aren't
+        # blocked by the R_* threshold of 7.5 (DERIV_BOOM_CRASH_AI_MIN_SCORE).
+        _is_boom_crash = any(k in symbol.upper() for k in ("BOOM", "CRASH"))
+        _ai_threshold = (
+            self._settings.boom_crash_ai_min_score
+            if _is_boom_crash
+            else self._settings.r_indices_ai_min_score
+        )
+        _LOGGER.info(
+            "[AI_GATE] %s using threshold=%.2f (is_boom_crash=%s)",
+            symbol, _ai_threshold, _is_boom_crash,
+        )
         prompt = _build_ai_prompt(
             symbol=symbol,
             side=side,
@@ -791,6 +804,7 @@ class DerivAnalyst:
             slope=slope,
             r2=r2,
             n_ticks=len(prices_list),
+            ai_threshold=_ai_threshold,
         )
 
         try:

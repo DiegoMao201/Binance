@@ -715,6 +715,21 @@ class DerivDaemon:
             _atr_threshold = int(_env_sym_th)
         elif _sym_upper in _per_sym_atr_defaults:
             _atr_threshold = _per_sym_atr_defaults[_sym_upper]
+            # Phase 15 — score-based relaxation for BOOM/CRASH: when the score is
+            # clearly above effective_min (≥ +0.50 margin), lower the ATR percentile
+            # by 12pp (e.g. p30 → p18) to avoid blocking valid setups that are just
+            # 5–10% below the ATR median on an otherwise strong signal.
+            _is_bc_sym = any(k in _sym_upper for k in ("BOOM", "CRASH"))
+            _eff_min = float(snap.effective_min_score or self._settings.min_score)
+            if _is_bc_sym and snap.score >= (_eff_min + 0.50):
+                _relaxed_th = max(15, _atr_threshold - 12)
+                _LOGGER.info(
+                    "[ATR_FILTER] %s score_boost_relax: p%d → p%d "
+                    "(score=%.2f eff_min=%.2f margin=%.2f)",
+                    tick.symbol, _atr_threshold, _relaxed_th,
+                    snap.score, _eff_min, snap.score - _eff_min,
+                )
+                _atr_threshold = _relaxed_th
         else:
             _atr_threshold = _atr_calm_th if (snap.score > 5.50 and not _atr_calm_bypassed) else _atr_base_th
         _atr_ok, _atr_reason = passes_atr_volatility_filter(

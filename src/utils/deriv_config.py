@@ -145,6 +145,11 @@ class DerivSettings:
     boom_crash_escape_valve: bool = False          # DERIV_BOOM_CRASH_ESCAPE_VALVE
     boom_crash_no_fvg_penalty: float = 0.20        # DERIV_BOOM_CRASH_NO_FVG_PENALTY
     boom_crash_calm_effective_min: float = 5.25    # DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN
+    # AI gate thresholds — separate so BOOM/CRASH can use a lower bar than R_*
+    # BOOM/CRASH have their own protection (spike_timeout + broker SL) so a
+    # lower AI gate is mathematically justified.  R_* retain the stricter 7.5.
+    boom_crash_ai_min_score: float = 6.00          # DERIV_BOOM_CRASH_AI_MIN_SCORE
+    r_indices_ai_min_score: float = 7.50           # DERIV_R_INDICES_AI_MIN_SCORE
 
     # ── Derived paths ───────────────────────────────────────────────────────
     @property
@@ -219,5 +224,11 @@ def load_deriv_settings() -> DerivSettings:
         boom_crash_no_fvg_penalty=_get_float("DERIV_BOOM_CRASH_NO_FVG_PENALTY", 0.20),
         boom_crash_calm_effective_min=max(
             _get_float("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", 5.25), 5.25
+        ),
+        boom_crash_ai_min_score=max(
+            _get_float("DERIV_BOOM_CRASH_AI_MIN_SCORE", 6.00), 5.25
+        ),
+        r_indices_ai_min_score=max(
+            _get_float("DERIV_R_INDICES_AI_MIN_SCORE", 7.50), 5.25
         ),
     )

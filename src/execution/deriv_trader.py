@@ -243,6 +243,9 @@ class DerivTradeExecutor:
                         max_hold_seconds=float(_r.get("max_hold_seconds", 0.0)),
                         peak_profit=float(_r.get("peak_profit", 0.0)),
                         trail_sl_locked=float(_r.get("trail_sl_locked", _TRAIL_INIT_SL)),
+                        # Phase 15 fix: restore broker BE and floating PnL state
+                        broker_be_locked=bool(_r.get("broker_be_locked", False)),
+                        floating_pnl=float(_r.get("floating_pnl", 0.0)),
                     )
                 if self._open:
                     _LOGGER.info(
@@ -724,6 +727,9 @@ class DerivTradeExecutor:
                 # BUG-B fix: include live floating PnL so deriv_open_contracts.json
                 # always has the last-known PnL when the file is written
                 "floating_pnl": round(oc.floating_pnl, 4),
+                # Phase 15 fix: persist broker_be_locked so restarts can re-apply
+                # the SL=$0.01 without waiting for Phase 2 to fire again.
+                "broker_be_locked": oc.broker_be_locked,
             }
             for oc in self._open.values()
         ]
@@ -1423,6 +1429,62 @@ class DerivTradeExecutor:
         # ghost.  broker_contracts is only populated when boot=True.
         if boot:
             await self._boot_recover_broker_orphans(broker_contracts)
+            # Phase 15 fix: re-apply broker BE lock for any contract whose
+            # broker_be_locked=True was persisted before the restart.
+            # Doing this AFTER orphan recovery ensures ALL open contracts
+            # (both disk-restored and broker-recovered) are considered.
+            await self._reapply_broker_be_locks()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 15: Broker BE lock re-application on restart
+    # After a deploy/restart, any contract that had broker_be_locked=True had
+    # its SL set to $0.01 in the previous process.  The broker retains the SL
+    # but we re-issue the call to be safe (idempotent: setting SL=$0.01 twice
+    # has no side-effects).  Also proactively locks any contract whose
+    # peak_profit already exceeded the BE threshold but whose lock was NOT
+    # persisted (e.g. lost due to a sudden kill before the next write).
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _reapply_broker_be_locks(self) -> None:
+        async with self._lock:
+            snapshot = list(self._open.items())
+
+        if not snapshot:
+            return
+
+        for cid, oc in snapshot:
+            # Case 1: lock was persisted — re-apply unconditionally
+            if oc.broker_be_locked and not self._settings.dry_run:
+                try:
+                    await self._client.contract_update(cid, stop_loss=0.01)
+                    _LOGGER.info(
+                        "[RECOVERY] Re-applied broker BE lock contract_id=%s symbol=%s "
+                        "peak=%.4f — SL=$0.01 re-issued after restart",
+                        cid, oc.symbol, oc.peak_profit,
+                    )
+                except Exception as _be_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "[RECOVERY] Failed to re-apply BE lock for %s: %s",
+                        cid, _be_exc,
+                    )
+            # Case 2: lock was NOT persisted but peak_profit suggests it should
+            # have been.  Use the most conservative DPM ratchet_step (25% of
+            # stake) as the BE trigger so we never miss a locked contract.
+            elif not oc.broker_be_locked and oc.peak_profit >= oc.stake_usdt * 0.25:
+                if not self._settings.dry_run:
+                    try:
+                        await self._client.contract_update(cid, stop_loss=0.01)
+                        oc.broker_be_locked = True
+                        _LOGGER.info(
+                            "[RECOVERY] Applied missed broker BE lock contract_id=%s symbol=%s "
+                            "peak=%.4f stake=%.2f (peak/stake=%.1f%%) — proactive lock on restart",
+                            cid, oc.symbol, oc.peak_profit, oc.stake_usdt,
+                            100 * oc.peak_profit / oc.stake_usdt,
+                        )
+                    except Exception as _be_exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "[RECOVERY] Failed proactive BE lock for %s: %s",
+                            cid, _be_exc,
+                        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Boot amnesia recovery — broker → local direction

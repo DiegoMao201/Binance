@@ -430,6 +430,122 @@ function ErrorShell({ err, onRetry }) {
 /* ════════════════════════════════════════════════════════════════════════
    TAB 0 — OPERACIONES
    ════════════════════════════════════════════════════════════════════════ */
+function DpmTierPanel({ c }) {
+  // DPM Tier Visualizer — shows current ratchet state, SL floor, BE lock status,
+  // and a progress bar toward Phase 2. All values come from deriv_open_contracts.json
+  // which is refreshed every 10s by _write_status().
+  const stake   = Number(c.stake_usdt || 0);
+  const peak    = Number(c.peak_profit ?? 0);
+  const trailSl = Number(c.trail_sl ?? c.trail_sl_locked ?? -1);
+  const beLocked = Boolean(c.broker_be_locked);
+  const durSec  = Number(c.duration_sec ?? 0);
+
+  // Infer DPM phase from trail_sl:
+  // trail_sl < 0 → Phase 1 (initial sentinel, no ratchet yet)
+  // trail_sl >= 0 → Phase 2 (ratchet active)
+  const isPhase2 = trailSl >= 0;
+
+  // Progress toward Phase 2: using ratchet_step_pct=0.65 as reference (worst case)
+  // Shows % of stake that peak has reached. Phase 2 fires typically at 25–65% of stake.
+  const phasePct = stake > 0 ? Math.min(1, peak / (stake * 0.65)) : 0;
+
+  // SL floor to display: show trail_sl if Phase 2, else show "–"
+  const slDisplay = isPhase2 ? `$${n(trailSl, 3)}` : "–";
+  const peakDisplay = peak > 0 ? `+$${n(peak, 3)}` : "–";
+
+  const phase1Color = "#60a5fa"; // blue
+  const phase2Color = T.green;
+  const phaseColor  = isPhase2 ? phase2Color : phase1Color;
+
+  return (
+    <div style={{
+      borderTop: `1px solid ${T.border}`,
+      paddingTop: 8,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+    }}>
+      {/* Phase label + BE lock badge */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
+            color: phaseColor, background: `${phaseColor}18`,
+            border: `1px solid ${phaseColor}44`, borderRadius: 4, padding: "2px 6px",
+          }}>
+            {isPhase2 ? "▲ DPM FASE 2" : "● DPM FASE 1"}
+          </span>
+          {beLocked && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
+              color: T.green, background: `${T.green}14`,
+              border: `1px solid ${T.green}44`, borderRadius: 4, padding: "2px 6px",
+            }}>
+              🔒 BE BROKER
+            </span>
+          )}
+        </div>
+        <span style={{ fontSize: 9, color: T.mute }}>
+          {durSec > 0 ? dur(durSec) : "–"}
+        </span>
+      </div>
+
+      {/* Progress bar toward Phase 2 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 9, color: T.mute }}>Progreso ratchet</span>
+          <span style={{ fontSize: 9, color: phaseColor, fontFamily: FONT_MONO, fontWeight: 700 }}>
+            {Math.round(phasePct * 100)}%
+          </span>
+        </div>
+        <div style={{
+          height: 4, borderRadius: 2,
+          background: `${T.border}`,
+          overflow: "hidden",
+        }}>
+          <div style={{
+            height: "100%",
+            width: `${Math.round(phasePct * 100)}%`,
+            borderRadius: 2,
+            background: isPhase2
+              ? `linear-gradient(90deg, ${T.green}, #34d399)`
+              : `linear-gradient(90deg, ${phase1Color}, #93c5fd)`,
+            transition: "width 1s ease",
+          }} />
+        </div>
+      </div>
+
+      {/* SL floor + Peak row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>SL Floor</div>
+          <div style={{
+            fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO,
+            color: isPhase2 ? T.green : T.mute,
+          }}>
+            {slDisplay}
+          </div>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Peak P&L</div>
+          <div style={{
+            fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO,
+            color: peak > 0 ? T.green : T.mute,
+          }}>
+            {peakDisplay}
+          </div>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Stake</div>
+          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: T.amber }}>
+            ${n(stake, 2)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OpenContractCard({ c }) {
   const pnl = Number(c.floating_pnl ?? c.pnl ?? 0);
   const pnlColor = pnl > 0.001 ? T.green : pnl < -0.001 ? T.red : T.textD;
@@ -437,6 +553,7 @@ function OpenContractCard({ c }) {
   const openedTs = c.opened_at_ts;
   const openedSec = openedTs ? Number(openedTs > 1e12 ? openedTs / 1000 : openedTs) : null;
   const duration = openedSec ? Math.round(Date.now() / 1000 - openedSec) : null;
+  const hasDpmData = c.trail_sl != null || c.peak_profit != null || c.broker_be_locked != null;
   return (
     <div style={{
       background: T.panel2, borderRadius: 10,
@@ -482,6 +599,125 @@ function OpenContractCard({ c }) {
           {c.ai_model && <span style={{ fontSize: 9, color: T.mute }}>{c.ai_model}</span>}
         </div>
       )}
+      {hasDpmData && <DpmTierPanel c={c} />       🔒 BE BROKER
+            </span>
+          )}
+        </div>
+        <span style={{ fontSize: 9, color: T.mute }}>
+          {durSec > 0 ? dur(durSec) : "–"}
+        </span>
+      </div>
+
+      {/* Progress bar toward Phase 2 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 9, color: T.mute }}>Progreso ratchet</span>
+          <span style={{ fontSize: 9, color: phaseColor, fontFamily: FONT_MONO, fontWeight: 700 }}>
+            {Math.round(phasePct * 100)}%
+          </span>
+        </div>
+        <div style={{
+          height: 4, borderRadius: 2,
+          background: `${T.border}`,
+          overflow: "hidden",
+        }}>
+          <div style={{
+            height: "100%",
+            width: `${Math.round(phasePct * 100)}%`,
+            borderRadius: 2,
+            background: isPhase2
+              ? `linear-gradient(90deg, ${T.green}, #34d399)`
+              : `linear-gradient(90deg, ${phase1Color}, #93c5fd)`,
+            transition: "width 1s ease",
+          }} />
+        </div>
+      </div>
+
+      {/* SL floor + Peak row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>SL Floor</div>
+          <div style={{
+            fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO,
+            color: isPhase2 ? T.green : T.mute,
+          }}>
+            {slDisplay}
+          </div>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Peak P&L</div>
+          <div style={{
+            fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO,
+            color: peak > 0 ? T.green : T.mute,
+          }}>
+            {peakDisplay}
+          </div>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Stake</div>
+          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: T.amber }}>
+            ${n(stake, 2)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OpenContractCard({ c }) {
+  const pnl = Number(c.floating_pnl ?? c.pnl ?? 0);
+  const pnlColor = pnl > 0.001 ? T.green : pnl < -0.001 ? T.red : T.textD;
+  const sym = c.symbol || c.underlying || "–";
+  const openedTs = c.opened_at_ts;
+  const openedSec = openedTs ? Number(openedTs > 1e12 ? openedTs / 1000 : openedTs) : null;
+  const duration = openedSec ? Math.round(Date.now() / 1000 - openedSec) : null;
+  const hasDpmData = c.trail_sl != null || c.peak_profit != null || c.broker_be_locked != null;
+  return (
+    <div style={{
+      background: T.panel2, borderRadius: 10,
+      border: `1px solid ${pnl > 0.001 ? T.green + "55" : pnl < -0.001 ? T.red + "55" : T.border}`,
+      padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8,
+      boxShadow: pnl > 0.001 ? `0 0 20px ${T.green}14` : pnl < -0.001 ? `0 0 20px ${T.red}14` : "none",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{sym}</span>
+          <SideBadge side={c.side} />
+        </div>
+        <span style={{ fontSize: 18, fontWeight: 700, color: pnlColor, fontFamily: FONT_MONO }}>
+          {pnl > 0 ? "+" : ""}{n(pnl, 2)}
+        </span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+        <MicroStat lbl="STAKE"   val={`$${n(c.stake_usdt, 2)}`} />
+        <MicroStat lbl="MULT"    val={`×${c.multiplier || "–"}`} color={T.violet} />
+        <MicroStat lbl="ENTRY"   val={n(c.entry_price, 4)} color={T.cyan} />
+        <MicroStat lbl="DUR."    val={dur(duration)} color={T.amber} />
+      </div>
+      {(c.score != null || c.regime != null) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+          <MicroStat
+            lbl={<>SCORE <TooltipHint tip="Puntuación compuesta de la señal (0–10). Mayor score = entrada de mayor calidad." /></>}
+            val={c.score != null ? n(c.score, 2) : "–"}
+            color={c.score >= 7 ? T.green : c.score >= 5 ? T.amber : T.red}
+          />
+          <MicroStat
+            lbl={<>HURST <TooltipHint tip="Exponente Hurst: >0.55 = tendencia persistente, <0.45 = mean-reversion." /></>}
+            val={c.hurst != null ? n(c.hurst, 3) : "–"}
+            color={T.violet}
+          />
+          <MicroStat lbl="REGIME" val={c.regime || "–"} color={REGIME_COLORS[c.regime] || T.cyan} />
+        </div>
+      )}
+      {c.ai_approved != null && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Pill color={c.ai_approved ? T.green : T.red} size="sm">
+            {c.ai_approved ? "IA ✓" : "IA ✗"}{c.ai_confidence != null ? ` ${pct(c.ai_confidence, 0)}` : ""}
+          </Pill>
+          {c.ai_model && <span style={{ fontSize: 9, color: T.mute }}>{c.ai_model}</span>}
+        </div>
+      )}
+      {hasDpmData && <DpmTierPanel c={c} />}
       <div style={{ fontSize: 9, color: T.mute, display: "flex", justifyContent: "space-between" }}>
         <span>#{String(c.contract_id || "–").slice(-8)}</span>
         <span>{fmtT(openedTs)}</span>
