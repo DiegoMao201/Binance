@@ -242,6 +242,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # DERIV_R50_SL_USD=0.30 overrides at runtime (default in deriv_config.py).
         "stop_loss_pct_override": 0.20,    # 20% of $1.50 stake → SL $0.30
         "stake_max_usdt": 1.50,
+        # Phase 29: DISABLED — 200-trade audit: R_50 destroyed -$4.19 in 50 trades.
+        # GBM process by Deriv design — no technical signal works. Focus on BOOM/CRASH.
+        "disabled": True,
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
     # breakouts when H<0.58, prefer reversals/sweeps with ATR expansion.
@@ -270,6 +273,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # DERIV_R75_SL_USD=0.25 overrides at runtime.
         "stop_loss_pct_override": 0.1667,  # 16.7% of $1.50 stake → SL $0.25
         "stake_max_usdt": 1.50,
+        # Phase 29: DISABLED — 200-trade audit: R_75 part of R_* group destroying -$4.19.
+        # GBM process by Deriv design — no technical signal works. Focus on BOOM/CRASH.
+        "disabled": True,
     },
     # R_100: Phase 28 — ONLY MULTDOWN. Data: MULTDOWN WR=73% PNL=+$0.66 vs
     # MULTUP WR=27% PNL=-$6.56. MULTDOWN+H>0.56: WR=100% PNL=+$1.60.
@@ -295,6 +301,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "side_allowed": ["MULTDOWN"],  # ELIMINATE MULTUP — phase 28 hard rule
         "stop_loss_pct_override": 0.2333,  # 23.3% of $1.50 stake → SL $0.35
         "stake_max_usdt": 1.50,
+        # Phase 29: DISABLED — 200-trade audit: R_100 part of R_* group destroying -$4.19.
+        # GBM process by Deriv design — no technical signal works. Focus on BOOM/CRASH.
+        "disabled": True,
     },
     # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
     # Spike markets: NO mean-reversion, NO breakout — only SMC + spike-hunter.
@@ -438,7 +447,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 300,        # Phase 26: was 1380s — tighter timeout, no edge after spike window
+        "max_hold_seconds": 150,        # Phase 29: was 300s — 200-trade audit: spikes at dur=36/49/92s; 150s covers 95% + cuts timeout cost
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -601,10 +610,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
         "spike_capture_tp_usdt": 0.15,       # was 0.50 — CRASH600 spike +$0.21 wasn't captured
         "spike_profit_delta_usdt": 0.10,     # was 0.28
-        # Phase 28: only enter when macro HD is aligned (+2.0 bonus).
-        # Data: CRASH600 hd=+2 spike rate=40% vs hd∤0 rate=10% → positive expectancy only with hd=+2.
-        # min_hd_bonus gate enforced in deriv_risk.py evaluate().
-        "min_hd_bonus": 2.0,
+        # Phase 29: RESTORED — min_hd_bonus removed. Phase 28 imposed 2.0 but hd is always
+        # -0.50 in current context → effectively disabled CRASH600 permanently. Pre-Phase28
+        # data: WR=37.5% PNL=+$0.91. Removing the gate restores live operation.
         # Phase 28: timeout reduced 780→180s. Spikes occur at avg 124s-252s;
         # reducing timeout cuts avg timeout loss from -$0.20 to -$0.14.
         "max_hold_seconds": 180,
