@@ -277,10 +277,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     # R_100: trending, long moves, better persistence → trend following.
     "R_100": {
         "type": "volatility",
-        "strategy_mode": "trend",
-        "min_hurst": 0.58,
-        "use_mean_reversion": False,
-        "allow_mean_reversion": False,
+        "strategy_mode": "hybrid",     # Phase 26: was trend — allow both trend + mean-rev (H≈0.50 neutral zone)
+        "min_hurst": 0.45,              # Phase 26: was 0.58 — H=0.50 was triggering HURST_GATE_B_SOFT on every tick
+        "use_mean_reversion": True,     # Phase 26: was False — mean-rev scores 6.05-7.64 were all blocked
+        "allow_mean_reversion": True,   # Phase 26: was False — STRATEGY_GATE_mean_rev_rejected blocked all MR entries
         "allow_breakout": True,
         "band_sigma": 2.10,
         "ema_trend_filter": True,
@@ -406,25 +406,28 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 600,        # Phase 19: MTBS≈500 ticks → 10 min (was 7.5)
+        "max_hold_seconds": 200,        # Phase 26: was 600s — CRASH500 spikes freq ~500 ticks, tighter timeout
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,
+        "min_score": 6.0,              # Phase 26: was 6.5 — align with CRASH600/900
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        # ── Batch analysis 2026-05-18 ──────────────────────────────────────
-        # Wins: geo -1.23 and -1.61 | Losses: geo -0.84 avg.
-        # Confirmed: no structural edge when price is not well below channel mid.
-        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
-        "geo_entry_max": -0.20,         # DEMO: was -1.00
+        "hurst_min_spike": 0.43,        # Phase 26: explicit — align with CRASH600/900
+        "fvg_tier_minimo": "fvg_detected",  # Phase 26: explicit Tier 1 OK (was implicit)
+        # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
+        # ROOT CAUSE: geo_pos was +0.013-0.038 (price near channel mid).
+        # geo_entry_max=-0.20 → overshoot=+0.21 → geo_gate=-1.5 → score 4.15→2.65 < 4.50
+        # With +0.30: price near mid passes with geo_gate=0.0, score stays at 4.15.
+        # REQUIRES COOLIFY: DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.80 (was 4.50)
+        # so that score=4.00-4.15 passes effective_min=3.80.
+        "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        "min_score": 6.5,             # lowered 7.5→6.5
         # Phase 24: spike capture thresholds
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -434,24 +437,27 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 1380,       # Phase 19: MTBS≈1000 ticks → 23 min (was 7.5)
+        "max_hold_seconds": 300,        # Phase 26: was 1380s — tighter timeout, no edge after spike window
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,
+        "min_score": 6.0,              # Phase 26: was 6.5 — align with CRASH600/900
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        # ── Batch analysis 2026-05-18 ──────────────────────────────────────
-        # Wins: geo -1.09 (both) | Losses: geo -0.77 avg.
-        # Confirmed: edge only when price is well below channel midpoint.
-        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
-        "geo_entry_max": -0.20,         # DEMO: was -1.00
-        "min_score": 6.5,             # lowered 7.5→6.5
+        "hurst_min_spike": 0.43,        # Phase 26: explicit — align with CRASH1000 batch data
+        # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
+        # ROOT CAUSE: geo_pos was +0.55 (price above channel mid).
+        # geo_entry_max=-0.20 → overshoot=+0.75 → geo_gate=-2.0 → score 4.21→2.21 < 4.50
+        # With +0.30: overshoot=+0.25 → geo_gate=-1.5 → score 4.21-1.5=2.71 still blocked.
+        # At geo_pos=+0.55 price is structurally wrong for CRASH. Score will be low.
+        # REQUIRES COOLIFY: DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.80
+        # so baseline scores 4.0+ can pass when price near mid.
+        "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
