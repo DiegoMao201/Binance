@@ -247,6 +247,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
     # breakouts when H<0.58, prefer reversals/sweeps with ATR expansion.
+    # Phase 25: raised min_score 6.5→8.0. Data: 8 sl_inicial WR=0% in one night.
+    # Root cause: scores 6.5-7.49 bypass AI gate (gate requires 7.5+) → bad entries
+    # with no AI confirmation. Only 8.0+ setups (full AI confirmation + buffer) enter.
     "R_75":  {
         "type": "volatility",
         "strategy_mode": "hybrid",
@@ -256,7 +259,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "allow_breakout": False,        # breakout only when H>=0.58 (handled in pipeline)
         "band_sigma": 2.00,
         "ema_trend_filter": True,
-        "min_score": 6.5,
+        "min_score": 8.0,               # Phase 25: was 6.5 — 8+ sl_inicial WR=0% → raise to AI-gate+buffer
         "atr_min": 0.0,
         "cooldown_sec": 120,
         "sl_multiplier": 1.8,

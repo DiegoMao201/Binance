@@ -75,8 +75,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     #   At peak=$2.37: win=$1.54 → R:R=2.85:1 → breakeven WR=26% ← target
     "R_50": {
         "sl_inicial_pct":        0.67,   # dead in practice (broker SL fires at 0.36)
-        "micro_tp_pct":          0.10,   # Phase 21: lock $0.05 floor when pnl >= 10% stake
-        "micro_tp_floor_pct":    0.03,   # close if reverts below 3% stake after micro_tp armed
+        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10% — too sensitive)
+        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3% — below commission)
         "breakeven_step_pct":    0.30,   # NEW: lock at $0 floor when pnl >= 30% stake
         "ratchet_step_pct":      0.65,   # was 0.20 — Phase 2 at 65% of stake ($0.975)
         "ratchet_ratio":         0.65,   # was 0.50 — locks 65% of peak
@@ -86,8 +86,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "R_75": {
         "sl_inicial_pct":        0.67,
-        "micro_tp_pct":          0.10,   # Phase 21: micro-TP floor
-        "micro_tp_floor_pct":    0.03,
+        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10%)
+        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3%)
         "breakeven_step_pct":    0.30,   # NEW
         "ratchet_step_pct":      0.65,   # was 0.25
         "ratchet_ratio":         0.65,   # was 0.52
@@ -97,8 +97,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "R_100": {
         "sl_inicial_pct":        0.70,
-        "micro_tp_pct":          0.10,   # Phase 21: micro-TP floor
-        "micro_tp_floor_pct":    0.03,
+        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10%)
+        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3%)
         "breakeven_step_pct":    0.28,   # NEW — R_100 slightly tighter (faster market)
         "ratchet_step_pct":      0.60,   # was 0.20
         "ratchet_ratio":         0.65,   # was 0.50
@@ -147,7 +147,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      450,    # Phase 21: data shows WR=10% after 450s (was 810)
+        "max_duration_seg":      250,    # Phase 25: spikes avg 229s — timeout at 250 (was 450)
     },
     "CRASH900": {
         "sl_inicial_pct":        1.00,
@@ -155,7 +155,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      450,    # Phase 21: reduce from 810
+        "max_duration_seg":      200,    # Phase 25: CRASH900 spikes avg 53s — very fast (was 450)
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -164,7 +164,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      450,    # Phase 21: data WR=10% after 450s (was 540)
+        "max_duration_seg":      250,    # Phase 25: spikes avg 206s — timeout at 250 (was 450)
     },
     "CRASH600": {
         "sl_inicial_pct":        1.00,
@@ -172,7 +172,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      450,    # Phase 21: reduce from 540
+        "max_duration_seg":      250,    # Phase 25: spikes avg 227s — timeout at 250 (was 450)
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
