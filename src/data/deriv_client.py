@@ -379,7 +379,9 @@ class DerivClient:
         mult = int(multiplier)
 
         # SL/TP as absolute USD P&L amounts (Deriv API requirement for limit_order).
-        sl_usd = round(max(stake * float(stop_loss_pct), 0.50), 2)
+        # Phase 28: floor lowered 0.50→0.20 so R_50/R_75/R_100 can use $0.25-$0.35 SL
+        # (ratio-corrected SL: $0.25-$0.35 vs TP $0.15-$0.40 = ~1:1 R:R).
+        sl_usd = round(max(stake * float(stop_loss_pct), 0.20), 2)
         tp_usd = round(max(stake * float(take_profit_pct), 1.00), 2)
 
         # Direct-buy format: buy="1" (string) + parameters block.
@@ -423,7 +425,7 @@ class DerivClient:
                     buy_req["parameters"]["amount"] = broker_limit
                     # Recalculate SL/TP for the adjusted stake
                     buy_req["parameters"]["limit_order"]["stop_loss"] = round(
-                        max(broker_limit * float(stop_loss_pct), 0.50), 2
+                        max(broker_limit * float(stop_loss_pct), 0.20), 2
                     )
                     buy_req["parameters"]["limit_order"]["take_profit"] = round(
                         max(broker_limit * float(take_profit_pct), 1.00), 2

@@ -1131,6 +1131,17 @@ class DerivRiskManager:
         snap.effective_min_score = round(effective_min_score, 2)
         snap.hurst_score_delta = round(hurst_delta, 2)
 
+        # ── min_hd_bonus gate (per-profile, spike markets) ─────────────────────
+        # Phase 28: CRASH600/BOOM900 require min_hd_bonus=2.0 to enter.
+        # Data: hd=+2 → 40% spike rate +$0.13/trade; hd<2 → 20% spike rate (negative).
+        _min_hd_req = _get_asset_profile(symbol).get("min_hd_bonus", 0.0)
+        if _min_hd_req > 0.0 and _hd_bonus < _min_hd_req:
+            snap.reasons.append(
+                f"min_hd_bonus_veto: hd={_hd_bonus:.1f} < required={_min_hd_req:.1f}"
+            )
+            snap.allowed = False
+            return snap
+
         # Ambiguous trend: CALIBRATION SAMPLING — downgrade to soft penalty instead
         # of hard block. Apply score penalty and 20% size reduction; attempt
         # mean-rev direction resolution. Only hard-block if geo conflict is severe
@@ -1156,6 +1167,17 @@ class DerivRiskManager:
 
         side = "MULTUP" if trend_dir > 0 else "MULTDOWN"
         snap.side = side
+
+        # ── side_allowed gate (per-profile, R_* only) ─────────────────────────
+        # Phase 28: R_100 side_allowed=["MULTDOWN"] — MULTUP WR=27% destroyed -$6.56 PnL
+        # in 100-trade sample. MULTDOWN WR=73% with +$0.66. No MULTUP under any condition.
+        _side_allowed = _get_asset_profile(symbol).get("side_allowed")
+        if _side_allowed and side not in _side_allowed:
+            snap.reasons.append(
+                f"side_allowed_veto: side={side} not in {_side_allowed}"
+            )
+            snap.allowed = False
+            return snap
 
         # ── Hard Random-Walk veto (R_* indices only) ──────────────────────
         # When Hurst sits inside [0.45, 0.55] the price series is statistically

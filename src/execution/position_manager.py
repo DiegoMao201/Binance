@@ -68,43 +68,62 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     #   ratchet_ratio (raised 0.50→0.65): captures 65% of peak when ratchet fires.
     #   max_duration_seg (extended): more time for winners to develop.
     #
+    # Phase 28 (2026-05-20): ratio-corrected SL — $0.30/$0.25/$0.35 replaces $1.00/$1.00/$1.20.
+    # sl_inicial_pct = sl_usd / stake = $X / $1.50.
+    # early_exit_*: if after N seconds peak_profit < $0.05, cut at -exit_loss_usd
+    # instead of riding to full SL. Data: R_100 MULTUP max_pnl=$0.000 → -$1.03.
+    #
     # NEW MATH for R_50 on $1.50 stake:
-    #   Loser  (never reaches +$0.45):         broker SL = -$0.54
+    #   Loser  (never reaches +$0.45):         broker SL = -$0.30
     #   BE exit (reached $0.45, reversed < $0):  DPM BE = ~$0
     #   Winner (reached $0.975+):              DPM ratchet = 65% × peak ≥ $0.63
-    #   At peak=$2.37: win=$1.54 → R:R=2.85:1 → breakeven WR=26% ← target
     "R_50": {
-        "sl_inicial_pct":        0.67,   # dead in practice (broker SL fires at 0.36)
-        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10% — too sensitive)
-        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3% — below commission)
-        "breakeven_step_pct":    0.30,   # NEW: lock at $0 floor when pnl >= 30% stake
-        "ratchet_step_pct":      0.65,   # was 0.20 — Phase 2 at 65% of stake ($0.975)
-        "ratchet_ratio":         0.65,   # was 0.50 — locks 65% of peak
+        "sl_inicial_pct":        0.20,   # Phase 28: $0.30 / $1.50 = 0.20 (was 0.67 = $1.00)
+        "micro_tp_pct":          0.20,
+        "micro_tp_floor_pct":    0.15,
+        "breakeven_step_pct":    0.30,
+        "ratchet_step_pct":      0.65,
+        "ratchet_ratio":         0.65,
         "momentum_window":       25,
         "agotamiento_threshold": 0.30,
-        "max_duration_seg":      1200,   # was 720 — 20 min to let winners develop
+        "max_duration_seg":      1200,
+        # Phase 28 early exit: cut at -$0.15 if no green in 45s
+        "early_exit_seconds":    45,
+        "early_exit_min_pnl":    0.05,    # peak must have reached at least +$0.05
+        "early_exit_loss_usd":   0.15,    # close if pnl <= -$0.15 at checkpoint
     },
     "R_75": {
-        "sl_inicial_pct":        0.67,
-        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10%)
-        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3%)
-        "breakeven_step_pct":    0.30,   # NEW
-        "ratchet_step_pct":      0.65,   # was 0.25
-        "ratchet_ratio":         0.65,   # was 0.52
+        "sl_inicial_pct":        0.1667,  # Phase 28: $0.25 / $1.50 = 0.1667 (was 0.67 = $1.00)
+        "micro_tp_pct":          0.20,
+        "micro_tp_floor_pct":    0.15,
+        "breakeven_step_pct":    0.30,
+        "ratchet_step_pct":      0.65,
+        "ratchet_ratio":         0.65,
         "momentum_window":       20,
         "agotamiento_threshold": 0.28,
-        "max_duration_seg":      1500,   # was 900 — 25 min
+        "max_duration_seg":      1500,
+        # Phase 28 early exit: cut at -$0.12 if no green in 30s
+        "early_exit_seconds":    30,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   0.12,
     },
     "R_100": {
-        "sl_inicial_pct":        0.70,
-        "micro_tp_pct":          0.20,   # Phase 25: arm at 20% stake (was 10%)
-        "micro_tp_floor_pct":    0.15,   # Phase 25: floor at 15% stake (was 3%)
-        "breakeven_step_pct":    0.28,   # NEW — R_100 slightly tighter (faster market)
-        "ratchet_step_pct":      0.60,   # was 0.20
-        "ratchet_ratio":         0.65,   # was 0.50
+        "sl_inicial_pct":        0.2333,  # Phase 28: $0.35 / $1.50 = 0.2333 (was 0.70 = $1.05)
+        "micro_tp_pct":          0.20,
+        "micro_tp_floor_pct":    0.15,
+        "breakeven_step_pct":    0.28,
+        "ratchet_step_pct":      0.60,
+        "ratchet_ratio":         0.65,
         "momentum_window":       20,
         "agotamiento_threshold": 0.30,
-        "max_duration_seg":      1200,   # was 720
+        "max_duration_seg":      1200,
+        # Phase 28 early exit: cut at -$0.20 if no green in 60s
+        # Evidence: MULTUP dur=220s max_pnl=$0.000 → -$1.03 (immédiate adverse move)
+        #           MULTUP dur=46s  max_pnl=$0.000 → -$1.05 (same pattern)
+        # With early exit at 60s would have saved $0.83-$0.89 per trade.
+        "early_exit_seconds":    60,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   0.20,
     },
     # ── BOOM/CRASH — SL already 100% stake; tune ratchet patience ─────────────
     # Spikes can develop over many seconds: be patient, don't ratchet too fast.
@@ -155,7 +174,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      200,    # Phase 25: CRASH900 spikes avg 53s — very fast (was 450)
+        "max_duration_seg":      150,    # Phase 28: was 200 — reduce timeout, 3 spikes at 36/92/201s
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -172,7 +191,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      250,    # Phase 25: spikes avg 227s — timeout at 250 (was 450)
+        "max_duration_seg":      180,    # Phase 28: was 250 — CRASH600 spikes avg 124-252s; 180s covers avg
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
@@ -395,6 +414,25 @@ class DynamicPositionManager:
                 contract_id, state.symbol, elapsed, params["max_duration_seg"], float_pnl,
             )
             return "timeout_max"
+
+        # ── Early exit: no momentum at checkpoint (Phase 28) ─────────────────
+        # If after early_exit_seconds the trade has never been green (peak < $0.05)
+        # and is already in loss beyond early_exit_loss_usd, cut it.
+        # Evidence: R_100 MULTUP dur=46-220s max_pnl=$0.000 → -$1.03 routinely.
+        # Saving $0.83-$0.89 per trade vs riding to full broker SL.
+        _ee_sec = params.get("early_exit_seconds", 0)
+        if _ee_sec > 0 and elapsed >= _ee_sec:
+            _ee_min_pnl  = params.get("early_exit_min_pnl",  0.05)
+            _ee_loss_usd = params.get("early_exit_loss_usd", 0.20)
+            if state.peak_profit < _ee_min_pnl and float_pnl <= -_ee_loss_usd:
+                self._log_tick(state, float_pnl, now, close_reason="early_exit_no_momentum")
+                _LOGGER.info(
+                    "[DPM] early_exit_no_momentum contract_id=%s symbol=%s "
+                    "elapsed=%.0fs peak=%.4f < min_pnl=%.4f pnl=%.4f <= -%.4f",
+                    contract_id, state.symbol, elapsed,
+                    state.peak_profit, _ee_min_pnl, float_pnl, _ee_loss_usd,
+                )
+                return "early_exit_no_momentum"
 
         # ── Phase 1: Initial SL protection ───────────────────────────────────
         if state.fase == 1:

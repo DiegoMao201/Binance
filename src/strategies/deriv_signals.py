@@ -236,13 +236,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_min": -1.0,          # reject if geo < -1.0 (too extended down)
         "geo_entry_max":  0.5,          # reject if geo >  0.5 (too extended up)
         "trail_floor_min_usdt": 0.30,   # T1 activates at ≥$0.30 locked profit
-        # ── SL floor fix 2026-05-18 (mismo bug que R_75) ──────────────────
-        # stop_loss_pct=0.004 (mean_rev) × stake prodíca sl_usd≪$0.50 (floor broker)
-        # → SL se flooreaba a $0.50 que es 33-50% del stake → trade cerraba en SL rápido.
-        # Phase 16: widened to $1.00 so normal R_50 noise ($0.002–$0.005/pt) cannot
-        # stop the position before the directional edge materialises.
-        # DERIV_R50_SL_USD=1.00 in Coolify overrides this at runtime.
-        "stop_loss_pct_override": 0.6667,  # 66.7% of $1.50 stake → SL $1.00
+        # ── Phase 28: ratio-corrected SL ──────────────────────────────────
+        # 100-trade audit: SL=$1.00 vs avg_win=$0.19 = 5.3:1 adverse ratio.
+        # New SL=$0.30 → ratio 1.6:1 → breakeven WR=38% (was 84%).
+        # DERIV_R50_SL_USD=0.30 overrides at runtime (default in deriv_config.py).
+        "stop_loss_pct_override": 0.20,    # 20% of $1.50 stake → SL $0.30
         "stake_max_usdt": 1.50,
     },
     # R_75: very erratic, false spikes → require high confluence, NO pure
@@ -256,45 +254,46 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "min_hurst": 0.55,
         "use_mean_reversion": False,
         "allow_mean_reversion": True,
-        "allow_breakout": False,        # breakout only when H>=0.58 (handled in pipeline)
+        "allow_breakout": False,
         "band_sigma": 2.00,
         "ema_trend_filter": True,
-        "min_score": 8.0,               # Phase 25: was 6.5 — 8+ sl_inicial WR=0% → raise to AI-gate+buffer
+        "min_score": 8.0,
         "atr_min": 0.0,
         "cooldown_sec": 120,
         "sl_multiplier": 1.8,
         "tp_multiplier": 1.5,
         "trailing_mode": "atr_dynamic",
-        # ── Reactivado 2026-05-18 tras auditoría SL vs ATR ─────────────────
-        # Causa raíz: stop_loss_pct=0.004 (mean_rev) × stake producía sl_usd=$0.026
-        # → flooreado a $0.50 mínimo Deriv = 33% del stake en cada trade.
-        # Con ATR_abs≈4.1 y 200× apalancamiento, el floor era alcanzable en 1-2 min.
-        # Phase 16: widened to $1.00 — same rationale as R_50.
-        # DERIV_R75_SL_USD=1.00 in Coolify overrides this at runtime.
-        "stop_loss_pct_override": 0.6667,  # 66.7% of $1.50 stake → SL $1.00
+        # ── Phase 28: ratio-corrected SL ──────────────────────────────────
+        # 100-trade audit: 1 SL of -$0.78 wiped 7 micro-wins of +$0.105 each.
+        # New SL=$0.25 → ratio 1.7:1 vs TP $0.15 → breakeven WR=63% (actual 67%).
+        # expectancy = 0.67×$0.15 - 0.33×$0.25 = +$0.018/trade
+        # DERIV_R75_SL_USD=0.25 overrides at runtime.
+        "stop_loss_pct_override": 0.1667,  # 16.7% of $1.50 stake → SL $0.25
         "stake_max_usdt": 1.50,
     },
-    # R_100: trending, long moves, better persistence → trend following.
+    # R_100: Phase 28 — ONLY MULTDOWN. Data: MULTDOWN WR=73% PNL=+$0.66 vs
+    # MULTUP WR=27% PNL=-$6.56. MULTDOWN+H>0.56: WR=100% PNL=+$1.60.
     "R_100": {
         "type": "volatility",
-        "strategy_mode": "hybrid",     # Phase 26: was trend — allow both trend + mean-rev (H≈0.50 neutral zone)
-        "min_hurst": 0.45,              # Phase 26: was 0.58 — H=0.50 was triggering HURST_GATE_B_SOFT on every tick
-        "use_mean_reversion": True,     # Phase 26: was False — mean-rev scores 6.05-7.64 were all blocked
-        "allow_mean_reversion": True,   # Phase 26: was False — STRATEGY_GATE_mean_rev_rejected blocked all MR entries
+        "strategy_mode": "hybrid",
+        "min_hurst": 0.52,              # Phase 28: was 0.45 — H>0.52 for MULTDOWN edge (H>0.56=WR100%)
+        "use_mean_reversion": True,
+        "allow_mean_reversion": True,
         "allow_breakout": True,
         "band_sigma": 2.10,
         "ema_trend_filter": True,
-        "min_score": 6.0,
+        "min_score": 7.5,              # Phase 28: was 6.0 — only high-conviction setups
         "atr_min": 0.0,
         "cooldown_sec": 150,
         "sl_multiplier": 1.5,
         "tp_multiplier": 3.0,
         "trailing_mode": "atr_wide",
-        # ── SL floor fix 2026-05-19 ─────────────────────────────────────
-        # Phase 16: widened to $1.20 — R_100 is more volatile so needs
-        # an extra 20 cents of breathing room vs R_50/R_75.
-        # DERIV_R100_SL_USD=1.20 in Coolify overrides this at runtime.
-        "stop_loss_pct_override": 0.80,    # 80% of $1.50 stake → SL $1.20
+        # ── Phase 28: MULTDOWN only + ratio-corrected SL ────────────────────
+        # 100-trade audit: MULTUP WR=27% -$6.56 | MULTDOWN WR=73% +$0.66.
+        # With MULTDOWN only: expectancy = 0.73×$0.40 - 0.27×$0.35 = +$0.198/trade.
+        # side_allowed gate enforced in deriv_risk.py evaluate().
+        "side_allowed": ["MULTDOWN"],  # ELIMINATE MULTUP — phase 28 hard rule
+        "stop_loss_pct_override": 0.2333,  # 23.3% of $1.50 stake → SL $0.35
         "stake_max_usdt": 1.50,
     },
     # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
@@ -497,42 +496,42 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
-        # Phase 20: deterministic spike capture — Phase 24: thresholds 0.50→0.15 / 0.28→0.10
-        # BOOM900/CRASH900: same small-spike problem as CRASH600 — exit on first real spike tick
-        "spike_capture_tp_usdt": 0.15,       # was 0.50
-        "spike_profit_delta_usdt": 0.10,     # was 0.28
+        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
+        # Phase 28: only enter when macro HD is aligned (+2.0).
+        # Data: BOOM900 hd=+2 spike rate=20% → expectancy=+$0.026/trade (was marginal without filter).
+        "min_hd_bonus": 2.0,
     },
     "CRASH900": {
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 1200,       # Phase 19: MTBS≈900 ticks → 20 min (was 450 s)
+        "max_hold_seconds": 150,       # Phase 28: was 1200s — 3 spikes at dur=36/92/201s; 150s captures 2 of 3
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,              # T5 2026-05-19: lowered 7.0→6.00
+        "min_score": 6.00,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # confirmed same as CRASH1000
-        "geo_entry_min": -999,           # no upper floor needed — use geo_max only
-        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
-        "geo_entry_max": -0.20,         # DEMO: was -1.00
-        "stake_max_usdt": 2.00,         # T5: conservative until edge confirmed
-        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
-        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
-        "ratchet_enabled": True,        # DPM ratchet active
+        "hurst_min_spike": 0.43,
+        "geo_entry_min": -999,
+        "geo_entry_max": -0.20,
+        "stake_max_usdt": 2.00,
+        "stop_loss_pct_override": 0.36,
+        "trail_stop_floor_min": 0.20,
+        "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
-        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
-        "spike_capture_tp_usdt": 0.15,       # was 0.50
-        "spike_profit_delta_usdt": 0.10,     # was 0.28
+        "fvg_tier_minimo": "fvg_detected",
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
     },
     # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {
@@ -565,6 +564,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
         "spike_capture_tp_usdt": 0.15,       # was 0.50
         "spike_profit_delta_usdt": 0.10,     # was 0.28
+        # Phase 28: BOOM600 suspended — 0 spikes in 15 trades = 0% spike rate in sample.
+        # Data: all 15 trades hit timeout_max, WR=20%, PNL=-$1.09. No spike edge visible.
+        # Reactivate when: 5+ spikes in new sample AND regime != calm.
+        "disabled": True,
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -598,6 +601,13 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
         "spike_capture_tp_usdt": 0.15,       # was 0.50 — CRASH600 spike +$0.21 wasn't captured
         "spike_profit_delta_usdt": 0.10,     # was 0.28
+        # Phase 28: only enter when macro HD is aligned (+2.0 bonus).
+        # Data: CRASH600 hd=+2 spike rate=40% vs hd∤0 rate=10% → positive expectancy only with hd=+2.
+        # min_hd_bonus gate enforced in deriv_risk.py evaluate().
+        "min_hd_bonus": 2.0,
+        # Phase 28: timeout reduced 780→180s. Spikes occur at avg 124s-252s;
+        # reducing timeout cuts avg timeout loss from -$0.20 to -$0.14.
+        "max_hold_seconds": 180,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.

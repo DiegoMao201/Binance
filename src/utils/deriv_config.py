@@ -151,14 +151,17 @@ class DerivSettings:
     boom_crash_ai_min_score: float = 6.00          # DERIV_BOOM_CRASH_AI_MIN_SCORE
     r_indices_ai_min_score: float = 7.50           # DERIV_R_INDICES_AI_MIN_SCORE
 
-    # ── Per-symbol SL width (Phase 16) ─────────────────────────────────────
-    # Wider SL so normal tick noise ($0.002–$0.005/s on R_50) cannot stop the
-    # trade before the directional edge materialises.  Formula applied inside
-    # main_deriv: sl_pct = sl_usd / actual_stake (so it scales with stake).
-    # Floor enforced at $0.50 (Deriv demo minimum) by deriv_client.buy().
-    r50_sl_usd:  float = 1.00   # DERIV_R50_SL_USD  — was $0.54 (pct_ov 0.36)
-    r75_sl_usd:  float = 1.00   # DERIV_R75_SL_USD  — was $0.54 (pct_ov 0.36)
-    r100_sl_usd: float = 1.20   # DERIV_R100_SL_USD — was $0.54 (pct_ov 0.36)
+    # ── Per-symbol SL width (Phase 28: ratio-corrected) ────────────────────
+    # Phase 28 data: SL=$1.00 vs wins=$0.15-$0.20 = 5:1 adverse ratio.
+    # New SL targets match TP so ratio approaches 1:1:
+    #   R_50:  SL $0.30 | ratchet TP ~$0.40 | ratio 1.3:1 → needs WR>43%
+    #   R_75:  SL $0.25 | micro-TP $0.15    | ratio 1.7:1 → needs WR>63%
+    #   R_100: SL $0.35 | TP $0.40          | ratio 1.1:1 → needs WR>47%
+    # Formula: sl_pct = sl_usd / actual_stake.  Floor lowered to $0.20
+    # in deriv_client.buy() (was $0.50 — was blocking all Phase 28 SL targets).
+    r50_sl_usd:  float = 0.30   # DERIV_R50_SL_USD  — Phase 28: was $1.00
+    r75_sl_usd:  float = 0.25   # DERIV_R75_SL_USD  — Phase 28: was $1.00
+    r100_sl_usd: float = 0.35   # DERIV_R100_SL_USD — Phase 28: was $1.20
 
     # ── Derived paths ───────────────────────────────────────────────────────
     @property
@@ -240,7 +243,7 @@ def load_deriv_settings() -> DerivSettings:
         r_indices_ai_min_score=max(
             _get_float("DERIV_R_INDICES_AI_MIN_SCORE", 7.50), 5.25
         ),
-        r50_sl_usd=max(_get_float("DERIV_R50_SL_USD", 1.00), 0.50),
-        r75_sl_usd=max(_get_float("DERIV_R75_SL_USD", 1.00), 0.50),
-        r100_sl_usd=max(_get_float("DERIV_R100_SL_USD", 1.20), 0.50),
+        r50_sl_usd=max(_get_float("DERIV_R50_SL_USD", 0.30), 0.20),
+        r75_sl_usd=max(_get_float("DERIV_R75_SL_USD", 0.25), 0.20),
+        r100_sl_usd=max(_get_float("DERIV_R100_SL_USD", 0.35), 0.20),
     )
