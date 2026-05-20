@@ -362,8 +362,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
         # Wins had geo ∈ [-0.69, +1.04]; loss had geo +1.35 (extended).
         "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
-        "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
+        # DEMO Phase 23: widened 0.40→0.60 (same as BOOM600/900 that trade successfully)
+        "geo_entry_max": 0.60,          # DEMO: was 0.40
         "min_score": 6.5,             # lowered 7.5→6.5
+        "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: Tier 1 sufficient (was default)
         # Phase 20: deterministic spike capture
         "spike_capture_tp_usdt": 0.40,
         "spike_profit_delta_usdt": 0.22,
@@ -389,7 +391,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── Geo gate added 2026-05-18: CRASH needs price below channel mid ──
         # CRASH spikes DOWN from extended low zones. Wins had deeply negative geo.
         # Entering near channel mid or above = no accumulated downward pressure.
-        "geo_entry_max": -0.70,         # only enter when price ≤ 0.70σ below mid
+        # DEMO Phase 23: relaxed -0.70→-0.20 to generate data on CRASH edge.
+        "geo_entry_max": -0.20,         # DEMO: was -0.70, needs ≥20 trades to recalibrate
     },
     "CRASH500": {
         "type": "spike_crash",
@@ -411,7 +414,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Wins: geo -1.23 and -1.61 | Losses: geo -0.84 avg.
         # Confirmed: no structural edge when price is not well below channel mid.
-        "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid (loosened from -1.20)
+        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
+        "geo_entry_max": -0.20,         # DEMO: was -1.00
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
         "min_score": 6.5,             # lowered 7.5→6.5
     },
@@ -435,10 +439,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Wins: geo -1.09 (both) | Losses: geo -0.77 avg.
         # Confirmed: edge only when price is well below channel midpoint.
-        "geo_entry_max": -1.00,         # only enter when price ≤ -1.00σ below mid
+        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
+        "geo_entry_max": -0.20,         # DEMO: was -1.00
         "min_score": 6.5,             # lowered 7.5→6.5
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
+        "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
         # Phase 20: deterministic spike capture
         "spike_capture_tp_usdt": 0.40,
         "spike_profit_delta_usdt": 0.22,
@@ -494,7 +500,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # confirmed same as CRASH1000
         "geo_entry_min": -999,           # no upper floor needed — use geo_max only
-        "geo_entry_max": -1.00,         # CRASH needs price ≤ −1.00σ below mid
+        # DEMO Phase 23: relaxed -1.00→-0.20 to generate data. Recalibrate after 20 trades.
+        "geo_entry_max": -0.20,         # DEMO: was -1.00
         "stake_max_usdt": 2.00,         # T5: conservative until edge confirmed
         "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
@@ -557,14 +564,16 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
         "geo_entry_min": -999,           # no upper floor — use geo_max only
-        "geo_entry_max": -1.00,         # T5: relaxed -1.10→-1.00
+        # DEMO Phase 23: relaxed -1.00→-0.20 AND fvg_tier fvg_mitigated→fvg_detected
+        # to unblock CRASH600 which had 0 trades. Recalibrate after 20 trades.
+        "geo_entry_max": -0.20,         # DEMO: was -1.00
         "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
         "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
         "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: CRASH600 needs confirmed FVG mitigation
+        "fvg_tier_minimo": "fvg_detected",  # DEMO: was fvg_mitigated — Tier 1 now OK
         # Phase 20: deterministic spike capture
         "spike_capture_tp_usdt": 0.50,
         "spike_profit_delta_usdt": 0.28,
