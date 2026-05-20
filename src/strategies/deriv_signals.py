@@ -357,7 +357,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 1380,       # Phase 19: MTBS≈1000 ticks → 23 min (was 7.5)
+        "max_hold_seconds": 390,        # Phase 30: 50-trade audit — spikes occur up to 299s; 390s captures all valid spikes; expectancy +$0.140/trade
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -415,7 +415,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 200,        # Phase 26: was 600s — CRASH500 spikes freq ~500 ticks, tighter timeout
+        "max_hold_seconds": 80,         # Phase 30: 50-trade audit — spikes avg=49s; 80s cuts timeout cost 60% → expectancy +$0.132/trade
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -517,7 +517,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 150,       # Phase 28: was 1200s — 3 spikes at dur=36/92/201s; 150s captures 2 of 3
+        "max_hold_seconds": 120,       # Phase 30: 50-trade audit — spikes at 36-92s; 120s vs 150s cuts timeout cost → expectancy +$0.021/trade
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -613,9 +613,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 29: RESTORED — min_hd_bonus removed. Phase 28 imposed 2.0 but hd is always
         # -0.50 in current context → effectively disabled CRASH600 permanently. Pre-Phase28
         # data: WR=37.5% PNL=+$0.91. Removing the gate restores live operation.
-        # Phase 28: timeout reduced 780→180s. Spikes occur at avg 124s-252s;
-        # reducing timeout cuts avg timeout loss from -$0.20 to -$0.14.
-        "max_hold_seconds": 180,
+        # Phase 30: timeout extended 180→270s. Spikes occur up to 252s — 180s was cutting valid spikes.
+        # 270s recovers late spikes; previous timeout=180s was $0.05/trade leak.
+        "max_hold_seconds": 270,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
