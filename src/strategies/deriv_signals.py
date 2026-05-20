@@ -366,9 +366,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": 0.60,          # DEMO: was 0.40
         "min_score": 6.5,             # lowered 7.5→6.5
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: Tier 1 sufficient (was default)
-        # Phase 20: deterministic spike capture
-        "spike_capture_tp_usdt": 0.40,
-        "spike_profit_delta_usdt": 0.22,
+        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered 0.40→0.15 / 0.22→0.10
+        # CRASH600 spike peak +$0.21 didn't trigger $0.40 TP. Small spikes are still real spikes.
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -393,6 +394,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Entering near channel mid or above = no accumulated downward pressure.
         # DEMO Phase 23: relaxed -0.70→-0.20 to generate data on CRASH edge.
         "geo_entry_max": -0.20,         # DEMO: was -0.70, needs ≥20 trades to recalibrate
+        # Phase 24: spike capture thresholds — small spikes still valid exits
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
     },
     "CRASH500": {
         "type": "spike_crash",
@@ -418,6 +422,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": -0.20,         # DEMO: was -1.00
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
         "min_score": 6.5,             # lowered 7.5→6.5
+        # Phase 24: spike capture thresholds
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
     },
     "CRASH1000": {
         "type": "spike_crash",
@@ -445,9 +452,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
-        # Phase 20: deterministic spike capture
-        "spike_capture_tp_usdt": 0.40,
-        "spike_profit_delta_usdt": 0.22,
+        # Phase 20/24: deterministic spike capture — thresholds lowered 0.40→0.15
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
     },
     # ── NEW: BOOM/CRASH 900 — active ───────────────────────────────────────────────
     "BOOM900": {
@@ -477,9 +484,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
-        # Phase 20: deterministic spike capture — close on spike tick or static TP
-        "spike_capture_tp_usdt": 0.50,       # TP at $0.50 (25% of $2 stake) → lock profit
-        "spike_profit_delta_usdt": 0.28,     # jump >$0.28 in one tick → spike detected
+        # Phase 20: deterministic spike capture — Phase 24: thresholds 0.50→0.15 / 0.28→0.10
+        # BOOM900/CRASH900: same small-spike problem as CRASH600 — exit on first real spike tick
+        "spike_capture_tp_usdt": 0.15,       # was 0.50
+        "spike_profit_delta_usdt": 0.10,     # was 0.28
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -509,9 +517,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
-        # Phase 20: deterministic spike capture
-        "spike_capture_tp_usdt": 0.50,
-        "spike_profit_delta_usdt": 0.28,
+        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "spike_capture_tp_usdt": 0.15,       # was 0.50
+        "spike_profit_delta_usdt": 0.10,     # was 0.28
     },
     # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {
@@ -541,9 +549,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: BOOM600 needs confirmed FVG mitigation
-        # Phase 20: deterministic spike capture
-        "spike_capture_tp_usdt": 0.50,
-        "spike_profit_delta_usdt": 0.28,
+        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "spike_capture_tp_usdt": 0.15,       # was 0.50
+        "spike_profit_delta_usdt": 0.10,     # was 0.28
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -574,9 +582,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_detected",  # DEMO: was fvg_mitigated — Tier 1 now OK
-        # Phase 20: deterministic spike capture
-        "spike_capture_tp_usdt": 0.50,
-        "spike_profit_delta_usdt": 0.28,
+        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "spike_capture_tp_usdt": 0.15,       # was 0.50 — CRASH600 spike +$0.21 wasn't captured
+        "spike_profit_delta_usdt": 0.10,     # was 0.28
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
