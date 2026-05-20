@@ -708,7 +708,7 @@ class DerivDaemon:
             "BOOM600":  32,
             "BOOM900":  30,
             "BOOM1000": 20,   # Phase 26: was 30 — atr_abs=0.012 vs p30=0.013 (2-5% gap blocks valid entries)
-            "CRASH500": 28,
+            "CRASH500": 15,   # Phase 27: was 28 — no pipeline logs in 5000 lines; ATR too high for current calm
         }
         _env_sym_th = os.getenv(f"DERIV_ATR_TH_{_sym_upper}")
         if _env_sym_th and _env_sym_th.isdigit():

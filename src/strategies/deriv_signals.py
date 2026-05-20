@@ -354,20 +354,21 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,
+        "min_score": 5.0,              # Phase 27: was 6.5 — H=0.200 mean_rev→trend=0→max score~5.9
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
+        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92; cap at 1.80 prevents rejection
+        "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
         # Wins had geo ∈ [-0.69, +1.04]; loss had geo +1.35 (extended).
         "hurst_min_spike": 0.43,        # veto if hurst < 0.43 even for spike markets
         # DEMO Phase 23: widened 0.40→0.60 (same as BOOM600/900 that trade successfully)
         "geo_entry_max": 0.60,          # DEMO: was 0.40
-        "min_score": 6.5,             # lowered 7.5→6.5
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: Tier 1 sufficient (was default)
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered 0.40→0.15 / 0.22→0.10
         # CRASH600 spike peak +$0.21 didn't trigger $0.40 TP. Small spikes are still real spikes.
@@ -427,8 +428,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # REQUIRES COOLIFY: DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.80 (was 4.50)
         # so that score=4.00-4.15 passes effective_min=3.80.
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
-        "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        # Phase 24: spike capture thresholds
+        "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92; cap at 1.80 prevents rejection
+        "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
+        "min_score": 5.0,              # Phase 27: was 6.0 — no_fvg_penalty reduces score to ~5.0        # Phase 24: spike capture thresholds
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
     },
@@ -461,6 +463,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
+        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92 (ENTRY_ALLOWED→rejected@$2.40)
+        "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
         # Phase 20/24: deterministic spike capture — thresholds lowered 0.40→0.15
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
