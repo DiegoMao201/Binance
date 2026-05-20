@@ -93,6 +93,12 @@ export async function GET(request) {
     result: url.searchParams.get("result"),
   };
 
+  // Phase-slice params: applied AFTER standard filters
+  const lastN       = url.searchParams.get("last_n")    ? parseInt(url.searchParams.get("last_n"), 10)    : null;
+  const sinceId     = url.searchParams.get("since_id")  ? parseInt(url.searchParams.get("since_id"), 10)  : null;
+  const sinceSec    = url.searchParams.get("since_ts")  ? parseFloat(url.searchParams.get("since_ts"))    : null;  // unix seconds
+  const sinceIso    = url.searchParams.get("since_date"); // ISO date string e.g. "2026-05-19"
+
   const [status, open, closed] = await Promise.all([
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
@@ -124,6 +130,36 @@ export async function GET(request) {
       return NextResponse.json({ error: `unknown dataset: ${dataset}` }, { status: 400 });
   }
 
+  // ── Phase-slice filters (applied after base filters) ─────────────────────
+  // since_id: only rows whose contract_id > since_id
+  if (sinceId != null) {
+    rows = rows.filter(r => {
+      const id = parseInt(r.contract_id ?? r.id ?? 0, 10);
+      return id > sinceId;
+    });
+  }
+  // since_ts / since_date: only rows opened after the given time
+  if (sinceSec != null || sinceIso != null) {
+    const cutoffMs = sinceIso
+      ? new Date(sinceIso).getTime()
+      : sinceSec * 1000;
+    rows = rows.filter(r => {
+      const t = tsOf(r);
+      return t != null && t >= cutoffMs;
+    });
+  }
+  // last_n: keep only the N most-recent rows (by timestamp → stable order)
+  if (lastN != null && lastN > 0 && rows.length > lastN) {
+    // Sort desc by ts, take first N, restore asc order
+    rows = rows
+      .slice()
+      .sort((a, b) => (tsOf(b) ?? 0) - (tsOf(a) ?? 0))
+      .slice(0, lastN)
+      .sort((a, b) => (tsOf(a) ?? 0) - (tsOf(b) ?? 0));
+  }
+
+  const sliceInfo = { last_n: lastN, since_id: sinceId, since_ts: sinceSec, since_date: sinceIso };
+
   if (format === "csv") {
     const csv = toCSV(rows);
     return new NextResponse(csv, {
@@ -136,7 +172,7 @@ export async function GET(request) {
   }
   // JSON (default)
   return new NextResponse(JSON.stringify({
-    dataset, count: rows.length, filters, rows,
+    dataset, count: rows.length, filters, slice: sliceInfo, rows,
     exported_at: new Date().toISOString(),
   }, null, 2), {
     headers: {

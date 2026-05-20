@@ -1912,15 +1912,28 @@ function ExportTab({ data }) {
   const [dataset, setDataset] = useState("trades");
   const [format, setFormat] = useState("csv");
   const [filters, setFilters] = useState({});
+  const [lastN, setLastN] = useState("");
+  const [sinceId, setSinceId] = useState("");
+  const [sinceDate, setSinceDate] = useState("");
   const syms = Object.keys(data.by_symbol || {}).sort();
   const regimes = Object.keys(data.by_regime || {});
   const strategies = Object.keys(data.by_strategy || {});
+
+  // Phase quick-presets — click to pre-fill the since_date field
+  const PHASES = [
+    { label: "Phase 18-19", date: "2026-05-19", desc: "AI gate + MTBS timeout" },
+    { label: "Phase 20", date: "2026-05-19", desc: "Spike capture" },
+    { label: "Phase 21", date: "2026-05-20", desc: "R_75 FVG off + micro-TP" },
+  ];
 
   const buildUrl = () => {
     const u = new URLSearchParams({ dataset, format });
     for (const [k, v] of Object.entries(filters)) {
       if (v != null && v !== "") u.set(k, v);
     }
+    if (lastN && Number(lastN) > 0)  u.set("last_n", lastN);
+    if (sinceId && sinceId !== "")   u.set("since_id", sinceId);
+    if (sinceDate && sinceDate !== "") u.set("since_date", sinceDate);
     return `/api/deriv-analytics/export?${u.toString()}`;
   };
 
@@ -1975,6 +1988,43 @@ function ExportTab({ data }) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <FilterDate label="From" value={filters.from} onChange={v => setFilters({ ...filters, from: v })} />
               <FilterDate label="To" value={filters.to} onChange={v => setFilters({ ...filters, to: v })} />
+            </div>
+
+            {/* ── Phase slice — new ─────────────────────────────────────── */}
+            <div style={{ marginTop: 4, padding: "10px 12px", background: T.bg, borderRadius: 6, border: `1px solid ${T.border}` }}>
+              <Label>Phase slice (exportar solo desde una fase)</Label>
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                {PHASES.map(ph => (
+                  <button key={ph.label} onClick={() => { setSinceDate(ph.date); setLastN(""); setSinceId(""); }}
+                    title={ph.desc}
+                    style={{ ...btnStyle(sinceDate === ph.date && lastN === "" && sinceId === "" ? T.cyan : T.mute), fontSize: 9, padding: "4px 8px" }}>
+                    {ph.label}
+                  </button>
+                ))}
+                <button onClick={() => { setSinceDate(""); setLastN("50"); setSinceId(""); }}
+                  style={{ ...btnStyle(lastN === "50" ? T.violet : T.mute), fontSize: 9, padding: "4px 8px" }}>last 50</button>
+                <button onClick={() => { setSinceDate(""); setLastN("100"); setSinceId(""); }}
+                  style={{ ...btnStyle(lastN === "100" ? T.violet : T.mute), fontSize: 9, padding: "4px 8px" }}>last 100</button>
+                <button onClick={() => { setSinceDate(""); setLastN(""); setSinceId(""); }}
+                  style={{ ...btnStyle(T.mute), fontSize: 9, padding: "4px 8px" }}>todo</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <Label>last N</Label>
+                  <input type="number" value={lastN} onChange={e => { setLastN(e.target.value); setSinceId(""); setSinceDate(""); }}
+                    placeholder="ej: 50" style={{ ...inputStyle, padding: "5px 8px" }} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <Label>since contract_id</Label>
+                  <input type="number" value={sinceId} onChange={e => { setSinceId(e.target.value); setLastN(""); setSinceDate(""); }}
+                    placeholder="ej: 248735491" style={{ ...inputStyle, padding: "5px 8px" }} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <Label>since date</Label>
+                  <input type="date" value={sinceDate} onChange={e => { setSinceDate(e.target.value); setLastN(""); setSinceId(""); }}
+                    style={{ ...inputStyle, padding: "5px 8px" }} />
+                </div>
+              </div>
             </div>
           </div>
         </div>
