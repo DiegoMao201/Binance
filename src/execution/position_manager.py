@@ -75,6 +75,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     #   At peak=$2.37: win=$1.54 → R:R=2.85:1 → breakeven WR=26% ← target
     "R_50": {
         "sl_inicial_pct":        0.67,   # dead in practice (broker SL fires at 0.36)
+        "micro_tp_pct":          0.10,   # Phase 21: lock $0.05 floor when pnl >= 10% stake
+        "micro_tp_floor_pct":    0.03,   # close if reverts below 3% stake after micro_tp armed
         "breakeven_step_pct":    0.30,   # NEW: lock at $0 floor when pnl >= 30% stake
         "ratchet_step_pct":      0.65,   # was 0.20 — Phase 2 at 65% of stake ($0.975)
         "ratchet_ratio":         0.65,   # was 0.50 — locks 65% of peak
@@ -84,6 +86,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "R_75": {
         "sl_inicial_pct":        0.67,
+        "micro_tp_pct":          0.10,   # Phase 21: micro-TP floor
+        "micro_tp_floor_pct":    0.03,
         "breakeven_step_pct":    0.30,   # NEW
         "ratchet_step_pct":      0.65,   # was 0.25
         "ratchet_ratio":         0.65,   # was 0.52
@@ -93,6 +97,8 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "R_100": {
         "sl_inicial_pct":        0.70,
+        "micro_tp_pct":          0.10,   # Phase 21: micro-TP floor
+        "micro_tp_floor_pct":    0.03,
         "breakeven_step_pct":    0.28,   # NEW — R_100 slightly tighter (faster market)
         "ratchet_step_pct":      0.60,   # was 0.20
         "ratchet_ratio":         0.65,   # was 0.50
@@ -141,7 +147,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      810,    # 90% × 900 ticks
+        "max_duration_seg":      450,    # Phase 21: data shows WR=10% after 450s (was 810)
     },
     "CRASH900": {
         "sl_inicial_pct":        1.00,
@@ -149,7 +155,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      810,
+        "max_duration_seg":      450,    # Phase 21: reduce from 810
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -158,7 +164,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      540,    # 90% × 600 ticks
+        "max_duration_seg":      450,    # Phase 21: data WR=10% after 450s (was 540)
     },
     "CRASH600": {
         "sl_inicial_pct":        1.00,
@@ -166,7 +172,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      540,
+        "max_duration_seg":      450,    # Phase 21: reduce from 540
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
@@ -227,6 +233,9 @@ class _PositionState:
     )
     # Absolute momentum peak since phase-2 activation
     momentum_peak: float = 0.0
+    # Phase 21: micro-TP state — armed once profit touches micro_tp_pct
+    # stays armed so the floor persists until close or phase-2 promotion.
+    micro_tp_armed: bool = False
     # Per-tick audit log
     tick_log: list[dict[str, Any]] = field(default_factory=list)
 
@@ -389,7 +398,37 @@ class DynamicPositionManager:
 
         # ── Phase 1: Initial SL protection ───────────────────────────────────
         if state.fase == 1:
-            # ── Break-even tier (Phase 1.5) ──────────────────────────────────
+            # ── Micro-TP tier (Phase 1.2) ───────────────────────────────────────
+            # DATA FINDING (120 trades): 42-56% of losses first hit +$0.10 before
+            # closing at SL. The BE floor ($0.45 at 30% stake) is too high to
+            # capture these micro-gains. Add an earlier floor:
+            #   If profit >= micro_tp_pct × stake (default 10%)
+            #   → arm micro_tp and lock floor at micro_tp_floor_pct × stake
+            #   If profit then reverts below that floor → close (micro_tp_captured)
+            _mtp_pct   = params.get("micro_tp_pct", 0.0)
+            _mtp_floor = params.get("micro_tp_floor_pct", 0.0)
+            if _mtp_pct > 0:
+                _mtp_usd   = _mtp_pct   * state.stake
+                _mtp_floor_usd = _mtp_floor * state.stake
+                if not state.micro_tp_armed and float_pnl >= _mtp_usd:
+                    state.micro_tp_armed = True
+                    # Ensure the micro-TP floor is at least as tight as sl_ratchet
+                    if state.sl_ratchet < _mtp_floor_usd:
+                        state.sl_ratchet = _mtp_floor_usd
+                    _LOGGER.info(
+                        "[DPM] MICRO_TP_ARMED contract_id=%s symbol=%s "
+                        "pnl=%.4f >= micro_tp=%.4f floor_locked=%.4f",
+                        contract_id, state.symbol, float_pnl, _mtp_usd, _mtp_floor_usd,
+                    )
+                if state.micro_tp_armed and float_pnl <= _mtp_floor_usd:
+                    self._log_tick(state, float_pnl, now, close_reason="micro_tp_captured")
+                    _LOGGER.info(
+                        "[DPM] micro_tp_captured contract_id=%s symbol=%s "
+                        "pnl=%.4f <= floor=%.4f stake=%.2f",
+                        contract_id, state.symbol, float_pnl, _mtp_floor_usd, state.stake,
+                    )
+                    return "micro_tp_captured"
+
             # When profit first reaches breakeven_step_pct × stake, lock the
             # sl_ratchet floor at $0.  This prevents a profitable excursion from
             # becoming a loss (converts many near-losers into $0 exits).

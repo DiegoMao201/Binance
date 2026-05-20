@@ -1265,7 +1265,27 @@ class DerivRiskManager:
         # ── SMC: FVG mitigation + Momentum divergence (institutional confluence) ──
         # Spike markets enforce their direction (BOOM=bull only, CRASH=bear only).
         # For R_* indices we accept either direction as long as FVG_dir == DIV_dir.
-        if _geo is not None and _geo.smc_side is not None and _geo.smc_bonus > 0:
+        #
+        # DATA FINDING (120 real trades, 2026-05-20):
+        #   R_75 with FVG active → WR=12%  (net -$4.68)
+        #   R_75 without FVG    → WR=54%  (winner)
+        # For R_75: FVG signals RESISTANCE, not support. When the SMC engine
+        # detects a mitigated FVG on R_75, the price is already reversing against
+        # our direction. Neutralize the smc_bonus entirely for R_75 to avoid
+        # inflating score on setups that statistically destroy capital.
+        _r75_fvg_neutralize = (
+            symbol.upper() == "R_75"
+            and _geo is not None
+            and _geo.smc_bonus > 0
+        )
+        if _r75_fvg_neutralize:
+            snap.score_breakdown["fvg_neutralized_r75"] = True
+            snap.score_breakdown["fvg_active"] = False   # suppress FVG for gate checks
+            _LOGGER.info(
+                "[deriv-risk] R_75 FVG neutralized: smc_bonus=%.2f suppressed (data: WR=12%% with FVG)",
+                _geo.smc_bonus,
+            )
+        if _geo is not None and _geo.smc_side is not None and _geo.smc_bonus > 0 and not _r75_fvg_neutralize:
             _smc_dir_ok = True
             _su = symbol.upper()
             if "BOOM" in _su and _geo.smc_side != "MULTUP":
