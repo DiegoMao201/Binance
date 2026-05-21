@@ -514,9 +514,11 @@ class DerivDaemon:
         _early_profile = get_asset_profile(tick.symbol)
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
             return
         if _early_profile.get("suspended"):
             _LOGGER.debug("[PIPELINE] SYMBOL_SUSPENDED %s — skipping", tick.symbol)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_suspended")
             return
 
 
@@ -978,6 +980,8 @@ class DerivDaemon:
                     "profile": _asset_profile,
                 },
             )
+            self._spike_enrich(tick.symbol, bot_entered=False,
+                               block_reason=f"strategy_gate_mean_rev:mode={_strat}")
             return
         # spike strategy gate REMOVED (2026-05-19, Phase9):
         # DerivRiskManager now handles no-FVG entries with Momentum Escape Valve
@@ -1005,6 +1009,8 @@ class DerivDaemon:
                     score=snap.score, reason=_hms_reason,
                     extra={"hurst": _eval_hurst, "hurst_min_spike": _hms},
                 )
+                self._spike_enrich(tick.symbol, bot_entered=False,
+                                   block_reason=_hms_reason)
                 return
 
         decision_extra = {
@@ -1116,6 +1122,8 @@ class DerivDaemon:
                     reason=f"SPREAD_VETO: {spread_pct:.5f} > {_EXEC_MAX_SPREAD_PCT:.5f}",
                     extra={**decision_extra, "spread_pct": spread_pct},
                 )
+                self._spike_enrich(tick.symbol, bot_entered=False,
+                                   block_reason=f"spread_veto:{spread_pct:.5f}")
                 return
             # ── Observation window (BOOM markets only, Phase 31) ───────────
             _obs_sec_ov = int(_asset_profile.get("observation_window_sec", 0))
@@ -1153,15 +1161,15 @@ class DerivDaemon:
             except OrderRouterError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] router rejected (override): %s", exc)
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_router_error")
             except DerivClientError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] broker rejected order %s (override): %s", tick.symbol, exc)
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="broker_rejected")
             except Exception:  # noqa: BLE001
                 self._counters["orders_failed"] += 1
                 _LOGGER.exception("[deriv-daemon] order pipeline crashed (override, suppressed)")
-            return  # ← override path always returns here; AI never runs
-
-        # ═══════════════════════════════════════════════════════════════════
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_crashed")
         # BLOCK 3 — AI GATE (only reached when NO hard math override fired)
         # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.
         # If AI approves (or is skipped/errored), execute the order.
@@ -1314,6 +1322,8 @@ class DerivDaemon:
                 reason=f"SPREAD_VETO: {spread_pct:.5f} > {_EXEC_MAX_SPREAD_PCT:.5f}",
                 extra={**decision_extra, "spread_pct": spread_pct},
             )
+            self._spike_enrich(tick.symbol, bot_entered=False,
+                               block_reason=f"spread_veto:{spread_pct:.5f}")
             return
         # ── Observation window (BOOM markets only, Phase 31) ─────────────
         _obs_sec = int(_asset_profile.get("observation_window_sec", 0))
@@ -1351,12 +1361,15 @@ class DerivDaemon:
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_router_error")
         except DerivClientError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] broker rejected order %s: %s", tick.symbol, exc)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="broker_rejected")
         except Exception:  # noqa: BLE001
             self._counters["orders_failed"] += 1
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_crashed")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Observation window — Phase 31

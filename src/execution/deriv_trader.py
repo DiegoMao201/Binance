@@ -812,6 +812,100 @@ class DerivTradeExecutor:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(existing, indent=2, default=str))
         tmp.replace(path)
+        # Enrich spike record when an existing position captured the spike
+        if record.get("exit_reason") in ("spike_tp", "spike_capture"):
+            self._enrich_spike_captured_by_pos(
+                record.get("symbol", ""),
+                float(record.get("realized_pnl_usdt", 0)),
+            )
+
+    def _enrich_spike_captured_by_pos(self, symbol: str, pnl: float) -> None:
+        """Mark the most-recent spike record for *symbol* as captured by an existing position.
+
+        Called whenever a contract closes with spike_tp / spike_capture.  When
+        the spike fired the bot may have had an open position for that symbol
+        (block_reason='trade_cooldown', had_open_pos=True).  That position later
+        exited via spike_tp, so the spike WAS in fact captured — just not by a
+        new entry.  Setting captured_by_existing_pos=True allows the frontend to
+        count this as a «caught» spike instead of a «blocked / missed» one.
+        """
+        try:
+            _state_dir = Path(
+                os.environ.get(
+                    "BOT_STATE_DIR",
+                    os.environ.get("LOGS_DIR", str(self._settings.closed_contracts_file.parent)),
+                )
+            )
+            _spike_file = _state_dir / "deriv_spike_events.json"
+            if not _spike_file.exists():
+                return
+            _existing: list = json.loads(_spike_file.read_text())
+            _now = time.time()
+            for i in range(len(_existing) - 1, -1, -1):
+                ev = _existing[i]
+                if ev.get("symbol") != symbol:
+                    continue
+                _ev_ts = float(ev.get("ts", 0))
+                if _now - _ev_ts > 3600:   # ignore spikes older than 1 hour
+                    break
+                if ev.get("had_open_pos") and ev.get("bot_entered") is False:
+                    _existing[i]["captured_by_existing_pos"] = True
+                    _existing[i]["spike_tp_pnl"] = round(pnl, 4)
+                    _spike_file.write_text(json.dumps(_existing))
+                    _LOGGER.debug(
+                        "[deriv-trader] spike captured_by_existing_pos enriched: "
+                        "symbol=%s pnl=%.4f", symbol, pnl,
+                    )
+                    break
+        except Exception as _e:
+            _LOGGER.debug("[deriv-trader] _enrich_spike_captured_by_pos failed: %s", _e)
+        # Enrich spike record when an existing position captured the spike
+        if record.get("exit_reason") in ("spike_tp", "spike_capture"):
+            self._enrich_spike_captured_by_pos(
+                record.get("symbol", ""),
+                float(record.get("realized_pnl_usdt", 0)),
+            )
+
+    def _enrich_spike_captured_by_pos(self, symbol: str, pnl: float) -> None:
+        """Mark the most-recent spike record for *symbol* as captured by an existing position.
+
+        Called whenever a contract closes with spike_tp / spike_capture.  When
+        the spike fired the bot may have had an open position for that symbol
+        (block_reason='trade_cooldown', had_open_pos=True).  That position later
+        exited via spike_tp, so the spike WAS in fact captured — just not by a
+        new entry.  Setting captured_by_existing_pos=True allows the frontend to
+        count this as a «caught» spike instead of a «blocked / missed» one.
+        """
+        try:
+            _state_dir = Path(
+                os.environ.get(
+                    "BOT_STATE_DIR",
+                    os.environ.get("LOGS_DIR", str(self._settings.closed_contracts_file.parent)),
+                )
+            )
+            _spike_file = _state_dir / "deriv_spike_events.json"
+            if not _spike_file.exists():
+                return
+            _existing: list = json.loads(_spike_file.read_text())
+            _now = time.time()
+            for i in range(len(_existing) - 1, -1, -1):
+                ev = _existing[i]
+                if ev.get("symbol") != symbol:
+                    continue
+                _ev_ts = float(ev.get("ts", 0))
+                if _now - _ev_ts > 3600:   # ignore spikes older than 1 hour
+                    break
+                if ev.get("had_open_pos") and ev.get("bot_entered") is False:
+                    _existing[i]["captured_by_existing_pos"] = True
+                    _existing[i]["spike_tp_pnl"] = round(pnl, 4)
+                    _spike_file.write_text(json.dumps(_existing))
+                    _LOGGER.debug(
+                        "[deriv-trader] spike captured_by_existing_pos enriched: "
+                        "symbol=%s pnl=%.4f", symbol, pnl,
+                    )
+                    break
+        except Exception as _e:
+            _LOGGER.debug("[deriv-trader] _enrich_spike_captured_by_pos failed: %s", _e)
 
     # ─────────────────────────────────────────────────────────────────────────
     # PAMM webhook (broker='deriv')
@@ -1220,17 +1314,33 @@ class DerivTradeExecutor:
                         or poc.get("sell_price")
                         or 0
                     )
-                    exit_reason = self._classify_exit(poc)
-                    if exit_reason in ("", "unknown"):
-                        exit_reason = "forced_close"
+                    # ── Heartbeat exit classification (same priority as WS/reaper) ──
+                    # CRITICAL FIX: heartbeat must honour pending_close_reason so that
+                    # spike_tp/spike_capture closes that lost their WS event are NOT
+                    # mislabeled as "manual_close" (broker status=sold is ambiguous).
+                    _held_hb = time.time() - oc.opened_at_ts
+                    _was_ratchet_hb = (
+                        oc.trail_sl_locked > _TRAIL_INIT_SL
+                        and realized <= oc.trail_sl_locked + 0.01
+                    )
+                    if oc.max_hold_seconds > 0 and _held_hb >= oc.max_hold_seconds:
+                        exit_reason = "spike_timeout"
+                    elif oc.pending_close_reason:
+                        exit_reason = oc.pending_close_reason
+                    elif _was_ratchet_hb:
+                        exit_reason = f"ratchet_sl_alcanzado(floor={oc.trail_sl_locked:.4f})"
+                    else:
+                        exit_reason = self._classify_exit(poc)
+                        if exit_reason in ("", "unknown"):
+                            exit_reason = "forced_close"
 
                     _dpm_stats = self._dpm.get_close_stats(cid, realized)
                     self._dpm.unregister(cid)
 
                     _LOGGER.warning(
                         "[heartbeat] FORCED_CLOSE detected contract_id=%s symbol=%s "
-                        "pnl=%.4f status=%s — was not caught by WS event or reaper",
-                        cid, oc.symbol, realized, _poc_status,
+                        "pnl=%.4f status=%s exit_reason=%s — was not caught by WS event or reaper",
+                        cid, oc.symbol, realized, _poc_status, exit_reason,
                     )
                     record = {
                         "broker": "deriv",
