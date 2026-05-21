@@ -215,6 +215,10 @@ class DerivTradeExecutor:
         self._telemetry = telemetry
         self._open: dict[int, DerivOpenContract] = {}
         self._lock = asyncio.Lock()
+        # Phase 35: close-lock guard — prevents duplicate sell() calls when WS
+        # ticks and/or the reaper fire on the same contract simultaneously.
+        # asyncio is single-threaded so check+add before any `await` is atomic.
+        self._closing: set[int] = set()
         # Running per-symbol stats (updated on each contract close)
         self._sym_stats: dict[str, dict[str, Any]] = {}
         self._session_pnl: float = 0.0
@@ -468,16 +472,22 @@ class DerivTradeExecutor:
             if oc_check is not None and oc_check.max_hold_seconds > 0:
                 held = time.time() - oc_check.opened_at_ts
                 if held >= oc_check.max_hold_seconds:
-                    _LOGGER.info(
-                        "[deriv-trader] spike_timeout: force-selling %s (%s held=%.1fs limit=%.0fs)",
-                        cid, oc_check.symbol, held, oc_check.max_hold_seconds,
-                    )
-                    try:
-                        await self._client.sell(cid)
-                    except DerivClientError as exc:
-                        _LOGGER.warning(
-                            "[deriv-trader] spike_timeout sell failed for %s: %s", cid, exc
+                    # Phase 35: close-lock guard
+                    if cid in self._closing:
+                        pass  # sell already in-flight; fall through to poll
+                    else:
+                        self._closing.add(cid)
+                        _LOGGER.info(
+                            "[deriv-trader] spike_timeout: force-selling %s (%s held=%.1fs limit=%.0fs)",
+                            cid, oc_check.symbol, held, oc_check.max_hold_seconds,
                         )
+                        try:
+                            await self._client.sell(cid)
+                        except DerivClientError as exc:
+                            _LOGGER.warning(
+                                "[deriv-trader] spike_timeout sell failed for %s: %s", cid, exc
+                            )
+                            self._closing.discard(cid)  # allow retry next reap
                         # Contract may already be closed; continue to poll below
 
             try:
@@ -542,18 +552,22 @@ class DerivTradeExecutor:
                         oc_check.trail_sl_locked,
                     )
                 if _close_reason:
-                    _LOGGER.info(
-                        "[DPM-REAPER] %s closing symbol=%s reason=%s pnl=%.4f",
-                        cid, oc_check.symbol, _close_reason, _current_profit,
-                    )
-                    oc_check.pending_close_reason = _close_reason
-                    try:
-                        await self._client.sell(cid)
-                    except DerivClientError as exc:
-                        _LOGGER.warning(
-                            "[DPM-REAPER] sell failed for %s: %s — poll will detect close",
-                            cid, exc,
+                    # Phase 35: close-lock guard
+                    if cid not in self._closing:
+                        self._closing.add(cid)
+                        _LOGGER.info(
+                            "[DPM-REAPER] %s closing symbol=%s reason=%s pnl=%.4f",
+                            cid, oc_check.symbol, _close_reason, _current_profit,
                         )
+                        oc_check.pending_close_reason = _close_reason
+                        try:
+                            await self._client.sell(cid)
+                        except DerivClientError as exc:
+                            _LOGGER.warning(
+                                "[DPM-REAPER] sell failed for %s: %s — poll will detect close",
+                                cid, exc,
+                            )
+                            self._closing.discard(cid)  # allow retry next reap
                     # Fall through — next poll will see is_sold=True
 
             if not is_sold:
@@ -602,6 +616,7 @@ class DerivTradeExecutor:
 
             async with self._lock:
                 oc = self._open.pop(cid, None)
+                self._closing.discard(cid)  # Phase 35: release close-lock on reaper settlement
                 self._persist_open()
             if oc is None:
                 continue
@@ -945,6 +960,12 @@ class DerivTradeExecutor:
                     and (current_profit - oc_check.last_profit) >= _sc_delta
                 )
                 if _tp_hit or _delta_hit:
+                    # Phase 35: close-lock guard — bail if sell already in-flight
+                    if cid in self._closing:
+                        _LOGGER.debug(
+                            "[SPIKE-CAPTURE] cid=%s already closing — skipped duplicate sell", cid)
+                        return
+                    self._closing.add(cid)
                     _sc_why = "spike_tp" if _tp_hit else "spike_capture"
                     _LOGGER.info(
                         "[SPIKE-CAPTURE] cid=%s sym=%s reason=%s pnl=%.4f "
@@ -960,6 +981,7 @@ class DerivTradeExecutor:
                     except DerivClientError as exc:
                         _LOGGER.warning(
                             "[SPIKE-CAPTURE] sell failed cid=%s: %s", cid, exc)
+                        self._closing.discard(cid)  # allow retry on next tick
                     return
             oc_check.last_profit = current_profit
             # ─────────────────────────────────────────────────────────────────
@@ -991,6 +1013,12 @@ class DerivTradeExecutor:
                     oc_check.trail_sl_locked,
                 )
             if close_reason:
+                # Phase 35: close-lock guard — bail if sell already in-flight
+                if cid in self._closing:
+                    _LOGGER.debug(
+                        "[DPM-WS] cid=%s already closing — skipped duplicate sell", cid)
+                    return
+                self._closing.add(cid)
                 _LOGGER.info(
                     "[DPM-WS] %s closing symbol=%s reason=%s pnl=%.4f "
                     "fase=%s sl=%.4f",
@@ -1002,13 +1030,16 @@ class DerivTradeExecutor:
                     await self._client.sell(cid)
                 except DerivClientError as exc:
                     _LOGGER.warning("[DPM-WS] sell failed for %s: %s", cid, exc)
+                    self._closing.discard(cid)  # allow retry on next tick
             return
 
         # ── is_sold=True: immediate settlement ───────────────────────────────
         async with self._lock:
             oc = self._open.pop(cid, None)
             if oc is None:
+                self._closing.discard(cid)
                 return  # already settled by reaper or reconciliation
+            self._closing.discard(cid)  # Phase 35: release close-lock on final settlement
             self._persist_open()
 
         realized   = float(poc.get("profit") or 0)
