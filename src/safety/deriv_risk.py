@@ -1214,6 +1214,14 @@ class DerivRiskManager:
             _spike_slope_abs = abs(_macro_slope) if _macro_slope is not None else 0.0
             if _spike_slope_abs < _MACRO_HD_FLAT_THRESHOLD * 5.0:
                 _hd_bonus = 0.0  # mild opposing slope = neutral for spike accumulation
+        # FIX (2026-05-18 quant audit): For CRASH spike markets, positive hd_bonus means
+        # macro slope is ALREADY DOWN — the accumulation phase is over or the spike
+        # already happened. Quant data: CRASH500 WIN avg_score=5.41 (no hd_bonus) vs
+        # LOSS avg_score=8.85 (hd_bonus=+2.0). Grade A entries (hd_bonus inflated) had
+        # 12.1% WR (-$7.78 total). Zero out positive hd_bonus for all CRASH symbols
+        # so score reflects pure microstructure, not a lagging macro confirmation.
+        if _is_spike and _hd_bonus > 0.0 and "CRASH" in symbol.upper():
+            _hd_bonus = 0.0  # macro confirming CRASH = already falling = bad entry timing
         if _hd_bonus != 0.0:
             score = max(0.0, min(10.0, score + _hd_bonus))
             if _hd_bonus > 0:

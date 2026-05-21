@@ -453,7 +453,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # so that score=4.00-4.15 passes effective_min=3.80.
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
+        # ── AUDIT 2026-05-18: stake $5→$2 — 25% WR at $5 destroys capital ──
+        # CRASH500: 8 trades, 2 wins, avg_loss=-$0.658, total=-$3.94. $2 cap reduces exposure.
+        "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         "min_score": 4.5,              # Phase 32: 5.0→4.5 — profile gate below effective_min=3.50; let risk engine be the gate
         # Phase 24: spike capture thresholds
@@ -471,6 +473,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "allow_mean_reversion": False,
         "allow_breakout": False,
         "min_score": 4.5,              # Phase 32: 6.0→4.5 — profile gate below effective_min=3.50
+        # ── AUDIT 2026-05-18: DISABLED — 10 trades, 0 wins, -$5.14, ALL spike_timeout ──
+        # Spike cycle=1000 ticks. Bot holds 450s but cycle is ~1000s → 55% of spikes missed.
+        # CRASH1000 accumulation phase drifts UP against MULTDOWN → systematic timeout loss.
+        # Re-enable only after: (1) spike_entry timing fix, (2) per-cycle hold calibration.
+        "disabled": True,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -561,6 +568,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         "max_hold_seconds": 200,       # Phase 32: 120→200 — give more time to capture spikes (120s too tight)
+        # ── AUDIT 2026-05-18: stake $5→$2 — 13.3% WR at $5 is catastrophic ──
+        # CRASH900: 15 trades, 2 wins, avg_loss=-$0.565, total=-$2.05. Reduce to $2.
+        "stake_max_usdt": 2.00,
     },
     # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {
