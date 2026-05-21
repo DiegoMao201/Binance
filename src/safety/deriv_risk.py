@@ -725,7 +725,8 @@ class DerivRiskManager:
                         # Persist spike event to JSON for frontend consumption
                         try:
                             _state_dir = Path(
-                                os.environ.get("BOT_STATE_DIR", Path(__file__).parents[2] / "logs")
+                                os.environ.get("BOT_STATE_DIR",
+                                    os.environ.get("LOGS_DIR", Path(__file__).parents[2] / "logs"))
                             )
                             _state_dir.mkdir(parents=True, exist_ok=True)
                             _spike_file = _state_dir / "deriv_spike_events.json"
