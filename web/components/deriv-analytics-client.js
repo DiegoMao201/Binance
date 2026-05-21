@@ -2110,7 +2110,7 @@ function SpikesTab() {
                         {e.iso ? e.iso.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", "Z") : "–"}
                       </td>
                       <td style={{ padding: "4px 10px" }}>
-                        <Pill color={"BOOM" in (e.symbol || "") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill>
+                        <Pill color={(e.symbol || "").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill>
                       </td>
                       <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>
                         {e.direction === "UP" ? "▲" : "▼"} {e.direction}
