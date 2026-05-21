@@ -62,6 +62,19 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
     const bestOpenMatch = findBestContractMatch(spike, openContracts || []);
     if (!bestOpenMatch) return spike;
 
+    const spikeTs = Number(spike?.ts);
+    const openedTs = Number(bestOpenMatch?.opened_at_ts);
+    const lagSec = Number.isFinite(spikeTs) && Number.isFinite(openedTs)
+      ? Number((openedTs - spikeTs).toFixed(1))
+      : null;
+    const entryTiming = lagSec == null
+      ? null
+      : lagSec > 0
+        ? "late"
+        : lagSec < 0
+          ? "early"
+          : "on_time";
+
     return {
       ...spike,
       bot_entered: true,
@@ -71,6 +84,8 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
       trade_contract_id: bestOpenMatch?.contract_id ?? null,
       trade_opened_at_ts: bestOpenMatch?.opened_at_ts ?? null,
       trade_closed_at_ts: null,
+      entry_lag_sec: lagSec,
+      entry_timing: entryTiming,
     };
   }
 
@@ -79,6 +94,18 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
   const tradeWon = Number.isFinite(realizedPnl)
     ? realizedPnl > 0
     : /(^|_)won($|\b)|spike_tp/i.test(exitReason);
+  const spikeTs = Number(spike?.ts);
+  const openedTs = Number(bestClosedMatch?.opened_at_ts);
+  const lagSec = Number.isFinite(spikeTs) && Number.isFinite(openedTs)
+    ? Number((openedTs - spikeTs).toFixed(1))
+    : null;
+  const entryTiming = lagSec == null
+    ? null
+    : lagSec > 0
+      ? "late"
+      : lagSec < 0
+        ? "early"
+        : "on_time";
 
   return {
     ...spike,
@@ -90,7 +117,31 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
     trade_contract_id: bestClosedMatch?.contract_id ?? null,
     trade_opened_at_ts: bestClosedMatch?.opened_at_ts ?? null,
     trade_closed_at_ts: bestClosedMatch?.closed_at_ts ?? null,
+    entry_lag_sec: lagSec,
+    entry_timing: entryTiming,
   };
+}
+
+function annotateSpikeSequence(spikes) {
+  const byContract = new Map();
+
+  for (const spike of spikes) {
+    const cid = spike?.trade_contract_id;
+    if (!cid) continue;
+    if (!byContract.has(cid)) byContract.set(cid, []);
+    byContract.get(cid).push(spike);
+  }
+
+  for (const [, list] of byContract.entries()) {
+    list.sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
+    for (let i = 0; i < list.length; i += 1) {
+      const seq = i + 1;
+      list[i].spike_seq_for_trade = seq;
+      list[i].spike_label = `spike_${seq}`;
+    }
+  }
+
+  return spikes;
 }
 
 export async function GET(request) {
@@ -124,6 +175,7 @@ export async function GET(request) {
   }
 
   spikes = spikes.map((spike) => deriveSpikeStatus(spike, closedContracts, openContracts));
+  spikes = annotateSpikeSequence(spikes);
 
   if (since > 0) spikes = spikes.filter((e) => e.ts >= since);
   if (symbol) spikes = spikes.filter((e) => e.symbol === symbol);
