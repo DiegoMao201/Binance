@@ -1966,20 +1966,23 @@ function SpikesTab() {
     const m = {};
     for (const e of spikes) {
       const s = e.symbol || "?";
-      if (!m[s]) m[s] = { n: 0, entered: 0, blocked: 0, ratioSum: 0, ratioMax: 0 };
+      if (!m[s]) m[s] = { n: 0, entered: 0, missed: 0, blocked: 0, ratioSum: 0, ratioMax: 0 };
       m[s].n++;
       m[s].ratioSum += e.ratio || 0;
       if ((e.ratio || 0) > m[s].ratioMax) m[s].ratioMax = e.ratio;
-      if (e.bot_entered === true)  m[s].entered++;
-      if (e.bot_entered === false) m[s].blocked++;
+      if (e.bot_entered === true)              m[s].entered++;
+      else if (e.missed_exit === true)          m[s].missed++;
+      else if (e.bot_entered === false)         m[s].blocked++;
     }
     return Object.entries(m).sort((a, b) => b[1].n - a[1].n);
   }, [spikes]);
 
   const entered = spikes.filter(e => e.bot_entered === true).length;
-  const blocked = spikes.filter(e => e.bot_entered === false).length;
+  const missed  = spikes.filter(e => e.missed_exit === true).length;
+  const blocked = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
   const unknown = spikes.filter(e => e.bot_entered == null).length;
-  const entryRate = spikes.length > 0 ? ((entered / spikes.length) * 100).toFixed(1) : "–";
+  const entryDenom = entered + missed + blocked;
+  const entryRate = entryDenom > 0 ? ((entered / entryDenom) * 100).toFixed(1) : "–";
   const allSymbols = [...new Set(spikes.map(e => e.symbol).filter(Boolean))].sort();
 
   const dirColor = d => d === "UP" ? T.green : T.red;
@@ -1992,7 +1995,8 @@ function SpikesTab() {
         <KPI label="En pantalla" value={spikes.length} accent={T.violet} />
         <KPI label="Bot entró" value={entered} color={T.green} accent={T.green} />
         <KPI label="Bot bloqueado" value={blocked} color={T.red} accent={T.red} />
-        <KPI label="Sin dato" value={unknown} color={T.amber} />
+        <KPI label="Salió antes" value={missed} color={T.amber} accent={T.amber} />
+        <KPI label="Sin dato" value={unknown} color={T.mute} />
         <KPI label="Entrada %" value={`${entryRate}%`} color={entered > 0 ? T.green : T.textD} accent={T.cyan} />
       </div>
 
@@ -2052,15 +2056,16 @@ function SpikesTab() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                  {["Símbolo","Spikes","Entró","Bloqueado","Entry %","Ratio avg","Ratio max"].map(h => (
+                  {["Símbolo","Spikes","Entró","Perdido","Bloqueado","Entry %","Ratio avg","Ratio max"].map(h => (
                     <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9 }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {bySym.map(([sym, st]) => {
-                  const entPct = (st.entered + st.blocked) > 0
-                    ? ((st.entered / (st.entered + st.blocked)) * 100).toFixed(0) : "–";
+                  const _denom = st.entered + (st.missed||0) + st.blocked;
+                  const entPct = _denom > 0
+                    ? ((st.entered / _denom) * 100).toFixed(0) : "–";
                   return (
                     <tr key={sym}
                       style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}
@@ -2070,6 +2075,7 @@ function SpikesTab() {
                       <td style={{ padding: "5px 8px" }}><Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">{sym}</Pill></td>
                       <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
                       <td style={{ padding: "5px 8px", color: T.green }}>{st.entered}</td>
+                      <td style={{ padding: "5px 8px", color: T.amber }}>{st.missed||0}</td>
                       <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
                       <td style={{ padding: "5px 8px", color: T.amber }}>{entPct}%</td>
                       <td style={{ padding: "5px 8px", color: T.textD }}>{st.n > 0 ? (st.ratioSum / st.n).toFixed(0) : "–"}×</td>
@@ -2102,8 +2108,9 @@ function SpikesTab() {
               <tbody>
                 {sorted.map((e, i) => {
                   const isEntered = e.bot_entered === true;
-                  const isBlocked = e.bot_entered === false;
-                  const rowBg = isEntered ? `${T.green}08` : isBlocked ? `${T.red}06` : "transparent";
+                  const isMissed  = e.missed_exit === true;
+                  const isBlocked = e.bot_entered === false && !isMissed;
+                  const rowBg = isEntered ? `${T.green}08` : isMissed ? `${T.amber}08` : isBlocked ? `${T.red}06` : "transparent";
                   return (
                     <tr key={`${e.ts}-${i}`} style={{ background: rowBg, borderBottom: `1px solid ${T.border}18` }}>
                       <td style={{ padding: "4px 10px", color: T.mute, whiteSpace: "nowrap" }}>
@@ -2135,8 +2142,10 @@ function SpikesTab() {
                         {e.lockout_active ? <Pill color={T.red} size="sm">SÍ</Pill> : <span style={{ color: T.mute }}>–</span>}
                       </td>
                       <td style={{ padding: "4px 10px" }}>
-                        {e.bot_entered === true  && <Pill color={T.green} size="sm">✓ SÍ</Pill>}
-                        {e.bot_entered === false && <Pill color={T.red}   size="sm">✗ NO</Pill>}
+                        {e.bot_entered === true  && !e.post_spike_entry && <Pill color={T.green} size="sm">✓ SÍ</Pill>}
+                        {e.bot_entered === true  && e.post_spike_entry  && <Pill color={T.cyan}  size="sm">⚡ TARDE</Pill>}
+                        {e.missed_exit === true  && <Pill color={T.amber} size="sm">↩ PERDIDO</Pill>}
+                        {e.bot_entered === false && !e.missed_exit       && <Pill color={T.red}   size="sm">✗ NO</Pill>}
                         {e.bot_entered == null   && <span style={{ color: T.mute }}>–</span>}
                         {e.score != null && <span style={{ color: T.textD, marginLeft: 4 }}>s={e.score}</span>}
                       </td>

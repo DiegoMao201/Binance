@@ -76,6 +76,39 @@ function findBestContractMatch(spike, contracts, isOpen) {
   return triggeredMatch || activeMatch;
 }
 
+// NEW: Find a contract that was in the same symbol but closed JUST BEFORE the spike (missed exit).
+// Matches contracts that closed 5s–300s before the spike. These are trades we were holding
+// but got kicked out (e.g. spike_timeout) before the spike actually fired.
+function findMissedExitContract(spike, closedContracts) {
+  const symbol = spike?.symbol;
+  const spikeTs = Number(spike?.ts);
+  if (!symbol || !Number.isFinite(spikeTs)) return null;
+
+  const directionToSide = spike?.direction === "UP"
+    ? "MULTUP"
+    : spike?.direction === "DOWN"
+      ? "MULTDOWN"
+      : null;
+
+  let best = null;
+  let bestClosedAt = -Infinity;
+
+  for (const contract of closedContracts) {
+    if ((contract?.symbol || null) !== symbol) continue;
+    if (directionToSide && contract?.side && contract.side !== directionToSide) continue;
+    const closedAt = Number(contract?.closed_at_ts ?? null);
+    if (!Number.isFinite(closedAt)) continue;
+    const secBefore = spikeTs - closedAt; // positive = closed before spike
+    if (secBefore >= 5 && secBefore <= 300) {
+      if (closedAt > bestClosedAt) {
+        bestClosedAt = closedAt;
+        best = { contract, secBefore: Math.round(secBefore) };
+      }
+    }
+  }
+  return best;
+}
+
 function deriveSpikeStatus(spike, closedContracts, openContracts) {
   if (spike?.bot_entered === true) return spike;
 
@@ -83,7 +116,22 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
 
   if (!bestClosedMatch) {
     const bestOpenMatch = findBestContractMatch(spike, openContracts || [], true);
-    if (!bestOpenMatch) return spike;
+    if (!bestOpenMatch) {
+      // Check if we had a trade in this symbol that closed just before the spike (missed exit)
+      const missedExit = findMissedExitContract(spike, closedContracts || []);
+      if (missedExit) {
+        const exitReason = missedExit.contract?.exit_reason || "?";
+        return {
+          ...spike,
+          bot_entered: false,
+          missed_exit: true,
+          missed_exit_sec: missedExit.secBefore,
+          missed_exit_reason: exitReason,
+          block_reason: `salió_antes: ${exitReason} (${missedExit.secBefore}s antes del spike)`,
+        };
+      }
+      return spike;
+    }
 
     const spikeTs = Number(spike?.ts);
     const openedTs = Number(bestOpenMatch?.opened_at_ts);
@@ -97,6 +145,8 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
         : lagSec < 0
           ? "early"
           : "on_time";
+    // post_spike_entry: trade opened MORE than 5s after spike (chasing, not catching)
+    const postSpikeEntry = lagSec != null && lagSec > 5;
 
     return {
       ...spike,
@@ -104,6 +154,7 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
       block_reason: null,
       trade_result: "open",
       trade_status: "open",
+      post_spike_entry: postSpikeEntry,
       trade_contract_id: bestOpenMatch?.contract_id ?? null,
       trade_opened_at_ts: bestOpenMatch?.opened_at_ts ?? null,
       trade_closed_at_ts: null,
@@ -129,11 +180,14 @@ function deriveSpikeStatus(spike, closedContracts, openContracts) {
       : lagSec < 0
         ? "early"
         : "on_time";
+  // post_spike_entry: trade opened MORE than 5s after spike
+  const postSpikeEntry = lagSec != null && lagSec > 5;
 
   return {
     ...spike,
     bot_entered: true,
     block_reason: null,
+    post_spike_entry: postSpikeEntry,
     trade_result: tradeWon ? "win" : "loss",
     trade_status: "closed",
     trade_exit_reason: bestClosedMatch?.exit_reason || null,
