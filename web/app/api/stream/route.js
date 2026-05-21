@@ -28,6 +28,7 @@ const WATCHED_DERIV = [
   "deriv_status.json",
   "deriv_open_contracts.json",
   "deriv_closed_contracts.json",
+  "deriv_session.json",
 ];
 
 export async function GET() {

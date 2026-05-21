@@ -312,22 +312,30 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 20,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 270,        # Phase 31: BOOM300 spikes ~every 300 ticks (≈5min); 270s window captures 90%
         "ema_distance_pct": 0.02,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,             # lowered 7.5→6.5: hd+smc bonuses bring viable setups to ≥7.5
+        "min_score": 6.5,             # hd+smc bonuses bring viable setups to ≥7.5
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        # ── Geo gate added 2026-05-18: BOOM needs price below channel mid ──
-        # BOOM spikes UP from accumulation zones. Extended prices (positive geo)
-        # indicate the price already moved away from the dip → wrong entry timing.
-        "geo_entry_max": 0.40,          # veto if price > 0.40σ above channel mid
+        "hurst_min_spike": 0.43,        # Phase 31: aligned with other BOOM profiles
+        "fvg_tier_minimo": "fvg_detected",  # Phase 31: Tier 1 sufficient — generate data first
+        # ── Geo gate: BOOM needs price below channel mid ──
+        # BOOM spikes UP from accumulation zones. Extended prices = wrong entry timing.
+        "geo_entry_max": 0.50,          # Phase 31: 0.40→0.50 to allow more setups while collecting data
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
+        "stop_loss_pct_override": 0.36, # Phase 31: align with other BOOM profiles → sl_usd > broker floor
+        "spike_capture_tp_usdt": 0.15,  # Phase 31: small spikes still valid exits
+        "spike_profit_delta_usdt": 0.10,
+        # Phase 31: observation window — wait 60s after signal; if spike occurs during wait → cancel
+        # (spike already happened = entry is late). If no spike → proceed (spike still pending).
+        "observation_window_sec": 60,
     },
     "BOOM500": {
         "type": "spike_boom",
@@ -369,7 +377,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92; cap at 1.80 prevents rejection
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
@@ -382,6 +390,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # CRASH600 spike peak +$0.21 didn't trigger $0.40 TP. Small spikes are still real spikes.
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
+        # Phase 31: observation window — wait 90s after signal; if spike occurs during wait → cancel
+        # (spike already happened = entry is late). If no spike → proceed (spike still pending).
+        "observation_window_sec": 90,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -389,7 +400,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 20,
-        "max_hold_seconds": 450,        # 7.5 min — overrides BOOM_CRASH_SPIKE_TIMEOUT_SEC
+        "max_hold_seconds": 270,        # Phase 31: CRASH300 spikes ~every 300 ticks; 270s window captures 90%
         "ema_distance_pct": 0.02,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -401,14 +412,17 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        # ── Geo gate added 2026-05-18: CRASH needs price below channel mid ──
-        # CRASH spikes DOWN from extended low zones. Wins had deeply negative geo.
-        # Entering near channel mid or above = no accumulated downward pressure.
-        # DEMO Phase 23: relaxed -0.70→-0.20 to generate data on CRASH edge.
+        # ── Geo gate: CRASH needs price below channel mid ──────────────────
+        # CRASH spikes DOWN from extended low zones. DEMO: relaxed -0.70→-0.20.
         "geo_entry_max": -0.20,         # DEMO: was -0.70, needs ≥20 trades to recalibrate
         # Phase 24: spike capture thresholds — small spikes still valid exits
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
+        # Phase 31: full config additions
+        "hurst_min_spike": 0.43,        # Phase 31: aligned with other CRASH profiles
+        "fvg_tier_minimo": "fvg_detected",  # Phase 31: Tier 1 sufficient — generate data first
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
+        "stop_loss_pct_override": 0.36, # Phase 31: align with other CRASH profiles → sl_usd > broker floor
     },
     "CRASH500": {
         "type": "spike_crash",
@@ -436,9 +450,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # REQUIRES COOLIFY: DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.80 (was 4.50)
         # so that score=4.00-4.15 passes effective_min=3.80.
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
-        "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92; cap at 1.80 prevents rejection
+        "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
-        "min_score": 5.0,              # Phase 27: was 6.0 — no_fvg_penalty reduces score to ~5.0        # Phase 24: spike capture thresholds
+        "min_score": 5.0,              # Phase 27: was 6.0 — no_fvg_penalty reduces score to ~5.0
+        # Phase 24: spike capture thresholds
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
     },
@@ -471,7 +487,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
-        "stake_max_usdt": 1.80,         # Phase 27: broker limit ~$1.92 (ENTRY_ALLOWED→rejected@$2.40)
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
         "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
         # Phase 20/24: deterministic spike capture — thresholds lowered 0.40→0.15
         "spike_capture_tp_usdt": 0.15,
@@ -498,19 +514,18 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,        # confirmed same as BOOM1000
         "geo_entry_min": -999,           # no lower bound — BOOM spikes can come from any depth
         "geo_entry_max": 0.50,          # T5: widened 0.40→0.50 to allow more setups
-        "stake_max_usdt": 2.00,         # T5: conservative 8.0→2.00 until edge confirmed
-        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75 → sl_usd > broker floor
-        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
-        "ratchet_enabled": True,        # DPM ratchet active
+        "stake_max_usdt": 2.00,
+        "stop_loss_pct_override": 0.36,
+        "trail_stop_floor_min": 0.20,
+        "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_detected",   # Tier 1 sufficient: FVG detected (not mitigated)
-        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Phase 28: only enter when macro HD is aligned (+2.0).
-        # Data: BOOM900 hd=+2 spike rate=20% → expectancy=+$0.026/trade (was marginal without filter).
         "min_hd_bonus": 2.0,
+        # Phase 31: suspended — no confirmed edge. Reactivate when spike_rate > 20% in ≥50 trades.
+        "disabled": True,
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -532,7 +547,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": -0.20,
-        "stake_max_usdt": 2.00,
+        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -599,23 +614,19 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_min": -999,           # no upper floor — use geo_max only
         # DEMO Phase 23: relaxed -1.00→-0.20 AND fvg_tier fvg_mitigated→fvg_detected
         # to unblock CRASH600 which had 0 trades. Recalibrate after 20 trades.
-        "geo_entry_max": -0.20,         # DEMO: was -1.00
-        "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
-        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75
-        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
-        "ratchet_enabled": True,        # DPM ratchet active
+        "geo_entry_max": -0.20,
+        "stake_max_usdt": 2.00,
+        "stop_loss_pct_override": 0.36,
+        "trail_stop_floor_min": 0.20,
+        "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_detected",  # DEMO: was fvg_mitigated — Tier 1 now OK
-        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
-        "spike_capture_tp_usdt": 0.15,       # was 0.50 — CRASH600 spike +$0.21 wasn't captured
-        "spike_profit_delta_usdt": 0.10,     # was 0.28
-        # Phase 29: RESTORED — min_hd_bonus removed. Phase 28 imposed 2.0 but hd is always
-        # -0.50 in current context → effectively disabled CRASH600 permanently. Pre-Phase28
-        # data: WR=37.5% PNL=+$0.91. Removing the gate restores live operation.
-        # Phase 30: timeout extended 180→270s. Spikes occur up to 252s — 180s was cutting valid spikes.
-        # 270s recovers late spikes; previous timeout=180s was $0.05/trade leak.
+        "fvg_tier_minimo": "fvg_detected",
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
         "max_hold_seconds": 270,
+        # Phase 31: suspended — no confirmed edge. Reactivate when spike_rate > 20% in ≥50 trades.
+        "disabled": True,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.

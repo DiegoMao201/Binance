@@ -64,6 +64,10 @@ export default function HudClient({ initialData }) {
   const [focusSymbol, setFocusSymbol] = useState("");
   const [controlBusy, setControlBusy] = useState(false);
   const [mobileTab, setMobileTab] = useState("pulse");
+  // Phase 31: session management — null = all-time stats, number = unix ms start
+  const [sessionStart, setSessionStart] = useState(
+    () => initialData?.derivSession?.session_start_ts ?? null
+  );
 
   // SSE event-driven (chokidar push). Si falla, retry exponencial.
   useEffect(() => {
@@ -79,10 +83,27 @@ export default function HudClient({ initialData }) {
         setTimeout(open, retry); retry = Math.min(retry * 2, 15000); return;
       }
       es.addEventListener("state", (e) => {
-        try { setPayload(JSON.parse(e.data)); setConnected(true); retry = 1000; } catch { /* noop */ }
+        try {
+          const d = JSON.parse(e.data);
+          setPayload(d);
+          setConnected(true);
+          retry = 1000;
+          // Sync session start from server (in case another client reset it)
+          if (d?.derivSession?.session_start_ts != null) {
+            setSessionStart(d.derivSession.session_start_ts);
+          }
+        } catch { /* noop */ }
       });
       es.onmessage = (e) => {
-        try { setPayload(JSON.parse(e.data)); setConnected(true); retry = 1000; } catch { /* noop */ }
+        try {
+          const d = JSON.parse(e.data);
+          setPayload(d);
+          setConnected(true);
+          retry = 1000;
+          if (d?.derivSession?.session_start_ts != null) {
+            setSessionStart(d.derivSession.session_start_ts);
+          }
+        } catch { /* noop */ }
       };
       es.onerror = () => {
         setConnected(false);
@@ -134,12 +155,41 @@ export default function HudClient({ initialData }) {
 
   // Portfolio stats
   const equity = portfolio.equity_usdt ?? portfolio.balance_usdt ?? null;
-  const realized = portfolio.realized_pnl_usdt ?? null;
-  const winRate = portfolio.win_rate_pct ?? portfolio.win_rate ?? null;
-  const wins = portfolio.wins ?? null;
-  const losses = portfolio.losses ?? null;
-  const totalTrades = portfolio.total_trades ?? closedTrades.length ?? 0;
   const drawdown = portfolio.current_drawdown_pct ?? null;
+
+  // Phase 31: session-filtered stats — compute from derivClosedContracts
+  const allDerivContracts = useMemo(() => payload?.derivClosedContracts || [], [payload?.derivClosedContracts]);
+  const sessionContracts = useMemo(() => {
+    if (!sessionStart) return allDerivContracts;
+    return allDerivContracts.filter((c) => {
+      const closedMs = c.closed_at_ts != null
+        ? c.closed_at_ts * 1000
+        : c.closed_at ? Date.parse(c.closed_at) : 0;
+      return closedMs >= sessionStart;
+    });
+  }, [allDerivContracts, sessionStart]);
+  const sessionPnl = useMemo(
+    () => sessionContracts.reduce((sum, c) => sum + (c.realized_pnl_usdt ?? 0), 0),
+    [sessionContracts]
+  );
+  const sessionWins = useMemo(
+    () => sessionContracts.filter((c) => (c.realized_pnl_usdt ?? 0) > 0).length,
+    [sessionContracts]
+  );
+  const sessionLosses = useMemo(
+    () => sessionContracts.filter((c) => (c.realized_pnl_usdt ?? 0) <= 0).length,
+    [sessionContracts]
+  );
+  const sessionWinRate = sessionContracts.length > 0
+    ? (sessionWins / sessionContracts.length) * 100
+    : null;
+
+  // Use session stats for display when a session is active, else all-time
+  const realized = sessionStart != null ? sessionPnl : (portfolio.realized_pnl_usdt ?? null);
+  const winRate = sessionStart != null ? sessionWinRate : (portfolio.win_rate_pct ?? portfolio.win_rate ?? null);
+  const wins = sessionStart != null ? sessionWins : (portfolio.wins ?? null);
+  const losses = sessionStart != null ? sessionLosses : (portfolio.losses ?? null);
+  const totalTrades = sessionStart != null ? sessionContracts.length : (portfolio.total_trades ?? closedTrades.length ?? 0);
   const isOnline = useMemo(() => {
     const hb = status?.heartbeat_at;
     if (!hb) return false;
@@ -161,6 +211,17 @@ export default function HudClient({ initialData }) {
     finally { setControlBusy(false); }
   }
 
+  // Phase 31: session reset — visual only, bot keeps running
+  async function resetSession() {
+    try {
+      const res = await fetch("/api/session", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setSessionStart(data.session_start_ts ?? Date.now());
+      }
+    } catch { /* noop */ }
+  }
+
   const hasSignal = Boolean(focusAi?.approved && focusAi?.signal === "buy");
   const hasPosition = Boolean(focusOpen);
 
@@ -178,9 +239,14 @@ export default function HudClient({ initialData }) {
 
         <div className="hud-topbar-stats">
           <StatPill label="EQUITY" value={`${fmtUsd(equity)} USDT`} accent="#22d3ee" />
-          <StatPill label="PnL REAL" value={`${realized != null && realized >= 0 ? "+" : ""}${fmtUsd(realized, 4)}`} accent={realized >= 0 ? "#22c55e" : "#ef4444"} trend={realized > 0 ? 1 : realized < 0 ? -1 : 0} />
+          <StatPill
+            label={sessionStart ? "PnL SESIÓN" : "PnL REAL"}
+            value={`${realized != null && realized >= 0 ? "+" : ""}${fmtUsd(realized, 4)}`}
+            accent={realized >= 0 ? "#22c55e" : "#ef4444"}
+            trend={realized > 0 ? 1 : realized < 0 ? -1 : 0}
+          />
           <StatPill label="WIN RATE" value={winRate != null ? `${Number(winRate).toFixed(1)}%` : "—"} accent="#facc15" />
-          <StatPill label="TRADES" value={`${totalTrades}`} accent="#a78bfa" />
+          <StatPill label={sessionStart ? "TRADES·S" : "TRADES"} value={`${totalTrades}`} accent="#a78bfa" />
           <StatPill label="DD" value={drawdown != null ? fmtPct(drawdown) : "—"} accent="#f97316" />
           <StatPill label="W/L" value={wins != null && losses != null ? `${wins}/${losses}` : "—"} accent="#22d3ee" />
         </div>
@@ -274,6 +340,20 @@ export default function HudClient({ initialData }) {
           </button>
           <button disabled={controlBusy} onClick={() => sendControl("stopped")} className={`hud-btn hud-btn-stop ${desired === "stopped" ? "active" : ""}`}>
             <Square size={12} /> STOP
+          </button>
+          {/* Phase 31: session reset — resets visual KPIs, bot unaffected */}
+          <button
+            onClick={resetSession}
+            title="Reset session stats (visual only, bot keeps running)"
+            className="hud-btn"
+            style={{ borderColor: "rgba(251,191,36,0.5)", color: "#fbbf24", gap: 4 }}
+          >
+            <RotateCcw size={12} />
+            {sessionStart ? (
+              <span style={{ fontSize: 9, opacity: 0.8 }}>
+                {new Date(sessionStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            ) : "SESIÓN"}
           </button>
           <a href="/" className="hud-btn hud-btn-link"><RotateCcw size={12} /> Clásico</a>
         </div>

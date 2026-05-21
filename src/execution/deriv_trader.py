@@ -312,10 +312,10 @@ class DerivTradeExecutor:
         # upstream by direction_veto in the risk engine (BOOM→MULTUP only,
         # CRASH→MULTDOWN only).  The old RISE/FALL path was rejected by the broker.
         # ABSOLUTE HARD CAP — final guard before any order touches the broker.
-        # DERIV_MAX_STAKE_USDT (default $3.00) is unbreakable: no regime/score
+        # DERIV_MAX_STAKE_USDT (default $5.00) is unbreakable: no regime/score
         # multiplier or Hurst boost can send a larger stake. Logged as a warning
         # so calibration samples are always within the configured ceiling.
-        _final_hard_cap = float(os.getenv("DERIV_MAX_STAKE_USDT", "3.00"))
+        _final_hard_cap = float(os.getenv("DERIV_MAX_STAKE_USDT", "5.00"))
         if order.stake_usdt > _final_hard_cap:
             _LOGGER.warning(
                 "[deriv-trader] stake capped %.2f → %.2f (DERIV_MAX_STAKE_USDT hard cap)",

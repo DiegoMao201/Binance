@@ -1079,6 +1079,17 @@ class DerivDaemon:
                     extra={**decision_extra, "spread_pct": spread_pct},
                 )
                 return
+            # ── Observation window (BOOM markets only, Phase 31) ───────────
+            _obs_sec_ov = int(_asset_profile.get("observation_window_sec", 0))
+            if _obs_sec_ov > 0:
+                _entry_ts_ov = time.monotonic()
+                if await self._obs_window_check(tick.symbol, _obs_sec_ov, _entry_ts_ov):
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score, reason=f"OBS_WINDOW_BLOCKED[override]: spike during {_obs_sec_ov}s",
+                        extra={**decision_extra, "obs_sec": _obs_sec_ov},
+                    )
+                    return
             self._counters["orders_sent"] += 1
             try:
                 result = await self._router.route_order(payload_override)
@@ -1247,6 +1258,17 @@ class DerivDaemon:
                 extra={**decision_extra, "spread_pct": spread_pct},
             )
             return
+        # ── Observation window (BOOM markets only, Phase 31) ─────────────
+        _obs_sec = int(_asset_profile.get("observation_window_sec", 0))
+        if _obs_sec > 0:
+            _entry_ts = time.monotonic()
+            if await self._obs_window_check(tick.symbol, _obs_sec, _entry_ts):
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=f"OBS_WINDOW_BLOCKED: spike during {_obs_sec}s",
+                    extra={**decision_extra, "obs_sec": _obs_sec},
+                )
+                return
         self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
@@ -1264,6 +1286,36 @@ class DerivDaemon:
         except Exception:  # noqa: BLE001
             self._counters["orders_failed"] += 1
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Observation window — Phase 31
+    # After signal fires for BOOM markets, wait obs_window_sec before placing
+    # the order. If a spike is detected DURING the wait, the opportunity has
+    # already materialised → cancel entry (we'd be entering after the fact).
+    # If no spike occurs → proceed (spike still pending, good entry timing).
+    # CRASH symbols deliberately have no obs_window (spikes too rapid).
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _obs_window_check(self, symbol: str, obs_sec: int, entry_ts: float) -> bool:
+        """Wait *obs_sec* seconds monitoring for a spike.
+
+        Returns True (entry blocked) if a spike fires during the window.
+        Returns False (proceed) if the window closes cleanly.
+        """
+        _end = time.monotonic() + obs_sec
+        while time.monotonic() < _end:
+            await asyncio.sleep(1)
+            if self._risk.get_last_spike_ts(symbol) > entry_ts:
+                _LOGGER.info(
+                    "[OBS_WINDOW] %s spike detected during obs window (%ds) → entry cancelled"
+                    " (spike already materialised)",
+                    symbol, obs_sec,
+                )
+                return True  # blocked — too late
+        _LOGGER.info(
+            "[OBS_WINDOW] %s no spike in %ds → proceeding with entry",
+            symbol, obs_sec,
+        )
+        return False  # clean — go ahead
 
     # ─────────────────────────────────────────────────────────────────────────
     # Balance refresh — polls Deriv API every 30 s and caches the result so

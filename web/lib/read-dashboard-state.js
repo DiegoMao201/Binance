@@ -22,7 +22,7 @@ async function readJson(fileName, fallback, baseDir = LOGS) {
 
 
 export async function readDashboardState() {
-  const [state, status, control, orderHistory, signalHistory, scanHistory, openPositions, closedTrades, equityHistory, preFlight, tradeMonitorLog, recoveryStatus, derivStatus, derivOpenContracts, derivClosedContracts] = await Promise.all([
+  const [state, status, control, orderHistory, signalHistory, scanHistory, openPositions, closedTrades, equityHistory, preFlight, tradeMonitorLog, recoveryStatus, derivStatus, derivOpenContracts, derivClosedContracts, derivSession] = await Promise.all([
     readJson("bot_state.json", {}),
     readJson("status.json", {}),
     readJson("control.json", {}),
@@ -38,6 +38,7 @@ export async function readDashboardState() {
     readJson("deriv_status.json", {}, DERIV_LOGS),
     readJson("deriv_open_contracts.json", [], DERIV_LOGS),
     readJson("deriv_closed_contracts.json", [], DERIV_LOGS),
+    readJson("deriv_session.json", null, DERIV_LOGS),
   ]);
 
   return {
@@ -56,6 +57,8 @@ export async function readDashboardState() {
     derivStatus,
     derivOpenContracts,
     derivClosedContracts,
+    // Phase 31: session management — null = show all-time stats
+    derivSession,
     serverTime: new Date().toISOString(),
   };
 }

@@ -708,11 +708,28 @@ class DerivRiskManager:
                     _is_crash_spike = "CRASH" in _su and _jump < -3.0 * _recent_atr
                     if _is_boom_spike or _is_crash_spike:
                         self._last_spike_ts[symbol] = time.time()
+                        _direction = "UP" if _is_boom_spike else "DOWN"
                         _LOGGER.info(
-                            "[SPIKE_DETECTED] %s jump=%.5f atr=%.5f (%.1f×) — "
+                            "[SPIKE_DETECTED] %s direction=%s jump=%.5f atr=%.5f ratio=%.1f× — "
                             "spike-cycle timer reset",
-                            symbol, _jump, _recent_atr, abs(_jump) / _recent_atr,
+                            symbol, _direction, _jump, _recent_atr, abs(_jump) / _recent_atr,
                         )
+                        # Structured spike event log — captured by log parser and spike_events table
+                        _LOGGER.info(
+                            "[SPIKE_EVENT] symbol=%s direction=%s jump=%.5f atr=%.5f "
+                            "ratio=%.2f ts=%.3f",
+                            symbol, _direction, _jump, _recent_atr,
+                            abs(_jump) / _recent_atr, time.time(),
+                        )
+
+    def get_last_spike_ts(self, symbol: str) -> float:
+        """Return wall-clock time of the last spike detected for *symbol*.
+
+        Returns 0.0 if no spike has been observed yet.  Used by the
+        observation-window logic in main_deriv to detect spikes that occur
+        DURING the wait period and cancel stale entries.
+        """
+        return self._last_spike_ts.get(symbol, 0.0)
 
     def evaluate(
         self,
@@ -1808,10 +1825,10 @@ class DerivRiskManager:
             symbol, _exec_grade, score, _score_sz, regime,
         )
         # Hard floor at $1.00 (DERIV_MIN_STAKE_USDT_HARD overrides).
-        # Hard cap at $3.00 (DERIV_MAX_STAKE_USDT overrides) — ABSOLUTE, unbreakable.
+        # Hard cap at $5.00 (DERIV_MAX_STAKE_USDT overrides) — ABSOLUTE, unbreakable.
         # Prevents any regime/score multiplier from producing $30+ orders.
         _HARD_FLOOR_USDT: float = float(os.getenv("DERIV_MIN_STAKE_USDT_HARD", "1.00"))
-        _HARD_CAP_USDT: float = float(os.getenv("DERIV_MAX_STAKE_USDT", "3.00"))
+        _HARD_CAP_USDT: float = float(os.getenv("DERIV_MAX_STAKE_USDT", "5.00"))
         min_stake = max(_HARD_FLOOR_USDT, float(self._settings.min_stake_usdt))
         stake = max(min_stake, min(risk_usdt, self._settings.bankroll_usdt * 0.25))
         stake = min(stake, _HARD_CAP_USDT)   # ABSOLUTE CAP — overrides all multipliers
