@@ -219,6 +219,10 @@ class DerivTradeExecutor:
         # ticks and/or the reaper fire on the same contract simultaneously.
         # asyncio is single-threaded so check+add before any `await` is atomic.
         self._closing: set[int] = set()
+        # Phase 36: entry-lock guard — prevents TOCTOU race where two pipeline
+        # tasks both pass the open_on_symbol check before the first buy
+        # completes (~300 ms window).  Checked+set before any `await`.
+        self._pending_entries: set[str] = set()
         # Running per-symbol stats (updated on each contract close)
         self._sym_stats: dict[str, dict[str, Any]] = {}
         self._session_pnl: float = 0.0
@@ -295,6 +299,25 @@ class DerivTradeExecutor:
                 f"max_open_contracts={self._settings.max_open_contracts} reached"
             )
 
+        # Phase 36: entry-lock guard (belt-and-suspenders alongside _sym_eval_locks).
+        # asyncio is single-threaded: check+add here is atomic — no await between them.
+        # This closes the TOCTOU window where open_on_symbol is empty but a buy is
+        # already in-flight (self._open is only updated AFTER the broker ack, ~300 ms).
+        if order.symbol in self._pending_entries:
+            _LOGGER.info(
+                "[deriv-trader] ENTRY_GUARD: %s buy already in-flight — blocked duplicate entry",
+                order.symbol,
+            )
+            return {"status": "symbol_already_open", "symbol": order.symbol,
+                    "open_contracts": [], "reason": "pending_entry"}
+        self._pending_entries.add(order.symbol)
+        try:
+            return await self._execute_locked(order)
+        finally:
+            self._pending_entries.discard(order.symbol)
+
+    async def _execute_locked(self, order: "DerivOrder") -> dict[str, Any]:
+        """Inner execute: called only when no pending entry exists for the symbol."""
         # BUG-A fix: hard block — one position per symbol, no stale bypass.
         # The per-symbol asyncio lock in _evaluate_and_trade prevents the race
         # but this is the final backstop in execute_order itself.

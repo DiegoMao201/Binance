@@ -502,6 +502,7 @@ class DerivDaemon:
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
         # ═══════════════════════════════════════════════════════════════════
         if not self._cooldown.can_fire(tick.symbol):
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="trade_cooldown")
             return
 
         # ═══════════════════════════════════════════════════════════════════
@@ -534,6 +535,7 @@ class DerivDaemon:
                 "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%.0fs / %.0fs",
                 tick.symbol, _sig_elapsed, _cd_sec,
             )
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
             return
 
         # ═══════════════════════════════════════════════════════════════════
@@ -1125,16 +1127,29 @@ class DerivDaemon:
                         score=snap.score, reason=f"OBS_WINDOW_BLOCKED[override]: spike during {_obs_sec_ov}s",
                         extra={**decision_extra, "obs_sec": _obs_sec_ov},
                     )
+                    self._spike_enrich(tick.symbol, bot_entered=False,
+                                       block_reason=f"obs_window_blocked:{_obs_sec_ov}s")
                     return
             self._counters["orders_sent"] += 1
             try:
                 result = await self._router.route_order(payload_override)
-                self._counters["orders_ok"] += 1
-                _LOGGER.info(
-                    "[deriv-daemon] ORDER %s | score=%.2f [MATH_OVERRIDE] | %s",
-                    tick.symbol, snap.score, result,
-                )
-                self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
+                # Phase 36: symbol_already_open means execute() blocked the buy
+                # (pending entry or open contract) — not an actual order.
+                if (result or {}).get("status") == "symbol_already_open":
+                    self._counters["orders_sent"] -= 1
+                    _LOGGER.info(
+                        "[deriv-daemon] ORDER BLOCKED %s [MATH_OVERRIDE]: symbol_already_open",
+                        tick.symbol,
+                    )
+                    self._spike_enrich(tick.symbol, bot_entered=False,
+                                       block_reason="symbol_already_open")
+                else:
+                    self._counters["orders_ok"] += 1
+                    _LOGGER.info(
+                        "[deriv-daemon] ORDER %s | score=%.2f [MATH_OVERRIDE] | %s",
+                        tick.symbol, snap.score, result,
+                    )
+                    self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
             except OrderRouterError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] router rejected (override): %s", exc)
@@ -1310,16 +1325,29 @@ class DerivDaemon:
                     score=snap.score, reason=f"OBS_WINDOW_BLOCKED: spike during {_obs_sec}s",
                     extra={**decision_extra, "obs_sec": _obs_sec},
                 )
+                self._spike_enrich(tick.symbol, bot_entered=False,
+                                   block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
         self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
-            self._counters["orders_ok"] += 1
-            _LOGGER.info(
-                "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
-                tick.symbol, snap.score, ai_note, hurst_note, result,
-            )
-            self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
+            # Phase 36: symbol_already_open means execute() blocked the buy
+            # (pending entry or open contract) — not an actual order.
+            if (result or {}).get("status") == "symbol_already_open":
+                self._counters["orders_sent"] -= 1
+                _LOGGER.info(
+                    "[deriv-daemon] ORDER BLOCKED %s: symbol_already_open",
+                    tick.symbol,
+                )
+                self._spike_enrich(tick.symbol, bot_entered=False,
+                                   block_reason="symbol_already_open")
+            else:
+                self._counters["orders_ok"] += 1
+                _LOGGER.info(
+                    "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
+                    tick.symbol, snap.score, ai_note, hurst_note, result,
+                )
+                self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
