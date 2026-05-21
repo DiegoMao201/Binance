@@ -26,5 +26,22 @@ export async function GET(request) {
   if (symbol) spikes = spikes.filter((e) => e.symbol === symbol);
   spikes = spikes.slice(-limit);
 
+  const format = searchParams.get("format") || "json";
+  if (format === "csv") {
+    const cols = ["ts","iso","symbol","direction","jump","atr","ratio","price","loss_streak","since_last_trade_s","lockout_active","bot_entered","block_reason","score","had_open_pos"];
+    const rows = [cols.join(",")];
+    for (const e of spikes) {
+      rows.push(cols.map(c => {
+        const v = e[c];
+        if (v == null) return "";
+        if (typeof v === "string" && v.includes(",")) return `"${v}"`;
+        return v;
+      }).join(","));
+    }
+    return new Response(rows.join("\n"), {
+      headers: { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=deriv_spike_events.csv" },
+    });
+  }
+
   return Response.json({ total: spikes.length, spikes });
 }

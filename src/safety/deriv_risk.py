@@ -730,6 +730,16 @@ class DerivRiskManager:
                             )
                             _state_dir.mkdir(parents=True, exist_ok=True)
                             _spike_file = _state_dir / "deriv_spike_events.json"
+                            # --- enriched context available at spike detection time ---
+                            _price_at_spike = round(buf[-1], 5)
+                            _since_last_trade = round(
+                                _spike_ts - self._last_trade_ts_per_symbol.get(symbol.upper(), 0), 1
+                            )
+                            _lockout_active = False
+                            try:
+                                _lockout_active = bool(self._read_lockout().locked)
+                            except Exception:
+                                pass
                             _spike_record = {
                                 "ts": _spike_ts,
                                 "iso": datetime.fromtimestamp(_spike_ts, tz=timezone.utc).isoformat(),
@@ -738,6 +748,14 @@ class DerivRiskManager:
                                 "jump": round(_jump, 5),
                                 "atr": round(_recent_atr, 5),
                                 "ratio": round(abs(_jump) / _recent_atr, 2),
+                                "price": _price_at_spike,
+                                "loss_streak": int(self._loss_streak),
+                                "since_last_trade_s": _since_last_trade,
+                                "lockout_active": _lockout_active,
+                                # bot_entered / block_reason are written post-evaluate
+                                # via enrich_last_spike() called from the trading loop
+                                "bot_entered": None,
+                                "block_reason": None,
                             }
                             _existing: list = []
                             if _spike_file.exists():
@@ -761,6 +779,42 @@ class DerivRiskManager:
         DURING the wait period and cancel stale entries.
         """
         return self._last_spike_ts.get(symbol, 0.0)
+
+    def enrich_last_spike(
+        self,
+        symbol: str,
+        *,
+        bot_entered: bool,
+        block_reason: str | None = None,
+        score: float | None = None,
+        had_open_pos: bool = False,
+    ) -> None:
+        """Enrich the most-recent spike record for *symbol* with post-evaluate context.
+
+        Called from main_deriv after evaluate() decides whether to enter or block.
+        Updates bot_entered, block_reason, score in the last spike JSON record.
+        """
+        try:
+            _state_dir = Path(
+                os.environ.get("BOT_STATE_DIR",
+                    os.environ.get("LOGS_DIR", Path(__file__).parents[2] / "logs"))
+            )
+            _spike_file = _state_dir / "deriv_spike_events.json"
+            if not _spike_file.exists():
+                return
+            _existing: list = json.loads(_spike_file.read_text())
+            # Find last spike for this symbol (most recent first)
+            for i in range(len(_existing) - 1, -1, -1):
+                if _existing[i].get("symbol") == symbol:
+                    _existing[i]["bot_entered"] = bot_entered
+                    _existing[i]["block_reason"] = block_reason
+                    if score is not None:
+                        _existing[i]["score"] = round(score, 2)
+                    _existing[i]["had_open_pos"] = had_open_pos
+                    break
+            _spike_file.write_text(json.dumps(_existing))
+        except Exception as _e:
+            _LOGGER.debug("[SPIKE_EVENT] enrich_last_spike failed: %s", _e)
 
     def evaluate(
         self,

@@ -140,6 +140,35 @@ class DerivDaemon:
         # until the in-flight pipeline completes.
         self._sym_eval_locks: dict[str, asyncio.Lock] = {}
 
+    def _spike_enrich(
+        self,
+        symbol: str,
+        *,
+        bot_entered: bool,
+        block_reason: str | None = None,
+        score: float | None = None,
+    ) -> None:
+        """Enrich the most-recent spike JSON record for BOOM/CRASH symbols.
+
+        Only runs if the last spike for this symbol happened within 60 s, to
+        avoid overwriting old records with unrelated evaluate() outcomes.
+        """
+        _su = symbol.upper()
+        if "BOOM" not in _su and "CRASH" not in _su:
+            return
+        _last_spike = self._risk.get_last_spike_ts(symbol)
+        if _last_spike <= 0 or (time.time() - _last_spike) > 60.0:
+            return
+        _open_contracts = getattr(self._executor, "open_contracts", {})
+        _had_open = bool(_open_contracts.get(symbol) or _open_contracts.get(_su))
+        self._risk.enrich_last_spike(
+            symbol,
+            bot_entered=bot_entered,
+            block_reason=block_reason,
+            score=score,
+            had_open_pos=_had_open,
+        )
+
     def _record_decision(self, *, symbol: str, allowed: bool, side: str | None,
                          score: float, reason: str,
                          extra: dict | None = None) -> None:
@@ -997,6 +1026,11 @@ class DerivDaemon:
                 reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
                 extra=decision_extra,
             )
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
+                score=getattr(snap, "score", 0.0),
+            )
             return
 
         # ═══════════════════════════════════════════════════════════════════
@@ -1279,6 +1313,7 @@ class DerivDaemon:
                 "[deriv-daemon] ORDER %s | score=%.2f%s%s | %s",
                 tick.symbol, snap.score, ai_note, hurst_note, result,
             )
+            self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)

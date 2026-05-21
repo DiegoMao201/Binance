@@ -283,6 +283,7 @@ const TABS = [
   { id: "telemetry",   label: "Telemetry",   icon: "◈" },
   { id: "decisions",   label: "Decisions",   icon: "▸" },
   { id: "symbols",     label: "Symbols",     icon: "✦" },
+  { id: "spikes",      label: "Spikes",      icon: "⚡" },
   { id: "logs",        label: "Logs",        icon: "≡" },
   { id: "export",      label: "Export",      icon: "↓" },
 ];
@@ -348,6 +349,7 @@ export default function DerivAnalyticsClient({ initialState }) {
           {tab === "telemetry" && <TelemetryTab data={data} />}
           {tab === "decisions" && <DecisionsTab data={data} />}
           {tab === "symbols"   && <SymbolsTab data={data} />}
+          {tab === "spikes"    && <SpikesTab />}
           {tab === "logs"      && <LogsTab data={data} />}
           {tab === "export"    && <ExportTab data={data} />}
         </motion.div>
@@ -1921,6 +1923,238 @@ function LogsTab({ data }) {
 /* ════════════════════════════════════════════════════════════════════════
    TAB 7 — EXPORT
    ════════════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════════════
+   SPIKES TAB — real-time spike event explorer
+   ════════════════════════════════════════════════════════════════════════ */
+function SpikesTab() {
+  const [spikes, setSpikes]       = useState([]);
+  const [total, setTotal]         = useState(0);
+  const [loading, setLoading]     = useState(true);
+  const [filterSym, setFilterSym] = useState("");
+  const [limit, setLimit]         = useState(300);
+  const [sortDesc, setSortDesc]   = useState(true);
+  const [liveMode, setLiveMode]   = useState(true);
+
+  const fetchSpikes = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit });
+      if (filterSym) params.set("symbol", filterSym);
+      const r = await fetch(`/api/spikes?${params}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      setSpikes(j.spikes || []);
+      setTotal(j.total || 0);
+    } catch { /* ignore */ } finally {
+      setLoading(false);
+    }
+  }, [filterSym, limit]);
+
+  useEffect(() => { fetchSpikes(); }, [fetchSpikes]);
+  useEffect(() => {
+    if (!liveMode) return;
+    const id = setInterval(fetchSpikes, 5000);
+    return () => clearInterval(id);
+  }, [liveMode, fetchSpikes]);
+
+  const sorted = useMemo(() => {
+    const s = [...spikes];
+    return sortDesc ? s.reverse() : s;
+  }, [spikes, sortDesc]);
+
+  // ── Stats by symbol ───────────────────────────────────────────────────
+  const bySym = useMemo(() => {
+    const m = {};
+    for (const e of spikes) {
+      const s = e.symbol || "?";
+      if (!m[s]) m[s] = { n: 0, entered: 0, blocked: 0, ratioSum: 0, ratioMax: 0 };
+      m[s].n++;
+      m[s].ratioSum += e.ratio || 0;
+      if ((e.ratio || 0) > m[s].ratioMax) m[s].ratioMax = e.ratio;
+      if (e.bot_entered === true)  m[s].entered++;
+      if (e.bot_entered === false) m[s].blocked++;
+    }
+    return Object.entries(m).sort((a, b) => b[1].n - a[1].n);
+  }, [spikes]);
+
+  const entered = spikes.filter(e => e.bot_entered === true).length;
+  const blocked = spikes.filter(e => e.bot_entered === false).length;
+  const unknown = spikes.filter(e => e.bot_entered == null).length;
+  const entryRate = spikes.length > 0 ? ((entered / spikes.length) * 100).toFixed(1) : "–";
+  const allSymbols = [...new Set(spikes.map(e => e.symbol).filter(Boolean))].sort();
+
+  const dirColor = d => d === "UP" ? T.green : T.red;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* ── Top KPIs ─────────────────────────────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+        <KPI label="Total Spikes" value={total} accent={T.cyan} />
+        <KPI label="En pantalla" value={spikes.length} accent={T.violet} />
+        <KPI label="Bot entró" value={entered} color={T.green} accent={T.green} />
+        <KPI label="Bot bloqueado" value={blocked} color={T.red} accent={T.red} />
+        <KPI label="Sin dato" value={unknown} color={T.amber} />
+        <KPI label="Entrada %" value={`${entryRate}%`} color={entered > 0 ? T.green : T.textD} accent={T.cyan} />
+      </div>
+
+      {/* ── Controls ─────────────────────────────────────────────────── */}
+      <Panel title="Filtros">
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Símbolo</Label>
+            <select value={filterSym} onChange={e => setFilterSym(e.target.value)}
+              style={{ ...inputStyle, padding: "5px 8px", minWidth: 120 }}>
+              <option value="">Todos</option>
+              {allSymbols.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Mostrar</Label>
+            <select value={limit} onChange={e => setLimit(Number(e.target.value))}
+              style={{ ...inputStyle, padding: "5px 8px" }}>
+              <option value={50}>Últimos 50</option>
+              <option value={100}>Últimos 100</option>
+              <option value={300}>Últimos 300</option>
+              <option value={1000}>Últimos 1000</option>
+              <option value={2000}>Todos (2000)</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Orden</Label>
+            <button onClick={() => setSortDesc(v => !v)} style={{ ...btnStyle(T.cyan), padding: "6px 10px" }}>
+              {sortDesc ? "↓ Más reciente" : "↑ Más antiguo"}
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Live</Label>
+            <button onClick={() => setLiveMode(v => !v)} style={{ ...btnStyle(liveMode ? T.green : T.mute), padding: "6px 10px" }}>
+              {liveMode ? "◉ LIVE" : "◎ PAUSE"}
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>&nbsp;</Label>
+            <button onClick={fetchSpikes} style={{ ...btnStyle(T.amber), padding: "6px 10px" }}>↻ Refresh</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Descargar</Label>
+            <a
+              href={`/api/spikes?limit=2000${filterSym ? `&symbol=${filterSym}` : ""}&format=json`}
+              download="deriv_spike_events.json"
+              style={{ ...btnStyle(T.violet), padding: "6px 10px", textDecoration: "none", display: "inline-block" }}
+            >↓ JSON</a>
+          </div>
+        </div>
+      </Panel>
+
+      {/* ── Stats por símbolo ─────────────────────────────────────────── */}
+      {bySym.length > 0 && (
+        <Panel title="Stats por símbolo">
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                  {["Símbolo","Spikes","Entró","Bloqueado","Entry %","Ratio avg","Ratio max"].map(h => (
+                    <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {bySym.map(([sym, st]) => {
+                  const entPct = (st.entered + st.blocked) > 0
+                    ? ((st.entered / (st.entered + st.blocked)) * 100).toFixed(0) : "–";
+                  return (
+                    <tr key={sym} style={{ borderBottom: `1px solid ${T.border}22` }}
+                      onClick={() => setFilterSym(filterSym === sym ? "" : sym)}
+                      onMouseEnter={e => e.currentTarget.style.background = T.panel2}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                      style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}>
+                      <td style={{ padding: "5px 8px" }}><Pill color={"BOOM" in sym ? T.green : T.red} size="sm">{sym}</Pill></td>
+                      <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
+                      <td style={{ padding: "5px 8px", color: T.green }}>{st.entered}</td>
+                      <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
+                      <td style={{ padding: "5px 8px", color: T.amber }}>{entPct}%</td>
+                      <td style={{ padding: "5px 8px", color: T.textD }}>{st.n > 0 ? (st.ratioSum / st.n).toFixed(0) : "–"}×</td>
+                      <td style={{ padding: "5px 8px", color: T.violet }}>{st.ratioMax.toFixed(0)}×</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+
+      {/* ── Tabla de eventos ─────────────────────────────────────────── */}
+      <Panel title={`Spike events · ${sorted.length} shown`} pad={false}>
+        {loading ? (
+          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>Cargando spikes…</div>
+        ) : sorted.length === 0 ? (
+          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>No hay spikes registrados aún.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.panel2 }}>
+                  {["ISO","Símbolo","Dir","Jump","ATR","Ratio","Price","Streak","Cooldown s","Lockout","Entró","Razón bloqueo"].map(h => (
+                    <th key={h} style={{ textAlign: "left", padding: "5px 10px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((e, i) => {
+                  const isEntered = e.bot_entered === true;
+                  const isBlocked = e.bot_entered === false;
+                  const rowBg = isEntered ? `${T.green}08` : isBlocked ? `${T.red}06` : "transparent";
+                  return (
+                    <tr key={`${e.ts}-${i}`} style={{ background: rowBg, borderBottom: `1px solid ${T.border}18` }}>
+                      <td style={{ padding: "4px 10px", color: T.mute, whiteSpace: "nowrap" }}>
+                        {e.iso ? e.iso.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", "Z") : "–"}
+                      </td>
+                      <td style={{ padding: "4px 10px" }}>
+                        <Pill color={"BOOM" in (e.symbol || "") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill>
+                      </td>
+                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>
+                        {e.direction === "UP" ? "▲" : "▼"} {e.direction}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>
+                        {e.jump != null ? (e.jump > 0 ? "+" : "") + e.jump.toFixed(3) : "–"}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: T.textD }}>{e.atr != null ? e.atr.toFixed(4) : "–"}</td>
+                      <td style={{ padding: "4px 10px" }}>
+                        <span style={{ color: (e.ratio || 0) > 500 ? T.red : (e.ratio || 0) > 100 ? T.amber : T.textD, fontWeight: 700 }}>
+                          {e.ratio != null ? e.ratio.toFixed(0) + "×" : "–"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "4px 10px", color: T.textD }}>{e.price != null ? e.price.toFixed(2) : "–"}</td>
+                      <td style={{ padding: "4px 10px", color: (e.loss_streak || 0) > 0 ? T.amber : T.textD }}>
+                        {e.loss_streak != null ? e.loss_streak : "–"}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: T.textD }}>
+                        {e.since_last_trade_s != null ? `${e.since_last_trade_s}s` : "–"}
+                      </td>
+                      <td style={{ padding: "4px 10px" }}>
+                        {e.lockout_active ? <Pill color={T.red} size="sm">SÍ</Pill> : <span style={{ color: T.mute }}>–</span>}
+                      </td>
+                      <td style={{ padding: "4px 10px" }}>
+                        {e.bot_entered === true  && <Pill color={T.green} size="sm">✓ SÍ</Pill>}
+                        {e.bot_entered === false && <Pill color={T.red}   size="sm">✗ NO</Pill>}
+                        {e.bot_entered == null   && <span style={{ color: T.mute }}>–</span>}
+                        {e.score != null && <span style={{ color: T.textD, marginLeft: 4 }}>s={e.score}</span>}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: T.mute, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {e.block_reason || (e.had_open_pos ? "pos_open" : "–")}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
 function ExportTab({ data }) {
   const [dataset, setDataset] = useState("trades");
   const [format, setFormat] = useState("csv");
