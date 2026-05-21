@@ -5,7 +5,8 @@ export const dynamic = "force-dynamic";
 
 const ROOT = path.join(process.cwd(), "..");
 const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
-const SPIKE_FILE = path.join(LOGS, "deriv_spike_events.json");
+const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
+const SPIKE_FILE = path.join(DERIV_LOGS, "deriv_spike_events.json");
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
