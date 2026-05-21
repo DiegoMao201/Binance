@@ -567,7 +567,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "max_hold_seconds": 200,       # Phase 32: 120→200 — give more time to capture spikes (120s too tight)
+        # ── AUDIT 2026-05-21: 200s→700s — ALL losses were spike_timeout from LATE entries
+        # Data: 3 losses all had entry_lag 45-111s (post-spike). Cycle=900s.
+        # With 200s hold + 100s lag = only 100s window to catch next spike 800s away → ALWAYS loses.
+        # With 700s hold + 100s lag = 600s window → can catch next spike (comes at ~800s). ✓
+        "max_hold_seconds": 700,
         # ── AUDIT 2026-05-18: stake $5→$2 — 13.3% WR at $5 is catastrophic ──
         # CRASH900: 15 trades, 2 wins, avg_loss=-$0.565, total=-$2.05. Reduce to $2.
         "stake_max_usdt": 2.00,
