@@ -317,7 +317,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,             # hd+smc bonuses bring viable setups to ≥7.5
+        "min_score": 4.5,             # Phase 32: 6.5→4.5 — calm scores 4.09-4.35; profile gate must sit BELOW effective_min
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -370,7 +370,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 5.0,              # Phase 27: was 6.5 — H=0.200 mean_rev→trend=0→max score~5.9
+        "min_score": 4.0,              # Phase 32: 5.0→4.0 — real scores 4.09-4.35; 5.0 was blocking 100% of entries in calm
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -405,7 +405,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,             # lowered 7.5→6.5: hd+smc bonuses bridge the gap
+        "min_score": 4.5,             # Phase 32: 6.5→4.5 — profile gate below effective_min=3.50; let risk engine gate
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -413,8 +413,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         # ── Geo gate: CRASH needs price below channel mid ──────────────────
-        # CRASH spikes DOWN from extended low zones. DEMO: relaxed -0.70→-0.20.
-        "geo_entry_max": -0.20,         # DEMO: was -0.70, needs ≥20 trades to recalibrate
+        # Phase 32: relaxed -0.20→0.30 (aligned with CRASH500/CRASH1000)
+        # Root cause: geo_pos=+0.20 → overshoot=0.40 → geo_penalty=-2.0 → score blocked
+        # CRASH500 fix in Phase 26 proved +0.30 generates valid data without disabling edge.
+        "geo_entry_max": 0.30,          # Phase 32: was -0.20
         # Phase 24: spike capture thresholds — small spikes still valid exits
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -429,7 +431,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 80,         # Phase 30: 50-trade audit — spikes avg=49s; 80s cuts timeout cost 60% → expectancy +$0.132/trade
+        "max_hold_seconds": 150,        # Phase 32: 80→150 — 80s was cutting spikes that arrive at 90-120s; WR=0% in 50 trades diagnoses timeout too short
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -453,7 +455,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
-        "min_score": 5.0,              # Phase 27: was 6.0 — no_fvg_penalty reduces score to ~5.0
+        "min_score": 4.5,              # Phase 32: 5.0→4.5 — profile gate below effective_min=3.50; let risk engine be the gate
         # Phase 24: spike capture thresholds
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -468,7 +470,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.0,              # Phase 26: was 6.5 — align with CRASH600/900
+        "min_score": 4.5,              # Phase 32: 6.0→4.5 — profile gate below effective_min=3.50
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -537,7 +539,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,
+        "min_score": 4.5,              # Phase 32: 6.0→4.5 — align profile gate below effective_min=3.50
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -546,8 +548,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
-        "geo_entry_max": -0.20,
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
+        # Phase 32: relaxed -0.20→0.30 — CRASH900 geo blocked by ATR+geo combo
+        # Aligned with CRASH500/CRASH1000 which use +0.30 and were actually trading
+        "geo_entry_max": 0.30,          # Phase 32: was -0.20
+        "stake_max_usdt": 5.00,         # Phase 31
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -556,6 +560,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
+        "max_hold_seconds": 200,       # Phase 32: 120→200 — give more time to capture spikes (120s too tight)
     },
     # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
     "BOOM600": {

@@ -985,12 +985,13 @@ class DerivRiskManager:
                 _allow_grade_c_floor = score < _grade_b_th_local and not _high_spread
                 if _allow_grade_c_floor:
                     # Phase 17: default lowered 5.25→4.50, floor lowered 5.25→4.00.
-                    # Logs show best BOOM scores are 4.71-4.90; 5.25 floor was
-                    # physically unreachable via env var and blocked ALL BOOM entries.
-                    # CRASH entries remain self-gated by geo (need price above channel).
+                    # Phase 32: 4.50→3.50 / floor 4.00→3.00.
+                    # Diagnosis: BOOM1000 real scores 4.09-4.35 in calm = 100% ENTRY_BLOCKED
+                    # with old floor=4.00+env=4.50. All BOOM/CRASH blocked at this threshold.
+                    # CRASH entries also self-gated by geo — floor lowered to generate data.
                     _bc_calm_floor = max(
-                        float(os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "4.50")),
-                        4.00,   # absolute safety floor — never below 4.00
+                        float(os.getenv("DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN", "3.50")),
+                        3.00,   # absolute safety floor — never below 3.00
                     )
                 else:
                     _bc_calm_floor = max(

@@ -389,6 +389,19 @@ function TopBar({ status, live, setLive, lastUpdate, loading, error, onRefresh, 
         <Stat lbl="TRADES"   val={kpi.trades || 0} />
         <button onClick={() => setLive(!live)} style={btnStyle(live ? T.green : T.amber)}>{live ? "● LIVE" : "❚❚ PAUSED"}</button>
         <button onClick={onRefresh} style={btnStyle(T.cyan)}>↻ SYNC</button>
+        {/* Phase 32: session reset — resets visual KPIs only, bot keeps running */}
+        <button
+          onClick={async () => {
+            try {
+              const r = await fetch("/api/session", { method: "POST" });
+              if (r.ok) onRefresh();
+            } catch { /* noop */ }
+          }}
+          style={{ ...btnStyle(T.amber), minWidth: 70 }}
+          title="Resetear estadísticas de sesión (visual, bot no se interrumpe)"
+        >
+          ↺ RESET·S
+        </button>
       </div>
     </div>
   );
