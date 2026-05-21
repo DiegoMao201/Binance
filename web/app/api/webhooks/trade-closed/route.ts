@@ -259,28 +259,36 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }),
 
       // (d) TRADE_PNL — net amount credited/debited to the client
-      //     Amount stored as absolute (positive). Sign is conveyed by type + description.
-      prisma.ledgerTransaction.create({
-        data: {
-          userId:      client.id,
-          type:        "TRADE_PNL",
-          broker:      p.broker,
-          amountUsdt:  clientNetShare.abs(),
-          description: `Net PnL (${clientNetShare.gte(0) ? "WIN" : "LOSS"}) — ${symbolLabel} | raw: ${rawPnlD.toFixed(8)} USDT`,
-        },
-      }),
+      //     Skipped if clientNetShare is exactly 0 (satisfies ledger_amount_positive constraint).
+      ...(clientNetShare.abs().gt(0)
+        ? [
+            prisma.ledgerTransaction.create({
+              data: {
+                userId:      client.id,
+                type:        "TRADE_PNL",
+                broker:      p.broker,
+                amountUsdt:  clientNetShare.abs(),
+                description: `Net PnL (${clientNetShare.gte(0) ? "WIN" : "LOSS"}) — ${symbolLabel} | raw: ${rawPnlD.toFixed(8)} USDT`,
+              },
+            }),
+          ]
+        : []),
 
-      // (e) BINANCE_FEE_REIMBURSEMENT — Binance fee deducted from client, credited to admin
-      //     Always created regardless of WIN/LOSS outcome.
-      prisma.ledgerTransaction.create({
-        data: {
-          userId:      client.id,
-          type:        "BINANCE_FEE_REIMBURSEMENT",
-          broker:      p.broker,
-          amountUsdt:  binanceFeeD,
-          description: `${p.broker === "deriv" ? "Deriv" : "Binance"} execution fee — ${symbolLabel} | reimbursed to admin`,
-        },
-      }),
+      // (e) BINANCE_FEE_REIMBURSEMENT — only when fee > 0 (Deriv trades have 0 fee)
+      //     Skipped when binanceFee=0 to satisfy the ledger_amount_positive constraint.
+      ...(binanceFeeD.gt(0)
+        ? [
+            prisma.ledgerTransaction.create({
+              data: {
+                userId:      client.id,
+                type:        "BINANCE_FEE_REIMBURSEMENT",
+                broker:      p.broker,
+                amountUsdt:  binanceFeeD,
+                description: `${p.broker === "deriv" ? "Deriv" : "Binance"} execution fee — ${symbolLabel} | reimbursed to admin`,
+              },
+            }),
+          ]
+        : []),
 
       // (f) PERFORMANCE_FEE — only charged on wins (netBaseline > 0)
       //     Not created on LOSS trades.
