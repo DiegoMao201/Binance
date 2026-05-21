@@ -525,8 +525,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "min_hd_bonus": 2.0,
-        # FIX-5: enabled — 178 spikes wasted in 7.5h session without trading BOOM900
+        # FIX-5: re-enabled — 178 spikes wasted in 7.5h session without trading BOOM900
+        # BUG-1: removed min_hd_bonus=2.0 — FIX-9 neutralizes mild opposing slopes to hd=0.0,
+        # which permanently triggers the >=2.0 gate. Phase 28 gate was designed for disabled state.
     },
     "CRASH900": {
         "type": "spike_crash",
