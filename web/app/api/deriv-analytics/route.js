@@ -122,7 +122,7 @@ export async function GET() {
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
-    readJson("deriv_session.json", null),
+    readJson("deriv_session.json", null, LOGS),
   ]);
   const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
   // Session filter: only for global KPIs (SESSION, WIN%, PF, TRADES). Reports unaffected.
