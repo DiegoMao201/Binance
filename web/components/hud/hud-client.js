@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Cpu, Wifi, WifiOff, Activity, TrendingUp, TrendingDown, Pause, Play, Square, RotateCcw, Brain, BarChart2, Layers, List, Zap } from "lucide-react";
+import { Cpu, Wifi, WifiOff, Activity, TrendingUp, TrendingDown, Pause, Play, Square, RotateCcw, RefreshCw, Brain, BarChart2, Layers, List, Zap } from "lucide-react";
 
 import LiveChart from "./live-chart";
 import NeuralPulse from "./neural-pulse";
@@ -346,14 +346,20 @@ export default function HudClient({ initialData }) {
             onClick={resetSession}
             title="Reset session stats (visual only, bot keeps running)"
             className="hud-btn"
-            style={{ borderColor: "rgba(251,191,36,0.5)", color: "#fbbf24", gap: 4 }}
+            style={{
+              borderColor: "rgba(251,191,36,0.7)",
+              color: "#fbbf24",
+              background: "rgba(251,191,36,0.08)",
+              gap: 4,
+              minWidth: 60,
+            }}
           >
-            <RotateCcw size={12} />
-            {sessionStart ? (
-              <span style={{ fontSize: 9, opacity: 0.8 }}>
-                {new Date(sessionStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </span>
-            ) : "SESIÓN"}
+            <RefreshCw size={12} />
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1 }}>
+              {sessionStart
+                ? new Date(sessionStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                : "RESET·S"}
+            </span>
           </button>
           <a href="/" className="hud-btn hud-btn-link"><RotateCcw size={12} /> Clásico</a>
         </div>
