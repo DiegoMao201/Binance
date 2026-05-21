@@ -166,7 +166,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      250,    # Phase 25: spikes avg 229s — timeout at 250 (was 450)
+        "max_duration_seg":      450,    # Phase 34: 250→450 — avg spike interval 297s > 250s DPM; 114 timeout losses with 0 spike_tp wins; mirrors CRASH600/900 fix in Phase 33
     },
     "CRASH900": {
         "sl_inicial_pct":        1.00,
