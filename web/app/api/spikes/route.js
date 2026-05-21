@@ -18,9 +18,13 @@ function parseJson(content, fallback) {
   }
 }
 
-// Match a spike to a closed contract: the contract must have been opened near the spike
-// (within [-45s, +180s] window — trade triggered by spike).
-function findBestClosedMatch(spike, contracts) {
+// Match a spike to a contract (open or closed).
+// Two cases:
+//   1. Spike triggered the trade: contract opened within [-45s, +180s] of spike
+//   2. Trade was active during the spike: opened_at <= spike_ts <= closed_at (or still open)
+// We prefer case-1 matches (narrower window = more intentional). Case-2 handles long-running
+// trades that were already open when a new spike occurred.
+function findBestContractMatch(spike, contracts, isOpen) {
   const symbol = spike?.symbol;
   const spikeTs = Number(spike?.ts);
   if (!symbol || !Number.isFinite(spikeTs)) return null;
@@ -31,63 +35,54 @@ function findBestClosedMatch(spike, contracts) {
       ? "MULTDOWN"
       : null;
 
-  const preWindowSec = 45;
-  const postWindowSec = 180;
-  let bestMatch = null;
-  let bestAbsDelta = Number.POSITIVE_INFINITY;
+  let triggeredMatch = null;
+  let triggeredBestDelta = Number.POSITIVE_INFINITY;
+  let activeMatch = null;
+  let activeBestOpenedAt = -Infinity;
 
   for (const contract of contracts) {
     if ((contract?.symbol || null) !== symbol) continue;
     const openedAt = Number(contract?.opened_at_ts);
     if (!Number.isFinite(openedAt)) continue;
-    const delta = openedAt - spikeTs;
-    if (delta < -preWindowSec || delta > postWindowSec) continue;
     if (directionToSide && contract?.side && contract.side !== directionToSide) continue;
 
-    const absDelta = Math.abs(delta);
-    if (absDelta < bestAbsDelta) {
-      bestAbsDelta = absDelta;
-      bestMatch = contract;
+    const delta = openedAt - spikeTs;
+
+    // Case 1: spike triggered this trade (opened near the spike)
+    if (delta >= -45 && delta <= 180) {
+      const absDelta = Math.abs(delta);
+      if (absDelta < triggeredBestDelta) {
+        triggeredBestDelta = absDelta;
+        triggeredMatch = contract;
+      }
+    }
+
+    // Case 2: trade was already open when spike occurred
+    //   For open contracts: opened before spike (still running, no closed_at)
+    //   For closed contracts: opened before spike AND closed after spike
+    if (openedAt <= spikeTs + 5) {
+      const closedAt = isOpen ? null : Number(contract?.closed_at_ts ?? null);
+      const wasActiveAtSpike = isOpen
+        ? true  // still open = still active
+        : Number.isFinite(closedAt) && closedAt >= spikeTs - 5;
+      if (wasActiveAtSpike && openedAt > activeBestOpenedAt) {
+        activeBestOpenedAt = openedAt;
+        activeMatch = contract;
+      }
     }
   }
 
-  return bestMatch;
-}
-
-// Match a spike to an OPEN contract: the contract must have been open DURING the spike.
-// No pre-window limit — an open trade may have started many minutes before the spike.
-function findActiveOpenMatch(spike, openContracts) {
-  const symbol = spike?.symbol;
-  const spikeTs = Number(spike?.ts);
-  if (!symbol || !Number.isFinite(spikeTs)) return null;
-
-  // Find all open contracts for this symbol that were already open when the spike occurred.
-  // Pick the most recently opened one (closest to spike ts from the left).
-  let bestMatch = null;
-  let bestOpenedAt = -Infinity;
-
-  for (const contract of openContracts) {
-    if ((contract?.symbol || null) !== symbol) continue;
-    const openedAt = Number(contract?.opened_at_ts);
-    if (!Number.isFinite(openedAt)) continue;
-    // Contract must have been opened before OR at the spike timestamp
-    if (openedAt > spikeTs + 5) continue; // allow 5s slack for open-order latency
-    if (openedAt > bestOpenedAt) {
-      bestOpenedAt = openedAt;
-      bestMatch = contract;
-    }
-  }
-
-  return bestMatch;
+  // Prefer case-1 (spike-triggered) over case-2 (was already open)
+  return triggeredMatch || activeMatch;
 }
 
 function deriveSpikeStatus(spike, closedContracts, openContracts) {
   if (spike?.bot_entered === true) return spike;
 
-  const bestClosedMatch = findBestClosedMatch(spike, closedContracts || []);
+  const bestClosedMatch = findBestContractMatch(spike, closedContracts || [], false);
 
   if (!bestClosedMatch) {
-    const bestOpenMatch = findActiveOpenMatch(spike, openContracts || []);
+    const bestOpenMatch = findBestContractMatch(spike, openContracts || [], true);
     if (!bestOpenMatch) return spike;
 
     const spikeTs = Number(spike?.ts);
