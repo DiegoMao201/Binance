@@ -118,12 +118,18 @@ function pearson(x, y) {
 }
 
 export async function GET() {
-  const [status, open, closed] = await Promise.all([
+  const [status, open, closed, sessionFile] = await Promise.all([
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
+    readJson("deriv_session.json", null),
   ]);
   const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
+  // Session filter: only for global KPIs (SESSION, WIN%, PF, TRADES). Reports unaffected.
+  const sessionStartMs = sessionFile?.session_start_ts ?? null;
+  const sessionClosed = sessionStartMs
+    ? allClosed.filter(c => tsOf(c) >= sessionStartMs)
+    : allClosed;
   const openContracts = Array.isArray(open) ? open : [];
 
   let cum = 0;
@@ -231,7 +237,7 @@ export async function GET() {
   }
 
   let curType = null, curN = 0, maxW = 0, maxL = 0;
-  for (const c of allClosed) {
+  for (const c of sessionClosed) {
     const p = pnlOf(c);
     const t = p > 0 ? "W" : p < 0 ? "L" : null;
     if (!t) continue;
@@ -239,36 +245,40 @@ export async function GET() {
     if (t === "W") maxW = Math.max(maxW, curN); else maxL = Math.max(maxL, curN);
   }
 
-  const totalPnl = allClosed.reduce((s, c) => s + pnlOf(c), 0);
-  const wins = allClosed.filter(c => pnlOf(c) > 0);
-  const losses = allClosed.filter(c => pnlOf(c) < 0);
+  // Global KPIs use sessionClosed (filtered from session_start_ts). Reports use allClosed.
+  const totalPnl = sessionClosed.reduce((s, c) => s + pnlOf(c), 0);
+  const wins = sessionClosed.filter(c => pnlOf(c) > 0);
+  const losses = sessionClosed.filter(c => pnlOf(c) < 0);
   const grossP = wins.reduce((s, c) => s + pnlOf(c), 0);
   const grossL = -losses.reduce((s, c) => s + pnlOf(c), 0);
-  const holdValid = allClosed.map(holdOf).filter(h => h != null);
+  const holdValid = sessionClosed.map(holdOf).filter(h => h != null);
   const avgDur = holdValid.length ? holdValid.reduce((s, h) => s + h, 0) / holdValid.length / 1000 : null;
 
-  const pnlArr = allClosed.map(pnlOf);
+  const pnlArr = sessionClosed.map(pnlOf);
   const mean = pnlArr.length ? pnlArr.reduce((a, b) => a + b, 0) / pnlArr.length : 0;
   const variance = pnlArr.length ? pnlArr.reduce((a, b) => a + (b - mean) ** 2, 0) / pnlArr.length : 0;
   const std = Math.sqrt(variance);
   const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
 
   const todayKey = new Date().toISOString().slice(0, 10);
-  const todayPnl = (dailyMap[todayKey]?.pnl) || 0;
+  const todayPnl = sessionClosed
+    .filter(c => isoDay(tsOf(c)) === todayKey)
+    .reduce((s, c) => s + pnlOf(c), 0);
 
   const global = {
-    total_trades: allClosed.length,
+    total_trades: sessionClosed.length,
     wins: wins.length,
     losses: losses.length,
-    winrate: allClosed.length ? wins.length / allClosed.length : 0,
+    winrate: sessionClosed.length ? wins.length / sessionClosed.length : 0,
     profit_factor: grossL > 0 ? +(grossP / grossL).toFixed(3) : (grossP > 0 ? null : 0),
-    expectancy: allClosed.length ? +(totalPnl / allClosed.length).toFixed(4) : 0,
+    expectancy: sessionClosed.length ? +(totalPnl / sessionClosed.length).toFixed(4) : 0,
     avg_win: wins.length ? +(grossP / wins.length).toFixed(4) : 0,
     avg_loss: losses.length ? +(-grossL / losses.length).toFixed(4) : 0,
     gross_profit: +grossP.toFixed(4),
     gross_loss: +grossL.toFixed(4),
     session_pnl: +totalPnl.toFixed(4),
     today_pnl: +todayPnl.toFixed(4),
+    session_start_ts: sessionStartMs,
     avg_duration_sec: avgDur,
     sharpe_like: +sharpe.toFixed(3),
     max_drawdown: maxDrawdown(equity_curve),
