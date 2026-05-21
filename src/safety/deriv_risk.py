@@ -803,15 +803,24 @@ class DerivRiskManager:
             if not _spike_file.exists():
                 return
             _existing: list = json.loads(_spike_file.read_text())
-            # Find last spike for this symbol (most recent first)
+            # Prefer the latest unresolved spike so a later event does not
+            # overwrite a previously resolved capture for the same symbol.
+            _target_idx: int | None = None
             for i in range(len(_existing) - 1, -1, -1):
-                if _existing[i].get("symbol") == symbol:
-                    _existing[i]["bot_entered"] = bot_entered
-                    _existing[i]["block_reason"] = block_reason
-                    if score is not None:
-                        _existing[i]["score"] = round(score, 2)
-                    _existing[i]["had_open_pos"] = had_open_pos
+                if _existing[i].get("symbol") == symbol and _existing[i].get("bot_entered") is None:
+                    _target_idx = i
                     break
+            if _target_idx is None:
+                for i in range(len(_existing) - 1, -1, -1):
+                    if _existing[i].get("symbol") == symbol:
+                        _target_idx = i
+                        break
+            if _target_idx is not None:
+                _existing[_target_idx]["bot_entered"] = bot_entered
+                _existing[_target_idx]["block_reason"] = block_reason
+                if score is not None:
+                    _existing[_target_idx]["score"] = round(score, 2)
+                _existing[_target_idx]["had_open_pos"] = had_open_pos
             _spike_file.write_text(json.dumps(_existing))
         except Exception as _e:
             _LOGGER.debug("[SPIKE_EVENT] enrich_last_spike failed: %s", _e)
