@@ -1987,6 +1987,43 @@ function SpikesTab() {
 
   const dirColor = d => d === "UP" ? T.green : T.red;
 
+  // ── Timing analysis ─────────────────────────────────────────────────
+  const tardeSamples   = spikes.filter(e => e.bot_entered === true && e.post_spike_entry === true);
+  const trueSamples    = spikes.filter(e => e.bot_entered === true && !e.post_spike_entry);
+  const perdidoSamples = spikes.filter(e => e.missed_exit === true);
+
+  const avgTardeLag  = tardeSamples.length > 0
+    ? Math.round(tardeSamples.reduce((s, e) => s + (e.entry_lag_sec || 0), 0) / tardeSamples.length)
+    : null;
+  const maxTardeLag  = tardeSamples.length > 0
+    ? Math.round(Math.max(...tardeSamples.map(e => e.entry_lag_sec || 0)))
+    : null;
+  const closedTarde  = tardeSamples.filter(e => e.trade_result === "win" || e.trade_result === "loss");
+  const tardeWins    = tardeSamples.filter(e => e.trade_result === "win").length;
+  const tardeLosses  = tardeSamples.filter(e => e.trade_result === "loss").length;
+  const tardeWinRate = closedTarde.length > 0
+    ? ((tardeWins / closedTarde.length) * 100).toFixed(0) + "%"
+    : "–";
+
+  const avgMissedSec = perdidoSamples.length > 0
+    ? Math.round(perdidoSamples.reduce((s, e) => s + (e.missed_exit_sec || 0), 0) / perdidoSamples.length)
+    : null;
+  const minMissedSec = perdidoSamples.length > 0
+    ? Math.min(...perdidoSamples.map(e => e.missed_exit_sec || 0))
+    : null;
+  const exitReasonBreakdown = perdidoSamples.reduce((acc, e) => {
+    const r = e.missed_exit_reason || "?";
+    acc[r] = (acc[r] || 0) + 1;
+    return acc;
+  }, {});
+
+  const closedTrue  = trueSamples.filter(e => e.trade_result === "win" || e.trade_result === "loss");
+  const trueWins    = trueSamples.filter(e => e.trade_result === "win").length;
+  const trueLosses  = trueSamples.filter(e => e.trade_result === "loss").length;
+  const trueWinRate = closedTrue.length > 0
+    ? ((trueWins / closedTrue.length) * 100).toFixed(0) + "%"
+    : "–";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {/* ── Top KPIs ─────────────────────────────────────────────────── */}
@@ -2089,6 +2126,135 @@ function SpikesTab() {
         </Panel>
       )}
 
+      {/* ── Análisis de Timing ─────────────────────────────────────── */}
+      {(tardeSamples.length > 0 || perdidoSamples.length > 0) && (
+        <Panel title="Análisis de Timing — Estrategia">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+
+            {/* TARDE: late entries */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Pill color={T.cyan}>⚡ TARDE</Pill>
+                <span style={{ fontSize: 9, color: T.mute }}>Entró &gt;5s después del spike (persiguió el movimiento)</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+                <KPI label="Total" value={tardeSamples.length} color={T.cyan} />
+                <KPI label="Lag prom." value={avgTardeLag != null ? avgTardeLag + "s" : "–"} color={T.cyan} />
+                <KPI label="Win rate" value={tardeWinRate} color={closedTarde.length > 0 && tardeWins >= tardeLosses ? T.green : T.red} />
+              </div>
+              {tardeSamples.length > 0 && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: FONT_MONO }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                        {["Hora Spike", "Símbolo", "Lag entrada", "Resultado"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "3px 6px", color: T.mute, fontSize: 8, letterSpacing: "0.1em", fontWeight: 700 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tardeSamples.slice(-10).reverse().map((e, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${T.border}18` }}>
+                          <td style={{ padding: "3px 6px", color: T.mute }}>{fmtDT(e.ts)}</td>
+                          <td style={{ padding: "3px 6px" }}><Pill color={(e.symbol||"").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol}</Pill></td>
+                          <td style={{ padding: "3px 6px", color: T.cyan, fontWeight: 700 }}>+{e.entry_lag_sec}s</td>
+                          <td style={{ padding: "3px 6px" }}>
+                            {e.trade_result === "win"  && <Pill color={T.green} size="sm">WIN</Pill>}
+                            {e.trade_result === "loss" && <Pill color={T.red}   size="sm">LOSS</Pill>}
+                            {e.trade_result === "open" && <Pill color={T.cyan}  size="sm">OPEN</Pill>}
+                            {!e.trade_result           && <span style={{ color: T.mute }}>–</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div style={{ fontSize: 9, color: T.amber, background: `${T.amber}0a`, border: `1px solid ${T.amber}33`, borderRadius: 6, padding: "7px 10px", lineHeight: 1.6 }}>
+                💡 Si lag &gt;15s con win rate bajo → reducir ventana case-1 de 180s. Si lag 5-15s con buenos resultados → el bot sigue el impulso correctamente.
+              </div>
+            </div>
+
+            {/* PERDIDO: missed exits */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Pill color={T.amber}>↩ PERDIDO</Pill>
+                <span style={{ fontSize: 9, color: T.mute }}>Trade cerrado antes de que llegara el spike</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                <KPI label="Total" value={perdidoSamples.length} color={T.amber} />
+                <KPI label="Salida prom." value={avgMissedSec != null ? avgMissedSec + "s antes" : "–"} color={T.amber} />
+              </div>
+              {Object.keys(exitReasonBreakdown).length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  <span style={{ fontSize: 8, color: T.mute, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700 }}>Razón de salida</span>
+                  {Object.entries(exitReasonBreakdown).sort((a, b) => b[1] - a[1]).map(([reason, count]) => (
+                    <div key={reason} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 9, color: T.textD }}>{reason}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: Math.max(16, Math.round((count / perdidoSamples.length) * 80)) + "px", height: 5, background: T.amber, borderRadius: 3 }} />
+                        <span style={{ fontSize: 9, color: T.amber, fontWeight: 700, minWidth: 16, textAlign: "right" }}>{count}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {perdidoSamples.length > 0 && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: FONT_MONO }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                        {["Hora Spike", "Símbolo", "Salió X antes", "Razón"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "3px 6px", color: T.mute, fontSize: 8, letterSpacing: "0.1em", fontWeight: 700 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {perdidoSamples.slice(-10).reverse().map((e, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${T.border}18` }}>
+                          <td style={{ padding: "3px 6px", color: T.mute }}>{fmtDT(e.ts)}</td>
+                          <td style={{ padding: "3px 6px" }}><Pill color={(e.symbol||"").includes("BOOM") ? T.green : T.amber} size="sm">{e.symbol}</Pill></td>
+                          <td style={{ padding: "3px 6px", color: T.amber, fontWeight: 700 }}>-{e.missed_exit_sec}s</td>
+                          <td style={{ padding: "3px 6px", color: T.mute, fontSize: 8 }}>{e.missed_exit_reason || "?"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div style={{ fontSize: 9, color: T.amber, background: `${T.amber}0a`, border: `1px solid ${T.amber}33`, borderRadius: 6, padding: "7px 10px", lineHeight: 1.6 }}>
+                💡 Si mayoría sale por <code style={{ color: T.amber }}>spike_timeout</code>: considerar aumentar timeout o añadir hold-for-spike si ratio ATR sube bruscamente. Si sale por SL/trailing: re-entrada rápida &lt;30s post-spike es la estrategia correcta.
+              </div>
+            </div>
+          </div>
+
+          {/* Comparativa TRUE vs TARDE */}
+          {(closedTrue.length > 0 || closedTarde.length > 0) && (
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, marginTop: 4 }}>
+              <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700 }}>Comparativa: Captura Real vs. Entrada Tarde</span>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
+                <div style={{ background: `${T.green}08`, border: `1px solid ${T.green}22`, borderRadius: 6, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: T.green, fontWeight: 700, marginBottom: 8, letterSpacing: "0.1em" }}>✓ CAPTURA REAL ({trueSamples.length} spikes / {closedTrue.length} cerrados)</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>WIN RATE</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{trueWinRate}</div></div>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>WINS</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{trueWins}</div></div>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>LOSSES</div><div style={{ fontSize: 14, color: T.red, fontWeight: 700, fontFamily: FONT_MONO }}>{trueLosses}</div></div>
+                  </div>
+                </div>
+                <div style={{ background: `${T.cyan}08`, border: `1px solid ${T.cyan}22`, borderRadius: 6, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: T.cyan, fontWeight: 700, marginBottom: 8, letterSpacing: "0.1em" }}>⚡ ENTRADA TARDE ({tardeSamples.length} spikes / {closedTarde.length} cerrados) · lag máx {maxTardeLag != null ? maxTardeLag+"s" : "–"}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>WIN RATE</div><div style={{ fontSize: 14, color: T.cyan, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeWinRate}</div></div>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>WINS</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeWins}</div></div>
+                    <div><div style={{ fontSize: 8, color: T.mute }}>LOSSES</div><div style={{ fontSize: 14, color: T.red, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeLosses}</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </Panel>
+      )}
+
       {/* ── Tabla de eventos ─────────────────────────────────────────── */}
       <Panel title={`Spike events · ${sorted.length} shown`} pad={false}>
         {loading ? (
@@ -2100,7 +2266,7 @@ function SpikesTab() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.panel2 }}>
-                  {["ISO","Símbolo","Dir","Jump","ATR","Ratio","Price","Streak","Cooldown s","Lockout","Entró","Razón bloqueo"].map(h => (
+                  {["Hora","Símbolo","Dir","Jump","ATR","Ratio","Price","Streak","Cooldown","Lockout","Entró","Timing","Trade","Razón"].map(h => (
                     <th key={h} style={{ textAlign: "left", padding: "5px 10px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
@@ -2114,7 +2280,7 @@ function SpikesTab() {
                   return (
                     <tr key={`${e.ts}-${i}`} style={{ background: rowBg, borderBottom: `1px solid ${T.border}18` }}>
                       <td style={{ padding: "4px 10px", color: T.mute, whiteSpace: "nowrap" }}>
-                        {e.iso ? e.iso.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", "Z") : "–"}
+                        {fmtDT(e.ts)}
                       </td>
                       <td style={{ padding: "4px 10px" }}>
                         <Pill color={(e.symbol || "").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill>
@@ -2147,9 +2313,28 @@ function SpikesTab() {
                         {e.missed_exit === true  && <Pill color={T.amber} size="sm">↩ PERDIDO</Pill>}
                         {e.bot_entered === false && !e.missed_exit       && <Pill color={T.red}   size="sm">✗ NO</Pill>}
                         {e.bot_entered == null   && <span style={{ color: T.mute }}>–</span>}
-                        {e.score != null && <span style={{ color: T.textD, marginLeft: 4 }}>s={e.score}</span>}
+                        {e.score != null && <span style={{ color: T.textD, marginLeft: 4, fontSize: 9 }}>s={e.score}</span>}
                       </td>
-                      <td style={{ padding: "4px 10px", color: T.mute, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <td style={{ padding: "4px 10px", whiteSpace: "nowrap" }}>
+                        {e.post_spike_entry && e.entry_lag_sec != null && (
+                          <span style={{ color: T.cyan, fontWeight: 700 }}>+{e.entry_lag_sec}s</span>
+                        )}
+                        {e.missed_exit === true && e.missed_exit_sec != null && (
+                          <span style={{ color: T.amber, fontWeight: 700 }}>-{e.missed_exit_sec}s</span>
+                        )}
+                        {e.bot_entered === true && !e.post_spike_entry && e.entry_lag_sec != null && (
+                          <span style={{ color: T.mute, fontSize: 9 }}>{e.entry_lag_sec > 0 ? '+' : ''}{e.entry_lag_sec}s</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "4px 10px", whiteSpace: "nowrap" }}>
+                        {e.trade_result === "win"  && <Pill color={T.green} size="sm">WIN</Pill>}
+                        {e.trade_result === "loss" && <Pill color={T.red}   size="sm">LOSS</Pill>}
+                        {e.trade_result === "open" && <Pill color={T.cyan}  size="sm">OPEN</Pill>}
+                        {e.trade_exit_reason && e.trade_result !== "open" && (
+                          <span style={{ color: T.mute, marginLeft: 4, fontSize: 8 }}>{e.trade_exit_reason}</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "4px 10px", color: T.mute, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {e.block_reason || (e.had_open_pos ? "pos_open" : "–")}
                       </td>
                     </tr>
