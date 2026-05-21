@@ -431,7 +431,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 150,        # Phase 32: 80→150 — 80s was cutting spikes that arrive at 90-120s; WR=0% in 50 trades diagnoses timeout too short
+        "max_hold_seconds": 450,        # FIX-1: 150→450 — 200-trade audit: 99% of losses close at exactly 150s (timeout IS the bottleneck); CRASH500 cycle=500s so 450s is needed to capture spikes
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -465,7 +465,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 150,        # Phase 29: was 300s — 200-trade audit: spikes at dur=36/49/92s; 150s covers 95% + cuts timeout cost
+        "max_hold_seconds": 450,        # FIX-1: 150→450 — 200-trade audit: 99% losses hit timeout at 150s; CRASH1000 cycle=1000s so 450s needed
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -526,8 +526,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         "min_hd_bonus": 2.0,
-        # Phase 31: suspended — no confirmed edge. Reactivate when spike_rate > 20% in ≥50 trades.
-        "disabled": True,
+        # FIX-5: enabled — 178 spikes wasted in 7.5h session without trading BOOM900
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -589,14 +588,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,        # DPM ratchet active
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_mitigated",  # Tier 2 required: BOOM600 needs confirmed FVG mitigation
+        "fvg_tier_minimo": "fvg_detected",  # FIX-5: Tier 1 sufficient (was fvg_mitigated — too strict)
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
         "spike_capture_tp_usdt": 0.15,       # was 0.50
         "spike_profit_delta_usdt": 0.10,     # was 0.28
-        # Phase 28: BOOM600 suspended — 0 spikes in 15 trades = 0% spike rate in sample.
-        # Data: all 15 trades hit timeout_max, WR=20%, PNL=-$1.09. No spike edge visible.
-        # Reactivate when: 5+ spikes in new sample AND regime != calm.
-        "disabled": True,
+        # FIX-5: enabled — 178 spikes wasted in 7.5h session; collecting real data now
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -617,9 +613,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
         "geo_entry_min": -999,           # no upper floor — use geo_max only
-        # DEMO Phase 23: relaxed -1.00→-0.20 AND fvg_tier fvg_mitigated→fvg_detected
-        # to unblock CRASH600 which had 0 trades. Recalibrate after 20 trades.
-        "geo_entry_max": -0.20,
+        # FIX-5: geo_entry_max relaxed -0.20→0.30 (aligned with CRASH500/900/1000)
+        # and disabled removed — 178 spikes wasted in 7.5h session with 0 entries.
+        "geo_entry_max": 0.30,
         "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
@@ -629,9 +625,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "max_hold_seconds": 270,
-        # Phase 31: suspended — no confirmed edge. Reactivate when spike_rate > 20% in ≥50 trades.
-        "disabled": True,
+        "max_hold_seconds": 450,        # FIX-1/5: 270→450 aligned with CRASH500/1000 cycle timing
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.

@@ -99,7 +99,7 @@ class GeometryResult:
 
 
 # ── Microstructure parameters (SMC + Momentum) ───────────────────────────────
-FVG_LOOKBACK      = 80        # ticks of recent history to scan for a fresh gap
+FVG_LOOKBACK      = 200       # FIX-4: 80→200 ticks — more chances to find unmitigated FVGs in slow markets
 FVG_MIN_GAP_PCT   = 0.00010   # 0.010 %  minimum gap width to be relevant
 ROC_PERIOD        = 14        # ticks for momentum rate-of-change
 DIV_PIVOT_RANGE   = 30        # ticks to evaluate price/momentum divergence
@@ -234,8 +234,9 @@ def _detect_fvg(prices: np.ndarray) -> tuple[bool, float, float, str]:
         if gap > a_high * FVG_MIN_GAP_PCT:
             top, bottom = c_low, a_high
             # Mitigation check: has price entered the gap since then?
+            # FIX-4: also accept when CURRENT price is inside the gap (being mitigated now)
             tail = seg[i + 2:]
-            if tail.min() > bottom:        # never re-entered → still active
+            if tail.min() > bottom or (bottom <= current <= top):
                 return True, top, bottom, "bullish"
             continue                       # already mitigated → keep scanning
 
@@ -244,7 +245,9 @@ def _detect_fvg(prices: np.ndarray) -> tuple[bool, float, float, str]:
         if gap > a_low * FVG_MIN_GAP_PCT:
             top, bottom = a_low, c_high
             tail = seg[i + 2:]
-            if tail.max() < top:
+            # FIX-4: also accept when CURRENT price is inside the gap (CRASH market
+            # drifts UP back into bearish gap = ideal MULTDOWN entry zone)
+            if tail.max() < top or (bottom <= current <= top):
                 return True, top, bottom, "bearish"
             continue
 

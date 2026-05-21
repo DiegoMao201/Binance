@@ -486,9 +486,9 @@ class DerivRiskManager:
         # Per-symbol rolling tick window for synthetic ATR / trend.
         self._ticks: dict[str, list[float]] = {}
         self._max_window = 1000  # enlarged for multi-TF geometry (was 270)
-        # Per-symbol rolling ATR history (last 50 ATR values for percentile)
+        # Per-symbol rolling ATR history (FIX-8: 50→500 for accurate percentile over days not hours)
         self._atr_history: dict[str, list[float]] = {}
-        self._MAX_ATR_HISTORY = 50
+        self._MAX_ATR_HISTORY = 500
         # Force-test-trades tick counter (DERIV_FORCE_TEST_TRADES mode)
         self._force_tick_count: dict[str, int] = {}
         # ── Spike-cycle tracker (BOOM/CRASH only) ─────────────────────────
@@ -993,6 +993,19 @@ class DerivRiskManager:
                 atr_score = 1.0
                 _atr_calm_bypassed = True
 
+        # ── FIX-3: Spike structural trend credit ────────────────────────────
+        # OLS slope threshold (5e-5) is too coarse for calm synthetic markets:
+        # typical calm ATR/price ≈ 0.000176 → tick-slope ≈ 7e-6 → trend_score=0.
+        # BOOM/CRASH have an inherent directional asymmetry (forced_side) that IS
+        # a structural "trend" the OLS misses.  Award minimum credit so the score
+        # is not systematically under-counted by up to 3.0 pts in calm regime.
+        if _is_spike_market(symbol) and trend_score == 0.0:
+            trend_score = float(os.getenv("DERIV_SPIKE_TREND_CREDIT", "1.5"))
+            _LOGGER.debug(
+                "[SPIKE_TREND_CREDIT] %s trend_score was 0.0 → applied structural credit=%.1f",
+                symbol, trend_score,
+            )
+
         # In volatile regime, require a stronger trend signal
         if regime == "volatile" and trend_dir is not None:
             trend_score = min(trend_score, 2.0)
@@ -1191,6 +1204,16 @@ class DerivRiskManager:
         # Applied AFTER trend_dir is fully resolved; BEFORE score_breakdown is built.
         _macro_slope = MacroHDCalibrator.get_slope(symbol)
         _hd_bonus = self._higher_direction_bonus(ticks, trend_dir, macro_slope_pct=_macro_slope)
+        # FIX-9: Spike market HD neutralization
+        # During accumulation, CRASH markets drift UP (opposing MULTDOWN = trade_dir=-1),
+        # and BOOM markets may drift DOWN (opposing MULTUP).  This is structurally CORRECT
+        # and normal — macro slope opposes trade direction BY DESIGN during accumulation.
+        # A mild opposing slope should be neutral (0.0), not penalising (-0.5).
+        # Only a STRONG opposing slope (>5× flat threshold) warrants the penalty.
+        if _is_spike and _hd_bonus < 0.0:
+            _spike_slope_abs = abs(_macro_slope) if _macro_slope is not None else 0.0
+            if _spike_slope_abs < _MACRO_HD_FLAT_THRESHOLD * 5.0:
+                _hd_bonus = 0.0  # mild opposing slope = neutral for spike accumulation
         if _hd_bonus != 0.0:
             score = max(0.0, min(10.0, score + _hd_bonus))
             if _hd_bonus > 0:
@@ -1654,67 +1677,39 @@ class DerivRiskManager:
 
             if not _has_fvg_active and not _has_spike_hunter:
                 # ── Tier 0: No FVG detected, no EMA200 spike-hunter ──────────
-                # MOMENTUM ESCAPE VALVE: replaces the hard block with a weighted
-                # score penalty.  The setup is still allowed through the pipeline;
-                # the effective_min_score gate at the bottom decides final pass/fail.
-                #
-                # Escape valve condition (raw momentum compensates missing FVG):
-                #   macro aligned (hd_bonus >= 1.5) AND momentum >= 1.20 AND atr >= 1.50
-                #   → penalty = 0.50  (DERIV_NO_FVG_ESCAPE_PENALTY, default 0.50)
-                # Otherwise:
-                #   → penalty = 1.00  (DERIV_NO_FVG_STANDARD_PENALTY, default 1.00)
-                #   Capped at 1.25 to prevent catastrophic destruction of valid setups.
-                _hd_bonus_val = float(snap.score_breakdown.get("hd_bonus", 0.0))
-                _escape_valve = (
-                    _hd_bonus_val >= 1.5
-                    and momentum_score >= 1.20
-                    and atr_score >= 1.50
-                )
-                # Phase 12: BOOM/CRASH env override.
-                # When DERIV_BOOM_CRASH_ESCAPE_VALVE=true the escape path is forced
-                # regardless of hd/mom/atr conditions.  A lower spike-specific penalty
-                # (DERIV_BOOM_CRASH_NO_FVG_PENALTY, default 0.20) is used — less than
-                # the generic escape penalty (0.50) because BOOM/CRASH don't rely on
-                # FVG structure to find their edge (they hunt the spike itself).
-                # Math: base_score≈5.48 − 0.20 = 5.28 ≥ effective_min(5.25) → PASS.
+                # FIX-10: Hard structural veto — no institutional confirmation.
+                # Empirical evidence: 75%+ losses on BOOM/CRASH entries without
+                # FVG or EMA200 spike-hunter structural setup.
+                # Exception: DERIV_BOOM_CRASH_ESCAPE_VALVE=true (debug/research only).
                 _bc_escape_env = (
-                    _is_boom_crash_sym
-                    and os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").lower()
+                    os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").lower()
                     in ("1", "true", "yes")
                 )
-                if _bc_escape_env and not _escape_valve:
-                    _escape_valve = True
-                    snap.score_breakdown["bc_escape_env"] = True
-                if _bc_escape_env:
-                    # Use spike-specific lower penalty for BOOM/CRASH escape path.
+                if not _bc_escape_env:
+                    snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
+                    snap.reasons.append(
+                        f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
+                    )
+                    snap.allowed = False
+                    return snap
+                else:
+                    # Debug escape valve: apply mild penalty instead of hard block.
                     _no_fvg_penalty = float(
                         os.getenv("DERIV_BOOM_CRASH_NO_FVG_PENALTY", "0.20")
                     )
-                else:
-                    _no_fvg_penalty = (
-                        float(os.getenv("DERIV_NO_FVG_ESCAPE_PENALTY", "0.50"))
-                        if _escape_valve else
-                        float(os.getenv("DERIV_NO_FVG_STANDARD_PENALTY", "1.00"))
+                    score = max(0.0, score - _no_fvg_penalty)
+                    snap.score = round(score, 3)
+                    snap.score_breakdown["fvg_tier"] = "bc_escape_env"
+                    snap.score_breakdown["bc_escape_env"] = True
+                    snap.score_breakdown["no_fvg_penalty"] = round(_no_fvg_penalty, 2)
+                    snap.reasons.append(
+                        f"no_fvg_escape_env: penalty={_no_fvg_penalty:.2f} score_after={score:.2f}"
                     )
-                _no_fvg_penalty = min(_no_fvg_penalty, 1.25)  # absolute cap
-                score = max(0.0, score - _no_fvg_penalty)
-                snap.score = round(score, 3)
-                _fvg_tier_tag = "no_fvg_escape_valve" if _escape_valve else "no_fvg_penalized"
-                snap.score_breakdown["fvg_tier"] = _fvg_tier_tag
-                snap.score_breakdown["no_fvg_penalty"] = round(_no_fvg_penalty, 2)
-                snap.reasons.append(
-                    f"no_fvg_penalty={_no_fvg_penalty:.2f} escape_valve={_escape_valve} "
-                    f"score_after={score:.2f} (hd={_hd_bonus_val:.1f} "
-                    f"mom={momentum_score:.2f} atr={atr_score:.2f})"
-                )
-                _LOGGER.info(
-                    "[STRUCTURAL_VETO] %s no_fvg penalty=%.2f escape_valve=%s "
-                    "score_after=%.2f hd=%.1f mom=%.2f atr=%.2f "
-                    "(effective_min=%.2f)",
-                    symbol, _no_fvg_penalty, _escape_valve,
-                    score, _hd_bonus_val, momentum_score, atr_score,
-                    snap.effective_min_score,
-                )
+                    _LOGGER.info(
+                        "[STRUCTURAL_VETO_ESCAPE] %s bc_escape_env penalty=%.2f "
+                        "score_after=%.2f (effective_min=%.2f)",
+                        symbol, _no_fvg_penalty, score, snap.effective_min_score,
+                    )
             elif _has_fvg_active and not _has_fvg_mitigated and not _has_spike_hunter:
                 # ── Tier 1: FVG detected but not yet mitigated ───────────────
                 # Check if the profile requires mitigated FVG (e.g. BOOM600/CRASH600).
@@ -1763,9 +1758,10 @@ class DerivRiskManager:
             _fvg_active = bool(snap.score_breakdown.get("fvg_active"))
             _fvg_dir    = snap.score_breakdown.get("fvg_direction", "")
             # Per-symbol FVG direction check (BOOM=bull, CRASH=bear)
+            # FIX: fvg_direction is stored as "bullish"/"bearish" — accept both forms
             _fvg_aligned = (
-                ("BOOM"  in _su_gate and _fvg_dir == "bull") or
-                ("CRASH" in _su_gate and _fvg_dir == "bear")
+                ("BOOM"  in _su_gate and _fvg_dir in ("bull", "bullish")) or
+                ("CRASH" in _su_gate and _fvg_dir in ("bear", "bearish"))
             )
             _structural_ok = (
                 _override_enabled
@@ -1898,7 +1894,7 @@ class DerivRiskManager:
             _score_sz = 0.60
         else:
             _exec_grade = "C"
-            _score_sz = 0.30
+            _score_sz = 0.40  # FIX-6: 0.30→0.40 — too punishing; 0.30 makes min stakes unviable
             # DPM hook: aggressive_trailing=True tells DynamicPositionManager
             # to use tightest ratchet (smallest ratchet_step, highest ratchet_ratio)
             # ensuring any Grade C profit is protected immediately.
@@ -2228,11 +2224,13 @@ class DerivRiskManager:
         sorted_hist = sorted(hist)
         rank = sum(1 for h in sorted_hist if h <= atr) / len(sorted_hist)
 
-        if 0.20 <= rank <= 0.80:   # healthy middle range
-            return 2.0
-        if 0.10 <= rank <= 0.90:   # acceptable
-            return 1.0
-        return 0.0  # extreme outlier
+        # FIX-7: Continuous scoring — replace step function (1.0/2.0) with
+        # linear interpolation.  Peak 2.0 at rank=0.50, decays to 0.0 at edges.
+        # rank=0.50→2.0, rank=0.30/0.70→1.0, rank=0.20/0.80→0.5, rank≤0.10/≥0.90→0.0
+        if rank < 0.10 or rank > 0.90:
+            return 0.0
+        center_dist = abs(rank - 0.50)  # 0.0 at center, 0.40 at rank=0.10/0.90
+        return round(max(0.0, 2.0 * (1.0 - center_dist / 0.40)), 2)
 
     @staticmethod
     def _stability_score(ticks: list[float]) -> float:
