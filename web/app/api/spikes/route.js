@@ -8,6 +8,7 @@ const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 const SPIKE_FILE = path.join(DERIV_LOGS, "deriv_spike_events.json");
 const CLOSED_FILE = path.join(DERIV_LOGS, "deriv_closed_contracts.json");
+const OPEN_FILE = path.join(DERIV_LOGS, "deriv_open_contracts.json");
 
 function parseJson(content, fallback) {
   try {
@@ -17,12 +18,10 @@ function parseJson(content, fallback) {
   }
 }
 
-function deriveSpikeStatus(spike, closedContracts) {
-  if (spike?.bot_entered === true) return spike;
-
+function findBestContractMatch(spike, contracts) {
   const symbol = spike?.symbol;
   const spikeTs = Number(spike?.ts);
-  if (!symbol || !Number.isFinite(spikeTs)) return spike;
+  if (!symbol || !Number.isFinite(spikeTs)) return null;
 
   const directionToSide = spike?.direction === "UP"
     ? "MULTUP"
@@ -30,27 +29,53 @@ function deriveSpikeStatus(spike, closedContracts) {
       ? "MULTDOWN"
       : null;
 
-  const matchWindowSec = 180;
+  // Some events are detected a few seconds after order placement.
+  const preWindowSec = 45;
+  const postWindowSec = 180;
   let bestMatch = null;
-  let bestDelta = Number.POSITIVE_INFINITY;
+  let bestAbsDelta = Number.POSITIVE_INFINITY;
 
-  for (const contract of closedContracts) {
+  for (const contract of contracts) {
     if ((contract?.symbol || null) !== symbol) continue;
     const openedAt = Number(contract?.opened_at_ts);
     if (!Number.isFinite(openedAt)) continue;
     const delta = openedAt - spikeTs;
-    if (delta < 0 || delta > matchWindowSec) continue;
+    if (delta < -preWindowSec || delta > postWindowSec) continue;
     if (directionToSide && contract?.side && contract.side !== directionToSide) continue;
-    if (delta < bestDelta) {
-      bestDelta = delta;
+
+    const absDelta = Math.abs(delta);
+    if (absDelta < bestAbsDelta) {
+      bestAbsDelta = absDelta;
       bestMatch = contract;
     }
   }
 
-  if (!bestMatch) return spike;
+  return bestMatch;
+}
 
-  const realizedPnl = Number(bestMatch?.realized_pnl_usdt);
-  const exitReason = String(bestMatch?.exit_reason || "");
+function deriveSpikeStatus(spike, closedContracts, openContracts) {
+  if (spike?.bot_entered === true) return spike;
+
+  const bestClosedMatch = findBestContractMatch(spike, closedContracts || []);
+
+  if (!bestClosedMatch) {
+    const bestOpenMatch = findBestContractMatch(spike, openContracts || []);
+    if (!bestOpenMatch) return spike;
+
+    return {
+      ...spike,
+      bot_entered: true,
+      block_reason: null,
+      trade_result: "open",
+      trade_status: "open",
+      trade_contract_id: bestOpenMatch?.contract_id ?? null,
+      trade_opened_at_ts: bestOpenMatch?.opened_at_ts ?? null,
+      trade_closed_at_ts: null,
+    };
+  }
+
+  const realizedPnl = Number(bestClosedMatch?.realized_pnl_usdt);
+  const exitReason = String(bestClosedMatch?.exit_reason || "");
   const tradeWon = Number.isFinite(realizedPnl)
     ? realizedPnl > 0
     : /(^|_)won($|\b)|spike_tp/i.test(exitReason);
@@ -58,11 +83,13 @@ function deriveSpikeStatus(spike, closedContracts) {
   return {
     ...spike,
     bot_entered: true,
+    block_reason: null,
     trade_result: tradeWon ? "win" : "loss",
-    trade_exit_reason: bestMatch?.exit_reason || null,
-    trade_contract_id: bestMatch?.contract_id ?? null,
-    trade_opened_at_ts: bestMatch?.opened_at_ts ?? null,
-    trade_closed_at_ts: bestMatch?.closed_at_ts ?? null,
+    trade_status: "closed",
+    trade_exit_reason: bestClosedMatch?.exit_reason || null,
+    trade_contract_id: bestClosedMatch?.contract_id ?? null,
+    trade_opened_at_ts: bestClosedMatch?.opened_at_ts ?? null,
+    trade_closed_at_ts: bestClosedMatch?.closed_at_ts ?? null,
   };
 }
 
@@ -74,6 +101,7 @@ export async function GET(request) {
 
   let spikes = [];
   let closedContracts = [];
+  let openContracts = [];
   try {
     const content = await fs.readFile(SPIKE_FILE, "utf8");
     spikes = parseJson(content, []);
@@ -88,7 +116,14 @@ export async function GET(request) {
     // closed-contract history may not exist yet
   }
 
-  spikes = spikes.map((spike) => deriveSpikeStatus(spike, closedContracts));
+  try {
+    const content = await fs.readFile(OPEN_FILE, "utf8");
+    openContracts = parseJson(content, []);
+  } catch {
+    // open-contract state may not exist yet
+  }
+
+  spikes = spikes.map((spike) => deriveSpikeStatus(spike, closedContracts, openContracts));
 
   if (since > 0) spikes = spikes.filter((e) => e.ts >= since);
   if (symbol) spikes = spikes.filter((e) => e.symbol === symbol);
