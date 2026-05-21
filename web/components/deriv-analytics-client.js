@@ -1966,23 +1966,38 @@ function SpikesTab() {
     const m = {};
     for (const e of spikes) {
       const s = e.symbol || "?";
-      if (!m[s]) m[s] = { n: 0, entered: 0, missed: 0, blocked: 0, ratioSum: 0, ratioMax: 0 };
+      if (!m[s]) m[s] = { n: 0, entered: 0, missed: 0, blocked: 0, win: 0, loss: 0, openPos: 0, ratioSum: 0, ratioMax: 0 };
       m[s].n++;
       m[s].ratioSum += e.ratio || 0;
       if ((e.ratio || 0) > m[s].ratioMax) m[s].ratioMax = e.ratio;
-      if (e.bot_entered === true)              m[s].entered++;
-      else if (e.missed_exit === true)          m[s].missed++;
-      else if (e.bot_entered === false)         m[s].blocked++;
+      if (e.bot_entered === true) {
+        m[s].entered++;
+        if (e.trade_result === "win")  m[s].win++;
+        else if (e.trade_result === "loss") m[s].loss++;
+        else if (e.trade_result === "open") m[s].openPos++;
+      } else if (e.missed_exit === true) {
+        m[s].missed++;
+      } else if (e.bot_entered === false) {
+        m[s].blocked++;
+      }
     }
     return Object.entries(m).sort((a, b) => b[1].n - a[1].n);
   }, [spikes]);
 
-  const entered = spikes.filter(e => e.bot_entered === true).length;
-  const missed  = spikes.filter(e => e.missed_exit === true).length;
-  const blocked = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
-  const unknown = spikes.filter(e => e.bot_entered == null).length;
+  const entered   = spikes.filter(e => e.bot_entered === true).length;
+  const missed    = spikes.filter(e => e.missed_exit === true).length;
+  const blocked   = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
+  const unknown   = spikes.filter(e => e.bot_entered == null).length;
+  // WIN/LOSS/OPEN breakdown of entered spikes
+  const spikeWins   = spikes.filter(e => e.bot_entered === true && e.trade_result === "win").length;
+  const spikeLosses = spikes.filter(e => e.bot_entered === true && e.trade_result === "loss").length;
+  const spikeOpen   = spikes.filter(e => e.bot_entered === true && e.trade_result === "open").length;
+  const spikeClosedEntered = spikeWins + spikeLosses;
+  // Effective capture rate: spikes where bot entered AND won / all known spikes
   const entryDenom = entered + missed + blocked;
-  const entryRate = entryDenom > 0 ? ((entered / entryDenom) * 100).toFixed(1) : "–";
+  const efectivaDenom = entryDenom; // same base = total meaningful spikes
+  const capturaEfectiva = efectivaDenom > 0 ? ((spikeWins / efectivaDenom) * 100).toFixed(1) : "–";
+  const winRateEntered  = spikeClosedEntered > 0 ? ((spikeWins / spikeClosedEntered) * 100).toFixed(1) : "–";
   const allSymbols = [...new Set(spikes.map(e => e.symbol).filter(Boolean))].sort();
 
   const dirColor = d => d === "UP" ? T.green : T.red;
@@ -2027,14 +2042,29 @@ function SpikesTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {/* ── Top KPIs ─────────────────────────────────────────────────── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+      {/* FILA 1: contadores brutos */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
         <KPI label="Total Spikes" value={total} accent={T.cyan} />
         <KPI label="En pantalla" value={spikes.length} accent={T.violet} />
-        <KPI label="Bot entró" value={entered} color={T.green} accent={T.green} />
-        <KPI label="Bot bloqueado" value={blocked} color={T.red} accent={T.red} />
-        <KPI label="Salió antes" value={missed} color={T.amber} accent={T.amber} />
+        <KPI label="Bot entró" value={entered} color={T.textD} accent={T.textD}
+          sub={`${spikeWins}W · ${spikeLosses}L · ${spikeOpen} abiertas`} />
+        <KPI label="↩ Salió antes" value={missed} color={T.amber} accent={T.amber} sub="spike_timeout prematura" />
+        <KPI label="✗ Bloqueado" value={blocked} color={T.red} accent={T.red} sub="filtros/lockout" />
         <KPI label="Sin dato" value={unknown} color={T.mute} />
-        <KPI label="Entrada %" value={`${entryRate}%`} color={entered > 0 ? T.green : T.textD} accent={T.cyan} />
+      </div>
+      {/* FILA 2: métricas reales */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
+        <KPI label="✓ Spike WIN" value={spikeWins} color={T.green} accent={T.green} big
+          sub={`de ${entered} entradas`} />
+        <KPI label="✗ Spike LOSS" value={spikeLosses} color={T.red} accent={T.red} big
+          sub={`de ${entered} entradas`} />
+        <KPI label="Win% (de entradas cerradas)" value={`${winRateEntered}%`}
+          color={Number(winRateEntered) >= 50 ? T.green : T.red} accent={T.cyan} big
+          sub={`${spikeClosedEntered} spikes cerrados`} />
+        <KPI label="Captura efectiva" value={`${capturaEfectiva}%`}
+          color={Number(capturaEfectiva) >= 30 ? T.green : Number(capturaEfectiva) >= 15 ? T.amber : T.red}
+          accent={T.violet} big
+          sub={`WIN / total spikes (${spikeWins}/${efectivaDenom})`} />
       </div>
 
       {/* ── Controls ─────────────────────────────────────────────────── */}
@@ -2093,16 +2123,18 @@ function SpikesTab() {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                  {["Símbolo","Spikes","Entró","Perdido","Bloqueado","Entry %","Ratio avg","Ratio max"].map(h => (
-                    <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9 }}>{h}</th>
+                  {["Símbolo","Spikes","WIN","LOSS","Open","↩Perdido","✗Bloq.","Win%","Cap.Efect.","Ratio avg","Ratio max"].map(h => (
+                    <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {bySym.map(([sym, st]) => {
-                  const _denom = st.entered + (st.missed||0) + st.blocked;
-                  const entPct = _denom > 0
-                    ? ((st.entered / _denom) * 100).toFixed(0) : "–";
+                  const closed = st.win + st.loss;
+                  const winPct   = closed > 0 ? ((st.win / closed) * 100).toFixed(0) : "–";
+                  const capDenom = st.entered + (st.missed||0) + st.blocked;
+                  const capPct   = capDenom > 0 ? ((st.win / capDenom) * 100).toFixed(0) : "–";
+                  const winColor = closed > 0 && st.win >= st.loss ? T.green : T.red;
                   return (
                     <tr key={sym}
                       style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}
@@ -2111,10 +2143,13 @@ function SpikesTab() {
                       onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                       <td style={{ padding: "5px 8px" }}><Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">{sym}</Pill></td>
                       <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
-                      <td style={{ padding: "5px 8px", color: T.green }}>{st.entered}</td>
+                      <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{st.win}</td>
+                      <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{st.loss}</td>
+                      <td style={{ padding: "5px 8px", color: T.cyan }}>{st.openPos||0}</td>
                       <td style={{ padding: "5px 8px", color: T.amber }}>{st.missed||0}</td>
                       <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
-                      <td style={{ padding: "5px 8px", color: T.amber }}>{entPct}%</td>
+                      <td style={{ padding: "5px 8px", color: winColor, fontWeight: 700 }}>{winPct}{winPct !== "–" ? "%" : ""}</td>
+                      <td style={{ padding: "5px 8px", color: Number(capPct) >= 30 ? T.green : Number(capPct) >= 15 ? T.amber : T.red, fontWeight: 700 }}>{capPct}{capPct !== "–" ? "%" : ""}</td>
                       <td style={{ padding: "5px 8px", color: T.textD }}>{st.n > 0 ? (st.ratioSum / st.n).toFixed(0) : "–"}×</td>
                       <td style={{ padding: "5px 8px", color: T.violet }}>{st.ratioMax.toFixed(0)}×</td>
                     </tr>
