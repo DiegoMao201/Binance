@@ -856,7 +856,7 @@ class DerivRiskManager:
                     1000 if "1000" in _su_sg
                     else (500 if "500" in _su_sg else 300)
                 )
-                _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.30"))
+                _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.08"))
                 _sg_min_wait = _spike_gate_interval * _frac
                 if _sg_elapsed < _sg_min_wait:
                     _spike_gate_active   = True
@@ -1698,7 +1698,7 @@ class DerivRiskManager:
                 snap.score_breakdown["spike_gate_override"]  = True
                 snap.score_breakdown["spike_gate_elapsed_s"] = round(_spike_gate_elapsed, 1)
             else:
-                _frac_used = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.30"))
+                _frac_used = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.08"))
                 snap.reasons.append(
                     f"SPIKE_CYCLE_GATE: {symbol} last_spike={_spike_gate_elapsed:.0f}s ago "
                     f"< {_spike_gate_min_wait:.0f}s "
