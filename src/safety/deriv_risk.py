@@ -715,12 +715,42 @@ class DerivRiskManager:
                             symbol, _direction, _jump, _recent_atr, abs(_jump) / _recent_atr,
                         )
                         # Structured spike event log — captured by log parser and spike_events table
+                        _spike_ts = time.time()
                         _LOGGER.info(
                             "[SPIKE_EVENT] symbol=%s direction=%s jump=%.5f atr=%.5f "
                             "ratio=%.2f ts=%.3f",
                             symbol, _direction, _jump, _recent_atr,
-                            abs(_jump) / _recent_atr, time.time(),
+                            abs(_jump) / _recent_atr, _spike_ts,
                         )
+                        # Persist spike event to JSON for frontend consumption
+                        try:
+                            _state_dir = Path(
+                                os.environ.get("BOT_STATE_DIR", Path(__file__).parents[2] / "logs")
+                            )
+                            _state_dir.mkdir(parents=True, exist_ok=True)
+                            _spike_file = _state_dir / "deriv_spike_events.json"
+                            _spike_record = {
+                                "ts": _spike_ts,
+                                "iso": datetime.fromtimestamp(_spike_ts, tz=timezone.utc).isoformat(),
+                                "symbol": symbol,
+                                "direction": _direction,
+                                "jump": round(_jump, 5),
+                                "atr": round(_recent_atr, 5),
+                                "ratio": round(abs(_jump) / _recent_atr, 2),
+                            }
+                            _existing: list = []
+                            if _spike_file.exists():
+                                try:
+                                    _existing = json.loads(_spike_file.read_text())
+                                except Exception:
+                                    _existing = []
+                            _existing.append(_spike_record)
+                            # Keep last 2000 spike events to avoid unbounded growth
+                            if len(_existing) > 2000:
+                                _existing = _existing[-2000:]
+                            _spike_file.write_text(json.dumps(_existing))
+                        except Exception as _e:
+                            _LOGGER.debug("[SPIKE_EVENT] failed to persist to JSON: %s", _e)
 
     def get_last_spike_ts(self, symbol: str) -> float:
         """Return wall-clock time of the last spike detected for *symbol*.
