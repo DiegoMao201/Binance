@@ -157,7 +157,7 @@ class DerivDaemon:
         if "BOOM" not in _su and "CRASH" not in _su:
             return
         _last_spike = self._risk.get_last_spike_ts(symbol)
-        if _last_spike <= 0 or (time.time() - _last_spike) > 60.0:
+        if _last_spike <= 0 or (time.time() - _last_spike) > 300.0:
             return
         _open_contracts = getattr(self._executor, "open_contracts", {})
         _had_open = bool(_open_contracts.get(symbol) or _open_contracts.get(_su))
@@ -1134,6 +1134,7 @@ class DerivDaemon:
                     "[deriv-daemon] ORDER %s | score=%.2f [MATH_OVERRIDE] | %s",
                     tick.symbol, snap.score, result,
                 )
+                self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
             except OrderRouterError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] router rejected (override): %s", exc)
@@ -1186,6 +1187,11 @@ class DerivDaemon:
                     "vol_regime": analysis.vol_regime,
                     "ai_model": analysis.ai_model,
                 },
+            )
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason=f"AI_VETO: {analysis.ai_reason}",
+                score=snap.score,
             )
             return
 

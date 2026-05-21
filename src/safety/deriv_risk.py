@@ -1587,8 +1587,28 @@ class DerivRiskManager:
         _ai_failed = ai_confidence is None or ai_confidence < _ai_min_conf
         if _ai_failed:
             _override_reason = ""
+            # (d) Spike-active override: a real spike was JUST detected for this
+            # symbol (within 90s) AND the escape valve fired (no FVG but live spike
+            # momentum IS the structural confirmation). This allows CRASH900 841x /
+            # CRASH600 305x type massive spikes to enter instead of being AI-vetoed.
+            # Only fires when the last spike for THIS symbol was recent — not a
+            # cross-symbol event — so we use per-symbol _last_spike_ts.
+            _spike_active_bypass = float(os.getenv("DERIV_SPIKE_ACTIVE_OVERRIDE_SEC", "90"))
+            _last_spike_for_sym = self._last_spike_ts.get(symbol, 0.0)
+            _spike_just_fired = (
+                _spike_active_bypass > 0
+                and _last_spike_for_sym > 0
+                and (time.time() - _last_spike_for_sym) <= _spike_active_bypass
+            )
+            _bc_escape_active = bool(snap.score_breakdown.get("bc_escape_env"))
+            if _is_spike and _spike_just_fired and _bc_escape_active and not _override_reason:
+                _elapsed_spike = time.time() - _last_spike_for_sym
+                _override_reason = (
+                    f"spike_active_override: spike {_elapsed_spike:.0f}s ago "
+                    f"+ bc_escape_env → bypass AI"
+                )
             # (a) Hurst-trend confluence
-            if (
+            if not _override_reason and (
                 hurst is not None and hurst > 0.62
                 and autocorr_lag1 is not None
                 and (
@@ -1600,14 +1620,14 @@ class DerivRiskManager:
                     f"trend_math: H={hurst:.3f} autocorr={autocorr_lag1:+.3f}"
                 )
             # (b) SMC confluence
-            elif _geo is not None and _geo.smc_side is not None and _geo.smc_side == side:
+            elif not _override_reason and _geo is not None and _geo.smc_side is not None and _geo.smc_side == side:
                 _override_reason = f"smc_confluence: {_geo.smc_reason}"
             # (c) Mean-reverting micro scalp — STRICTLY volatility-only.
             # BOOM/CRASH are spike-asymmetric and have no statistical band-touch
             # edge.  Allowing this branch for spike markets caused repeated
             # false overrides on BOOM1000/CRASH1000 that were later vetoed by
             # the structural gate (log pollution + wasted CPU).
-            elif (
+            elif not _override_reason and (
                 _geo is not None and _geo.micro_band_signal is not None
                 and hurst is not None and hurst < 0.40
                 and _geo.micro_band_signal == side

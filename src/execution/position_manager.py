@@ -174,7 +174,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      150,    # Phase 28: was 200 — reduce timeout, 3 spikes at 36/92/201s
+        "max_duration_seg":      350,    # Phase 33: 150→350 — avg spike 172s max 440s; 150s killed 15/15 trades with 0 wins
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -191,7 +191,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      180,    # Phase 28: was 250 — CRASH600 spikes avg 124-252s; 180s covers avg
+        "max_duration_seg":      450,    # Phase 33: 180→450 — avg spike 226s max 923s; 181s killed 14/14 trades with 0 spike_tp wins
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
