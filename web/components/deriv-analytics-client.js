@@ -2062,12 +2062,12 @@ function SpikesTab() {
                   const entPct = (st.entered + st.blocked) > 0
                     ? ((st.entered / (st.entered + st.blocked)) * 100).toFixed(0) : "–";
                   return (
-                    <tr key={sym} style={{ borderBottom: `1px solid ${T.border}22` }}
+                    <tr key={sym}
+                      style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}
                       onClick={() => setFilterSym(filterSym === sym ? "" : sym)}
                       onMouseEnter={e => e.currentTarget.style.background = T.panel2}
-                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                      style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}>
-                      <td style={{ padding: "5px 8px" }}><Pill color={"BOOM" in sym ? T.green : T.red} size="sm">{sym}</Pill></td>
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                      <td style={{ padding: "5px 8px" }}><Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">{sym}</Pill></td>
                       <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
                       <td style={{ padding: "5px 8px", color: T.green }}>{st.entered}</td>
                       <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
