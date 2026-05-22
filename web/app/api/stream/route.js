@@ -45,6 +45,7 @@ export async function GET() {
         if (closed) return;
         try {
           const data = await readDashboardState();
+          if (closed) return;
           const json = JSON.stringify(data);
           // Doble emisión: `event: state` para clientes nuevos, default para `onmessage`.
           controller.enqueue(encoder.encode(`event: state\ndata: ${json}\n\n`));
