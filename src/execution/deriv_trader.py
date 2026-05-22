@@ -230,6 +230,10 @@ class DerivTradeExecutor:
         # DynamicPositionManager — replaces static tiered trailing stop.
         # Manages ratchet SL + momentum-based exit for every open contract.
         self._dpm = DynamicPositionManager()
+        # Phase 37: spike buffer — when spike_tp/capture fires, hold for up to
+        # DERIV_SPIKE_BUFFER_SEC seconds to capture multi-tick spike sequences.
+        # dict[contract_id, {started_ts, peak_pnl, entry_pnl}]
+        self._spike_buffer: dict[int, dict[str, float]] = {}
         # Hook the WS client so open-contract subscriptions are automatically
         # re-established after every WS reconnect.
         self._client.set_reconnect_callback(self._on_ws_reconnect)
@@ -647,6 +651,7 @@ class DerivTradeExecutor:
             async with self._lock:
                 oc = self._open.pop(cid, None)
                 self._closing.discard(cid)  # Phase 35: release close-lock on reaper settlement
+                self._spike_buffer.pop(cid, None)  # Phase 37: clear buffer on close
                 self._persist_open()
             if oc is None:
                 continue
@@ -1066,13 +1071,59 @@ class DerivTradeExecutor:
             if current_profit > 0:
                 self._dpm.sync_external_peak(cid, current_profit)
 
-            # ── Phase 20: Deterministic spike capture for BOOM/CRASH ──────────
-            # Spikes reverse immediately after firing. Two triggers:
-            #   A) Static TP: profit >= spike_capture_tp_usdt (default 25% of stake)
-            #   B) Tick-delta: profit jumped spike_profit_delta_usdt in ONE tick
-            #      (default 15% of stake) — catches the spike tick in real time.
-            # Both require profit > $0.10 to avoid spurious triggers near entry.
+            # ── Phase 37: Spike Buffer + Phase 20: Spike Capture for BOOM/CRASH ─
+            # When a spike fires, instead of selling immediately we enter a short
+            # buffer window (DERIV_SPIKE_BUFFER_SEC, default 3s) to capture
+            # multi-tick spike sequences (e.g. 5-6 consecutive spikes observed
+            # in Muestra 02). Safety valve: if profit drops more than
+            # DERIV_SPIKE_BUFFER_DECAY_PCT (default 35%) from the buffer peak,
+            # sell immediately to protect gains.
+            _spike_buf_sec   = float(os.environ.get("DERIV_SPIKE_BUFFER_SEC", "3.0"))
+            _spike_buf_decay = float(os.environ.get("DERIV_SPIKE_BUFFER_DECAY_PCT", "0.35"))
+
             if is_spike_market(oc_check.symbol) and current_profit > 0.10:
+
+                # ── Check active spike buffer first ──────────────────────────
+                _sbuf = self._spike_buffer.get(cid)
+                if _sbuf is not None:
+                    # Update peak during buffer window
+                    if current_profit > _sbuf["peak_pnl"]:
+                        _sbuf["peak_pnl"] = current_profit
+
+                    _buf_elapsed    = time.time() - _sbuf["started_ts"]
+                    _decay_floor    = _sbuf["peak_pnl"] * (1.0 - _spike_buf_decay)
+                    _safety_valve   = current_profit < _decay_floor and current_profit < _sbuf["peak_pnl"]
+                    _buffer_expired = _buf_elapsed >= _spike_buf_sec
+
+                    if _safety_valve or _buffer_expired:
+                        if cid not in self._closing:
+                            self._closing.add(cid)
+                            _sb_why = "spike_tp" if _sbuf["peak_pnl"] >= float(
+                                get_asset_profile(oc_check.symbol).get(
+                                    "spike_capture_tp_usdt", oc_check.stake_usdt * 0.25)
+                            ) else "spike_capture"
+                            _LOGGER.info(
+                                "[SPIKE-BUFFER] cid=%s sym=%s CLOSE reason=%s "
+                                "pnl=%.4f peak=%.4f buf_elapsed=%.1fs safety_valve=%s",
+                                cid, oc_check.symbol, _sb_why,
+                                current_profit, _sbuf["peak_pnl"],
+                                _buf_elapsed, _safety_valve,
+                            )
+                            oc_check.pending_close_reason = _sb_why
+                            del self._spike_buffer[cid]
+                            oc_check.last_profit = current_profit
+                            try:
+                                await self._client.sell(cid)
+                            except DerivClientError as exc:
+                                _LOGGER.warning(
+                                    "[SPIKE-BUFFER] sell failed cid=%s: %s", cid, exc)
+                                self._closing.discard(cid)
+                        return
+                    # Buffer still active — keep waiting, skip DPM this tick
+                    oc_check.last_profit = current_profit
+                    return
+
+                # ── Evaluate spike triggers (buffer not yet active) ──────────
                 _sc_prof  = get_asset_profile(oc_check.symbol)
                 _sc_tp    = float(_sc_prof.get(
                     "spike_capture_tp_usdt", oc_check.stake_usdt * 0.25))
@@ -1084,29 +1135,26 @@ class DerivTradeExecutor:
                     and (current_profit - oc_check.last_profit) >= _sc_delta
                 )
                 if _tp_hit or _delta_hit:
-                    # Phase 35: close-lock guard — bail if sell already in-flight
                     if cid in self._closing:
                         _LOGGER.debug(
-                            "[SPIKE-CAPTURE] cid=%s already closing — skipped duplicate sell", cid)
+                            "[SPIKE-BUFFER] cid=%s already closing — skipped", cid)
                         return
-                    self._closing.add(cid)
+                    # Enter spike buffer instead of selling immediately
+                    self._spike_buffer[cid] = {
+                        "started_ts": time.time(),
+                        "peak_pnl":   current_profit,
+                        "entry_pnl":  current_profit,
+                    }
                     _sc_why = "spike_tp" if _tp_hit else "spike_capture"
                     _LOGGER.info(
-                        "[SPIKE-CAPTURE] cid=%s sym=%s reason=%s pnl=%.4f "
-                        "jump=%.4f tp_thresh=%.4f delta_thresh=%.4f",
+                        "[SPIKE-BUFFER] cid=%s sym=%s ENTER reason=%s pnl=%.4f "
+                        "jump=%.4f tp_thresh=%.4f delta_thresh=%.4f buf_sec=%.1f",
                         cid, oc_check.symbol, _sc_why, current_profit,
                         current_profit - max(oc_check.last_profit, 0.0),
-                        _sc_tp, _sc_delta,
+                        _sc_tp, _sc_delta, _spike_buf_sec,
                     )
-                    oc_check.pending_close_reason = _sc_why
                     oc_check.last_profit = current_profit
-                    try:
-                        await self._client.sell(cid)
-                    except DerivClientError as exc:
-                        _LOGGER.warning(
-                            "[SPIKE-CAPTURE] sell failed cid=%s: %s", cid, exc)
-                        self._closing.discard(cid)  # allow retry on next tick
-                    return
+                    return  # Don't close yet — buffer will decide
             oc_check.last_profit = current_profit
             # ─────────────────────────────────────────────────────────────────
 
@@ -1164,6 +1212,7 @@ class DerivTradeExecutor:
                 self._closing.discard(cid)
                 return  # already settled by reaper or reconciliation
             self._closing.discard(cid)  # Phase 35: release close-lock on final settlement
+            self._spike_buffer.pop(cid, None)  # Phase 37: clear buffer on close
             self._persist_open()
 
         realized   = float(poc.get("profit") or 0)
@@ -1310,6 +1359,7 @@ class DerivTradeExecutor:
                         oc = self._open.pop(cid, None)
                         if oc is None:
                             continue  # already settled by WS callback or reaper
+                        self._spike_buffer.pop(cid, None)  # Phase 37: clear buffer
                         self._persist_open()
 
                     realized = float(poc.get("profit") or 0)

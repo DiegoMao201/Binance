@@ -133,7 +133,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,   # locks 55% of peak (was 65% — too tight)
         "momentum_window":       35,     # very patient
         "agotamiento_threshold": 0.35,   # 35% of momentum peak before exit
-        "max_duration_seg":      900,
+        "max_duration_seg":      420,    # Muestra02-fix: profile max_hold=390 + 30s buffer so timeout_clock fires first
     },
     "CRASH1000": {
         "sl_inicial_pct":        1.00,
@@ -141,7 +141,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       35,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      900,
+        "max_duration_seg":      730,    # Muestra02-fix: profile max_hold=700 + 30s buffer
     },
     "CRASH500": {
         "sl_inicial_pct":        1.00,   # was 0.30 — corrected to match spike profile
@@ -149,7 +149,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      720,
+        "max_duration_seg":      480,    # Muestra02-fix: profile max_hold=450 + 30s buffer (was 720)
     },
     "BOOM500": {
         "sl_inicial_pct":        1.00,   # was 0.25 — corrected to match spike profile
@@ -157,7 +157,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      720,
+        "max_duration_seg":      480,    # profile max_hold=450 + 30s buffer
     },
     # ── NEW: BOOM/CRASH 900 ─────────────────────────────────────────────────
     "BOOM900": {
@@ -166,7 +166,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      450,    # Phase 34: 250→450 — avg spike interval 297s > 250s DPM; 114 timeout losses with 0 spike_tp wins; mirrors CRASH600/900 fix in Phase 33
+        "max_duration_seg":      630,    # Muestra02-fix: 450→630 (profile max_hold=600 + 30s). DPM was firing at 451s instead of letting profile 600s fire
     },
     "CRASH900": {
         "sl_inicial_pct":        1.00,
@@ -174,7 +174,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
-        "max_duration_seg":      350,    # Phase 33: 150→350 — avg spike 172s max 440s; 150s killed 15/15 trades with 0 wins
+        "max_duration_seg":      630,    # Muestra02-fix: 350→630 (profile max_hold=600 + 30s). DPM was cutting at 351s, missing spikes 351-600s
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -183,7 +183,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      250,    # Phase 25: spikes avg 206s — timeout at 250 (was 450)
+        "max_duration_seg":      380,    # Muestra02-CRITICAL-fix: 250→380 (profile max_hold=350 + 30s). DPM at 250 cut 27 trades early, 8 spikes arrived between 270-338s
     },
     "CRASH600": {
         "sl_inicial_pct":        1.00,
@@ -191,7 +191,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "ratchet_ratio":         0.55,
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
-        "max_duration_seg":      450,    # Phase 33: 180→450 — avg spike 226s max 923s; 181s killed 14/14 trades with 0 spike_tp wins
+        "max_duration_seg":      630,    # Muestra02-fix: 450→630 (profile max_hold=600 + 30s buffer; 8 missed spikes at 468-749s from entry)
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {

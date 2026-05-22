@@ -549,11 +549,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        # Muestra02: data-backed — spike_tp wins arrived at p50=165s, p90=323s, max=336s.
-        # With spike_min_post_sec=400 blocking early-cycle entries, all entries happen at
-        # t≥400s from last spike (next spike due ~900s → wait ≤500s from entry).
-        # 500s hold covers all valid entries. Replaces duplicate 120/700 mess.
-        "max_hold_seconds": 500,
+        # Muestra02: DPM was cutting at 351s (DPM max_duration_seg=350 firing before profile 500s).
+        # 3 missed spikes arrived at 526-576s from entry (175-225s after 351s close).
+        # Extending max_hold to 600s + DPM to 630s → captures those missed spikes.
+        "max_hold_seconds": 600,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -649,9 +648,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Muestra02: spike_tp wins arrived at p50=158s, p90=298s, max=379s.
-        # With spike_min_post_sec=150, entries at t≥150s → next spike in ≤450s → hold=450 catches all.
-        "max_hold_seconds": 450,
+        # Muestra02: spike_tp wins at p50=158s, p90=298s, max=379s.
+        # 8/12 timeouts had missed spikes arriving at 468-749s from entry (18-299s after 450s close).
+        # Extending to 600s captures ~7/8 of those missed spikes.
+        "max_hold_seconds": 600,
         "spike_min_post_sec": 150,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
