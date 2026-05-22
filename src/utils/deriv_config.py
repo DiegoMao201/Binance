@@ -222,7 +222,7 @@ def load_deriv_settings() -> DerivSettings:
         lockout_hours=_get_int("DERIV_LOCKOUT_HOURS", 12),
         min_stake_usdt=_get_float("DERIV_MIN_STAKE_USDT", 10.0),
         max_spread_pct=_get_float("DERIV_MAX_SPREAD_PCT", 0.0010),
-        contract_duration_sec=_get_int("DERIV_CONTRACT_DURATION_SEC", 300),
+        contract_duration_sec=_get_int("DERIV_CONTRACT_DURATION_SEC", 120),
         multiplier=_get_int("DERIV_MULTIPLIER", 200),
         take_profit_pct=_get_float("DERIV_TAKE_PROFIT_PCT", 0.012),
         stop_loss_pct=_get_float("DERIV_STOP_LOSS_PCT", 0.008),

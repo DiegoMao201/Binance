@@ -534,6 +534,32 @@ class DerivTradeExecutor:
                             self._closing.discard(cid)  # allow retry next reap
                         # Contract may already be closed; continue to poll below
 
+                # Prueba4-restart: zero_peak_exit — if after 150s the trade NEVER turned
+                # profitable (peak_profit=0.0) and is currently negative, cut the loss now.
+                # Data basis: BOOM900 62% zero_peak, BOOM600 60% zero_peak — these trades
+                # NEVER recover; waiting the full 480-600s hold just multiplies the loss.
+                # Condition: held>=150s, peak=0.0, floating<-0.05 (to avoid spread noise).
+                elif (
+                    held >= 150.0
+                    and oc_check.peak_profit == 0.0
+                    and oc_check.floating_pnl < -0.05
+                    and cid not in self._closing
+                ):
+                    self._closing.add(cid)
+                    oc_check.pending_close_reason = "zero_peak_exit"
+                    _LOGGER.info(
+                        "[deriv-trader] zero_peak_exit: %s (%s) held=%.1fs peak=0.0 pnl=%.4f — cutting stagnant loss",
+                        cid, oc_check.symbol, held, oc_check.floating_pnl,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[deriv-trader] zero_peak_exit sell failed for %s: %s", cid, exc
+                        )
+                        self._closing.discard(cid)
+                        oc_check.pending_close_reason = None
+
             try:
                 resp = await self._client.proposal_open_contract(cid)
             except DerivClientError as exc:

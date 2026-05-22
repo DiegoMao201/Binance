@@ -353,21 +353,20 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "min_score": 7.0,               # Conservative — higher than peers to compensate unknown baseline
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 240,
-        "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.50,          # cap geo — previous batch failed at geo+1.48; 0.50 blocks those
-        "stake_max_usdt": 2.00,         # Conservative — same as BOOM600/900
+        "stake_max_usdt": 3.00,         # Prueba4-restart: 2.00→3.00 — BOOM500 MVP 57%WR +$1.13/7t
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 500,
         "fvg_tier_minimo": "fvg_detected",
-        "block_bc_escape_env": False,   # First phase: collect data, decide after ≥20 trades
+        "block_bc_escape_env": False,   # BOOM500 data confirmed: bc_escape_env works for BOOM
+        "cooldown_sec": 120,            # Prueba4-restart: 240→120 — reduce signal cooldown blocking
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         "spike_min_post_sec": 280,      # cycle=500s, min_post=280s → hold=450s covers spikes up to 730s
@@ -385,8 +384,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "min_score": 4.0,              # Phase 32: 5.0→4.0 — real scores 4.09-4.35; 5.0 was blocking 100% of entries in calm
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 240,
-        "sl_multiplier": 3.0,
+        "cooldown_sec": 120,            # Prueba4-restart: 240→120
+        "sl_multiplier":120,            # Prueba4-restart: 240→120,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
@@ -458,7 +457,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # Phase 26: explicit — align with CRASH600/900
+        "hurst_min_spike": 0.42,        # Prueba4-restart: 0.43→0.42 — 2 spikes blocked at H=0.424-0.425
         "fvg_tier_minimo": "fvg_detected",  # Phase 26: explicit Tier 1 OK (was implicit)
         # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
@@ -477,6 +476,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Prueba03: bc_escape_env 20% WR (5t) vs fvg_detected/mitigated mixed.
         # All bc_escape_env entries timeout. block=True → only enter with real FVG structure.
         "block_bc_escape_env": True,    # Prueba04: hard veto — CRASH500 bc_escape_env no edge
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         # Muestra02 pre-filter: small 50s post-spike block (cycle=500s, hold=450s → min_wait=50s)
@@ -523,6 +523,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Raising min_score 4.5→7.0 + block bc_escape_env. Only enter on strong FVG setups.
         "min_score": 7.0,               # Prueba04: raised from 4.5 — low-score CRASH1000 entries all timeout
         "block_bc_escape_env": True,    # Prueba04: hard veto — ALL Prueba03 CRASH1000 losses were bc_escape_env
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
     },
@@ -532,35 +533,37 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        # Muestra02: spike_tp wins arrived at p50=164s, p90=414s, max=449s.
-        # With spike_min_post_sec=300, entries at t≥300s → next spike in ≤600s → hold=600 catches all.
-        "max_hold_seconds": 600,
+        # Prueba4-restart: zero_peak=62% with bc_escape_env entries — require FVG like CRASH symbols.
+        # fvg_mitigated = price returned to bullish FVG zone = proper accumulation entry.
+        # max_hold 600→480: reduce damage when timing is off.
+        # spike_min_post 300→270: off-by-one fix (7 spikes blocked at exactly 299t<300t).
+        "max_hold_seconds": 480,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,              # T5 2026-05-19: lowered 7.0→6.00 (in line with calm floor)
+        "min_score": 6.00,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 240,
+        "cooldown_sec": 120,            # Prueba4-restart: 240→120
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # confirmed same as BOOM1000
-        "geo_entry_min": -999,           # no lower bound — BOOM spikes can come from any depth
-        "geo_entry_max": 0.50,          # T5: widened 0.40→0.50 to allow more setups
-        "stake_max_usdt": 2.00,
+        "hurst_min_spike": 0.43,
+        "geo_entry_min": -999,
+        "geo_entry_max": 0.35,          # Prueba4-restart: 0.50→0.35 — tighter geo reduces wrong-phase entries
+        "stake_max_usdt": 1.50,         # Prueba4-restart: 2.00→1.50 — conservative until WR improves
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_detected",
+        "fvg_tier_minimo": "fvg_mitigated",  # Prueba4-restart: detected→mitigated (require price back to FVG zone)
+        "block_bc_escape_env": True,    # Prueba4-restart: 62% zero_peak on bc_escape_env — hard veto
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Muestra02 pre-filter: block eval entries until 300s after last spike.
-        # cycle=900s → entries at t≥300s are within reach of next spike with hold=600s.
-        "spike_min_post_sec": 300,
+        # off-by-one fix: 7 spikes blocked at 299t<300t → lowered to 270
+        "spike_min_post_sec": 270,
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -597,10 +600,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Prueba03: ALL 8 CRASH900 trades were bc_escape_env → 25% WR, -$0.49 total.
         # Confirmed: no FVG structures forming for CRASH900. bc_escape_env = timeout loop.
         "block_bc_escape_env": True,    # Prueba04: hard veto — wait for real FVG structure
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Prueba04: reduced from 400→280 to capture the 280-400s range that was blocked
-        "spike_min_post_sec": 280,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
@@ -608,55 +611,53 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        # Muestra02: spike_tp wins arrived at p50=95s, p90=242s, max=249s.
-        # With spike_min_post_sec=250, entries at t≥250s → next spike in ≤350s → hold=350 catches all.
-        "max_hold_seconds": 350,
+        # Prueba4-restart: zero_peak=60% with bc_escape_env entries — block bc_escape_env.
+        # fvg_mitigated: price back to bullish FVG zone = confirmed accumulation entry.
+        # spike_min_post 250→200: earlier window once FVG is valid.
+        # max_hold 350→280: limit damage on bad-timing entries.
+        "max_hold_seconds": 280,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,              # T5 2026-05-19: lowered 7.5→6.00
+        "min_score": 6.00,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 240,
+        "cooldown_sec": 120,            # Prueba4-restart: 240→120
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # T5: aligned with BOOM1000 (was 0.47)
-        "geo_entry_min": -999,           # no lower bound — BOOM spikes valid from any depth
-        "geo_entry_max": 0.50,          # T5: widened 0.40→0.50
-        "stake_max_usdt": 2.00,         # T5: conservative 6.0→2.00
-        "stop_loss_pct_override": 0.36,  # same SL fix as R_50/R_75 → sl_usd > broker floor
-        "trail_stop_floor_min": 0.20,   # DPM: lock profit above $0.20
-        "ratchet_enabled": True,        # DPM ratchet active
+        "hurst_min_spike": 0.43,
+        "geo_entry_min": -999,
+        "geo_entry_max": 0.35,          # Prueba4-restart: 0.50→0.35 — tighter geo vs wrong-phase entries
+        "stake_max_usdt": 1.50,         # Prueba4-restart: 2.00→1.50 — conservative until WR improves
+        "stop_loss_pct_override": 0.36,
+        "trail_stop_floor_min": 0.20,
+        "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_detected",  # FIX-5: Tier 1 sufficient (was fvg_mitigated — too strict)
-        # Prueba03: BOOM600 had 0 entries — completely blocked. block=False allows bc_escape_env
-        # with natural score gate (effective_min 3.5-6.0). BOOM900 bc_escape_env shows it can win.
-        "block_bc_escape_env": False,   # Prueba04: unblocked — was killing all BOOM600 entries
-        # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
+        "fvg_tier_minimo": "fvg_mitigated",  # Prueba4-restart: detected→mitigated (FVG touched = support confirmed)
+        "block_bc_escape_env": True,    # Prueba4-restart: 60% zero_peak on bc_escape_env — hard veto
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Muestra02 pre-filter: block eval entries until 250s after last spike.
-        # cycle=600s → entries at t≥250s are within reach of next spike with hold=350s.
-        "spike_min_post_sec": 250,
+        # Prueba4-restart: 250→200 — earlier entry once FVG structure is active
+        "spike_min_post_sec": 200,
     },
     "CRASH600": {
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 780,        # Phase 19: MTBS≈600 ticks → 13 min (was 450 s)
+        "max_hold_seconds": 600,
+        "ema_distance_pct": 600,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,              # T5 2026-05-19: lowered 7.5→6.00
+        "min_score": 6.00,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 300,
-        "sl_multiplier": 3.0,
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
@@ -675,15 +676,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # block_bc_escape_env=True is the correct enforcement.
         "fvg_tier_minimo": "fvg_mitigated",
         "block_bc_escape_env": True,    # Prueba04: hard veto — bc_escape_env has 0 edge for CRASH600
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
+        "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Muestra02: spike_tp wins at p50=158s, p90=298s, max=379s.
-        # 8/12 timeouts had missed spikes arriving at 468-749s from entry (18-299s after 450s close).
-        # Extending to 600s captures ~7/8 of those missed spikes.
-        "max_hold_seconds": 600,
-        # Muestra3: 984x spike arrived at 130t; 150t was blocking a 20t entry margin.
-        # Lowered from 150→130 to capture that window.
-        "spike_min_post_sec": 130,
+        "spike_min_post_sec": 110,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
