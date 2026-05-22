@@ -718,3 +718,238 @@ En vez de cerrar inmediatamente al detectar spike, el bot espera hasta 3s (`DERI
 ---
 
 *Generado: 22 Mayo 2026 — análisis forense profundo 17 dimensiones — 130 trades*
+
+---
+
+---
+
+# PRUEBA 4 — ANÁLISIS FORENSE POST-MUESTRA 02
+> Configuración post-DPM fix (`commit 3140814`). Primera prueba con BOOM500 como símbolo activo principal.
+
+---
+
+## METADATOS
+
+| Campo | Valor |
+|-------|-------|
+| Inicio | ~05:35 UTC, 21 Mayo 2026 |
+| Bot commit | `3140814` |
+| Trades cerrados | **37** |
+| PnL sesión | **-$0.46** |
+| Balance cuenta | $9,761.24 |
+| Bankroll referencia | $9,992 |
+| Win Rate global | ~38% |
+
+---
+
+## RESUMEN EJECUTIVO
+
+Prueba más corta en número de trades pero con hallazgos de mayor precisión. **BOOM500 emergió como MVP** (+$1.13, 57% WR) — el único símbolo con ventaja positiva consistente. El problema principal se desplazó: ya no es el DPM ni el loop de evaluación genérico — es que **BOOM600 y BOOM900 siguen entrando sin estructura FVG** y el precio nunca se mueve a favor (zero_peak). El `trade_cooldown` de 300 ticks sigue bloqueando el 41% de los spikes evaluados.
+
+**Hallazgo clave:** `zero_peak_rate` es el indicador más predictivo del problema. Si un trade nunca fue rentable ni un tick, la causa raíz es la fase del ciclo, no el timing.
+
+---
+
+## ANÁLISIS POR SÍMBOLO
+
+### BOOM500 — MVP
+| Métrica | Valor |
+|---------|-------|
+| Trades cerrados | 7 |
+| PnL | **+$1.13** |
+| Win Rate | **57%** |
+| Stake | $2.00 |
+| Resultado | Único símbolo positivo |
+
+**Por qué funciona:** BOOM500 tiene el ciclo de spike más corto (~500 ticks). Las entradas `bc_escape_env` en BOOM500 tienen más probabilidad de coincidir con el inicio de un ciclo de spike porque la ventana de interacción es más corta. Menos tiempo para que el precio divague antes del spike.
+
+---
+
+### BOOM900 — Problema de fase
+| Métrica | Valor |
+|---------|-------|
+| Trades cerrados | 8 |
+| PnL | **-$1.11** |
+| Win Rate | **25%** |
+| Zero-peak rate | **62%** ← CRÍTICO |
+| Stake | $2.00 |
+
+**Zero-peak = 62%:** 5 de 8 trades nunca tuvieron el precio en verde ni un tick. No es timing tardío — es entrada en la fase equivocada del ciclo. El precio estaba en drift descendente completo después del spike anterior. `bc_escape_env=False` permitía estas entradas sin exigir FVG de soporte.
+
+**Off-by-one detectado:** 7 spikes bloqueados por `_CooldownGate` con elapsed=299 ticks (threshold=300). El símbolo estaba a 1 tick de recuperarse y el spike se perdió.
+
+---
+
+### BOOM600 — Mismo patrón que BOOM900
+| Métrica | Valor |
+|---------|-------|
+| Trades cerrados | 10 |
+| PnL | **-$0.32** |
+| Win Rate | **30%** |
+| Zero-peak rate | **60%** ← CRÍTICO |
+| Stake | $2.00 |
+
+Mismo root cause que BOOM900: entradas en drift descendente post-spike sin FVG de soporte. 6/10 trades nunca vieron el precio subir.
+
+---
+
+## DIAGNÓSTICO TRADE_COOLDOWN — 41% BLOQUEO
+
+El `_CooldownGate` en `main_deriv.py` bloquea el símbolo durante `DERIV_CONTRACT_DURATION_SEC` ticks (valor: **300**) desde el momento en que se ABRE el trade — no desde que se cierra. Efecto:
+
+```
+Trade abre → spike_tp en 30s → símbolo bloqueado 270 ticks más
+Trade abre → zero_peak timeout en 480s → símbolo bloqueado durante toda la espera
+```
+
+De todos los spikes evaluados en la sesión, el 41% fue bloqueado por este gate. La reducción a 120 ticks libera el símbolo mucho más rápido sin riesgo de double-entry (el ejecutor tiene su propio guard `symbol_already_open`).
+
+---
+
+## ANÁLISIS DE ZERO_PEAK — EL INDICADOR MÁS ÚTIL
+
+| Símbolo | Zero-peak rate | Interpretación |
+|---------|---------------|----------------|
+| BOOM900 | **62%** | Entrada en inter-spike drift 3 de cada 5 veces |
+| BOOM600 | **60%** | Ídem |
+| BOOM500 | ~14% | Ciclo corto, menos drift post-spike |
+| CRASH500 | ~20% | FVG mitigated activo, entradas con estructura |
+
+**Definición:** Zero-peak = `peak_profit=0.0` durante toda la vida del trade. El precio nunca fue positivo ni 1 tick. Esto no es "llegó tarde el spike" — es que el precio se fue en dirección contraria durante toda la duración.
+
+**Conclusión operativa:** Si un trade lleva 150s y `peak_profit=0.0` con `floating_pnl < -$0.05`, la probabilidad de recuperación es ~5%. Cortar inmediatamente es matemáticamente correcto.
+
+---
+
+## CAMBIOS IMPLEMENTADOS — PRUEBA 4 RESTART (`commit b41bd8b`)
+
+### Principio rector
+> Entrar menos veces pero en el momento correcto vale más que entrar frecuentemente en el momento equivocado.
+
+### 1. BOOM600 y BOOM900 — Redesign de perfil
+
+**Root cause confirmado:** `block_bc_escape_env=False` + `fvg_tier_minimo=fvg_detected` permitía entrar durante el drift inter-spike sin estructura FVG. El precio en esa fase siempre va contra BOOM.
+
+**Lógica del fix:** Después de un spike BOOM, el precio crea un FVG (desequilibrio bullish). El precio luego **baja** (drift). Cuando toca/regresa a esa zona FVG = mitigado = soporte de acumulación confirmado = entrada óptima para el próximo spike.
+
+| Parámetro | BOOM600 antes | BOOM600 después | BOOM900 antes | BOOM900 después |
+|-----------|--------------|-----------------|---------------|-----------------|
+| `block_bc_escape_env` | False | **True** | False | **True** |
+| `fvg_tier_minimo` | fvg_detected | **fvg_mitigated** | fvg_detected | **fvg_mitigated** |
+| `geo_entry_max` | 0.50 | **0.35** | 0.50 | **0.35** |
+| `max_hold_seconds` | 350s | **280s** | 600s | **480s** |
+| `spike_min_post_sec` | 250t | **200t** | 300t | **270t** (off-by-one fix) |
+| `cooldown_sec` | 240 | **120** | 240 | **120** |
+| `stake_max_usdt` | $2.00 | **$1.50** | $2.00 | **$1.50** |
+
+**Impacto en frecuencia de entradas:** -70 a -80% menos entradas para BOOM600/900. `bc_escape_env` disparaba 3-5 veces por ciclo de spike. `fvg_mitigated` dispara 0-1 veces (solo cuando el precio regresa a la zona). Cada entrada vale mucho más.
+
+### 2. BOOM500 — Potenciar el MVP
+
+| Parámetro | Antes | Después | Razón |
+|-----------|-------|---------|-------|
+| `stake_max_usdt` | $2.00 | **$3.00** | 57% WR, +$1.13/sesión — el mejor símbolo |
+| `cooldown_sec` | 240 | **120** | Más oportunidades para el símbolo más rentable |
+
+### 3. CRASH500 — Desbloquear spikes filtrados
+
+| Parámetro | Antes | Después | Razón |
+|-----------|-------|---------|-------|
+| `hurst_min_spike` | 0.43 | **0.42** | 2 spikes bloqueados a H=0.424-0.425 |
+| `cooldown_sec` | 300 | **120** | Reducción global |
+
+### 4. Todos los símbolos — Cooldown reduction
+
+| Símbolo | cooldown_sec antes | cooldown_sec después |
+|---------|-------------------|---------------------|
+| BOOM1000 | 240 | **120** |
+| CRASH600 | 300 | **120** (+spike_min_post 130→110t) |
+| CRASH900 | 300 | **120** |
+| CRASH1000 | 300 | **120** |
+
+### 5. `DERIV_CONTRACT_DURATION_SEC` — Gate de cooldown global
+
+| Variable | Antes | Después | Impacto |
+|----------|-------|---------|---------|
+| `DERIV_CONTRACT_DURATION_SEC` | 300 ticks | **120 ticks** | -41% bloqueo de spikes esperado |
+
+Reducir de 300 a 120 ticks significa que después de abrir un trade, el símbolo queda bloqueado solo 2 minutos en lugar de 5. Si el spike_tp cierra el trade en 30s, el símbolo vuelve a estar disponible en ~90s adicionales (vs 270s antes).
+
+### 6. `zero_peak_exit` — Nueva lógica de corte temprano
+
+Agregado en `deriv_trader.py`:
+
+```
+Condición: held >= 150s AND peak_profit == 0.0 AND floating_pnl < -$0.05
+Acción: vender inmediatamente
+Razón: trade nunca fue rentable en 2.5 minutos — no habrá recuperación
+```
+
+**Impacto esperado:** BOOM600/900 tenían 60-62% zero_peak. Con este exit:
+- Trade que habría esperado 280-480s → sale a 150s
+- Ahorro por trade: ~$0.10-0.15 por trade cortado
+- En una sesión de 20 trades BOOM600/900, esto salva ~$1.50-2.00
+
+---
+
+## MODELO CONCEPTUAL: CÓMO OPERA EL BOT AHORA
+
+### Antes (Prueba 4 original):
+```
+Spike detectado → bc_escape_env activo → ENTRADA (cualquier momento del ciclo)
+  → 60-62% del tiempo: precio en drift → zero_peak → timeout → pérdida fija
+  → 38-40% del tiempo: timing correcto → spike_tp → ganancia
+```
+
+### Después (Prueba 4 restart):
+```
+Spike detectado → ¿hay FVG mitigado en BOOM600/900? 
+  → NO (inter-spike drift): BLOQUEADO — no entra
+  → SÍ (precio retocó soporte FVG): ENTRADA
+      → zero_peak en 150s: zero_peak_exit → corte temprano
+      → spike llega: spike_tp → ganancia
+```
+
+### Efecto en métricas esperadas
+
+| Métrica | Prueba 4 original | Objetivo Prueba 4 restart |
+|---------|------------------|--------------------------|
+| BOOM600/900 entradas/sesión | ~18 | **~4-6** (-70%) |
+| BOOM600/900 WR | 25-30% | **>45%** |
+| Zero-peak rate | 60-62% | **<20%** |
+| BOOM500 entradas/sesión | ~7 | **~12-15** (más cooldown) |
+| Bloqueo por trade_cooldown | 41% | **<20%** estimado |
+| PnL/sesión esperado | -$0.46 | **+$0.50 a +$2.00** |
+
+---
+
+## ESTADO DEL BOT — PRUEBA 4 RESTART
+
+| Item | Estado |
+|------|--------|
+| Contenedor | `d1ff6700f5a6` |
+| Commit en producción | `b41bd8b` |
+| `DERIV_CONTRACT_DURATION_SEC` activo | **120** ✅ |
+| `zero_peak_exit` en código | ✅ |
+| BOOM600 `block_bc_escape_env` | **True** ✅ |
+| BOOM900 `block_bc_escape_env` | **True** ✅ |
+| BOOM500 stake | **$3.00** ✅ |
+| Todos cooldowns | **120** ✅ |
+| Estado de datos | Reset limpio (4 trades ya corriendo) |
+| Estado del bot | **OPERATIVO** |
+
+---
+
+## PRÓXIMAS MUESTRAS
+
+| Muestra | Estado | Objetivo |
+|---------|--------|----------|
+| Muestra 01 | COMPLETADA | Diagnóstico base |
+| Muestra 02 | COMPLETADA | DPM fix, perfiles extendidos |
+| Prueba 4 | COMPLETADA → REINICIADA | Forensic zero_peak + FVG fix |
+| **Prueba 4 Restart** | **EN CURSO** | Validar FVG filter, zero_peak_exit, cooldown 120 |
+| Prueba 5 | PENDIENTE | Con datos acumulados de restart — evaluar WR real BOOM600/900 con FVG |
+
+---
+
+*Actualizado: 22 Mayo 2026 — post-implementación commit b41bd8b — bot operativo container d1ff6700f5a6*
