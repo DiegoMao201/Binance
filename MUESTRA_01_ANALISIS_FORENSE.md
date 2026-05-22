@@ -422,10 +422,299 @@ El único símbolo rentable. Sus características:
 | Muestra | Estado | Objetivo |
 |---------|--------|----------|
 | Muestra 01 | COMPLETADA | Configuración base, diagnóstico inicial |
-| Muestra 02 | PENDIENTE | Validar extensión timeouts BOOM600/BOOM900, habilitar CRASH1000 |
-| Muestra 03 | PENDIENTE | Reducir trade_cooldown, Hurst ajuste |
-| Muestra 04 | PENDIENTE | Early exit logic, evaluación de trading hours filter |
+| Muestra 02 | COMPLETADA | Validar extensión timeouts, habilitar CRASH1000 |
+| Muestra 03 | EN CURSO | Spike buffer, DPM fix, filtrar bc_escape_env TREND |
+| Muestra 04 | PENDIENTE | Validar filtros, evaluar early-exit por inactividad |
 
 ---
 
 *Generado: 22 Mayo 2026 — GitHub Copilot + datos live del bot Deriv*
+
+---
+
+---
+
+# MUESTRA 02 — ANÁLISIS FORENSE PROFUNDO
+> `commit ac3d3b8` — post-ajuste Muestra 01: perfiles extendidos, CRASH1000 habilitado, BOOM900 extendido.
+
+---
+
+## METADATOS
+
+| Campo | Valor |
+|-------|-------|
+| Inicio | ~12:13 UTC, 22 Mayo 2026 |
+| Fin | ~16:04 UTC, 22 Mayo 2026 |
+| Duración | ~3h 51m |
+| Bot commit | `ac3d3b8` |
+| Trades cerrados | **130** |
+| PnL total | **-5.69 USD** |
+| Win Rate | **31.5%** |
+| Avg win | +$0.381 |
+| Avg loss | -$0.245 |
+| Total ganado | +$15.64 |
+| Total perdido | -$21.33 |
+
+---
+
+## RESUMEN EJECUTIVO
+
+El bot sigue perdiendo pero el patrón de pérdida cambió: antes era `spike_timeout` puro, ahora el `timeout_max` del DPM domina. **Causa raíz descubierta: el DPM (`position_manager.py`) tiene su propio `max_duration_seg` que disparaba ANTES que el `max_hold_seconds` del perfil.** BOOM600 cerraba en 250s (DPM) en vez de 350s (perfil). BOOM900 en 451s en vez de 600s. CRASH900 en 351s en vez de 500s.
+
+El segundo hallazgo crítico: el **setup_type `TREND` con fvg_tier `bc_escape_env` es tóxico** — 102 trades, PnL=-$5.72, WR=29%. Estas entradas nunca debieron ejecutarse. En contraste, `fvg_mitigated` produce PnL=+$1.63 con WR=48% en solo 21 trades.
+
+Un tercer hallazgo estructural: **86/130 trades (66%) jamás fueron rentables** (eficiencia=0%). Perdieron $21.03 en total. El bot no tiene mecanismo de "no está funcionando esta vez" — cada trade espera hasta el timeout.
+
+---
+
+## ANÁLISIS POR EXIT_REASON
+
+| Salida | Count | PnL | WR | Avg PnL |
+|--------|-------|-----|----|---------|
+| spike_tp | 36 | **+$15.64** | 100% | +$0.434 |
+| spike_timeout | 34 | -$7.52 | 0% | -$0.221 |
+| timeout_max | 56 | -$12.32 | 0% | -$0.220 |
+| broker_sl_hit | 2 | -$1.44 | 0% | -$0.720 |
+| ghost_unknown | 2 | $0.00 | — | $0.000 |
+
+> **Insight clave:** Igual que en Muestra 01, el outcome es BINARIO: o se captura el spike (efic=1.00) o se pierde el timeout. No hay zona gris. 89/130 posiciones cerraron con eficiencia=0% (nunca verde) → pérdida de $21.33.
+
+---
+
+## HALLAZGO CRÍTICO — DPM DISPARANDO ANTES QUE EL PERFIL
+
+El `DynamicPositionManager` tiene su propio `max_duration_seg` independiente del perfil. En Muestra 02 esto hacía:
+
+| Símbolo | DPM max_duration | Perfil max_hold | Resultado |
+|---------|-----------------|-----------------|-----------|
+| BOOM600 | **250s** | 350s | Cerraba 100s antes del límite del perfil |
+| BOOM900 | **450s** | 600s | Cerraba 150s antes |
+| CRASH900 | **350s** | 500s | Cerraba 150s antes |
+| CRASH600 | 450s | 450s | OK (coincidía) |
+| CRASH1000 | 900s | 700s | DPM más largo que perfil — correcto |
+
+**Consecuencia:** BOOM600 tuvo 27 trades saliendo en ~250s (exit=`timeout_max`), no en 350s. Spikes de BOOM600 llegaron hasta 338s desde entrada — eran capturables con el tiempo correcto.
+
+**Fix implementado (commit `524bf0c`):** DPM ahora a profile+30s para todos los spike markets.
+
+---
+
+## HALLAZGO CRÍTICO — SETUP_TYPE `TREND` ES EL PROBLEMA
+
+### Por setup_type completo:
+
+| Setup | Trades | PnL | WR | Salidas |
+|-------|--------|-----|----|---------|
+| **TREND** | 103 | **-$6.04** | 29% | 54×timeout_max, 23×spike_timeout, 26×spike_tp |
+| **SMC_FVG** | 20 | **+$1.95** | 50% | 9×spike_tp, 11×spike_timeout |
+| UNKNOWN | 7 | -$1.60 | 14% | ghost/broker_sl_hit |
+
+### Por fvg_tier (correlaciona perfecto con setup_type):
+
+| FVG Tier | Trades | PnL | WR | Efic avg | Grades |
+|----------|--------|-----|----|----------|--------|
+| **bc_escape_env** | 102 | **-$5.72** | 29% | 0.23 | C:56, B:35, A:11 |
+| **fvg_mitigated** | 21 | **+$1.63** | 48% | 0.48 | A:11, B:7, C:3 |
+| none (UNKNOWN) | 7 | -$1.60 | 14% | 0.14 | — |
+
+**`bc_escape_env` = entrada sin FVG real.** El bot usa la envolvente del escape de canal como sustituto de un FVG. En 102 intentos con esta condición, pierde $5.72 y tiene una eficiencia media de 23% — el spike llega pero tarde, cuando el trade ya expiró.
+
+**`fvg_mitigated` = entrada con FVG real mitigado.** Solo en CRASH500 y CRASH600. WR=48%, PnL positivo, y la clave: **0 trades de `timeout_max`** — todos terminan en `spike_tp` o `spike_timeout` (el spike llegó, solo algunos llegaron tarde).
+
+### Por símbolo × setup_type:
+
+| Símbolo | Setup | Trades | PnL | WR | Exits principales |
+|---------|-------|--------|-----|----|-------------------|
+| BOOM600 | TREND/bc_escape | 32 | -$3.15 | 25% | 27×timeout_max |
+| BOOM600 | UNKNOWN | 2 | -$0.95 | 0% | broker_sl_hit |
+| BOOM900 | TREND/bc_escape | 19 | +$0.41 | 32% | 13×timeout_max, 6×spike_tp |
+| CRASH500 | **SMC_FVG/fvg_mitigated** | 12 | **+$1.08** | 50% | 5×spike_tp, 7×spike_timeout |
+| CRASH500 | TREND/bc_escape | 8 | -$0.13 | 50% | 4×spike_timeout, 4×spike_tp |
+| CRASH600 | **SMC_FVG/fvg_mitigated** | 8 | **+$0.87** | 50% | 4×spike_tp, 4×spike_timeout |
+| CRASH600 | TREND/bc_escape | 12 | -$1.23 | 25% | 9×spike_timeout |
+| CRASH900 | TREND/bc_escape | 18 | -$1.19 | 22% | 14×timeout_max |
+| CRASH1000 | TREND/bc_escape | 14 | -$0.75 | 36% | 10×spike_timeout, 4×spike_tp |
+
+---
+
+## HALLAZGO — EFICIENCIA BINARIA
+
+| Rango eficiencia | Trades | PnL | WR | Avg peak |
+|-----------------|--------|-----|----|----------|
+| 0% (jamás verde) | **86** | **-$21.03** | 0% | $0.002 |
+| 25-50% | 3 | +$0.06 | 100% | $0.057 |
+| 50-75% | 1 | +$0.08 | 100% | $0.140 |
+| **75-100%** | **37** | **+$15.50** | 100% | $0.419 |
+
+La distribución es casi perfectamente bimodal: **o llega el spike (efic>75%, PnL positivo) o no llega (efic=0%, pérdida inevitable).** No hay trades que "casi funcionaron". Esto confirma que el concepto de early-exit-por-inactividad es válido: si tras 200-250s la posición jamás fue verde, no llegará a ser rentable.
+
+---
+
+## HALLAZGO — DPM FASE NUNCA ACTIVA
+
+| DPM Fase | Trades | PnL | WR |
+|----------|--------|-----|----|
+| Fase 1 (sin ratchet) | 125 | -$4.81 | 32% |
+| **Fase 2 (ratchet activo)** | **1** | **+$0.56** | 100% |
+| Fase ? (error) | 4 | -$1.44 | 0% |
+
+El sistema de ratchet/trailing-stop de la Fase 2 **prácticamente nunca se activa** (1 trade de 130). Esto significa que todo el código de DPM de trailing está siendo inútil. La razón: los spikes son movimientos bruscos de 2-10 segundos — cuando la posición alcanza el umbral de activación del ratchet, ya está en el tick final del spike y se cierra por `spike_tp` antes de que el DPM llegue a operar.
+
+---
+
+## HALLAZGO — MOMENTUM SCORE vs OUTCOME (PARADOJA 0.7)
+
+| Momentum | Trades | PnL | WR |
+|----------|--------|-----|----|
+| 0.3 | 1 | -$0.18 | 0% |
+| 0.4 | 2 | -$0.41 | 0% |
+| 0.5 | 4 | +$0.17 | 50% |
+| 0.6 | 4 | +$0.07 | 25% |
+| **0.7** | **9** | **-$2.08** | **0%** |
+| 0.8 | 10 | +$0.85 | 60% |
+| 0.9 | 15 | +$1.52 | 40% |
+| 1.0 | 9 | -$1.26 | 22% |
+| 1.1 | 20 | -$0.61 | 35% |
+| 1.2 | 11 | -$1.86 | 18% |
+| 1.3 | 12 | +$0.16 | 42% |
+| 1.4 | 11 | -$1.13 | 27% |
+| 1.5 | 15 | +$0.67 | 40% |
+
+**Paradoja:** momentum=0.7 es peor que 0.3 o 0.4. 9 trades, WR=0%, pérdida de $2.08. Todos con peak=$0.00 — el mercado nunca se movió a favor. La zona 0.7-0.8 parece ser una transición inestable donde hay "suficiente" momentum para activar la entrada pero no suficiente para mover el precio.
+
+---
+
+## HALLAZGO — TREND SCORE FIJO (BUG DE SCORING)
+
+```
+trend=1.5 → 123/130 trades (100% de los trades válidos)
+```
+
+El score de tendencia es CONSTANTE en 1.5 para prácticamente todos los trades. No discrimina nada. Esto significa que el componente `trend` del scoring nunca bloquea entradas porque siempre aporta el mismo valor fijo. Es una variable muerta en el modelo de decisión.
+
+---
+
+## HALLAZGO — GEO_CHANNEL_POS vs OUTCOME
+
+| Posición en canal | Trades | PnL | WR |
+|-------------------|--------|-----|----|
+| < -0.5 (deep oversold) | 35 | **+$1.52** | 34% |
+| -0.5 a 0 (oversold) | 33 | -$1.51 | 30% |
+| **0 a 0.3 (neutral)** | **40** | **-$3.82** | 28% |
+| 0.3 a 0.6 (mid) | 11 | +$0.60 | **64%** |
+| > 0.6 (extended) | 3 | -$0.69 | 0% |
+
+La zona **"neutral" (0 a 0.3)** es la peor: 40 trades, WR=28%, PnL=-$3.82. Las entradas en el medio del canal no tienen ninguna ventaja estadística. La zona **0.3-0.6** es la mejor con 64% de WR (aunque solo 11 trades). Los extremos (`< -0.5`) tienen PnL positivo por el spike_tp potencial.
+
+---
+
+## ANÁLISIS BOOM600 — CASO CRÍTICO
+
+BOOM600 es la fuente de la mitad de las pérdidas (-$4.10 de -$5.69 total). Desglose forense:
+
+- **34 trades, 32 de tipo TREND/bc_escape_env**
+- `avg_peak = $0.052` — el spike casi nunca llega en tiempo
+- `max_peak = $0.62` — cuando llega, es grande
+- Solo **6 de 32** trades bc_escape_env alguna vez superaron $0.10 verde
+- score_raw range: 5.15-8.33 → el score **no predice nada** para BOOM600 bc_escape_env
+- geo range: -0.811 a 0.794 → tampoco discrimina
+- Todos los 27 `timeout_max` salieron exactamente a ~251s (DPM 250s)
+- Con fix DPM 250→380s, estos 27 trades ahora esperan hasta 350s (perfil)
+- Spikes de BOOM600 llegaron hasta 338s en sesión → el fix debería capturar ~8 adicionales
+
+**Root cause BOOM600:** El bc_escape_env nunca debió ser válido para BOOM600. La señal `bc_escape_env` indica que el precio salió de la envolvente del canal de Bollinger/ATR pero sin FVG institucional. Para BOOM600 (ciclo=600 ticks) esto genera entradas aleatorias dentro del ciclo sin ningún sesgo hacia el próximo spike.
+
+---
+
+## ANÁLISIS SMC_FVG — EL MODELO A SEGUIR
+
+Los 20 trades de tipo `SMC_FVG` con `fvg_mitigated` son los únicos con ventaja sistemática:
+
+- **CRASH500 SMC_FVG**: 12 trades, PnL=+$1.08, WR=50%, efic=0.48
+- **CRASH600 SMC_FVG**: 8 trades, PnL=+$0.87, WR=50%, efic=0.48
+- **0 salidas por `timeout_max`** — el spike siempre llegó, el problema fue el timing
+- geo<0 en 86% de los casos (vs 49% para bc_escape_env)
+- Grade A en 11/21 trades (vs 11/102 para bc_escape_env)
+- Exits: solo `spike_tp` o `spike_timeout` — el spike llegó pero algunos se cerraron antes por el hold
+
+**Este setup funciona porque:** el FVG mitigado indica que el precio retocó un desequilibrio institucional previo. Para CRASH500/600 esto coincide con el ciclo de recuperación pre-spike. La señal es estructural, no solo de momentum.
+
+---
+
+## GHOST / BROKER_SL_HIT ANÁLISIS
+
+4 trades anómalos con duración=0s y sin score_breakdown:
+
+| Exit | Símbolo | PnL | Causa probable |
+|------|---------|-----|----------------|
+| broker_sl_hit | BOOM600 | -$0.720 | Fill inmediato con slippage extremo → SL al 100% del stake |
+| broker_sl_hit | CRASH600 | -$0.720 | Ídem — fill en tick de spike opuesto |
+| ghost_unknown | BOOM900 | $0.000 | Contrato fantasma: cerrado sin PnL |
+| ghost_unknown | CRASH1000 | $0.000 | Ídem |
+
+Los broker_sl_hit son fills en ticks de alta volatilidad donde el spread se come el stake completo inmediatamente. Requieren filtro anti-spike-opuesto antes del fill.
+
+---
+
+## WINNERS ANATOMY — QUÉ ENTRA BIEN
+
+Los 36 trades `spike_tp` tienen eficiencia=1.00 (100%). Sus patrones:
+
+- **setup_type:** TREND (26) + SMC_FVG (10) — ambos pueden ganar si el spike llega
+- **fvg_tier:** bc_escape_env (26) + fvg_mitigated (10)
+- **Mejor trade:** BOOM900 bc_escape_env TREND, geo=-0.736, mom=0.89, hurst=0.493 → +$1.14
+- **fvg_mitigated wins:** todos de CRASH500/600, tienden a geo < -0.10
+- **bc_escape_env wins:** no tienen patrón de geo consistente — son pura lotería de timing
+- **Hurst de ganadores:** rango 0.438-0.540, sin diferencia con perdedores → hurst no discrimina
+
+**Conclusión:** Los ganadores de bc_escape_env no son mejores entradas — son simplemente los que tuvieron suerte en el timing del spike. No hay ningún indicador pre-entrada que los diferencie.
+
+---
+
+## CAMBIOS IMPLEMENTADOS (commit `524bf0c`)
+
+### 1. DPM max_duration_seg corregido — todos los spike markets
+
+| Símbolo | Antes | Después | Perfil max_hold |
+|---------|-------|---------|-----------------|
+| BOOM600 | 250s | **380s** | 350s |
+| BOOM900 | 450s | **630s** | 600s |
+| CRASH900 | 350s | **630s** | 600s (extendido) |
+| CRASH600 | 450s | **630s** | 600s (extendido) |
+| CRASH500 | 720s | **480s** | 450s |
+| CRASH1000 | 900s | **730s** | 700s |
+| BOOM1000 | 900s | **420s** | 390s |
+
+### 2. Perfiles extendidos
+
+| Símbolo | max_hold anterior | max_hold nuevo | Justificación |
+|---------|------------------|----------------|---------------|
+| CRASH600 | 450s | **600s** | 8 spikes llegaron 468-749s desde entrada |
+| CRASH900 | 500s | **600s** | 3 spikes llegaron 526-576s desde entrada |
+
+### 3. Spike buffer (Phase 37)
+
+En vez de cerrar inmediatamente al detectar spike, el bot espera hasta 3s (`DERIV_SPIKE_BUFFER_SEC`) para capturar secuencias multi-spike. Safety valve: si el PnL cae >35% del pico durante el buffer, cierra inmediatamente.
+
+---
+
+## ACCIONES PENDIENTES PARA MUESTRA 03
+
+### URGENTE — Implementar filtros de entrada
+
+| Filtro | Acción | Impacto esperado |
+|--------|--------|-----------------|
+| **Bloquear bc_escape_env TREND en BOOM600** | `min_score` imposible o `disabled=True` para BOOM600 TREND | -32 trades perdedores, ahorra ~$3.15/muestra |
+| **Requerir fvg_mitigated para CRASH500/600** | Elevar `fvg_tier_minimo = "fvg_mitigated"` | +50% WR en esos símbolos |
+| **Bloquear momentum en rango 0.65-0.75** | Agregar `min_momentum = 0.76` o penalización | Eliminar 9 trades WR=0% |
+| **Filtrar geo_channel_pos 0.0-0.30** | `geo_entry_min=0.30` para entradas TREND bc_escape_env | Elimina peor zona: 40 trades, -$3.82 |
+| **Early exit si efic=0 tras 200s** | Nueva lógica: si peak_profit<$0.05 tras 200s en bc_escape_env, cerrar | Salva $0.22/trade en ~45 trades potenciales |
+
+### MEDIO PLAZO — Scoring fix
+
+- **trend=1.5 siempre:** Investigar por qué el componente trend no varía. Si siempre vale 1.5, sobra del modelo — está consumiendo 1.5 puntos sin discriminar.
+- **DPM Fase 2 nunca activa:** Dado que los spikes son bruscos y cortos, el ratchet nunca opera. Considerar eliminarlo para spike markets y simplificar la lógica.
+
+---
+
+*Generado: 22 Mayo 2026 — análisis forense profundo 17 dimensiones — 130 trades*

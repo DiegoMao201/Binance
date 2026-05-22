@@ -1724,11 +1724,17 @@ class DerivRiskManager:
                     os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").lower()
                     in ("1", "true", "yes")
                 )
-                if not _bc_escape_env:
-                    snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
-                    snap.reasons.append(
+                # Per-profile override: block_bc_escape_env=True → hard veto even if escape valve open.
+                # Muestra02: BOOM600 bc_escape_env 32t → WR=25%, PnL=-$3.15; score does NOT predict.
+                _profile_blocks_bc = bool(_get_asset_profile(symbol).get("block_bc_escape_env", False))
+                if not _bc_escape_env or _profile_blocks_bc:
+                    _block_reason = (
+                        f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
+                        if _profile_blocks_bc else
                         f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
                     )
+                    snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
+                    snap.reasons.append(_block_reason)
                     snap.allowed = False
                     return snap
                 else:
