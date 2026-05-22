@@ -360,7 +360,14 @@ class DerivTradeExecutor:
                     "[deriv-trader] max_hold_seconds enforced from profile: %.0fs → %.0fs (%s)",
                     order.max_hold_seconds, _profile_mh, order.symbol,
                 )
-            order.max_hold_seconds = _profile_mh
+            # Apply ATR dynamic extension stored in score_breakdown
+            _atr_ext = float((order.score_breakdown or {}).get("atr_hold_extension", 0.0))
+            order.max_hold_seconds = _profile_mh + _atr_ext
+            if _atr_ext > 0:
+                _LOGGER.info(
+                    "[deriv-trader] ATR_HOLD_EXT %s +%.0fs → total=%.0fs",
+                    order.symbol, _atr_ext, order.max_hold_seconds,
+                )
         result = await self._client.buy(
             symbol=order.symbol,
             contract_type=order.side,

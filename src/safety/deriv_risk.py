@@ -948,6 +948,8 @@ class DerivRiskManager:
                 _su_sg = symbol.upper()
                 _spike_gate_interval = (
                     1000 if "1000" in _su_sg
+                    else 900 if "900" in _su_sg
+                    else 600 if "600" in _su_sg
                     else (500 if "500" in _su_sg else 300)
                 )
                 _frac = float(os.getenv("DERIV_SPIKE_CYCLE_FRAC", "0.08"))

@@ -393,6 +393,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 31: observation window — wait 90s after signal; if spike occurs during wait → cancel
         # (spike already happened = entry is late). If no spike → proceed (spike still pending).
         "observation_window_sec": 90,
+        # Muestra02 pre-filter: block eval entries until 400s after last spike.
+        # cycle=1000s, min_post=400s → entries at t≥400s, next spike in ≤600s → hold=390 borderline.
+        # observation_window_sec=90 adds forward protection; together covers the late-entry risk.
+        "spike_min_post_sec": 400,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -458,26 +462,28 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         "min_score": 4.5,              # Phase 32: 5.0→4.5 — profile gate below effective_min=3.50; let risk engine be the gate
-        # Phase 24: spike capture thresholds
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
+        # Muestra02 pre-filter: small 50s post-spike block (cycle=500s, hold=450s → min_wait=50s)
+        "spike_min_post_sec": 50,
     },
     "CRASH1000": {
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 450,        # FIX-1: 150→450 — 200-trade audit: 99% losses hit timeout at 150s; CRASH1000 cycle=1000s so 450s needed
+        # Muestra02: ENABLED with data-backed config (was disabled since 10-trade audit).
+        # spike_min_post_sec=300 ensures entries only happen in the middle/late accumulation phase.
+        # cycle=1000s, min_post=300s → entries at t≥300s, next spike in ≤700s → hold=700s covers all.
+        # ATR: mean=0.047, median=0.041 (similar to CRASH500). Jump median=5.16.
+        # stake_max=2.00 (conservative vs previous $5.00 that lost $5.14/10 trades).
+        "max_hold_seconds": 700,
+        "spike_min_post_sec": 300,
         "ema_distance_pct": 0.05,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 4.5,              # Phase 32: 6.0→4.5 — profile gate below effective_min=3.50
-        # ── AUDIT 2026-05-18: DISABLED — 10 trades, 0 wins, -$5.14, ALL spike_timeout ──
-        # Spike cycle=1000 ticks. Bot holds 450s but cycle is ~1000s → 55% of spikes missed.
-        # CRASH1000 accumulation phase drifts UP against MULTDOWN → systematic timeout loss.
-        # Re-enable only after: (1) spike_entry timing fix, (2) per-cycle hold calibration.
-        "disabled": True,
+        "min_score": 4.5,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 300,
@@ -496,7 +502,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
+        "stake_max_usdt": 2.00,         # Muestra02: was $5 (lost $5.14 in 10 trades), conservative
         "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
         # Phase 20/24: deterministic spike capture — thresholds lowered 0.40→0.15
         "spike_capture_tp_usdt": 0.15,
@@ -508,7 +514,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 1200,       # Phase 19: MTBS≈900 ticks → 20 min (was 450 s)
+        # Muestra02: spike_tp wins arrived at p50=164s, p90=414s, max=449s.
+        # With spike_min_post_sec=300, entries at t≥300s → next spike in ≤600s → hold=600 catches all.
+        "max_hold_seconds": 600,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -532,16 +540,20 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # FIX-5: re-enabled — 178 spikes wasted in 7.5h session without trading BOOM900
-        # BUG-1: removed min_hd_bonus=2.0 — FIX-9 neutralizes mild opposing slopes to hd=0.0,
-        # which permanently triggers the >=2.0 gate. Phase 28 gate was designed for disabled state.
+        # Muestra02 pre-filter: block eval entries until 300s after last spike.
+        # cycle=900s → entries at t≥300s are within reach of next spike with hold=600s.
+        "spike_min_post_sec": 300,
     },
     "CRASH900": {
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        "max_hold_seconds": 120,       # Phase 30: 50-trade audit — spikes at 36-92s; 120s vs 150s cuts timeout cost → expectancy +$0.021/trade
+        # Muestra02: data-backed — spike_tp wins arrived at p50=165s, p90=323s, max=336s.
+        # With spike_min_post_sec=400 blocking early-cycle entries, all entries happen at
+        # t≥400s from last spike (next spike due ~900s → wait ≤500s from entry).
+        # 500s hold covers all valid entries. Replaces duplicate 120/700 mess.
+        "max_hold_seconds": 500,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -555,10 +567,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
-        # Phase 32: relaxed -0.20→0.30 — CRASH900 geo blocked by ATR+geo combo
-        # Aligned with CRASH500/CRASH1000 which use +0.30 and were actually trading
-        "geo_entry_max": 0.30,          # Phase 32: was -0.20
-        "stake_max_usdt": 5.00,         # Phase 31
+        "geo_entry_max": 0.30,
+        "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -567,22 +577,19 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # ── AUDIT 2026-05-21: 200s→700s — ALL losses were spike_timeout from LATE entries
-        # Data: 3 losses all had entry_lag 45-111s (post-spike). Cycle=900s.
-        # With 200s hold + 100s lag = only 100s window to catch next spike 800s away → ALWAYS loses.
-        # With 700s hold + 100s lag = 600s window → can catch next spike (comes at ~800s). ✓
-        "max_hold_seconds": 700,
-        # ── AUDIT 2026-05-18: stake $5→$2 — 13.3% WR at $5 is catastrophic ──
-        # CRASH900: 15 trades, 2 wins, avg_loss=-$0.565, total=-$2.05. Reduce to $2.
-        "stake_max_usdt": 2.00,
+        # Muestra02 pre-filter: block eval entries until 400s after last spike.
+        # cycle=900s → entries at t≥400s are close enough to next spike for hold=500s to catch it.
+        "spike_min_post_sec": 400,
     },
-    # ── NEW: BOOM/CRASH 600 — active, conservative until ≥20 trades confirm edge ──
+    # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
         "type": "spike_boom",
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 780,        # Phase 19: MTBS≈600 ticks → 13 min (was 450 s)
+        # Muestra02: spike_tp wins arrived at p50=95s, p90=242s, max=249s.
+        # With spike_min_post_sec=250, entries at t≥250s → next spike in ≤350s → hold=350 catches all.
+        "max_hold_seconds": 350,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
@@ -605,9 +612,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_detected",  # FIX-5: Tier 1 sufficient (was fvg_mitigated — too strict)
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
-        "spike_capture_tp_usdt": 0.15,       # was 0.50
-        "spike_profit_delta_usdt": 0.10,     # was 0.28
-        # FIX-5: enabled — 178 spikes wasted in 7.5h session; collecting real data now
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
+        # Muestra02 pre-filter: block eval entries until 250s after last spike.
+        # cycle=600s → entries at t≥250s are within reach of next spike with hold=350s.
+        "spike_min_post_sec": 250,
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -640,7 +649,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "max_hold_seconds": 450,        # FIX-1/5: 270→450 aligned with CRASH500/1000 cycle timing
+        # Muestra02: spike_tp wins arrived at p50=158s, p90=298s, max=379s.
+        # With spike_min_post_sec=150, entries at t≥150s → next spike in ≤450s → hold=450 catches all.
+        "max_hold_seconds": 450,
+        "spike_min_post_sec": 150,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.

@@ -1,5 +1,7 @@
 .env
 .coolify_secrets
+# Contexto local — NO se pushea al repo
+DERIV_BOT_CONTEXT.md
 .venv/
 __pycache__/
 .pytest_cache/

@@ -77,11 +77,39 @@ _BOOM_CRASH_TP_PCT: float = float(os.getenv("DERIV_BOOM_CRASH_TP_PCT", "2.50"))
 # transmits the buy. Default 0.0008 = 0.08% (8 bps).
 _EXEC_MAX_SPREAD_PCT: float = float(os.getenv("DERIV_EXEC_MAX_SPREAD_PCT", "0.0008"))
 
-# ─── Anti-slippage spread veto (institutional execution gate) ────────────────
-# Stricter than the risk-engine spread veto (which is 0.0010 = 0.10%).
-# This is the FINAL pre-execution check applied right before the broker WS
-# transmits the buy. Default 0.0008 = 0.08% (8 bps).
-_EXEC_MAX_SPREAD_PCT: float = float(os.getenv("DERIV_EXEC_MAX_SPREAD_PCT", "0.0008"))
+# ─── Dynamic ATR hold extension ──────────────────────────────────────────────
+# When ATR is expanding relative to the rolling median, CRASH/BOOM spikes may
+# take longer to materialise.  Extend max_hold by a proportional amount.
+# Cap: min(MAX_EXTENSION, base * RATIO_MULT * (atr_ratio - THRESHOLD)).
+_ATR_HOLD_EXTENSION_THRESHOLD: float = float(os.getenv("DERIV_ATR_HOLD_EXT_THRESHOLD", "1.30"))
+_ATR_HOLD_EXTENSION_MULTIPLIER: float = float(os.getenv("DERIV_ATR_HOLD_EXT_MULT", "0.15"))
+_ATR_HOLD_EXTENSION_MAX_SEC: float = float(os.getenv("DERIV_ATR_HOLD_EXT_MAX", "150"))
+
+
+def _compute_atr_hold_extension(
+    symbol: str,
+    atr_abs: float,
+    atr_history: list,
+    base_hold_sec: float,
+) -> float:
+    """Return extra seconds to add to max_hold when ATR is expanding.
+
+    Only applies to BOOM/CRASH spike markets.  Returns 0.0 for non-spike
+    symbols or when ATR history is too thin to be meaningful.
+    """
+    if not is_spike_market(symbol):
+        return 0.0
+    if atr_abs <= 0 or len(atr_history) < 20:
+        return 0.0
+    sorted_hist = sorted(atr_history)
+    median_atr = sorted_hist[len(sorted_hist) // 2]
+    if median_atr <= 0:
+        return 0.0
+    atr_ratio = atr_abs / median_atr
+    if atr_ratio <= _ATR_HOLD_EXTENSION_THRESHOLD:
+        return 0.0
+    extra = base_hold_sec * _ATR_HOLD_EXTENSION_MULTIPLIER * (atr_ratio - _ATR_HOLD_EXTENSION_THRESHOLD)
+    return round(min(_ATR_HOLD_EXTENSION_MAX_SEC, extra), 1)
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
@@ -521,6 +549,34 @@ class DerivDaemon:
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_suspended")
             return
 
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 0c — GATE: spike pre-filter (BOOM/CRASH only)
+        # If a spike was detected within the last spike_min_post_sec seconds,
+        # the market is in the POST-SPIKE drift / accumulation phase.
+        # Entering from the eval loop NOW would:
+        #   1. Block the spike engine via trade_cooldown for the entire hold window
+        #   2. Enter at wrong timing — next spike is still cycle_sec away
+        # Formula: min_post = profile.spike_min_post_sec (default: 0 = disabled)
+        # Data basis: cycle=900s, hold=500s → need entry at t≥400s; for cycle=600s,
+        # hold=350s → need entry at t≥250s.
+        # ═══════════════════════════════════════════════════════════════════
+        if is_spike_market(tick.symbol):
+            _spf_min_post = float(_early_profile.get("spike_min_post_sec", 0))
+            if _spf_min_post > 0:
+                _spf_last_ts = self._risk.get_last_spike_ts(tick.symbol)
+                if _spf_last_ts > 0:
+                    _spf_age = time.time() - _spf_last_ts
+                    if _spf_age < _spf_min_post:
+                        _LOGGER.debug(
+                            "[SPIKE_PRE_FILTER] %s spike %ds ago < %ds window — "
+                            "blocking eval entry (post-spike drift phase)",
+                            tick.symbol, int(_spf_age), int(_spf_min_post),
+                        )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason=f"spike_pre_filter:{int(_spf_age)}s<{int(_spf_min_post)}s",
+                        )
+                        return
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
@@ -1087,11 +1143,26 @@ class DerivDaemon:
             )
             _is_spike_ov = bool(snap.score_breakdown.get("spike_entry"))
             # Adaptive timeout: trending BOOM/CRASH gets 600s, others 450s.
+            # Profile enforcement in deriv_trader overrides this; ATR extension
+            # is stored in score_breakdown so deriv_trader can add it on top.
             _max_hold_ov = (
                 float(adaptive_max_hold(tick.symbol, snap.regime))
                 if (_is_spike_ov or _is_boom_crash_ov)
                 else 0.0
             )
+            # ATR dynamic extension (stored in score_breakdown; applied in deriv_trader)
+            _atr_ext_ov = _compute_atr_hold_extension(
+                tick.symbol,
+                float(snap.score_breakdown.get("atr_abs", 0.0)),
+                list(self._risk._atr_history.get(tick.symbol, [])),
+                _max_hold_ov,
+            )
+            if _atr_ext_ov > 0:
+                snap.score_breakdown["atr_hold_extension"] = _atr_ext_ov
+                _LOGGER.info(
+                    "[ATR_HOLD_EXT] %s atr_abs=%.5f ext=+%.0fs (override path)",
+                    tick.symbol, snap.score_breakdown.get("atr_abs", 0), _atr_ext_ov,
+                )
             payload_override: dict[str, Any] = {
                 "broker": "deriv",
                 "symbol": tick.symbol,
@@ -1249,11 +1320,26 @@ class DerivDaemon:
             else (0.004 if _is_mean_rev else self._settings.take_profit_pct)
         )
         # Adaptive timeout: trending BOOM/CRASH gets 600s, others 450s.
+        # Profile enforcement in deriv_trader overrides this; ATR extension
+        # is stored in score_breakdown so deriv_trader can add it on top.
         _max_hold_sec = (
             float(adaptive_max_hold(tick.symbol, snap.regime))
             if (_is_spike_entry or _is_boom_crash)
             else 0.0
         )
+        # ATR dynamic extension (stored in score_breakdown; applied in deriv_trader)
+        _atr_ext = _compute_atr_hold_extension(
+            tick.symbol,
+            float(snap.score_breakdown.get("atr_abs", 0.0)),
+            list(self._risk._atr_history.get(tick.symbol, [])),
+            _max_hold_sec,
+        )
+        if _atr_ext > 0:
+            snap.score_breakdown["atr_hold_extension"] = _atr_ext
+            _LOGGER.info(
+                "[ATR_HOLD_EXT] %s atr_abs=%.5f ext=+%.0fs (AI path)",
+                tick.symbol, snap.score_breakdown.get("atr_abs", 0), _atr_ext,
+            )
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,

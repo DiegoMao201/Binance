@@ -3,6 +3,55 @@
 > **Propósito de este archivo:** Referencia completa de estado actual del bot de Deriv.
 > Usar como contexto de sistema para Gemini/GPT gems al configurar o auditar el bot.
 > **NO modifica código. Es solo documentación de configuración y lógica operativa.**
+> **ARCHIVO LOCAL — NO se pushea al repo git.**
+
+---
+
+## 🔴 ESTADO OPERACIONAL ACTUAL — 2026-05-21
+
+**Fase:** OPERACIONES EN VIVO — midiendo rendimiento, analizando trades de `deriv_closed_contracts.json`
+
+**Símbolos activos (live):** `BOOM1000, CRASH500, CRASH900, CRASH1000, BOOM600, BOOM900, CRASH600`
+
+**Últimas acciones ejecutadas:**
+| Cambio | Estado | Commit/Acción |
+|---|---|---|
+| BOOM300/CRASH300 eliminados (InvalidSymbol) | ✅ Live | env id=514 + env_file |
+| Spike persistence: LOGS_DIR fallback en deriv_risk.py | ✅ Deployd | `e63668b` |
+| /api/spikes lee de DERIV_STATE_DIR (volumen correcto) | ✅ Deployd | `01bbbbc` |
+| RESET·S session filter: deriv-analytics lee de LOGS (BOT_STATE_DIR) | ✅ Deployd | `aada315` |
+| ATR threshold BOOM1000=20, CRASH500=15 | ✅ Live | Coolify DB |
+| ATR threshold CRASH900=20, CRASH1000=20 | ✅ Live | Coolify DB |
+| DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.50 | ✅ Live | Coolify DB |
+| DERIV_SPIKE_CYCLE_FRAC=0.08 | ✅ Live | Coolify DB |
+| **Enriquecimiento spike record + tab ⚡ Spikes en /deriv** | ✅ Deployd | `ea05e71` |
+
+**Schema de spike enriquecido (desde commit ea05e71):**
+```json
+{
+  "ts": 1779340451.18,
+  "iso": "2026-05-21T05:14:11.180370+00:00",
+  "symbol": "CRASH500",
+  "direction": "DOWN",
+  "jump": -2.168,
+  "atr": 0.02104,
+  "ratio": 103.04,
+  "price": 1258.72,           ← precio exacto al momento del spike
+  "loss_streak": 0,           ← pérdidas consecutivas al momento
+  "since_last_trade_s": 320.5, ← segundos desde último trade del símbolo
+  "lockout_active": false,    ← si el bot estaba en lockout
+  "bot_entered": true,        ← si el bot entró (enriquecido post-evaluate)
+  "block_reason": null,       ← razón de bloqueo si bot_entered=false
+  "score": 7.42,              ← score del evaluate (enriquecido post-evaluate)
+  "had_open_pos": false       ← si había posición abierta al momento
+}
+```
+
+**Pendiente / siguiente análisis:**
+- Hacer Coolify redeploy del bot Deriv para activar `ea05e71` (spike enrichment)
+- Revisar `deriv_closed_contracts.json` para calcular win rate por símbolo y exit_reason
+- Crear tabla PostgreSQL `deriv_spike_events` para persistencia de spikes entre reinicios
+- Evaluar si BOOM600/BOOM900/CRASH600/CRASH900 tienen suficiente edge con los umbrales actuales
 
 ---
 
@@ -42,7 +91,7 @@ Todas las variables se leen desde `.env`. Carga via `DerivSettings` (dataclass).
 | `DERIV_API_TOKEN` | *(requerido)* | Token WS OAuth de Deriv |
 | `DERIV_APP_ID` | `1089` | App ID público de Deriv |
 | `DERIV_DRY_RUN` | `true` | **Fail-closed: false = modo real** |
-| `DERIV_SYMBOLS` | `R_100,R_75,R_50` | Universo de trading (CSV) |
+| `DERIV_SYMBOLS` | `BOOM1000,CRASH500,CRASH900,CRASH1000,BOOM600,BOOM900,CRASH600` | **Universo LIVE actual (CSV) — R_* desactivados** |
 
 ### 2.2 Capital y Riesgo
 
@@ -103,11 +152,25 @@ stake = clamp(risk_base, min_stake, MAX_STAKE_USDT=$3.00)
 
 ### 2.6 BOOM/CRASH Específico
 
-| Variable | Default | Descripción |
+| Variable | **Valor Live Actual** | Descripción |
 |---|---|---|
 | `DERIV_BOOM_CRASH_SL_PCT` | `0.60` | SL = 60% del stake ($1.80 en $3) |
 | `DERIV_BOOM_CRASH_TP_PCT` | `2.50` | TP = 250% del stake ($7.50 en $3) |
 | `BOOM_CRASH_SPIKE_TIMEOUT_SEC` | `450` | Fuerza cierre tras 450s si no hubo spike |
+| `DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN` | **`3.50`** | Score mín efectivo en régimen calm (override hacia bajo) |
+| `DERIV_SPIKE_CYCLE_FRAC` | **`0.08`** | Fracción del ciclo del símbolo para cooldown post-spike (8% de N ticks) |
+
+**Umbrales ATR por símbolo (BOOM/CRASH) — valores live:**
+
+| Variable | Valor | Descripción |
+|---|---|---|
+| `DERIV_ATR_TH_BOOM1000` | **`20`** | ATR mínimo para permitir entrada BOOM1000 |
+| `DERIV_ATR_TH_BOOM600` | *(default)* | ATR mínimo BOOM600 |
+| `DERIV_ATR_TH_BOOM900` | *(default)* | ATR mínimo BOOM900 |
+| `DERIV_ATR_TH_CRASH500` | **`15`** | ATR mínimo CRASH500 (más bajo por mayor frecuencia de spike) |
+| `DERIV_ATR_TH_CRASH600` | *(default)* | ATR mínimo CRASH600 |
+| `DERIV_ATR_TH_CRASH900` | **`20`** | ATR mínimo CRASH900 |
+| `DERIV_ATR_TH_CRASH1000` | **`20`** | ATR mínimo CRASH1000 |
 
 *Nota: El SL/TP de BOOM/CRASH es relativo al stake, NO al precio. Esto evita que el noise inter-spike (1–2 ticks) active el SL antes del evento.*
 
@@ -134,13 +197,15 @@ DERIV_TRAIL_T3_STEP_PCT=0.05  (gap 5%)
 
 ### 2.8 Archivos de Estado
 
-El bot escribe estos archivos en `logs/`:
+El bot escribe estos archivos en `logs/` (que en el container mapea al volumen `LOGS_DIR`):
 - `deriv_open_contracts.json` — Posiciones abiertas
-- `deriv_closed_contracts.json` — Historial de cierres
+- `deriv_closed_contracts.json` — Historial de cierres (**fuente principal para análisis**)
 - `deriv_status.json` — Estado general (actualizado cada 10s)
 - `deriv_state.json` — Persistencia interna del engine
 - `deriv_control.json` — Comandos remotos (pause/resume)
 - `deriv_lockout.json` — Estado del lockout activo
+- `deriv_spike_events.json` — **Spikes detectados** (jump ratio >20× ATR); path fijado commit `e63668b`
+- `deriv_session.json` — Timestamp de sesión actual (escrito por `/api/session` POST en BOT_STATE_DIR)
 
 ---
 
@@ -219,7 +284,11 @@ trailing:      atr_wide
 
 **Regla de hierro:** BOOM solo entra LARGO (MULTUP). La edge es el spike alcista estadístico. Entrar corto es estructuralmente perdedor.
 
-#### BOOM300 — Boom 300 Index
+> **BOOM300 — RETIRADO** del universo activo. Causa `InvalidSymbol` en la API de Deriv. No operar.
+
+> **BOOM500 — NO en universo activo** (no está en DERIV_SYMBOLS live). Perfil válido si se reactiva.
+
+#### BOOM600 — Boom 600 Index *(ACTIVO)*
 ```
 type:          spike_boom
 strategy:      spike (SMC + EMA200 Spike Hunter)
@@ -231,13 +300,11 @@ max_hold:      450s (spike_timeout)
 sl_mult:       3.0× (usa DERIV_BOOM_CRASH_SL_PCT)
 tp_mult:       6.0× (usa DERIV_BOOM_CRASH_TP_PCT)
 trailing:      none (T1 desactivado)
-ema_dist_pct:  0.02 (rango válido: dip 0.02–0.10% bajo EMA200)
+ema_dist_pct:  0.025
 require_fvg:   true
-allow_mean_rev: false
-allow_breakout: false
 ```
 
-#### BOOM500 — Boom 500 Index
+#### BOOM900 — Boom 900 Index *(ACTIVO)*
 ```
 type:          spike_boom
 strategy:      spike
@@ -249,11 +316,11 @@ max_hold:      450s
 sl_mult:       3.0×
 tp_mult:       6.0×
 trailing:      none
-ema_dist_pct:  0.03
+ema_dist_pct:  0.04
 require_fvg:   true
 ```
 
-#### BOOM1000 — Boom 1000 Index
+#### BOOM1000 — Boom 1000 Index *(ACTIVO)*
 ```
 type:          spike_boom
 strategy:      spike
@@ -267,31 +334,16 @@ tp_mult:       6.0×
 trailing:      none
 ema_dist_pct:  0.05
 require_fvg:   true
+atr_threshold: 20 (DERIV_ATR_TH_BOOM1000)
 ```
 
 ### 3.3 CRASH Indices (Spike DOWN — solo MULTDOWN)
 
 **Regla de hierro:** CRASH solo entra CORTO (MULTDOWN). La edge es el spike bajista estadístico.
 
-#### CRASH300 — Crash 300 Index
-```
-type:          spike_crash
-strategy:      spike
-side:          MULTDOWN ONLY
-min_hurst:     0.0
-min_score:     7.0
-cooldown:      300s
-max_hold:      450s
-sl_mult:       3.0×
-tp_mult:       6.0×
-trailing:      none
-ema_dist_pct:  0.02
-require_fvg:   true
-allow_mean_rev: false
-allow_breakout: false
-```
+> **CRASH300 — RETIRADO** del universo activo. Causa `InvalidSymbol` en la API de Deriv. No operar.
 
-#### CRASH500 — Crash 500 Index
+#### CRASH500 — Crash 500 Index *(ACTIVO)*
 ```
 type:          spike_crash
 strategy:      spike
@@ -305,9 +357,43 @@ tp_mult:       6.0×
 trailing:      none
 ema_dist_pct:  0.03
 require_fvg:   true
+atr_threshold: 15 (DERIV_ATR_TH_CRASH500 — más bajo por mayor frecuencia de spike)
 ```
 
-#### CRASH1000 — Crash 1000 Index
+#### CRASH600 — Crash 600 Index *(ACTIVO)*
+```
+type:          spike_crash
+strategy:      spike
+side:          MULTDOWN ONLY
+min_hurst:     0.0
+min_score:     7.0
+cooldown:      300s
+max_hold:      450s
+sl_mult:       3.0×
+tp_mult:       6.0×
+trailing:      none
+ema_dist_pct:  0.025
+require_fvg:   true
+```
+
+#### CRASH900 — Crash 900 Index *(ACTIVO)*
+```
+type:          spike_crash
+strategy:      spike
+side:          MULTDOWN ONLY
+min_hurst:     0.0
+min_score:     7.0
+cooldown:      300s
+max_hold:      450s
+sl_mult:       3.0×
+tp_mult:       6.0×
+trailing:      none
+ema_dist_pct:  0.04
+require_fvg:   true
+atr_threshold: 20 (DERIV_ATR_TH_CRASH900)
+```
+
+#### CRASH1000 — Crash 1000 Index *(ACTIVO)*
 ```
 type:          spike_crash
 strategy:      spike
@@ -321,6 +407,7 @@ tp_mult:       6.0×
 trailing:      none
 ema_dist_pct:  0.05
 require_fvg:   true
+atr_threshold: 20 (DERIV_ATR_TH_CRASH1000)
 ```
 
 ---
@@ -612,21 +699,40 @@ Estas reglas **nunca** pueden ser bypassadas por score, configuración o AI:
 
 ---
 
-## 12. TABLA RESUMEN: TODO EL UNIVERSO DE SÍMBOLOS
+## 12. TABLA RESUMEN: UNIVERSO DE SÍMBOLOS
 
-| Símbolo | Edge principal | Dirección | Cooldown | max_hold | Score mín | SL | TP |
-|---|---|---|---|---|---|---|---|
-| R_10 | mean_revert | AMBOS | 90s | — | 5.5 | 1.0× base | 1.0× base |
-| R_25 | mean_revert | AMBOS | 90s | — | 5.5 | 1.0× | 1.0× |
-| R_50 | mean_revert | AMBOS | 90s | — | 5.5 | 1.0× | 1.0× |
-| R_75 | hybrid | AMBOS | 120s | — | 6.5 | 1.2× | 1.5× |
-| R_100 | trend | AMBOS | 150s | — | 6.0 | 1.5× | 3.0× |
-| BOOM300 | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake |
-| BOOM500 | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake |
-| BOOM1000 | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake |
-| CRASH300 | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake |
-| CRASH500 | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake |
-| CRASH1000 | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake |
+### Activos en LIVE (DERIV_SYMBOLS actual)
+
+| Símbolo | Edge principal | Dirección | Cooldown | max_hold | Score mín | SL | TP | ATR_TH |
+|---|---|---|---|---|---|---|---|---|
+| **BOOM600** | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake | default |
+| **BOOM900** | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake | default |
+| **BOOM1000** | spike_up | **MULTUP** | 240s | **450s** | 7.0 | 60% stake | 250% stake | **20** |
+| **CRASH500** | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake | **15** |
+| **CRASH600** | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake | default |
+| **CRASH900** | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake | **20** |
+| **CRASH1000** | spike_down | **MULTDOWN** | 300s | **450s** | 7.0 | 60% stake | 250% stake | **20** |
+
+### Retirados / Desactivados
+
+| Símbolo | Razón | Fecha |
+|---|---|---|
+| BOOM300 | `InvalidSymbol` en API de Deriv | 2026-05-21 |
+| CRASH300 | `InvalidSymbol` en API de Deriv | 2026-05-21 |
+| R_100 | Fuera de DERIV_SYMBOLS (foco en BOOM/CRASH) | 2026-05-21 |
+| R_75 | Fuera de DERIV_SYMBOLS | 2026-05-21 |
+| R_50 | Fuera de DERIV_SYMBOLS | 2026-05-21 |
+| BOOM500 | Fuera de DERIV_SYMBOLS | 2026-05-21 |
+
+### Referencia: R_* (disponibles si se reactivan)
+
+| Símbolo | Edge principal | Dirección | Cooldown | Score mín | SL | TP |
+|---|---|---|---|---|---|---|
+| R_10 | mean_revert | AMBOS | 90s | 5.5 | 1.0× base | 1.0× base |
+| R_25 | mean_revert | AMBOS | 90s | 5.5 | 1.0× | 1.0× |
+| R_50 | mean_revert | AMBOS | 90s | 5.5 | 1.0× | 1.0× |
+| R_75 | hybrid | AMBOS | 120s | 6.5 | 1.2× | 1.5× |
+| R_100 | trend | AMBOS | 150s | 6.0 | 1.5× | 3.0× |
 
 *SL base = `DERIV_STOP_LOSS_PCT` × `sl_mult` del perfil. TP base = `DERIV_TAKE_PROFIT_PCT` × `tp_mult`.*
 
@@ -713,21 +819,23 @@ El bot lee `logs/deriv_control.json` periódicamente:
 
 ---
 
-## 16. CONFIGURACIÓN TÍPICA PARA OPERAR EN VIVO
+## 16. CONFIGURACIÓN LIVE ACTUAL (Coolify — o4w1ns4cceccmn2ozqt7sol2)
+
+> Esta es la configuración que está corriendo en producción a 2026-05-21.
+> El `.env` real vive en el contenedor Coolify en `/var/www/html/storage/app/applications/o4w1ns4cceccmn2ozqt7sol2/.env`
 
 ```bash
-# .env mínimo para live trading (completar tokens)
-DERIV_API_TOKEN=tu_token_real
-DERIV_DRY_RUN=false
-DERIV_SYMBOLS=R_100,R_75,BOOM1000,CRASH1000
+# Símbolos activos (BOOM300/CRASH300 retirados por InvalidSymbol)
+DERIV_SYMBOLS=BOOM1000,CRASH500,CRASH900,CRASH1000,BOOM600,BOOM900,CRASH600
 
 # Capital
-DERIV_BANKROLL_USDT=100.0
+DERIV_BANKROLL_USDT=100.0       # (o valor real en Coolify)
 DERIV_RISK_PER_TRADE_PCT=0.01
 DERIV_MAX_STAKE_USDT=3.00
 DERIV_MIN_STAKE_USDT=1.00
+DERIV_MIN_STAKE_USDT_HARD=1.00
 
-# Scoring conservador
+# Scoring
 DERIV_MIN_SCORE=6.0
 DERIV_AI_MIN_CONFIDENCE=0.55
 
@@ -739,14 +847,137 @@ DERIV_LOSS_STREAK_LOCKOUT=3
 DERIV_BOOM_CRASH_SL_PCT=0.60
 DERIV_BOOM_CRASH_TP_PCT=2.50
 BOOM_CRASH_SPIKE_TIMEOUT_SEC=450
+DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.50   # ← override score mín en régimen calm
+DERIV_SPIKE_CYCLE_FRAC=0.08               # ← 8% del ciclo = cooldown post-spike
+
+# ATR thresholds por símbolo (filtro volatilidad mínima para entrar)
+DERIV_ATR_TH_BOOM1000=20
+DERIV_ATR_TH_CRASH500=15
+DERIV_ATR_TH_CRASH900=20
+DERIV_ATR_TH_CRASH1000=20
 
 # AI Models
-OPENROUTER_API_KEY=tu_clave_openrouter
+OPENROUTER_API_KEY=<en Coolify>
 DERIV_AI_GATE_ENABLED=true
-DERIV_AI_MODELS=google/gemini-2.5-flash,openai/gpt-4o-mini
+DERIV_AI_MODELS=google/gemini-2.5-flash,openai/gpt-4o-mini,anthropic/claude-3-5-haiku
 ```
 
 ---
 
-*Generado: 2025 — Estado del bot a partir de commit `d78dbab` (spike_timeout 450s baked in BOOM/CRASH profiles).*
+## 17. INFRAESTRUCTURA DE DEPLOYMENT
+
+### Servidor
+- **IP:** `192.81.216.49` — SSH: `root` / `R3cov3ry-N3xus!`
+- **Coolify:** http://192.81.216.49:8000 (UI de gestión)
+- **App UUID (Deriv bot):** `o4w1ns4cceccmn2ozqt7sol2`
+
+### Contenedores activos
+
+| Contenedor | Función | Imagen | Red |
+|---|---|---|---|
+| `o4w1ns4cceccmn2ozqt7sol2-*` | Bot Deriv (Python) | `o4w1...:sha` | coolify |
+| `m0ks004osk4cw444gsokg8os-*` | Frontend Next.js | `m0ks...:sha` | coolify |
+| `wgk08oogswwwc0sgcs4g4kgo-*` | Bot Binance (Python) | `wgk...:sha` | coolify |
+| `t404gcck8cgo8soscowogg0s` | PostgreSQL | postgres | coolify |
+
+### Mapa de Volúmenes (CRÍTICO)
+
+```
+HOST /data/deriv-logs  →  /data/logs en bot o4w1 (LOGS_DIR=/data/logs)
+                       →  /data/deriv-logs en frontend (DERIV_STATE_DIR=/data/deriv-logs)
+
+HOST /data/logs (Binance vol)  →  /data/logs en bot wgk (LOGS_DIR=/data/logs)
+                               →  /data/logs en frontend (BOT_STATE_DIR=/data/logs)
+```
+
+### Dónde vive cada archivo de estado
+
+| Archivo | Escrito por | Ruta en host | Env var de ruta |
+|---|---|---|---|
+| `deriv_closed_contracts.json` | Bot Deriv (Python) | `/data/deriv-logs/` | `LOGS_DIR` |
+| `deriv_spike_events.json` | Bot Deriv (Python) | `/data/deriv-logs/` | `LOGS_DIR` (fallback) |
+| `deriv_status.json` | Bot Deriv (Python) | `/data/deriv-logs/` | `LOGS_DIR` |
+| `deriv_session.json` | Frontend `/api/session` POST | `/data/logs/` | `BOT_STATE_DIR` |
+| `deriv_open_contracts.json` | Bot Deriv (Python) | `/data/deriv-logs/` | `LOGS_DIR` |
+
+### PostgreSQL
+
+- **DB:** `optiferre_pamm` en contenedor `t404gcck8cgo8soscowogg0s`
+- **User:** `postgres`
+- **Tablas clave:** `deriv_contracts`, `deriv_ticks`, `pamm_accounts`, `cohort_*`
+- **Tabla pendiente:** `deriv_spike_events` (spikes actualmente solo en JSON)
+
+### Cómo modificar env vars del bot Deriv
+
+```bash
+# 1. Copiar .env actual del contenedor Coolify
+docker cp coolify:/var/www/html/storage/app/applications/o4w1ns4cceccmn2ozqt7sol2/.env /tmp/deriv_bot.env
+
+# 2. Editar en host
+sed -i "s|DERIV_SYMBOLS=.*|DERIV_SYMBOLS=NUEVO_VALOR|" /tmp/deriv_bot.env
+
+# 3. Volver a copiar al contenedor
+docker cp /tmp/deriv_bot.env coolify:/var/www/html/storage/app/applications/o4w1ns4cceccmn2ozqt7sol2/.env
+
+# 4. Reiniciar bot con imagen actual (manual si Coolify no redeploya solo)
+OLD_CONT=$(docker ps --format '{{.Names}}' | grep o4w1 | head -1)
+IMAGE=$(docker inspect $OLD_CONT --format '{{.Config.Image}}')
+NEW_NAME="o4w1ns4cceccmn2ozqt7sol2-0$(date +%m%d%H%M%S)"
+docker stop $OLD_CONT
+docker run -d --name "$NEW_NAME" --network coolify --restart unless-stopped \
+  --env-file /tmp/deriv_bot.env \
+  -v /data/deriv-logs:/data/logs \
+  "$IMAGE" /app/entrypoint.deriv.sh
+```
+
+---
+
+## 18. GUÍA DE ANÁLISIS DE OPERACIONES
+
+### Leer operaciones cerradas desde el servidor
+
+```bash
+ssh root@192.81.216.49 "
+CONT=\$(docker ps --format '{{.Names}}' | grep o4w1 | head -1)
+docker exec \$CONT python3 -c '
+import json
+data = json.load(open(\"logs/deriv_closed_contracts.json\"))
+print(f\"Total trades: {len(data)}\")
+by_sym = {}
+for t in data:
+    s = t.get(\"symbol\",\"?\")
+    r = t.get(\"realized_pnl_usdt\", 0)
+    by_sym.setdefault(s, []).append(float(r or 0))
+for sym, pnls in sorted(by_sym.items()):
+    wins = sum(1 for p in pnls if p > 0)
+    print(f\"{sym:<12} n={len(pnls):>3}  wr={wins/len(pnls)*100:.0f}%  pnl={sum(pnls):>+.2f}  avg={sum(pnls)/len(pnls):>+.3f}\")
+'
+"
+```
+
+### Leer spikes detectados
+
+```bash
+ssh root@192.81.216.49 "cat /data/deriv-logs/deriv_spike_events.json | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print(f\"Total spikes: {len(d)}\")
+for e in d[-20:]:
+    print(e.get(\"iso\",\"?\"), e.get(\"symbol\",\"?\"), \"jump=\",e.get(\"jump\",\"?\"), \"ratio=\",e.get(\"ratio\",\"?\"))
+'"
+```
+
+### API endpoints del frontend
+
+| Endpoint | Descripción | Fuente |
+|---|---|---|
+| `GET /api/deriv-analytics` | KPIs principales, trades, session P&L | `deriv_closed_contracts.json` + `deriv_session.json` |
+| `GET /api/spikes` | Spikes detectados con `?symbol=&since=&limit=` | `deriv_spike_events.json` |
+| `POST /api/session` | Reset RESET·S (escribe timestamp de sesión) | → `deriv_session.json` |
+| `GET /api/control` | Estado del bot (pause/resume) | `deriv_control.json` |
+
+---
+
+*Última actualización: 2026-05-21 — Commits relevantes: `e63668b` (spike path), `01bbbbc` (spikes API), `aada315` (session filter)*
 *Archivos fuente: `src/utils/deriv_config.py`, `src/strategies/deriv_signals.py`, `src/safety/deriv_risk.py`, `src/execution/deriv_trader.py`, `src/analysis/deriv_analyst.py`, `src/main_deriv.py`*
+*Infraestructura: Coolify en `192.81.216.49`, bot UUID `o4w1ns4cceccmn2ozqt7sol2`, DB `t404gcck8cgo8soscowogg0s`*
