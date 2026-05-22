@@ -132,8 +132,8 @@ class DerivDaemon:
         self._settings = settings
         self._client = DerivClient(settings)
         self._telemetry = self._build_telemetry()
-        self._executor = DerivTradeExecutor(settings, self._client, self._telemetry)
         self._risk = DerivRiskManager(settings)
+        self._executor = DerivTradeExecutor(settings, self._client, self._telemetry, risk_manager=self._risk)
         self._analyst = DerivAnalyst(settings, self._client)
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(seconds=max(60, int(settings.contract_duration_sec)))
@@ -167,6 +167,15 @@ class DerivDaemon:
         # at any time; subsequent ticks for the same symbol are silently dropped
         # until the in-flight pipeline completes.
         self._sym_eval_locks: dict[str, asyncio.Lock] = {}
+        # ── Market-context snapshot writer ────────────────────────────────
+        # Tracks how many ticks each symbol has emitted since the last context
+        # snapshot.  A snapshot is written when any symbol crosses 60 ticks,
+        # so roughly every ~60 seconds under normal feed conditions.
+        self._ctx_tick_count: dict[str, int] = {}
+        self._ctx_state_dir = Path(
+            os.environ.get("BOT_STATE_DIR",
+                os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
+        )
 
     def _spike_enrich(
         self,
@@ -214,6 +223,89 @@ class DerivDaemon:
         if len(self._last_decisions) > 30:
             self._last_decisions = self._last_decisions[-30:]
         self._counters["decisions_total"] += 1
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Market-context snapshot writer
+    # ─────────────────────────────────────────────────────────────────────────
+    def _maybe_write_market_context(self, symbol: str) -> None:
+        """Write one market-context snapshot for *symbol* every ~60 ticks.
+
+        Appends to deriv_market_context.json (capped at 10 000 records).
+        Fields: ts, symbol, hurst, regime, atr, atr_percentile,
+                ema200_distance_pct, ticks_since_last_spike,
+                spike_cluster_active, open_positions.
+        """
+        self._ctx_tick_count[symbol] = self._ctx_tick_count.get(symbol, 0) + 1
+        if self._ctx_tick_count[symbol] % 60 != 0:
+            return
+        try:
+            from src.safety.deriv_risk import _ema200
+            import json as _ctxjson
+            _summary  = self._analyst.get_history_summary().get(symbol) or {}
+            _hurst    = float(_summary.get("hurst") or 0.0) or None
+            _regime   = str(_summary.get("vol_regime") or _summary.get("regime") or "?")
+            _atr_hist = self._risk._atr_history.get(symbol, [])
+            _cur_atr  = self._risk.get_current_atr(symbol)
+            _atr_pct: int | None = None
+            if _atr_hist and _cur_atr is not None:
+                _window = _atr_hist[-100:]
+                _atr_pct = round(sum(1 for v in _window if v <= _cur_atr) / len(_window) * 100)
+            _ticks_buf  = self._risk._ticks.get(symbol, [])
+            _ema200_val = _ema200(list(_ticks_buf)) if len(_ticks_buf) >= 200 else None
+            _price      = self._last_ticks.get(symbol, {}).get("price")
+            _ema200_dev: float | None = None
+            if _ema200_val and _price and _ema200_val > 0:
+                _ema200_dev = round((_price - _ema200_val) / _ema200_val, 5)
+            _last_spike_ts = self._risk.get_last_spike_ts(symbol)
+            _now = time.time()
+            _ticks_since_spike: int | None = None
+            if _last_spike_ts > 0:
+                _ticks_since_spike = (
+                    self._risk.get_tick_count(symbol)
+                    - self._risk._last_spike_tick.get(symbol, 0)
+                )
+            _spike_cluster: bool | None = None
+            try:
+                _sf = self._ctx_state_dir / "deriv_spike_events.json"
+                if _sf.exists() and _last_spike_ts > 0:
+                    _evts = _ctxjson.loads(_sf.read_text())
+                    _sym_evts = [e for e in _evts if e.get("symbol") == symbol]
+                    if len(_sym_evts) >= 2:
+                        _t1 = float(_sym_evts[-1].get("ts", 0))
+                        _t2 = float(_sym_evts[-2].get("ts", 0))
+                        _spike_cluster = bool(_t1 - _t2 < 400)
+                    elif _sym_evts:
+                        _spike_cluster = False
+            except Exception:
+                pass
+            _open_pos = sum(
+                1 for oc in getattr(self._executor, "_open", {}).values()
+                if getattr(oc, "symbol", "") == symbol
+            )
+            _snap = {
+                "ts":                     round(_now, 3),
+                "iso":                    datetime.fromtimestamp(_now, tz=timezone.utc).isoformat(),
+                "symbol":                 symbol,
+                "hurst":                  round(_hurst, 4) if _hurst else None,
+                "regime":                 _regime,
+                "atr":                    _cur_atr,
+                "atr_percentile":         _atr_pct,
+                "ema200_distance_pct":    _ema200_dev,
+                "ticks_since_last_spike": _ticks_since_spike,
+                "spike_cluster_active":   _spike_cluster,
+                "open_positions":         _open_pos,
+            }
+            _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
+            try:
+                _existing: list = _ctxjson.loads(_ctx_file.read_text()) if _ctx_file.exists() else []
+            except Exception:
+                _existing = []
+            _existing.append(_snap)
+            if len(_existing) > 10_000:
+                _existing = _existing[-10_000:]
+            _ctx_file.write_text(_ctxjson.dumps(_existing))
+        except Exception as _ctx_exc:
+            _LOGGER.debug("[MARKET_CTX] write failed for %s: %s", symbol, _ctx_exc)
 
     def _log_entry_block(
         self,
@@ -484,6 +576,9 @@ class DerivDaemon:
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
         self._velocity.ingest_tick(tick.symbol, tick.price)
         self._velocity.ingest_tick(tick.symbol, tick.price)
+
+        # Market-context snapshot (every 60 ticks ≈ 60 s)
+        self._maybe_write_market_context(tick.symbol)
 
         # Periodic diagnostic log every 10 ticks per symbol (visible in Coolify).
         self._diag_tick_count[tick.symbol] = self._diag_tick_count.get(tick.symbol, 0) + 1
@@ -1163,6 +1258,10 @@ class DerivDaemon:
                     "[ATR_HOLD_EXT] %s atr_abs=%.5f ext=+%.0fs (override path)",
                     tick.symbol, snap.score_breakdown.get("atr_abs", 0), _atr_ext_ov,
                 )
+            # Telemetry: stamp entry tick count and spread so closed records can
+            # compute ticks_held and expose spread_at_entry without re-parsing logs.
+            snap.score_breakdown.setdefault("entry_tick_count", self._risk.get_tick_count(tick.symbol))
+            snap.score_breakdown.setdefault("spread_pct_at_entry", round(spread_pct, 6))
             payload_override: dict[str, Any] = {
                 "broker": "deriv",
                 "symbol": tick.symbol,
@@ -1340,6 +1439,10 @@ class DerivDaemon:
                 "[ATR_HOLD_EXT] %s atr_abs=%.5f ext=+%.0fs (AI path)",
                 tick.symbol, snap.score_breakdown.get("atr_abs", 0), _atr_ext,
             )
+        # Telemetry: stamp entry tick count and spread so closed records can
+        # compute ticks_held and expose spread_at_entry without re-parsing logs.
+        snap.score_breakdown.setdefault("entry_tick_count", self._risk.get_tick_count(tick.symbol))
+        snap.score_breakdown.setdefault("spread_pct_at_entry", round(spread_pct, 6))
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,

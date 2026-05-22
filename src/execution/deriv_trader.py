@@ -197,6 +197,11 @@ class DerivOpenContract:
     # Phase 20: previous-tick profit for spike-delta detection.
     # Default -1.0 so the first tick never triggers a false delta.
     last_profit: float = field(default=-1.0)
+    # Telemetry: tick count at the moment of entry (for ticks_held in closed record).
+    entry_tick_count: int = field(default=0)
+    # Telemetry: ATR snapshots sampled every 30s during the trade lifetime.
+    # Format: list of (elapsed_seconds, atr_value) rounded to 5 dp.
+    atr_samples: list = field(default_factory=list)
 
 
 class DerivTradeExecutor:
@@ -209,10 +214,14 @@ class DerivTradeExecutor:
         settings: DerivSettings,
         client: DerivClient,
         telemetry: TelegramTelemetry | None = None,
+        risk_manager: Any = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._telemetry = telemetry
+        # Optional reference to DerivRiskManager — used to read current ATR and
+        # tick counts for ticks_held / atr_trajectory telemetry in closed records.
+        self._risk = risk_manager
         self._open: dict[int, DerivOpenContract] = {}
         self._lock = asyncio.Lock()
         # Phase 35: close-lock guard — prevents duplicate sell() calls when WS
@@ -425,6 +434,7 @@ class DerivTradeExecutor:
             opened_at_ts=time.time(),
             score_breakdown=order.score_breakdown,
             max_hold_seconds=order.max_hold_seconds,
+            entry_tick_count=int((order.score_breakdown or {}).get("entry_tick_count", 0)),
         )
         async with self._lock:
             self._open[contract_id] = oc
@@ -550,6 +560,17 @@ class DerivTradeExecutor:
                 _current_price  = float(poc.get("current_spot") or 0)
                 # BUG-B fix: update floating PnL on poll path (safety-net for WS gaps)
                 oc_check.floating_pnl = _current_profit
+                # Telemetry: sample ATR every ~30s to build atr_trajectory
+                if self._risk is not None:
+                    _held_sec = time.time() - oc_check.opened_at_ts
+                    _sample_interval = 30.0
+                    _expected_samples = int(_held_sec / _sample_interval)
+                    if _expected_samples > len(oc_check.atr_samples):
+                        _atr_now = self._risk.get_current_atr(oc_check.symbol)
+                        if _atr_now is not None:
+                            oc_check.atr_samples.append(
+                                [round(_held_sec, 1), _atr_now]
+                            )
                 # Sync peak directly so ratchet can never lag behind dashboard PnL.
                 if _current_profit > 0:
                     self._dpm.sync_external_peak(cid, _current_profit)
@@ -676,7 +697,7 @@ class DerivTradeExecutor:
                 "max_hold_seconds": oc.max_hold_seconds,
                 **_dpm_stats,
             }
-            self._append_closed(record)
+            self._append_closed(record, oc)
             await self._post_pamm_webhook(record)
             self._notify("close", record)
             self._update_sym_stats(record)
@@ -799,7 +820,7 @@ class DerivTradeExecutor:
         tmp.write_text(json.dumps(body, indent=2))
         tmp.replace(path)
 
-    def _append_closed(self, record: dict[str, Any]) -> None:
+    def _append_closed(self, record: dict[str, Any], oc: "DerivOpenContract | None" = None) -> None:
         # ── Telemetry injection: surface grade-level audit fields as top-level keys ──
         # Allows post-trade analysis to filter deriv_closed_contracts.json by grade
         # without parsing score_breakdown JSONB.  setdefault() prevents overwrite
@@ -809,6 +830,20 @@ class DerivTradeExecutor:
         _fvg_tier = str(_sb.get("fvg_tier", ""))
         record.setdefault("fvg_bypassed", _fvg_tier in ("no_fvg_escape_valve", "no_fvg_penalized"))
         record.setdefault("hurst_penalty_applied", "neutral_zone_penalty" in _sb)
+        # ── Rich telemetry injected at close time ─────────────────────────
+        # These fields enable per-trade forensics without reprocessing score_breakdown.
+        record.setdefault("spread_at_entry", round(float(_sb.get("spread_pct_at_entry", 0)), 5))
+        record.setdefault("ema200_distance_at_entry_pct", _sb.get("ema200_dev_pct"))
+        # ticks_held: entry_tick_count is stored in score_breakdown by main_deriv;
+        # close_tick_count is fetched from risk manager if available.
+        _entry_ticks = int(_sb.get("entry_tick_count", 0))
+        _sym = str(record.get("symbol", ""))
+        _close_ticks = self._risk.get_tick_count(_sym) if self._risk is not None else 0
+        if _entry_ticks > 0 and _close_ticks >= _entry_ticks:
+            record.setdefault("ticks_held", _close_ticks - _entry_ticks)
+        # atr_trajectory: sampled every 30s during the trade by reap_closed loop
+        if oc is not None and oc.atr_samples:
+            record.setdefault("atr_trajectory", oc.atr_samples)
         # ── Append to JSON file ────────────────────────────────────────────
         path = self._settings.closed_contracts_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1269,7 +1304,7 @@ class DerivTradeExecutor:
             _dpm_stats.get("eficiencia", 0), _dpm_stats.get("max_pnl_alcanzado", 0),
             _dpm_stats.get("dpm_fase", "?"),
         )
-        self._append_closed(record)
+        self._append_closed(record, oc)
         await self._post_pamm_webhook(record)
         self._notify("close", record)
         self._update_sym_stats(record)
@@ -1417,7 +1452,7 @@ class DerivTradeExecutor:
                         "max_hold_seconds": oc.max_hold_seconds,
                         **_dpm_stats,
                     }
-                    self._append_closed(record)
+                    self._append_closed(record, oc)
                     await self._post_pamm_webhook(record)
                     self._notify("forced_close", record)
                     self._update_sym_stats(record)
@@ -1698,7 +1733,7 @@ class DerivTradeExecutor:
                 "score_breakdown": oc.score_breakdown,
                 "max_hold_seconds": oc.max_hold_seconds,
             }
-            self._append_closed(record)
+            self._append_closed(record, oc)
             await self._post_pamm_webhook(record)
             self._notify("ghost_closed", record)
 

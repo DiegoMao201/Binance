@@ -509,6 +509,8 @@ class DerivRiskManager:
         self._last_spike_ts: dict[str, float] = {}
         # Running per-symbol tick counter — incremented in ingest_tick.
         self._ingest_tick_count: dict[str, int] = {}
+        # Tick count at the moment of the last detected spike (for ticks_since_last_spike).
+        self._last_spike_tick: dict[str, int] = {}
         # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
         if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
             lf = settings.lockout_file
@@ -707,15 +709,28 @@ class DerivRiskManager:
                     _is_boom_spike  = "BOOM"  in _su and _jump >  3.0 * _recent_atr
                     _is_crash_spike = "CRASH" in _su and _jump < -3.0 * _recent_atr
                     if _is_boom_spike or _is_crash_spike:
-                        self._last_spike_ts[symbol] = time.time()
                         _direction = "UP" if _is_boom_spike else "DOWN"
+                        # Capture pre-update values for enrichment fields
+                        _prev_spike_ts   = self._last_spike_ts.get(symbol, 0.0)
+                        _spike_ts        = time.time()
+                        _spike_cluster   = _prev_spike_ts > 0 and (_spike_ts - _prev_spike_ts < 400)
+                        _cur_tick_n      = self._ingest_tick_count[symbol]
+                        _ticks_since_sp  = _cur_tick_n - self._last_spike_tick.get(symbol, 0)
+                        _ema200_at_spike = _ema200(list(buf))
+                        _ema200_dev: float | None = None
+                        if _ema200_at_spike is not None and _ema200_at_spike > 0:
+                            _ema200_dev = round(
+                                (buf[-1] - _ema200_at_spike) / _ema200_at_spike, 5
+                            )
+                        # Update trackers
+                        self._last_spike_ts[symbol]   = _spike_ts
+                        self._last_spike_tick[symbol] = _cur_tick_n
                         _LOGGER.info(
                             "[SPIKE_DETECTED] %s direction=%s jump=%.5f atr=%.5f ratio=%.1f× — "
                             "spike-cycle timer reset",
                             symbol, _direction, _jump, _recent_atr, abs(_jump) / _recent_atr,
                         )
                         # Structured spike event log — captured by log parser and spike_events table
-                        _spike_ts = time.time()
                         _LOGGER.info(
                             "[SPIKE_EVENT] symbol=%s direction=%s jump=%.5f atr=%.5f "
                             "ratio=%.2f ts=%.3f",
@@ -752,6 +767,10 @@ class DerivRiskManager:
                                 "loss_streak": int(self._loss_streak),
                                 "since_last_trade_s": _since_last_trade,
                                 "lockout_active": _lockout_active,
+                                # ── Telemetría enriquecida ───────────────
+                                "ticks_since_last_spike": _ticks_since_sp,
+                                "price_vs_ema200_pct": _ema200_dev,
+                                "spike_cluster": _spike_cluster,
                                 # bot_entered / block_reason are written post-evaluate
                                 # via enrich_last_spike() called from the trading loop
                                 "bot_entered": None,
@@ -779,6 +798,27 @@ class DerivRiskManager:
         DURING the wait period and cancel stale entries.
         """
         return self._last_spike_ts.get(symbol, 0.0)
+
+    def get_current_atr(self, symbol: str) -> float | None:
+        """Return the most-recent synthetic ATR for *symbol* (mean of last 5 ATR samples).
+
+        Returns None if there is no ATR history yet (cold start).
+        Used by DerivTradeExecutor to record atr_at_entry in closed contracts
+        and by the market-context snapshot loop in main_deriv.
+        """
+        hist = self._atr_history.get(symbol, [])
+        if not hist:
+            return None
+        val = mean(hist[-5:]) if len(hist) >= 5 else hist[-1]
+        return round(val, 6)
+
+    def get_tick_count(self, symbol: str) -> int:
+        """Return the cumulative ingest tick count for *symbol*.
+
+        Used to compute ticks_held (entry_tick_count → close_tick_count) and
+        ticks_since_last_spike in per-trade and per-spike telemetry.
+        """
+        return self._ingest_tick_count.get(symbol, 0)
 
     def enrich_last_spike(
         self,
