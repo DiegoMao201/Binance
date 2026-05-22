@@ -799,6 +799,16 @@ class DerivRiskManager:
         """
         return self._last_spike_ts.get(symbol, 0.0)
 
+    def get_last_spike_tick_count(self, symbol: str) -> int:
+        """Return the ingest-tick count at which the last spike for *symbol* was detected.
+
+        Returns 0 if no spike has been observed yet.  Used by the spike pre-filter
+        gate in main_deriv to compute ticks_since_last_spike in tick-domain instead
+        of wall-clock seconds, keeping cooldown semantics consistent with the rest
+        of the signal stack (Hurst, ATR, momentum — all tick-indexed).
+        """
+        return self._last_spike_tick.get(symbol, 0)
+
     def get_current_atr(self, symbol: str) -> float | None:
         """Return the most-recent synthetic ATR for *symbol* (mean of last 5 ATR samples).
 

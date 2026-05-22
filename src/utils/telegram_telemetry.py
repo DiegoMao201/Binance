@@ -92,9 +92,12 @@ class TelegramTelemetry:
 
     def _render_message(self, level: str, data: dict[str, Any]) -> str:
         normalized = level.strip().lower()
-        if normalized == "trade_open":
+        # Deriv executor fires "deriv_live_buy" / "deriv_paper_buy" for opens
+        # and "deriv_close" / "deriv_forced_close" / "deriv_ghost_closed" for closes.
+        # Map them explicitly so they never fall through to _render_sys ("ALERTA RED").
+        if normalized in ("trade_open", "deriv_live_buy", "deriv_paper_buy"):
             return self._render_trade_open(data)
-        if normalized == "trade_close":
+        if normalized in ("trade_close", "deriv_close", "deriv_forced_close", "deriv_ghost_closed"):
             return self._render_trade_close(data)
         if normalized == "radar":
             return self._render_radar(data)
@@ -108,84 +111,31 @@ class TelegramTelemetry:
     # ── Rich renderers (HTML) ────────────────────────────────────────────────
 
     def _render_trade_open(self, data: dict[str, Any]) -> str:
-        """🟢 Trade Opened — HTML."""
-        symbol  = _h(str(data.get("symbol") or "N/D"))
-        side    = _h(str(data.get("side") or "BUY").upper())
-        entry   = _h(self._fmt_price(data.get("entry_price") or data.get("fill_price") or data.get("price") or data.get("entry")))
-        sl      = _h(self._fmt_price(data.get("stop_loss") or data.get("sl")))
-        tp      = _h(self._fmt_price(data.get("take_profit") or data.get("tp")))
-        conf    = data.get("ai_confidence")
-        conf_s  = f"{round(float(conf) * 100)}%" if conf is not None else "n/d"
-        scenario = _h(str(data.get("scenario") or "–"))
-        regime   = _h(str(data.get("regime") or "–"))
-        logic    = _h(str(data.get("entry_logic_tag") or "standard_ai"))
-        mode_raw = str(data.get("mode") or "live").upper()
-        mode_icon = "🧪" if "DRY" in mode_raw else "💶"
-        flags_raw = data.get("ai_risk_flags") or []
-        flags_s = _h(", ".join(flags_raw)) if flags_raw else "ninguno"
-        notional = data.get("notional_usdt")
-        notional_s = f"{float(notional):.2f} USDT" if notional else "n/d"
-        lines = [
-            f"🟢 <b>TRADE ABIERTO</b> {mode_icon}",
-            f"<b>{symbol}</b>  ·  {side}  ·  Escenario <b>{scenario}</b>",
-            "",
-            f"📍 Entrada   <code>{entry}</code>",
-            f"🛑 Stop Loss <code>{sl}</code>",
-            f"🎯 Take Profit <code>{tp}</code>",
-            f"💰 Nocional  <code>{notional_s}</code>",
-            "",
-            f"🤖 IA Convicción  <b>{_h(conf_s)}</b>",
-            f"🌡 Régimen        <b>{regime}</b>",
-            f"🔖 Lógica entrada <code>{logic}</code>",
-            f"⚠️ Risk flags     {flags_s}",
-        ]
-        return "\n".join(lines)
+        """� Trade Opened — minimal single-line format."""
+        symbol = _h(str(data.get("symbol") or "?"))
+        side   = str(data.get("side") or "")
+        arrow  = "▲ SUBE" if "UP" in side.upper() else "▼ BAJA"
+        stake  = data.get("stake_usdt")
+        stake_s = _h(f"${float(stake):.2f}") if stake else ""
+        return f"📈 <b>{symbol}</b>  {arrow}  {stake_s}".strip()
 
     def _render_trade_close(self, data: dict[str, Any]) -> str:
-        """🔴/🔵 Trade Closed — HTML."""
-        symbol  = _h(str(data.get("symbol") or "N/D"))
-        pnl_raw = data.get("pnl_usdt", 0.0)
-        try:
-            pnl = float(pnl_raw)
-        except (TypeError, ValueError):
-            pnl = 0.0
-        pnl_pct_raw = data.get("pnl_pct")
-        try:
-            pnl_pct = float(pnl_pct_raw)
-            pnl_pct_s = f"{pnl_pct:+.2f}%"
-        except (TypeError, ValueError):
-            pnl_pct_s = "n/d"
-        pnl_icon = "🔵" if pnl >= 0 else "🔴"
-        pnl_sign  = "+" if pnl >= 0 else ""
-        exit_raw  = str(data.get("exit_reason") or data.get("reason") or "desconocido")
-        exit_icon = {
-            "take_profit": "✅", "tp": "✅",
-            "stop_loss": "🛑", "sl": "🛑",
-            "microstructure_bailout": "🧬",
-            "hard_timeout": "⏱",
-            "ai_emergency_exit": "🤖",
-            "manual": "🖐",
-            "trailing_tier": "📈",
-            "break_even": "⚖️",
-            "stagnation_timeout": "⏳",
-        }.get(exit_raw.lower(), "📤")
-        entry   = _h(self._fmt_price(data.get("entry_price") or data.get("entry")))
-        exit_p  = _h(self._fmt_price(data.get("exit_price") or data.get("exit")))
-        hold_m  = data.get("hold_minutes")
-        hold_s  = f"{float(hold_m):.0f} min" if hold_m else "n/d"
-        mode_raw = str(data.get("mode") or "live").upper()
-        mode_icon = "🧪" if "DRY" in mode_raw else "💶"
-        lines = [
-            f"{pnl_icon} <b>TRADE CERRADO</b> {mode_icon}",
-            f"<b>{symbol}</b>  ·  {exit_icon} <code>{_h(exit_raw)}</code>",
-            "",
-            f"📍 Entrada  <code>{entry}</code>",
-            f"🏁 Salida   <code>{exit_p}</code>",
-            f"⏱ Duración <code>{_h(hold_s)}</code>",
-            "",
-            f"💰 PnL neto <b>{_h(pnl_sign)}{_h(f'{pnl:.4f}')} USDT</b>  ({_h(pnl_pct_s)})",
-        ]
-        return "\n".join(lines)
+        """✅/❌ Trade Closed — minimal format with symbol + pnl + reason."""
+        symbol = _h(str(data.get("symbol") or "?"))
+        pnl = 0.0
+        for _key in ("pnl_usdt", "realized_pnl_usdt"):
+            try:
+                _val = data.get(_key)
+                if _val is not None:
+                    pnl = float(_val)
+                    break
+            except (TypeError, ValueError):
+                pass
+        exit_raw = str(data.get("exit_reason") or data.get("reason") or "")
+        exit_note = f"  <code>{_h(exit_raw)}</code>" if exit_raw else ""
+        if pnl >= 0:
+            return f"✅ <b>{symbol}</b>  +${pnl:.2f}{exit_note}"
+        return f"❌ <b>{symbol}</b>  -${abs(pnl):.2f}{exit_note}"
 
     def _render_radar(self, data: dict[str, Any]) -> str:
         """🟡 Radar Alert — ultra-compact single-line format (low-noise policy)."""

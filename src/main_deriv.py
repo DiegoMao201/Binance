@@ -114,16 +114,29 @@ def _compute_atr_hold_extension(
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
 class _CooldownGate:
-    def __init__(self, seconds: int) -> None:
-        self._seconds = seconds
-        self._last: dict[str, float] = {}
+    """Per-symbol trade cooldown measured in ingested ticks.
+
+    Tick-domain cooldowns are consistent with the rest of the signal stack
+    (Hurst, ATR, momentum scores — all computed over tick windows).  At roughly
+    1 tick/s for BOOM/CRASH indices the numeric values stay equivalent to the
+    previous seconds-based values, but the semantics correctly handle variable
+    tick rates during volatile market periods.
+    """
+
+    def __init__(self, ticks: int, risk: "DerivRiskManager") -> None:
+        self._ticks = ticks
+        self._risk = risk
+        self._last: dict[str, int | None] = {}  # None = never fired for this symbol
 
     def can_fire(self, symbol: str) -> bool:
-        now = time.time()
-        return (now - self._last.get(symbol, 0)) >= self._seconds
+        last = self._last.get(symbol)
+        if last is None:
+            return True  # never traded this symbol — gate is always open
+        current = self._risk.get_tick_count(symbol)
+        return (current - last) >= self._ticks
 
     def mark(self, symbol: str) -> None:
-        self._last[symbol] = time.time()
+        self._last[symbol] = self._risk.get_tick_count(symbol)
 
 
 # ─── Daemon orchestrator ─────────────────────────────────────────────────────
@@ -136,7 +149,7 @@ class DerivDaemon:
         self._executor = DerivTradeExecutor(settings, self._client, self._telemetry, risk_manager=self._risk)
         self._analyst = DerivAnalyst(settings, self._client)
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
-        self._cooldown = _CooldownGate(seconds=max(60, int(settings.contract_duration_sec)))
+        self._cooldown = _CooldownGate(ticks=max(60, int(settings.contract_duration_sec)), risk=self._risk)
         self._stop_event = asyncio.Event()
         self._velocity = TickVelocityAnalyzer()  # Module 2: tick acceleration detector
         # Telemetría in-memory (anillos) para que el frontend audite por qué
@@ -160,7 +173,7 @@ class DerivDaemon:
         # ── Signal cooldown (global anti-spam debounce for ALL HARD_MATH_OVERRIDE types) ──
         # Tracks last fired override per symbol. Checked FIRST in _pipeline() so
         # neither math nor AI evaluation runs on cooling-down symbols.
-        self._signal_cooldown: dict[str, float] = {}
+        self._signal_cooldown: dict[str, int | None] = {}  # symbol → tick count at last signal eval
         # ── Per-symbol evaluation lock (BUG-A fix) ──────────────────────────
         # Prevents concurrent pipeline runs for the same symbol when ticks fire
         # faster than one evaluation cycle. At most ONE pipeline runs per symbol
@@ -656,20 +669,21 @@ class DerivDaemon:
         # hold=350s → need entry at t≥250s.
         # ═══════════════════════════════════════════════════════════════════
         if is_spike_market(tick.symbol):
+            # spike_min_post_sec values are reused as tick counts (≈1 tick/s for BOOM/CRASH).
             _spf_min_post = float(_early_profile.get("spike_min_post_sec", 0))
             if _spf_min_post > 0:
-                _spf_last_ts = self._risk.get_last_spike_ts(tick.symbol)
-                if _spf_last_ts > 0:
-                    _spf_age = time.time() - _spf_last_ts
-                    if _spf_age < _spf_min_post:
+                _spf_last_tick = self._risk.get_last_spike_tick_count(tick.symbol)
+                if _spf_last_tick > 0:
+                    _spf_ticks_since = self._risk.get_tick_count(tick.symbol) - _spf_last_tick
+                    if _spf_ticks_since < _spf_min_post:
                         _LOGGER.debug(
-                            "[SPIKE_PRE_FILTER] %s spike %ds ago < %ds window — "
+                            "[SPIKE_PRE_FILTER] %s %d ticks since spike < %d ticks window — "
                             "blocking eval entry (post-spike drift phase)",
-                            tick.symbol, int(_spf_age), int(_spf_min_post),
+                            tick.symbol, _spf_ticks_since, int(_spf_min_post),
                         )
                         self._spike_enrich(
                             tick.symbol, bot_entered=False,
-                            block_reason=f"spike_pre_filter:{int(_spf_age)}s<{int(_spf_min_post)}s",
+                            block_reason=f"spike_pre_filter:{_spf_ticks_since}t<{int(_spf_min_post)}t",
                         )
                         return
 
@@ -678,18 +692,20 @@ class DerivDaemon:
         # Per-symbol override via ASSET_INTEL_PROFILES['cooldown_sec'] takes
         # precedence over the global DERIV_SIGNAL_COOLDOWN_SEC env var.
         # ═══════════════════════════════════════════════════════════════════
-        _global_cd = float(os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180"))
-        _profile_cd = float(get_asset_profile(tick.symbol).get("cooldown_sec", 0) or 0)
-        _cd_sec = _profile_cd if _profile_cd > 0 else _global_cd
-        _sig_last = self._signal_cooldown.get(tick.symbol, 0.0)
-        _sig_elapsed = time.time() - _sig_last
-        if _sig_elapsed < _cd_sec:
-            _LOGGER.debug(
-                "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%.0fs / %.0fs",
-                tick.symbol, _sig_elapsed, _cd_sec,
-            )
-            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
-            return
+        # Tick-based signal cooldown: consistent with the tick-domain signal stack.
+        _global_cd = int(os.getenv("DERIV_SIGNAL_COOLDOWN_TICKS", os.getenv("DERIV_SIGNAL_COOLDOWN_SEC", "180")))
+        _profile_cd = int(get_asset_profile(tick.symbol).get("cooldown_ticks", 0) or get_asset_profile(tick.symbol).get("cooldown_sec", 0) or 0)
+        _cd = _profile_cd if _profile_cd > 0 else _global_cd
+        _sig_last = self._signal_cooldown.get(tick.symbol)
+        if _sig_last is not None:
+            _sig_elapsed_ticks = self._risk.get_tick_count(tick.symbol) - _sig_last
+            if _sig_elapsed_ticks < _cd:
+                _LOGGER.debug(
+                    "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%d / %d ticks",
+                    tick.symbol, _sig_elapsed_ticks, _cd,
+                )
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
+                return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
@@ -1202,7 +1218,7 @@ class DerivDaemon:
         if snap.hurst_ai_override:
             # Stamp signal cooldown for ALL override types (trend_math,
             # smc_confluence, micro_scalp_mr) to prevent tick-by-tick spam.
-            self._signal_cooldown[tick.symbol] = time.time()
+            self._signal_cooldown[tick.symbol] = self._risk.get_tick_count(tick.symbol)
             self._cooldown.mark(tick.symbol)
 
             _is_mean_rev_ov = bool(snap.score_breakdown.get("mean_rev_mode"))
