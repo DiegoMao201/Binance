@@ -787,17 +787,30 @@ class DerivDaemon:
             _geo_max  = _asset_profile_early.get("geo_entry_max")
             _geo_gate = 0.0
             _geo_gate_label = ""
+            # Per-symbol geo tolerance: soft→hard penalty boundary (default 0.30).
+            # CRASH500 uses 0.25 to tighten overshoot zone (Muestra3).
+            _geo_tol = float(_asset_profile_early.get("geo_penalty_tolerance", 0.30))
+            # Per-symbol extended-down veto: when geo_pos < this floor, CRASH entries
+            # that would normally receive geo_optimal +1.0 bonus are hard-vetoed (-2.0).
+            # Fixes Grade A WR 14% issue where deeply negative geo positions were getting
+            # bonus score and entering as Grade A despite poor empirical WR (Muestra3).
+            _geo_veto_min = _asset_profile_early.get("geo_extended_veto_min")
 
             if _geo_max is not None:
                 _gmax     = float(_geo_max)
                 _overshoot = _geo_val - _gmax
-                if _overshoot <= -0.30:
+                if _geo_veto_min is not None and _geo_val < float(_geo_veto_min):
+                    _geo_gate = -2.0
+                    _geo_gate_label = (
+                        f"geo_extended_down_veto: {_geo_val:.3f}<{float(_geo_veto_min):.3f} →-2.0"
+                    )
+                elif _overshoot <= -0.30:
                     _geo_gate = +1.0
                     _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
                 elif _overshoot <= 0.0:
                     _geo_gate = 0.0
                     _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
-                elif _overshoot <= 0.30:
+                elif _overshoot <= _geo_tol:
                     _geo_gate = -1.5
                     _geo_gate_label = (
                         f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
@@ -819,7 +832,7 @@ class DerivDaemon:
                 elif _undershoot <= 0.0:
                     _geo_gate = 0.0
                     _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
-                elif _undershoot <= 0.30:
+                elif _undershoot <= _geo_tol:
                     _geo_gate = -1.5
                     _geo_gate_label = (
                         f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "

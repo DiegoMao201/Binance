@@ -462,6 +462,14 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",  # Phase 26: explicit Tier 1 OK (was implicit)
         # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
+        # Muestra3: tighten overshoot soft→hard boundary from 0.30 to 0.25 for CRASH500.
+        # Entries with geo_pos between 0.55–0.60 were getting soft penalty (-1.5) and still
+        # executing; now they get hard penalty (-2.0) which drops them below min_score.
+        "geo_penalty_tolerance": 0.25,
+        # Muestra3 Grade A WR fix: deeply extended-down entries (geo_pos < -0.70) currently
+        # receive geo_optimal +1.0 bonus which pushes borderline scores into Grade A territory.
+        # Empirical WR for these entries is <14%. Hard veto (-2.0) blocks them.
+        "geo_extended_veto_min": -0.70,
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
         "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
@@ -673,7 +681,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # 8/12 timeouts had missed spikes arriving at 468-749s from entry (18-299s after 450s close).
         # Extending to 600s captures ~7/8 of those missed spikes.
         "max_hold_seconds": 600,
-        "spike_min_post_sec": 150,
+        # Muestra3: 984x spike arrived at 130t; 150t was blocking a 20t entry margin.
+        # Lowered from 150→130 to capture that window.
+        "spike_min_post_sec": 130,
     },
     # ── NEW: BOOM/CRASH 300 — DISABLED until ≥20 trades of real data ────────────
     # BOOM500 had WR=0% (worst performer). BOOM300 = even higher frequency = more noise.
