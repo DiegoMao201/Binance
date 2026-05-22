@@ -342,23 +342,35 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 12,
-        "max_hold_seconds": 600,        # Phase 19: MTBS≈500 ticks → 10 min (was 7.5)
+        "max_hold_seconds": 450,        # Prueba04: 90%×500 ticks; was 600 (overkill), 450s is cycle window
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.5,
+        # Prueba04: first activation — conservative gate. Previous 10-trade batch had geo+1.48.
+        # geo_entry_max=0.50 prevents overextended entries. block_bc_escape_env=False: collect data
+        # on bc_escape_env to characterize the symbol, then decide in Prueba05.
+        "min_score": 7.0,               # Conservative — higher than peers to compensate unknown baseline
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        # ── Batch analysis 2026-05-18: 10 trades, -$2.96, geo always extended ──
-        # All 9 losses had avg geo +1.48 (price overextended on entry).
-        # Even the sole win had geo +1.31. Zero structural edge found.
-        # DISABLED until further evidence of consistent positive expectancy.
-        "disabled": True,
+        "hurst_min_spike": 0.43,
+        "geo_entry_min": -999,
+        "geo_entry_max": 0.50,          # cap geo — previous batch failed at geo+1.48; 0.50 blocks those
+        "stake_max_usdt": 2.00,         # Conservative — same as BOOM600/900
+        "stop_loss_pct_override": 0.36,
+        "trail_stop_floor_min": 0.20,
+        "ratchet_enabled": True,
+        "spike_family": "boom_crash_new",
+        "spike_interval_ticks": 500,
+        "fvg_tier_minimo": "fvg_detected",
+        "block_bc_escape_env": False,   # First phase: collect data, decide after ≥20 trades
+        "spike_capture_tp_usdt": 0.15,
+        "spike_profit_delta_usdt": 0.10,
+        "spike_min_post_sec": 280,      # cycle=500s, min_post=280s → hold=450s covers spikes up to 730s
     },
     "BOOM1000": {
         "type": "spike_boom",
@@ -393,10 +405,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Phase 31: observation window — wait 90s after signal; if spike occurs during wait → cancel
         # (spike already happened = entry is late). If no spike → proceed (spike still pending).
         "observation_window_sec": 90,
-        # Muestra02 pre-filter: block eval entries until 400s after last spike.
-        # cycle=1000s, min_post=400s → entries at t≥400s, next spike in ≤600s → hold=390 borderline.
-        # observation_window_sec=90 adds forward protection; together covers the late-entry risk.
-        "spike_min_post_sec": 400,
+        # Prueba04: reduced from 400→280 to capture the 280-400s range (4/6 BOOM1000 blocks in Prueba03)
+        # cycle=1000s, min_post=280s → entries at t≥280s, hold=390s covers spikes up to 670s
+        "spike_min_post_sec": 280,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
     "CRASH300": {
@@ -450,18 +461,14 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,        # Phase 26: explicit — align with CRASH600/900
         "fvg_tier_minimo": "fvg_detected",  # Phase 26: explicit Tier 1 OK (was implicit)
         # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
-        # ROOT CAUSE: geo_pos was +0.013-0.038 (price near channel mid).
-        # geo_entry_max=-0.20 → overshoot=+0.21 → geo_gate=-1.5 → score 4.15→2.65 < 4.50
-        # With +0.30: price near mid passes with geo_gate=0.0, score stays at 4.15.
-        # REQUIRES COOLIFY: DERIV_BOOM_CRASH_CALM_EFFECTIVE_MIN=3.80 (was 4.50)
-        # so that score=4.00-4.15 passes effective_min=3.80.
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        # ── AUDIT 2026-05-18: stake $5→$2 — 25% WR at $5 destroys capital ──
-        # CRASH500: 8 trades, 2 wins, avg_loss=-$0.658, total=-$3.94. $2 cap reduces exposure.
         "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
-        "min_score": 4.5,              # Phase 32: 5.0→4.5 — profile gate below effective_min=3.50; let risk engine be the gate
+        "min_score": 4.5,              # Phase 32: profile gate, let risk engine gate
+        # Prueba03: bc_escape_env 20% WR (5t) vs fvg_detected/mitigated mixed.
+        # All bc_escape_env entries timeout. block=True → only enter with real FVG structure.
+        "block_bc_escape_env": True,    # Prueba04: hard veto — CRASH500 bc_escape_env no edge
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         # Muestra02 pre-filter: small 50s post-spike block (cycle=500s, hold=450s → min_wait=50s)
@@ -504,7 +511,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
         "stake_max_usdt": 2.00,         # Muestra02: was $5 (lost $5.14 in 10 trades), conservative
         "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
-        # Phase 20/24: deterministic spike capture — thresholds lowered 0.40→0.15
+        # Prueba03: ALL 7 CRASH1000 trades bc_escape_env → 14% WR (1 win in 702s). Score doesn't help.
+        # Raising min_score 4.5→7.0 + block bc_escape_env. Only enter on strong FVG setups.
+        "min_score": 7.0,               # Prueba04: raised from 4.5 — low-score CRASH1000 entries all timeout
+        "block_bc_escape_env": True,    # Prueba04: hard veto — ALL Prueba03 CRASH1000 losses were bc_escape_env
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
     },
@@ -576,11 +586,13 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
         "fvg_tier_minimo": "fvg_detected",
+        # Prueba03: ALL 8 CRASH900 trades were bc_escape_env → 25% WR, -$0.49 total.
+        # Confirmed: no FVG structures forming for CRASH900. bc_escape_env = timeout loop.
+        "block_bc_escape_env": True,    # Prueba04: hard veto — wait for real FVG structure
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Muestra02 pre-filter: block eval entries until 400s after last spike.
-        # cycle=900s → entries at t≥400s are close enough to next spike for hold=500s to catch it.
-        "spike_min_post_sec": 400,
+        # Prueba04: reduced from 400→280 to capture the 280-400s range that was blocked
+        "spike_min_post_sec": 280,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
@@ -612,10 +624,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
         "fvg_tier_minimo": "fvg_detected",  # FIX-5: Tier 1 sufficient (was fvg_mitigated — too strict)
-        # Muestra02: 32 bc_escape_env TREND trades → WR=25%, PnL=-$3.15, avg_peak=$0.052.
-        # Score range 5.15-8.33 does NOT predict outcome — it's random spike timing.
-        # block_bc_escape_env=True → hard veto if no FVG active (no bc_escape_env entries).
-        "block_bc_escape_env": True,
+        # Prueba03: BOOM600 had 0 entries — completely blocked. block=False allows bc_escape_env
+        # with natural score gate (effective_min 3.5-6.0). BOOM900 bc_escape_env shows it can win.
+        "block_bc_escape_env": False,   # Prueba04: unblocked — was killing all BOOM600 entries
         # Phase 20: deterministic spike capture — Phase 24: thresholds lowered
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -651,9 +662,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        # Muestra02: fvg_mitigated WR=50%/+$0.87 (8t) vs bc_escape_env WR=25%/-$1.23 (12t).
-        # Require fvg_mitigated to eliminate bc_escape_env entries that have no edge.
+        # Prueba03: bc_escape_env 17% WR (6t, all timeout) vs fvg_mitigated 75% WR (4t).
+        # fvg_tier_minimo alone doesn't block bc_escape_env (different code branch).
+        # block_bc_escape_env=True is the correct enforcement.
         "fvg_tier_minimo": "fvg_mitigated",
+        "block_bc_escape_env": True,    # Prueba04: hard veto — bc_escape_env has 0 edge for CRASH600
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         # Muestra02: spike_tp wins at p50=158s, p90=298s, max=379s.
