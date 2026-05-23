@@ -1097,12 +1097,12 @@ Aplicadas en `/data/coolify/applications/o4w1ns4cceccmn2ozqt7sol2/.env`:
 
 Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_AI_INTERVAL_SEC`; para logs acepta `DYNAMIC_AI_LOGS_DIR` y alias `DYNAMIC_AI_LOG_DIR`.
 
-### Estado actual del bot (sin pendientes) — 2026-05-23 05:12 UTC
+### Estado actual del bot (sin pendientes) — 2026-05-23 05:24 UTC
 
-- Commit activo desplegado: `ca88d84`.
+- Commit activo desplegado: `6274ec5`.
 - Contenedores activos:
-  - `o4w1ns4cceccmn2ozqt7sol2:ca88d84...` (daemon principal)
-  - `o4w1ns4cceccmn2ozqt7sol2-ai:ca88d84...` (orquestador IA)
+  - `o4w1ns4cceccmn2ozqt7sol2:6274ec5...` (daemon principal)
+  - `o4w1ns4cceccmn2ozqt7sol2-ai:6274ec5...` (orquestador IA)
 - DB validada en vivo (`dynamic_symbol_config`):
   - `score_min_override` ya dentro de `6.8..7.0` (cumple hard floor 6.5).
   - `zero_peak_grace_sec=60` en todos los símbolos (incluye `BOOM500/CRASH500/CRASH600` con piso obligatorio).
@@ -1115,6 +1115,7 @@ Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_
   - Bloqueo de flips de régimen dentro de ventana mínima por símbolo.
   - Escritura a DB únicamente cuando hay diff real.
   - Archivo de auditoría de cambios: `/data/logs/dynamic_ai_config_diffs.jsonl`.
+  - Evidencia en logs: `[dynamic-ai][HYSTERESIS] ... rejected regime flip ...` y `[dynamic-ai][DIFF] ...`.
 - BOOM600/BOOM900 desbloqueados de veto rígido por profile env:
   - evidencia en logs: `[STRUCTURAL_VETO_ESCAPE] BOOM600 ...` y `[STRUCTURAL_VETO_ESCAPE] BOOM900 ...`
   - esto confirma que `DERIV_BLOCK_BC_ESCAPE_BOOM600/900=false` está impactando el pipeline.
