@@ -1039,10 +1039,11 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
 
 1. **Puente PostgreSQL de configuración dinámica**
 - Nueva migración: `db/migrations/009_dynamic_symbol_config.sql`.
+- Hardening aplicado: `db/migrations/010_dynamic_guardrails_hardening.sql`.
 - Tabla: `dynamic_symbol_config` con guardrails duros:
   - `spike_pre_filter_target` entre `50..500`
-  - `zero_peak_grace_sec` entre `0..120`
-  - `score_min_override` entre `3.0..10.0`
+  - `zero_peak_grace_sec` entre `0..120` con piso obligatorio `>=60` en `BOOM500/CRASH500/CRASH600`
+  - `score_min_override` entre `6.5..8.0` (nunca por debajo)
 - Símbolos base insertados: BOOM1000/900/600/500 + CRASH1000/900/600/500.
 
 2. **Bot principal leyendo configuración dinámica cada 15s**
@@ -1069,25 +1070,49 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
 - Ciclo cada 60s (configurable):
   - Lee telemetría reciente.
   - Consulta LLM (JSON estricto).
-  - Aplica guardrails locales.
+  - Aplica guardrails locales (score `6.5..8.0` + piso `zero_peak>=60` en símbolos críticos).
   - `UPDATE` a `dynamic_symbol_config`.
   - Fallback heurístico si LLM falla.
 
 6. **Auto-migración de arranque actualizada**
 - `scripts/migrate_db.py` incluye migración `009_dynamic_symbol_config.sql`.
 
-### Variables de entorno recomendadas
+### Variables de entorno aplicadas en Coolify (verificado)
+
+Aplicadas en `/data/coolify/applications/o4w1ns4cceccmn2ozqt7sol2/.env`:
 
 - `DERIV_DYNAMIC_CONFIG_ENABLED=true`
 - `DERIV_DYNAMIC_CONFIG_REFRESH_SEC=15`
 - `DERIV_ZERO_PEAK_BASE_SEC=150`
-
-Orquestador IA:
-
+- `DERIV_BLOCK_BC_ESCAPE_BOOM600=false`
+- `DERIV_BLOCK_BC_ESCAPE_BOOM900=false`
 - `DYNAMIC_AI_LOOP_SEC=60`
-- `DYNAMIC_AI_API_KEY=...` (o `OPENAI_API_KEY` / `OPENROUTER_API_KEY`)
-- `DYNAMIC_AI_MODEL=gpt-4o-mini` (o modelo operativo elegido)
-- `DYNAMIC_AI_BASE_URL=https://api.openai.com/v1/chat/completions` (o endpoint OpenRouter)
+- `DYNAMIC_AI_LOGS_DIR=/data/logs`
+
+Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_AI_INTERVAL_SEC`; para logs acepta `DYNAMIC_AI_LOGS_DIR` y alias `DYNAMIC_AI_LOG_DIR`.
+
+### Estado actual del bot (sin pendientes) — 2026-05-23 05:09 UTC
+
+- Commit activo desplegado: `ca88d84`.
+- Contenedores activos:
+  - `o4w1ns4cceccmn2ozqt7sol2:ca88d84...` (daemon principal)
+  - `o4w1ns4cceccmn2ozqt7sol2-ai:ca88d84...` (orquestador IA)
+- DB validada en vivo (`dynamic_symbol_config`):
+  - `score_min_override` ya dentro de `6.8..7.0` (cumple hard floor 6.5).
+  - `zero_peak_grace_sec=60` en todos los símbolos (incluye `BOOM500/CRASH500/CRASH600` con piso obligatorio).
+  - Constraint presente en DB: `chk_dsc_sensitive_zero_peak_floor` + `chk_dsc_score_min_override`.
+- Runtime validado en `deriv_status.json`:
+  - `dynamic_config.enabled=true`
+  - `dynamic_config.refresh_sec=15`
+  - Configs dinámicos por símbolo cargados y refrescando en caliente.
+- BOOM600/BOOM900 desbloqueados de veto rígido por profile env:
+  - evidencia en logs: `[STRUCTURAL_VETO_ESCAPE] BOOM600 ...` y `[STRUCTURAL_VETO_ESCAPE] BOOM900 ...`
+  - esto confirma que `DERIV_BLOCK_BC_ESCAPE_BOOM600/900=false` está impactando el pipeline.
+
+### Integridad de ciencia de datos / trazabilidad
+
+- Se mantienen intactos los reportes y artefactos operativos (`deriv_spike_events.json`, `deriv_closed_contracts.json`, `deriv_status.json`, telemetría de decisiones).
+- La capa dinámica no reemplaza observabilidad: añade un lazo de control (DB + LLM + fallback) encima de los mismos datos forenses para iteración cuantitativa continua.
 
 ### Resultado esperado de esta etapa
 
