@@ -10,6 +10,40 @@ Estado operativo consolidado y validado al 23-05-2026.
 - Dashboard de observabilidad IA/patrones: OK
 - Rama main: publicada y sincronizada en remoto
 
+## Reinicio limpio Prueba 5 (23-05-2026 UTC)
+
+1. Se dejo el broker sin posiciones heredadas y se ejecuto reset controlado de muestra.
+2. Backup pre-reset creado en:
+  - /data/deriv-logs/archive_stage5_restart_20260523_165659
+3. Archivos reiniciados para nueva muestra:
+  - deriv_closed_contracts.json -> []
+  - deriv_open_contracts.json -> []
+  - deriv_spike_events.json -> []
+  - deriv_spikes.json -> []
+  - deriv_ai_decisions.json -> []
+  - deriv_lockout.json -> {}
+  - deriv_status.json -> {}
+  - dynamic_ai_config_diffs.jsonl -> vacio
+4. Stack Deriv reiniciado (bot principal + orquestador IA) con health OK.
+5. Validacion remota release-gate en verde total (PASS) con DB guardrails y runtime dinamico correctos.
+6. Variables de escape explicitadas en env para consistencia de guardrails:
+  - DERIV_BLOCK_BC_ESCAPE_BOOM600=false
+  - DERIV_BLOCK_BC_ESCAPE_BOOM900=false
+
+## Snapshot de arranque de la nueva muestra
+
+- Archivo de bootstrap:
+  - /data/deriv-logs/sample5_bootstrap_20260523_165859.json
+- Estado al crear snapshot:
+  - open=1 (operacion nueva ya iniciada tras el reset)
+  - closed=0
+  - spikes=16
+  - ai_decisions=1
+  - heartbeat fresco
+  - dynamic_config.enabled=true
+  - dynamic_symbols_loaded=8
+  - entry_tick_only=true
+
 ## Cambios incluidos
 
 1. Filtro IA adaptativo por simbolo y endurecimiento de calidad en backend.
