@@ -1008,5 +1008,18 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
 
 ### Commit Stage 4
 
-- Commit: `PENDIENTE_PUSH`
-- Estado: `PENDIENTE_DEPLOY`
+- Commit base de cambios: `6a02bed`
+- Trigger deploy: `7d39318`
+- Contenedor activo post-deploy: `o4w1ns4cceccmn2ozqt7sol2:7d39318`
+- Estado deploy: **APLICADO** (rebuild + replace manual en servidor, 1 contenedor activo)
+
+### Ejecución real de restart Stage 4
+
+- Fecha UTC: `2026-05-23 00:12`
+- Archivo de respaldo creado:
+  - `/data/deriv-logs/archive_stage4_20260523_001233/`
+- Validación post-reset:
+  - `heartbeat_at` fresco
+  - `closed=0`
+  - `spikes=1` (nueva muestra ya iniciada)
+  - `open=2` (operación live retomada por el bot tras reset)
