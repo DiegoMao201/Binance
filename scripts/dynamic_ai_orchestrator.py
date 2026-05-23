@@ -41,6 +41,9 @@ SYMBOLS = [
 
 SCORE_MIN_GUARDRAIL = 6.5
 SCORE_MAX_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
+SCORE_MAX_DB_COMPAT_FALLBACK = float(
+    os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", "8.0") or 8.0
+)
 
 
 def _parse_symbol_float_map(raw: str) -> dict[str, float]:
@@ -678,34 +681,90 @@ async def _apply_cfg(
             if previous is not None and not _cfg_changed(previous, cfg):
                 continue
 
-            await conn.execute(
-                """
-                INSERT INTO dynamic_symbol_config (
-                    symbol, market_regime, spike_pre_filter_target,
-                    zero_peak_grace_sec, score_min_override, is_active
+            cfg_to_write = cfg
+
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO dynamic_symbol_config (
+                        symbol, market_regime, spike_pre_filter_target,
+                        zero_peak_grace_sec, score_min_override, is_active
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        market_regime = EXCLUDED.market_regime,
+                        spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
+                        zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
+                        score_min_override = EXCLUDED.score_min_override,
+                        is_active = EXCLUDED.is_active,
+                        last_updated = NOW()
+                    """,
+                    sym,
+                    cfg_to_write.regime,
+                    cfg_to_write.spike_pre_filter_target,
+                    cfg_to_write.zero_peak_grace_sec,
+                    cfg_to_write.score_min_override,
+                    cfg_to_write.is_active,
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    market_regime = EXCLUDED.market_regime,
-                    spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
-                    zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
-                    score_min_override = EXCLUDED.score_min_override,
-                    is_active = EXCLUDED.is_active,
-                    last_updated = NOW()
-                """,
-                sym,
-                cfg.regime,
-                cfg.spike_pre_filter_target,
-                cfg.zero_peak_grace_sec,
-                cfg.score_min_override,
-                cfg.is_active,
-            )
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if "chk_dsc_score_min_override" not in msg:
+                    raise
+
+                # Compatibility fallback for environments where migration 011
+                # (score guardrail upper bound 9.2) has not been applied yet.
+                fallback_max = max(
+                    SCORE_MIN_GUARDRAIL,
+                    min(SCORE_MAX_DB_COMPAT_FALLBACK, SCORE_MAX_GUARDRAIL),
+                )
+                fallback_score = min(float(cfg_to_write.score_min_override), fallback_max)
+                if fallback_score >= float(cfg_to_write.score_min_override):
+                    raise
+
+                LOG.warning(
+                    "[dynamic-ai][DB_COMPAT] %s score %.2f -> %.2f due to DB constraint",
+                    sym,
+                    float(cfg_to_write.score_min_override),
+                    float(fallback_score),
+                )
+                cfg_to_write = _clamp_cfg(
+                    sym,
+                    SymbolCfg(
+                        regime=cfg_to_write.regime,
+                        spike_pre_filter_target=cfg_to_write.spike_pre_filter_target,
+                        zero_peak_grace_sec=cfg_to_write.zero_peak_grace_sec,
+                        score_min_override=fallback_score,
+                        is_active=cfg_to_write.is_active,
+                    ),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO dynamic_symbol_config (
+                        symbol, market_regime, spike_pre_filter_target,
+                        zero_peak_grace_sec, score_min_override, is_active
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        market_regime = EXCLUDED.market_regime,
+                        spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
+                        zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
+                        score_min_override = EXCLUDED.score_min_override,
+                        is_active = EXCLUDED.is_active,
+                        last_updated = NOW()
+                    """,
+                    sym,
+                    cfg_to_write.regime,
+                    cfg_to_write.spike_pre_filter_target,
+                    cfg_to_write.zero_peak_grace_sec,
+                    cfg_to_write.score_min_override,
+                    cfg_to_write.is_active,
+                )
             updates += 1
 
             if previous is not None:
-                diffs = _cfg_diff_items(previous, cfg)
+                diffs = _cfg_diff_items(previous, cfg_to_write)
             else:
-                diffs = [f"created: {_cfg_to_dict(cfg)}"]
+                diffs = [f"created: {_cfg_to_dict(cfg_to_write)}"]
             if diffs:
                 LOG.info("[dynamic-ai][DIFF] %s modified | %s", sym, " | ".join(diffs))
                 _append_diff_jsonl(
@@ -716,7 +775,7 @@ async def _apply_cfg(
                         "source": decision_source,
                         "changes": diffs,
                         "old": _cfg_to_dict(previous) if previous is not None else None,
-                        "new": _cfg_to_dict(cfg),
+                        "new": _cfg_to_dict(cfg_to_write),
                     },
                 )
     return updates
