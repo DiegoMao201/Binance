@@ -163,6 +163,12 @@ class DerivDaemon:
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
+        # Tick-only anti-chase guard: never enter right after a materialized spike.
+        # This uses spike telemetry as a veto only (not as an entry trigger).
+        self._post_spike_chase_block_sec = max(
+            0.0,
+            float(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "180") or 180),
+        )
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -882,6 +888,39 @@ class DerivDaemon:
                             block_reason=_block_reason,
                         )
                         return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCK 0d — GATE: tick-only anti-chase (BOOM/CRASH only)
+        # In tick-only mode we still veto entries that happen shortly AFTER
+        # a detected spike, because those are typically pursuit entries.
+        # This is a defensive veto only; it never triggers entries.
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            self._entry_tick_only
+            and is_spike_market(tick.symbol)
+            and self._post_spike_chase_block_sec > 0
+        ):
+            _last_spike_ts = self._risk.get_last_spike_ts(tick.symbol)
+            if _last_spike_ts > 0:
+                _elapsed_post_spike = time.time() - _last_spike_ts
+                if 0 <= _elapsed_post_spike < self._post_spike_chase_block_sec:
+                    _block_reason = (
+                        "post_spike_chase_guard:"
+                        f"{_elapsed_post_spike:.1f}s<"
+                        f"{self._post_spike_chase_block_sec:.0f}s"
+                    )
+                    _LOGGER.debug(
+                        "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.1fs < %.0fs",
+                        tick.symbol,
+                        _elapsed_post_spike,
+                        self._post_spike_chase_block_sec,
+                    )
+                    self._spike_enrich(
+                        tick.symbol,
+                        bot_entered=False,
+                        block_reason=_block_reason,
+                    )
+                    return
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.

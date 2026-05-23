@@ -62,7 +62,9 @@ _LOGGER = logging.getLogger("deriv.analyst")
 
 # ── Env knobs ────────────────────────────────────────────────────────────────
 _AI_GATE_ENABLED    = os.getenv("DERIV_AI_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
-_AI_MIN_CONFIDENCE  = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.55"))
+_AI_MIN_CONFIDENCE  = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.70"))
+_AI_FAIL_OPEN       = os.getenv("DERIV_AI_FAIL_OPEN", "false").strip().lower() in {"1", "true", "yes", "on"}
+_AI_HARD_SCORE_FLOOR = float(os.getenv("DERIV_AI_HARD_SCORE_FLOOR", "6.9"))
 _OPENROUTER_KEY     = os.getenv("OPENROUTER_API_KEY", "")
 _OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 _HISTORY_COUNT      = int(os.getenv("DERIV_HISTORY_TICKS", "1000"))  # ticks fetched on startup
@@ -506,6 +508,7 @@ def _build_ai_prompt(
             f"Approve (true) if: score>={ai_threshold} AND Hurst>0.52 "
             f"AND autocorr aligned with side AND regime not 'volatile'."
         )
+    _min_conf = max(0.65, _AI_MIN_CONFIDENCE)
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -529,7 +532,7 @@ Respond ONLY with a JSON object:
 {{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
 
 {_approve_cond}
-Do NOT approve if confidence <0.65 or if mathematical signals conflict."""
+Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict."""
 
 
 # ── Main analyst class ───────────────────────────────────────────────────────
@@ -783,26 +786,37 @@ class DerivAnalyst:
             return analysis
 
         # Build current snapshot for cache invalidation comparison
-        current_snapshot = _build_cache_snapshot(score, hurst, side, score_breakdown)
-
-        # Check cache first (passes snapshot for drift detection)
-        cached_ai = self._ai_cache_get(symbol, current_snapshot=current_snapshot)
-        if cached_ai is not None:
-            analysis.ai_approved   = bool(cached_ai.get("approved", False)) and cached_ai.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
-            analysis.ai_confidence = float(cached_ai.get("confidence", 0.0))
-            analysis.ai_reason     = str(cached_ai.get("reason", "")) + " [cached]"
-            analysis.ai_model      = str(cached_ai.get("model", ""))
-            return analysis
-
-        # Cache miss — call the LLM and store result
-        # Phase 15: use per-symbol-type AI threshold so BOOM/CRASH aren't
-        # blocked by the R_* threshold of 7.5 (DERIV_BOOM_CRASH_AI_MIN_SCORE).
         _is_boom_crash = any(k in symbol.upper() for k in ("BOOM", "CRASH"))
         _ai_threshold = (
             self._settings.boom_crash_ai_min_score
             if _is_boom_crash
             else self._settings.r_indices_ai_min_score
         )
+        _hard_score_floor = max(_AI_HARD_SCORE_FLOOR, float(_ai_threshold))
+
+        current_snapshot = _build_cache_snapshot(score, hurst, side, score_breakdown)
+
+        # Check cache first (passes snapshot for drift detection)
+        cached_ai = self._ai_cache_get(symbol, current_snapshot=current_snapshot)
+        if cached_ai is not None:
+            _cached_conf = float(cached_ai.get("confidence", 0.0) or 0.0)
+            _cached_approved = bool(cached_ai.get("approved", False))
+            analysis.ai_approved = (
+                _cached_approved
+                and _cached_conf >= _AI_MIN_CONFIDENCE
+                and score >= _hard_score_floor
+            )
+            analysis.ai_confidence = _cached_conf
+            _cached_reason = str(cached_ai.get("reason", ""))
+            if _cached_approved and not analysis.ai_approved and score < _hard_score_floor:
+                _cached_reason = f"{_cached_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
+            analysis.ai_reason = _cached_reason + " [cached]"
+            analysis.ai_model      = str(cached_ai.get("model", ""))
+            return analysis
+
+        # Cache miss — call the LLM and store result
+        # Phase 15: use per-symbol-type AI threshold so BOOM/CRASH aren't
+        # blocked by the R_* threshold of 7.5 (DERIV_BOOM_CRASH_AI_MIN_SCORE).
         _LOGGER.info(
             "[AI_GATE] %s using threshold=%.2f (is_boom_crash=%s)",
             symbol, _ai_threshold, _is_boom_crash,
@@ -831,27 +845,58 @@ class DerivAnalyst:
             ai_result = await asyncio.wait_for(_call_openrouter(prompt), timeout=40.0)
             # No API key configured — skip gate entirely, don't veto the trade.
             if ai_result.get("reason") == "no_api_key":
-                _LOGGER.warning(
-                    "[deriv-analyst] No OPENROUTER_API_KEY set — AI gate bypassed for %s "
-                    "(set key in Coolify to enable full AI filtering)", symbol,
-                )
-                analysis.ai_skipped  = True
-                analysis.ai_approved = True
-                analysis.ai_reason   = "no_api_key_skipped"
+                if _AI_FAIL_OPEN:
+                    _LOGGER.warning(
+                        "[deriv-analyst] No OPENROUTER_API_KEY set — AI gate bypassed for %s "
+                        "(DERIV_AI_FAIL_OPEN=true)",
+                        symbol,
+                    )
+                    analysis.ai_skipped = True
+                    analysis.ai_approved = True
+                    analysis.ai_reason = "no_api_key_skipped"
+                else:
+                    _LOGGER.error(
+                        "[deriv-analyst] No OPENROUTER_API_KEY set — FAIL-CLOSED veto for %s",
+                        symbol,
+                    )
+                    analysis.ai_skipped = False
+                    analysis.ai_approved = False
+                    analysis.ai_confidence = 0.0
+                    analysis.ai_reason = "no_api_key_fail_closed"
                 return analysis
             # All models failed (HTTP 4xx/5xx) — treat same as timeout: don't veto.
             if ai_result.get("reason") == "all_models_failed":
-                _LOGGER.warning(
-                    "[deriv-analyst] All AI models failed for %s — gate bypassed (treating as skipped)",
-                    symbol,
-                )
-                analysis.ai_skipped  = True
-                analysis.ai_approved = True
-                analysis.ai_reason   = "all_models_failed_skipped"
+                if _AI_FAIL_OPEN:
+                    _LOGGER.warning(
+                        "[deriv-analyst] All AI models failed for %s — gate bypassed (DERIV_AI_FAIL_OPEN=true)",
+                        symbol,
+                    )
+                    analysis.ai_skipped = True
+                    analysis.ai_approved = True
+                    analysis.ai_reason = "all_models_failed_skipped"
+                else:
+                    _LOGGER.warning(
+                        "[deriv-analyst] All AI models failed for %s — FAIL-CLOSED veto",
+                        symbol,
+                    )
+                    analysis.ai_skipped = False
+                    analysis.ai_approved = False
+                    analysis.ai_confidence = 0.0
+                    analysis.ai_reason = "all_models_failed_fail_closed"
                 return analysis
-            analysis.ai_approved   = bool(ai_result.get("approved", False)) and ai_result.get("confidence", 0.0) >= _AI_MIN_CONFIDENCE
-            analysis.ai_confidence = float(ai_result.get("confidence", 0.0))
-            analysis.ai_reason     = str(ai_result.get("reason", ""))
+            _ai_conf = float(ai_result.get("confidence", 0.0) or 0.0)
+            _model_approved = bool(ai_result.get("approved", False))
+            analysis.ai_approved = (
+                _model_approved
+                and _ai_conf >= _AI_MIN_CONFIDENCE
+                and score >= _hard_score_floor
+            )
+            analysis.ai_confidence = _ai_conf
+            analysis.ai_reason = str(ai_result.get("reason", ""))
+            if _model_approved and not analysis.ai_approved and score < _hard_score_floor:
+                analysis.ai_reason = (
+                    f"{analysis.ai_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
+                )
             analysis.ai_model      = str(ai_result.get("model", ""))
             await self._ai_cache_set(
                 symbol, ai_result,
@@ -859,15 +904,29 @@ class DerivAnalyst:
                 snapshot=current_snapshot,
             )
         except asyncio.TimeoutError:
-            _LOGGER.warning("[deriv-analyst] AI gate timed out for %s — allowing trade", symbol)
-            analysis.ai_skipped  = True
-            analysis.ai_approved = True   # on timeout → don't block trading
-            analysis.ai_reason   = "ai_timeout_allowed"
+            if _AI_FAIL_OPEN:
+                _LOGGER.warning("[deriv-analyst] AI gate timed out for %s — allowing trade (DERIV_AI_FAIL_OPEN=true)", symbol)
+                analysis.ai_skipped  = True
+                analysis.ai_approved = True
+                analysis.ai_reason   = "ai_timeout_allowed"
+            else:
+                _LOGGER.warning("[deriv-analyst] AI gate timed out for %s — FAIL-CLOSED veto", symbol)
+                analysis.ai_skipped  = False
+                analysis.ai_approved = False
+                analysis.ai_confidence = 0.0
+                analysis.ai_reason   = "ai_timeout_fail_closed"
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("[deriv-analyst] AI gate error for %s: %s — allowing", symbol, exc)
-            analysis.ai_skipped  = True
-            analysis.ai_approved = True
-            analysis.ai_reason   = f"ai_error_allowed: {exc}"
+            if _AI_FAIL_OPEN:
+                _LOGGER.warning("[deriv-analyst] AI gate error for %s: %s — allowing (DERIV_AI_FAIL_OPEN=true)", symbol, exc)
+                analysis.ai_skipped  = True
+                analysis.ai_approved = True
+                analysis.ai_reason   = f"ai_error_allowed: {exc}"
+            else:
+                _LOGGER.warning("[deriv-analyst] AI gate error for %s: %s — FAIL-CLOSED veto", symbol, exc)
+                analysis.ai_skipped  = False
+                analysis.ai_approved = False
+                analysis.ai_confidence = 0.0
+                analysis.ai_reason   = f"ai_error_fail_closed: {exc}"
 
         return analysis
 

@@ -383,9 +383,12 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         early80 = float(t.get("next_spike_after_close_le80_pct") or 0.0)
         zero_peak_count = int(t.get("zero_peak_exit_count") or 0)
 
-        # Entry is tick-driven; tune conviction threshold only (not spike pre-filter).
-        if regime == "FAST" or (lag_med is not None and lag_med > 120) or late120 >= 35.0:
-            score = score - 0.8
+        # Entry is tick-driven; when lag is high we must be MORE selective,
+        # not less selective, to avoid chase entries.
+        if (lag_med is not None and lag_med > 120) or late120 >= 35.0:
+            score = score + 0.7
+        elif regime == "FAST":
+            score = score + 0.4
         elif regime == "SLOW":
             score = score + 0.5
 
@@ -413,7 +416,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "REGLAS DE AJUSTE:\n"
         "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
         "2. No modificar spike_pre_filter_target automaticamente; mantener el valor actual (solo observabilidad).\n"
-        "3. Si entry_lag_sec >120s o mercado FAST, baja score_min_override de forma moderada (sin romper guardrails).\n"
+        "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
         "6. Mantener guardrails: score_min_override [6.5,8.0], zero_peak_grace_sec [0,120].\n"

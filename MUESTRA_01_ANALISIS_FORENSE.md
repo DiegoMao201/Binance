@@ -1198,3 +1198,55 @@ Diagnóstico operativo: el histórico de spikes debe servir para **calibrar** (r
 2. `% late_entry_ge120` (objetivo: compresión fuerte)
 3. `% zero_peak_exit con spike <=80s posterior` (objetivo: caída marcada)
 4. Distribución de `exit_reason` (`zero_peak_exit` debe dejar de dominar cierres antes de spike)
+
+---
+
+## PRUEBA 5C — HARDENING URGENTE (ANTI-ENTRADA TARDÍA + IA PRECISA)
+
+Fecha: 2026-05-23 (hotfix inmediato sobre stack live de Prueba 5)
+
+### Problema observado en live
+
+- Persistencia de entradas tardías (`lag` alto post-spike) aun con `entry_tick_only=true`.
+- Tasa de aprobación IA excesiva en ventana corta (comportamiento permisivo).
+- Heurística dinámica con signo invertido: cuando el lag subía, bajaba `score_min_override` y abría más riesgo.
+
+### Correcciones aplicadas
+
+1. **Gate anti-chase post-spike en modo tick-only**
+- Archivo: `src/main_deriv.py`
+- Nuevo veto: `DERIV_POST_SPIKE_CHASE_BLOCK_SEC` (default `180s`).
+- En BOOM/CRASH y `entry_tick_only=true`, si hubo spike reciente dentro de esa ventana, se bloquea la entrada (`post_spike_chase_guard`).
+- Objetivo: cortar entradas de persecución después de spike materializado.
+
+2. **IA más estricta y fail-closed por defecto**
+- Archivo: `src/analysis/deriv_analyst.py`
+- `DERIV_AI_MIN_CONFIDENCE` sube de default `0.55` a `0.70`.
+- Nuevo piso determinístico de score para aprobar IA: `DERIV_AI_HARD_SCORE_FLOOR` (default `6.9`).
+- Fallos de IA (`no_api_key`, `all_models_failed`, timeout/error) pasan a **veto fail-closed** por defecto.
+- Se conserva compatibilidad con `DERIV_AI_FAIL_OPEN=true` solo si se decide explícitamente.
+
+3. **Override matemático pre-AI desactivado por defecto**
+- Archivo: `src/safety/deriv_risk.py`
+- `hard_math_override` ya no se activa automáticamente cuando `ai_confidence` es `None`.
+- Nuevo flag de compatibilidad: `DERIV_ALLOW_PRE_AI_MATH_OVERRIDE` (default `false`).
+- Objetivo: evitar bypass de IA en entradas límite y reducir sobreoperación.
+
+4. **Orquestador dinámico corregido (signo de lag)**
+- Archivo: `scripts/dynamic_ai_orchestrator.py`
+- Se invierte la regla crítica: si `entry_lag` alto, ahora **sube** `score_min_override` (más selectivo), no lo baja.
+- Prompt LLM actualizado para reflejar esa política.
+
+### Contrato de operación para Muestra 5 (vigente)
+
+- No se entra por persecución post-spike.
+- IA no puede aprobar en modo laxo por fallback silencioso.
+- Lag alto implica mayor filtro, no mayor agresividad.
+- Telemetría se mantiene íntegra para auditoría (sin borrar trazabilidad de decisiones).
+
+### KPIs inmediatos esperados (ventana corta)
+
+1. Caída de `% late_entry_ge120`.
+2. Reducción de `entry_lag_sec` P50/P75 por símbolo.
+3. Menor tasa de aprobación IA en ventanas de ruido.
+4. Menos aperturas con `peak_profit=0` prolongado en los primeros minutos.

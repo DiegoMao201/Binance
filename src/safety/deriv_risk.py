@@ -1721,9 +1721,16 @@ class DerivRiskManager:
         #   (a) Hurst > 0.62 with autocorr aligned   (trend continuation)
         #   (b) SMC FVG-mitigation confluence active (geo.smc_side aligned)
         #   (c) micro-channel scalp with Hurst < 0.45 (mean-reversion fade)
-        _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.55"))
+        _ai_min_conf = float(os.getenv("DERIV_AI_MIN_CONFIDENCE", "0.70"))
+        _allow_pre_ai_override = os.getenv(
+            "DERIV_ALLOW_PRE_AI_MATH_OVERRIDE",
+            "false",
+        ).strip().lower() in ("1", "true", "yes", "on")
         snap.hurst_ai_override = False
-        _ai_failed = ai_confidence is None or ai_confidence < _ai_min_conf
+        _ai_failed = (
+            (ai_confidence is not None and ai_confidence < _ai_min_conf)
+            or (ai_confidence is None and _allow_pre_ai_override)
+        )
         if _ai_failed:
             _override_reason = ""
             # (d) Spike-active override: a real spike was JUST detected for this
