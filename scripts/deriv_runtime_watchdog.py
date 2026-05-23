@@ -41,7 +41,8 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _run_validator(validator: Path, logs_dir: Path, check_db: bool) -> tuple[int, dict[str, Any], str]:
-    cmd = [sys.executable, str(validator), "--logs-dir", str(logs_dir), "--json"]
+    cmd = [sys.executable, str(validator), "--logs-dir", str(logs_dir), "--json",
+           "--max-diff-age-sec", "1500"]
     if check_db:
         cmd.append("--check-db")
 
