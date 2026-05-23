@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    LOGS_DIR=/data/logs
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --upgrade pip --no-cache-dir && \
+    pip install --no-cache-dir asyncpg requests python-dotenv
+
+COPY . .
+
+RUN mkdir -p /data/logs && chmod 777 /data/logs
+
+CMD ["python", "-m", "scripts.dynamic_ai_orchestrator"]

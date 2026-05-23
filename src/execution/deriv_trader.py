@@ -23,7 +23,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 
@@ -222,6 +222,9 @@ class DerivTradeExecutor:
         # Optional reference to DerivRiskManager — used to read current ATR and
         # tick counts for ticks_held / atr_trajectory telemetry in closed records.
         self._risk = risk_manager
+        # Optional callback injected by DerivDaemon:
+        #     provider(symbol) -> dynamic config dict from PostgreSQL cache.
+        self._dynamic_config_provider: Callable[[str], dict[str, Any]] | None = None
         self._open: dict[int, DerivOpenContract] = {}
         self._lock = asyncio.Lock()
         # Phase 35: close-lock guard — prevents duplicate sell() calls when WS
@@ -287,17 +290,41 @@ class DerivTradeExecutor:
                     _disk_exc,
                 )
 
+    def set_dynamic_config_provider(
+        self,
+        provider: Callable[[str], dict[str, Any]] | None,
+    ) -> None:
+        """Inject runtime dynamic config provider from daemon."""
+        self._dynamic_config_provider = provider
+
+    def _dynamic_zero_peak_grace_sec(self, symbol: str) -> int:
+        """Read zero_peak_grace_sec override (0..120) from dynamic config."""
+        if self._dynamic_config_provider is None:
+            return 0
+        try:
+            cfg = self._dynamic_config_provider(symbol) or {}
+        except Exception:  # noqa: BLE001
+            return 0
+        if not bool(cfg.get("is_active", False)):
+            return 0
+        try:
+            val = int(cfg.get("zero_peak_grace_sec") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+        return max(0, min(val, 120))
+
     def _zero_peak_grace_ticks(self, symbol: str) -> int:
         """Grace ticks near expected spike to avoid premature zero_peak exits."""
         _profile = get_asset_profile(symbol)
         _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
         if _cycle <= 0:
-            return 0
+            return self._dynamic_zero_peak_grace_sec(symbol)
         _frac = float(os.getenv("DERIV_ZERO_PEAK_GRACE_FRAC", "0.15"))
         _min_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MIN_TICKS", "30"))
         _max_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MAX_TICKS", "140"))
         _raw = int(_cycle * _frac)
-        return max(_min_ticks, min(_raw, _max_ticks))
+        _cycle_grace = max(_min_ticks, min(_raw, _max_ticks))
+        return _cycle_grace + self._dynamic_zero_peak_grace_sec(symbol)
 
     def _should_defer_zero_peak_exit(self, symbol: str, held_s: float) -> tuple[bool, str]:
         """Return True when the trade is close to expected spike timing.
@@ -555,6 +582,9 @@ class DerivTradeExecutor:
                 oc_check = self._open.get(cid)
             if oc_check is not None and oc_check.max_hold_seconds > 0:
                 held = time.time() - oc_check.opened_at_ts
+                _base_zero_peak_sec = float(os.getenv("DERIV_ZERO_PEAK_BASE_SEC", "150"))
+                _dyn_zero_peak_grace = self._dynamic_zero_peak_grace_sec(oc_check.symbol)
+                _dynamic_hold_limit = _base_zero_peak_sec + float(_dyn_zero_peak_grace)
                 if held >= oc_check.max_hold_seconds:
                     # Phase 35: close-lock guard
                     if cid in self._closing:
@@ -580,7 +610,7 @@ class DerivTradeExecutor:
                 # NEVER recover; waiting the full 480-600s hold just multiplies the loss.
                 # Condition: held>=150s, peak=0.0, floating<-0.05 (to avoid spread noise).
                 elif (
-                    held >= 150.0
+                    held >= _dynamic_hold_limit
                     and oc_check.peak_profit == 0.0
                     and oc_check.floating_pnl < -0.05
                     and cid not in self._closing
@@ -591,10 +621,11 @@ class DerivTradeExecutor:
                     )
                     if _defer_zero_peak:
                         _LOGGER.info(
-                            "[deriv-trader] zero_peak_exit deferred: %s (%s) held=%.1fs pnl=%.4f %s",
+                            "[deriv-trader] zero_peak_exit deferred: %s (%s) held=%.1fs limit=%.1fs pnl=%.4f %s",
                             cid,
                             oc_check.symbol,
                             held,
+                            _dynamic_hold_limit,
                             oc_check.floating_pnl,
                             _defer_reason,
                         )
@@ -602,8 +633,8 @@ class DerivTradeExecutor:
                     self._closing.add(cid)
                     oc_check.pending_close_reason = "zero_peak_exit"
                     _LOGGER.info(
-                        "[deriv-trader] zero_peak_exit: %s (%s) held=%.1fs peak=0.0 pnl=%.4f — cutting stagnant loss",
-                        cid, oc_check.symbol, held, oc_check.floating_pnl,
+                        "[deriv-trader] zero_peak_exit: %s (%s) held=%.1fs limit=%.1fs peak=0.0 pnl=%.4f — cutting stagnant loss",
+                        cid, oc_check.symbol, held, _dynamic_hold_limit, oc_check.floating_pnl,
                     )
                     try:
                         await self._client.sell(cid)

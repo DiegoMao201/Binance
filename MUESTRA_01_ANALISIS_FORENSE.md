@@ -1023,3 +1023,74 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
   - `closed=0`
   - `spikes=1` (nueva muestra ya iniciada)
   - `open=2` (operación live retomada por el bot tras reset)
+
+---
+
+## PRUEBA 5 — CAPA IA DINAMICA (HOT DEPLOY, SIN SHADOW)
+
+### Objetivo operativo
+
+- Mover umbrales por símbolo en caliente para cortar 3 fallas confirmadas en Prueba 4:
+  1. Entradas tardías (lag >= 120s).
+  2. Salidas prematuras (`zero_peak_exit`) antes del spike.
+  3. Ceguera ante aceleración/desaceleración por símbolo.
+
+### Implementación realizada
+
+1. **Puente PostgreSQL de configuración dinámica**
+- Nueva migración: `db/migrations/009_dynamic_symbol_config.sql`.
+- Tabla: `dynamic_symbol_config` con guardrails duros:
+  - `spike_pre_filter_target` entre `50..500`
+  - `zero_peak_grace_sec` entre `0..120`
+  - `score_min_override` entre `3.0..10.0`
+- Símbolos base insertados: BOOM1000/900/600/500 + CRASH1000/900/600/500.
+
+2. **Bot principal leyendo configuración dinámica cada 15s**
+- `src/main_deriv.py`:
+  - Loop `_dynamic_config_refresh_loop()` con lectura a PostgreSQL.
+  - Cache en memoria (`self._dynamic_configs`) para no tocar DB por tick.
+  - Estado visible en `deriv_status.json` bajo `dynamic_config`.
+
+3. **Entrada dinámica (anti-lag)**
+- `src/main_deriv.py`:
+  - `spike_pre_filter` usa `spike_pre_filter_target` de DB cuando `is_active=true`.
+  - Si no hay config dinámica activa, mantiene fallback adaptativo previo.
+  - Score gate dinámico por símbolo con `score_min_override`.
+
+4. **Salida dinámica (anti-cierre prematuro)**
+- `src/execution/deriv_trader.py`:
+  - `zero_peak_exit` ya no usa límite fijo rígido.
+  - Nuevo límite: `DERIV_ZERO_PEAK_BASE_SEC + zero_peak_grace_sec` por símbolo.
+  - Inyección de provider dinámico desde daemon (`set_dynamic_config_provider`).
+
+5. **Orquestador IA independiente**
+- Script: `scripts/dynamic_ai_orchestrator.py`.
+- Contenedor dedicado: `Dockerfile.deriv-ai`.
+- Ciclo cada 60s (configurable):
+  - Lee telemetría reciente.
+  - Consulta LLM (JSON estricto).
+  - Aplica guardrails locales.
+  - `UPDATE` a `dynamic_symbol_config`.
+  - Fallback heurístico si LLM falla.
+
+6. **Auto-migración de arranque actualizada**
+- `scripts/migrate_db.py` incluye migración `009_dynamic_symbol_config.sql`.
+
+### Variables de entorno recomendadas
+
+- `DERIV_DYNAMIC_CONFIG_ENABLED=true`
+- `DERIV_DYNAMIC_CONFIG_REFRESH_SEC=15`
+- `DERIV_ZERO_PEAK_BASE_SEC=150`
+
+Orquestador IA:
+
+- `DYNAMIC_AI_LOOP_SEC=60`
+- `DYNAMIC_AI_API_KEY=...` (o `OPENAI_API_KEY` / `OPENROUTER_API_KEY`)
+- `DYNAMIC_AI_MODEL=gpt-4o-mini` (o modelo operativo elegido)
+- `DYNAMIC_AI_BASE_URL=https://api.openai.com/v1/chat/completions` (o endpoint OpenRouter)
+
+### Resultado esperado de esta etapa
+
+- Menos bloqueos por `spike_pre_filter` durante ventanas FAST.
+- Menos `zero_peak_exit` justo antes del spike siguiente.
+- Rebalanceo de agresividad por símbolo sin redeploy de código.

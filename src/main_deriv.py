@@ -147,6 +147,22 @@ class DerivDaemon:
         self._telemetry = self._build_telemetry()
         self._risk = DerivRiskManager(settings)
         self._executor = DerivTradeExecutor(settings, self._client, self._telemetry, risk_manager=self._risk)
+        # Dynamic per-symbol runtime configuration (PostgreSQL bridge).
+        # Refreshed asynchronously every DERIV_DYNAMIC_CONFIG_REFRESH_SEC seconds
+        # and read from in-memory dict in the hot path.
+        self._dynamic_db_url = os.getenv("DATABASE_URL", "").strip()
+        _dyn_enabled_raw = os.getenv("DERIV_DYNAMIC_CONFIG_ENABLED", "true").strip().lower()
+        self._dynamic_enabled = (
+            _dyn_enabled_raw in {"1", "true", "yes", "on"}
+            and bool(self._dynamic_db_url)
+        )
+        self._dynamic_refresh_sec = max(
+            5,
+            int(os.getenv("DERIV_DYNAMIC_CONFIG_REFRESH_SEC", "15") or 15),
+        )
+        self._dynamic_configs: dict[str, dict[str, Any]] = {}
+        self._dynamic_last_refresh: str | None = None
+        self._dynamic_last_error_ts: float = 0.0
         self._analyst = DerivAnalyst(settings, self._client)
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(ticks=max(60, int(settings.contract_duration_sec)), risk=self._risk)
@@ -189,6 +205,7 @@ class DerivDaemon:
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
         )
+        self._executor.set_dynamic_config_provider(self.get_dynamic_config)
 
     def _spike_enrich(
         self,
@@ -236,6 +253,129 @@ class DerivDaemon:
         if len(self._last_decisions) > 30:
             self._last_decisions = self._last_decisions[-30:]
         self._counters["decisions_total"] += 1
+
+    @staticmethod
+    def _clamp_dynamic_values(
+        spike_pre_filter_target: int,
+        zero_peak_grace_sec: int,
+        score_min_override: float,
+    ) -> tuple[int, int, float]:
+        """Clamp dynamic config values to hard safety guardrails."""
+        _spf = max(50, min(int(spike_pre_filter_target), 500))
+        _grace = max(0, min(int(zero_peak_grace_sec), 120))
+        _score = max(3.0, min(float(score_min_override), 10.0))
+        return _spf, _grace, _score
+
+    def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return in-memory dynamic config for a symbol (safe fallback if DB unavailable)."""
+        _sym = symbol.upper()
+        _profile = profile or get_asset_profile(_sym)
+        _default = {
+            "symbol": _sym,
+            "market_regime": "NORMAL",
+            "spike_pre_filter_target": int(_profile.get("spike_min_post_sec", 0) or 0),
+            "zero_peak_grace_sec": 0,
+            "score_min_override": float(min_score_for(_sym)),
+            "is_active": False,
+            "source": "default",
+            "last_updated": None,
+        }
+        _db_cfg = self._dynamic_configs.get(_sym)
+        if not _db_cfg:
+            return _default
+        return {
+            "symbol": _sym,
+            "market_regime": str(_db_cfg.get("market_regime") or "NORMAL").upper(),
+            "spike_pre_filter_target": int(_db_cfg.get("spike_pre_filter_target") or _default["spike_pre_filter_target"]),
+            "zero_peak_grace_sec": int(_db_cfg.get("zero_peak_grace_sec") or 0),
+            "score_min_override": float(_db_cfg.get("score_min_override") or _default["score_min_override"]),
+            "is_active": bool(_db_cfg.get("is_active", True)),
+            "source": "dynamic_db",
+            "last_updated": _db_cfg.get("last_updated"),
+        }
+
+    async def _refresh_dynamic_config_once(self) -> None:
+        """Fetch dynamic per-symbol overrides from PostgreSQL into memory."""
+        if not self._dynamic_enabled:
+            return
+        try:
+            import asyncpg  # noqa: PLC0415
+        except ImportError:
+            _LOGGER.warning("[dynamic-config] asyncpg missing — dynamic layer disabled")
+            self._dynamic_enabled = False
+            return
+
+        conn = await asyncio.wait_for(asyncpg.connect(self._dynamic_db_url), timeout=8.0)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT symbol, market_regime, spike_pre_filter_target,
+                       zero_peak_grace_sec, score_min_override,
+                       is_active, last_updated
+                FROM dynamic_symbol_config
+                """
+            )
+        finally:
+            await conn.close()
+
+        _new: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            _sym = str(row["symbol"] or "").upper().strip()
+            if not _sym:
+                continue
+            _spf, _grace, _score = self._clamp_dynamic_values(
+                int(row["spike_pre_filter_target"] or 280),
+                int(row["zero_peak_grace_sec"] or 0),
+                float(row["score_min_override"] or 6.0),
+            )
+            _new[_sym] = {
+                "market_regime": str(row["market_regime"] or "NORMAL").upper(),
+                "spike_pre_filter_target": _spf,
+                "zero_peak_grace_sec": _grace,
+                "score_min_override": _score,
+                "is_active": bool(row["is_active"]),
+                "last_updated": (
+                    row["last_updated"].isoformat()
+                    if row["last_updated"] is not None
+                    else None
+                ),
+            }
+
+        self._dynamic_configs = _new
+        self._dynamic_last_refresh = datetime.now(timezone.utc).isoformat()
+        _LOGGER.info(
+            "[dynamic-config] refreshed %d symbols from PostgreSQL",
+            len(self._dynamic_configs),
+        )
+
+    async def _dynamic_config_refresh_loop(self) -> None:
+        """Periodic refresh loop for dynamic symbol config overrides."""
+        if not self._dynamic_enabled:
+            _LOGGER.info(
+                "[dynamic-config] disabled (DERIV_DYNAMIC_CONFIG_ENABLED=false or DATABASE_URL missing)"
+            )
+            await self._stop_event.wait()
+            return
+
+        _LOGGER.info(
+            "[dynamic-config] starting refresh loop (interval=%ss)",
+            self._dynamic_refresh_sec,
+        )
+        while not self._stop_event.is_set():
+            try:
+                await self._refresh_dynamic_config_once()
+            except Exception as exc:  # noqa: BLE001
+                _now = time.time()
+                if (_now - self._dynamic_last_error_ts) > 30:
+                    _LOGGER.warning(
+                        "[dynamic-config] refresh failed: %s — keeping last in-memory snapshot",
+                        exc,
+                    )
+                    self._dynamic_last_error_ts = _now
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._dynamic_refresh_sec)
+            except asyncio.TimeoutError:
+                pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Market-context snapshot writer
@@ -540,13 +680,20 @@ class DerivDaemon:
         macro_hd_task    = asyncio.create_task(
             MacroHDCalibrator().calibration_loop(), name="deriv-macro-hd"
         )
+        dynamic_cfg_task = asyncio.create_task(
+            self._dynamic_config_refresh_loop(), name="deriv-dynamic-config"
+        )
         ttl_task         = asyncio.create_task(self._snapshot_ttl_loop(), name="deriv-ttl")
         ws_task          = asyncio.create_task(
             self._client.run_forever(self._handle_tick), name="deriv-ws"
         )
         stop_task        = asyncio.create_task(self._stop_event.wait(), name="deriv-stop")
 
-        all_tasks = {ws_task, reaper_task, recon_task, timeout_task, stop_task, status_task, balance_task, history_task, calibrator_task, macro_hd_task, ttl_task, heartbeat_task}
+        all_tasks = {
+            ws_task, reaper_task, recon_task, timeout_task, stop_task,
+            status_task, balance_task, history_task, calibrator_task,
+            macro_hd_task, dynamic_cfg_task, ttl_task, heartbeat_task,
+        }
         try:
             done, _pending = await asyncio.wait(
                 all_tasks,
@@ -648,6 +795,8 @@ class DerivDaemon:
         #               removing the flag from ASSET_INTEL_PROFILES.
         # ═══════════════════════════════════════════════════════════════════
         _early_profile = get_asset_profile(tick.symbol)
+        _dyn_cfg = self.get_dynamic_config(tick.symbol, _early_profile)
+        _dyn_active = bool(_dyn_cfg.get("is_active", False))
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
@@ -669,30 +818,55 @@ class DerivDaemon:
         # hold=350s → need entry at t≥250s.
         # ═══════════════════════════════════════════════════════════════════
         if is_spike_market(tick.symbol):
-            # spike_min_post_sec values are reused as tick counts (≈1 tick/s for BOOM/CRASH).
-            _spf_min_post = float(_early_profile.get("spike_min_post_sec", 0))
+            _spf_source = "profile"
+            _spf_expected = int(_early_profile.get("spike_interval_ticks", 0) or 0)
+            _spf_min_post = 0
+            if _dyn_active:
+                _spf_min_post = int(_dyn_cfg.get("spike_pre_filter_target", 0) or 0)
+                _spf_source = "dynamic"
+            else:
+                # Profile value reused as tick count (≈1 tick/s for BOOM/CRASH).
+                _spf_min_post_profile = float(_early_profile.get("spike_min_post_sec", 0))
+                if _spf_min_post_profile > 0:
+                    _spf_base = int(_spf_min_post_profile)
+                    _spf_min_post = self._risk.get_adaptive_spike_min_post_ticks(
+                        tick.symbol,
+                        _spf_base,
+                        _spf_expected,
+                    )
             if _spf_min_post > 0:
-                _spf_base = int(_spf_min_post)
-                _spf_expected = int(_early_profile.get("spike_interval_ticks", 0) or 0)
-                _spf_min_post = self._risk.get_adaptive_spike_min_post_ticks(
-                    tick.symbol,
-                    _spf_base,
-                    _spf_expected,
-                )
                 _spf_last_tick = self._risk.get_last_spike_tick_count(tick.symbol)
                 if _spf_last_tick > 0:
                     _spf_ticks_since = self._risk.get_tick_count(tick.symbol) - _spf_last_tick
                     if _spf_ticks_since < _spf_min_post:
-                        _LOGGER.debug(
-                            "[SPIKE_PRE_FILTER] %s %d ticks since spike < %d ticks window "
-                            "(base=%d expected=%d) — "
-                            "blocking eval entry (post-spike drift phase)",
-                            tick.symbol, _spf_ticks_since, int(_spf_min_post),
-                            _spf_base, _spf_expected,
-                        )
+                        if _spf_source == "dynamic":
+                            _LOGGER.debug(
+                                "[SPIKE_PRE_FILTER_DYNAMIC] %s %d ticks since spike < %d ticks target "
+                                "(regime=%s) — blocking eval entry",
+                                tick.symbol,
+                                _spf_ticks_since,
+                                int(_spf_min_post),
+                                _dyn_cfg.get("market_regime", "NORMAL"),
+                            )
+                            _block_reason = (
+                                f"spike_pre_filter_dynamic:{_spf_ticks_since}t<{int(_spf_min_post)}t"
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "[SPIKE_PRE_FILTER] %s %d ticks since spike < %d ticks window "
+                                "(expected=%d adaptive_profile) — blocking eval entry (post-spike drift phase)",
+                                tick.symbol,
+                                _spf_ticks_since,
+                                int(_spf_min_post),
+                                _spf_expected,
+                            )
+                            _block_reason = (
+                                f"spike_pre_filter:{_spf_ticks_since}t<{int(_spf_min_post)}t"
+                            )
                         self._spike_enrich(
-                            tick.symbol, bot_entered=False,
-                            block_reason=f"spike_pre_filter:{_spf_ticks_since}t<{int(_spf_min_post)}t",
+                            tick.symbol,
+                            bot_entered=False,
+                            block_reason=_block_reason,
                         )
                         return
 
@@ -992,7 +1166,13 @@ class DerivDaemon:
         # by DerivRiskManager (applies calm-floor 5.80, DERIV_CALM_STRUCTURAL_MIN_SCORE,
         # spike-market overrides, etc.).  We must NOT shadow it with a second call
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
-        _regime_min = snap.effective_min_score
+        _dyn_score_min = max(
+            3.0,
+            min(10.0, float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol))),
+        )
+        snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
+        snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)
+        _regime_min = _dyn_score_min if _dyn_active else snap.effective_min_score
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
@@ -1026,8 +1206,13 @@ class DerivDaemon:
             )
 
         if snap.score < _regime_min:
+            _regime_gate_name = (
+                f"REGIME_SCORE_GATE_{snap.regime}_dynamic"
+                if _dyn_active else
+                f"REGIME_SCORE_GATE_{snap.regime}"
+            )
             self._log_entry_block(
-                tick.symbol, f"REGIME_SCORE_GATE_{snap.regime}",
+                tick.symbol, _regime_gate_name,
                 score=snap.score, effective_min_score=_regime_min,
                 side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
@@ -1035,17 +1220,21 @@ class DerivDaemon:
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
                 score=snap.score,
-                reason=f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}",
+                reason=(
+                    f"REGIME_SCORE_GATE_DYNAMIC: requires≥{_regime_min:.2f} got={snap.score:.2f}"
+                    if _dyn_active else
+                    f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}"
+                ),
                 extra={"regime": snap.regime},
             )
             return
 
         # Per-symbol minimum score gate (ASSET_INTEL_PROFILES)
-        _profile_min_score = min_score_for(tick.symbol)
+        _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
         _asset_profile = get_asset_profile(tick.symbol)
         if snap.allowed and snap.score < _profile_min_score:
             self._log_entry_block(
-                tick.symbol, "PROFILE_SCORE_GATE",
+                tick.symbol, "PROFILE_SCORE_GATE_DYNAMIC" if _dyn_active else "PROFILE_SCORE_GATE",
                 score=snap.score, effective_min_score=_profile_min_score,
                 side=snap.side, regime=snap.regime, hurst=_eval_hurst,
                 score_breakdown=snap.score_breakdown,
@@ -1053,12 +1242,17 @@ class DerivDaemon:
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,
                 score=snap.score,
-                reason=f"PROFILE_SCORE_GATE: {_asset_profile.get('type','?')} "
-                       f"requires>={_profile_min_score:.1f} got={snap.score:.2f}",
+                reason=(
+                    f"SCORE_TOO_LOW_DYNAMIC: requires>={_profile_min_score:.2f} got={snap.score:.2f}"
+                    if _dyn_active else
+                    f"PROFILE_SCORE_GATE: {_asset_profile.get('type','?')} "
+                    f"requires>={_profile_min_score:.1f} got={snap.score:.2f}"
+                ),
                 extra={
                     "score_breakdown": snap.score_breakdown,
                     "regime": snap.regime,
                     "profile": _asset_profile,
+                    "dynamic_cfg": _dyn_cfg,
                 },
             )
             return
@@ -1698,6 +1892,14 @@ class DerivDaemon:
                 "equity_history": list(self._equity_history[-50:]),  # last 50 snapshots
                 # ── Analyst statistics (Hurst, vol regime, AI gate) ───────
                 "analyst_summary": self._analyst.get_history_summary(),
+                # ── Dynamic runtime config (PostgreSQL bridge) ─────────────
+                "dynamic_config": {
+                    "enabled": self._dynamic_enabled,
+                    "refresh_sec": self._dynamic_refresh_sec,
+                    "last_refresh": self._dynamic_last_refresh,
+                    "symbols_loaded": sorted(self._dynamic_configs.keys()),
+                    "configs": self._dynamic_configs,
+                },
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=None, separators=(",", ":")))
