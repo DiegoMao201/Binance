@@ -1071,7 +1071,9 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
   - Lee telemetría reciente.
   - Consulta LLM (JSON estricto).
   - Aplica guardrails locales (score `6.5..8.0` + piso `zero_peak>=60` en símbolos críticos).
-  - `UPDATE` a `dynamic_symbol_config`.
+  - Aplica histéresis temporal por símbolo (`MIN_STATE_LIFETIME_SEC=600` por defecto).
+  - Solo ejecuta `UPDATE` en PostgreSQL cuando hay cambio real matemático.
+  - Registra diffs forenses en JSONL (`dynamic_ai_config_diffs.jsonl`).
   - Fallback heurístico si LLM falla.
 
 6. **Auto-migración de arranque actualizada**
@@ -1088,10 +1090,14 @@ Aplicadas en `/data/coolify/applications/o4w1ns4cceccmn2ozqt7sol2/.env`:
 - `DERIV_BLOCK_BC_ESCAPE_BOOM900=false`
 - `DYNAMIC_AI_LOOP_SEC=60`
 - `DYNAMIC_AI_LOGS_DIR=/data/logs`
+- `DYNAMIC_AI_MIN_STATE_LIFETIME_SEC=600`
+- `DYNAMIC_AI_DIFF_LOG_PATH=/data/logs/dynamic_ai_config_diffs.jsonl`
+- `DYNAMIC_AI_MODEL=gpt-4o-mini`
+- `DYNAMIC_AI_BASE_URL=https://api.openai.com/v1/chat/completions`
 
 Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_AI_INTERVAL_SEC`; para logs acepta `DYNAMIC_AI_LOGS_DIR` y alias `DYNAMIC_AI_LOG_DIR`.
 
-### Estado actual del bot (sin pendientes) — 2026-05-23 05:09 UTC
+### Estado actual del bot (sin pendientes) — 2026-05-23 05:12 UTC
 
 - Commit activo desplegado: `ca88d84`.
 - Contenedores activos:
@@ -1105,6 +1111,10 @@ Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_
   - `dynamic_config.enabled=true`
   - `dynamic_config.refresh_sec=15`
   - Configs dinámicos por símbolo cargados y refrescando en caliente.
+- Histéresis y auditoría forense activas en orquestador:
+  - Bloqueo de flips de régimen dentro de ventana mínima por símbolo.
+  - Escritura a DB únicamente cuando hay diff real.
+  - Archivo de auditoría de cambios: `/data/logs/dynamic_ai_config_diffs.jsonl`.
 - BOOM600/BOOM900 desbloqueados de veto rígido por profile env:
   - evidencia en logs: `[STRUCTURAL_VETO_ESCAPE] BOOM600 ...` y `[STRUCTURAL_VETO_ESCAPE] BOOM900 ...`
   - esto confirma que `DERIV_BLOCK_BC_ESCAPE_BOOM600/900=false` está impactando el pipeline.
@@ -1113,6 +1123,7 @@ Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_
 
 - Se mantienen intactos los reportes y artefactos operativos (`deriv_spike_events.json`, `deriv_closed_contracts.json`, `deriv_status.json`, telemetría de decisiones).
 - La capa dinámica no reemplaza observabilidad: añade un lazo de control (DB + LLM + fallback) encima de los mismos datos forenses para iteración cuantitativa continua.
+- Para ventana de validación 2-4h, KPIs prioritarios: `zero_peak_exit<120s`, `P75 entry_lag_sec`, y reactivación operativa BOOM600/CRASH900.
 
 ### Resultado esperado de esta etapa
 

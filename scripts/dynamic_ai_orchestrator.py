@@ -47,6 +47,13 @@ ZERO_PEAK_FLOOR_BY_SYMBOL = {
     "CRASH600": 60,
 }
 
+# Short-term memory to prevent regime oscillation.
+STATE_MEMORY: dict[str, dict[str, Any]] = {}
+MIN_STATE_LIFETIME_SEC = max(
+    480,
+    min(int(os.getenv("DYNAMIC_AI_MIN_STATE_LIFETIME_SEC", "600") or 600), 720),
+)
+
 
 @dataclass
 class SymbolCfg:
@@ -118,6 +125,117 @@ def _safe_ts(v: Any) -> float | None:
         except Exception:
             return None
     return None
+
+
+def _cfg_to_dict(cfg: SymbolCfg) -> dict[str, Any]:
+    return {
+        "regime": cfg.regime,
+        "spike_pre_filter_target": cfg.spike_pre_filter_target,
+        "zero_peak_grace_sec": cfg.zero_peak_grace_sec,
+        "score_min_override": round(float(cfg.score_min_override), 3),
+        "is_active": bool(cfg.is_active),
+    }
+
+
+def _cfg_diff_items(old_cfg: SymbolCfg, new_cfg: SymbolCfg) -> list[str]:
+    diffs: list[str] = []
+    keys = (
+        "spike_pre_filter_target",
+        "zero_peak_grace_sec",
+        "score_min_override",
+        "regime",
+        "is_active",
+    )
+    old_map = _cfg_to_dict(old_cfg)
+    new_map = _cfg_to_dict(new_cfg)
+    for key in keys:
+        old_val = old_map.get(key)
+        new_val = new_map.get(key)
+        if old_val != new_val:
+            diffs.append(f"{key}: {old_val} -> {new_val}")
+    return diffs
+
+
+def _cfg_changed(old_cfg: SymbolCfg, new_cfg: SymbolCfg) -> bool:
+    return bool(_cfg_diff_items(old_cfg, new_cfg))
+
+
+def _append_diff_jsonl(diff_log_path: Path, payload: dict[str, Any]) -> None:
+    try:
+        diff_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with diff_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[dynamic-ai] could not append diff log: %s", exc)
+
+
+def _seed_state_memory(current_cfg: dict[str, SymbolCfg]) -> None:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    for sym, cfg in current_cfg.items():
+        STATE_MEMORY.setdefault(
+            sym,
+            {
+                "regime": cfg.regime,
+                "config": cfg,
+                "last_changed": now_ts,
+            },
+        )
+
+
+def apply_temporal_smoothing(symbol: str, new_config: SymbolCfg) -> tuple[SymbolCfg, bool]:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    sym = str(symbol or "").upper()
+
+    if sym not in STATE_MEMORY:
+        STATE_MEMORY[sym] = {
+            "regime": new_config.regime,
+            "config": new_config,
+            "last_changed": now_ts,
+        }
+        return new_config, True
+
+    mem = STATE_MEMORY[sym]
+    previous_cfg = mem.get("config")
+    if not isinstance(previous_cfg, SymbolCfg):
+        previous_cfg = _clamp_cfg(sym, SymbolCfg("NORMAL", 280, 0, 7.0, True))
+
+    previous_regime = str(mem.get("regime") or previous_cfg.regime or "NORMAL").upper()
+    next_regime = str(new_config.regime or previous_regime).upper()
+    time_since_last_change = now_ts - float(mem.get("last_changed") or now_ts)
+
+    if next_regime == previous_regime:
+        mem["config"] = new_config
+        return new_config, True
+
+    emergency_change = (not bool(new_config.is_active)) or next_regime == "DORMANT"
+    if time_since_last_change < MIN_STATE_LIFETIME_SEC and not emergency_change:
+        return previous_cfg, False
+
+    STATE_MEMORY[sym] = {
+        "regime": next_regime,
+        "config": new_config,
+        "last_changed": now_ts,
+    }
+    return new_config, True
+
+
+def _apply_smoothing_all(candidate_cfg: dict[str, SymbolCfg]) -> tuple[dict[str, SymbolCfg], int]:
+    smoothed: dict[str, SymbolCfg] = {}
+    blocked_regime_flips = 0
+    for sym in SYMBOLS:
+        candidate = candidate_cfg[sym]
+        final_cfg, approved = apply_temporal_smoothing(sym, candidate)
+        if not approved and final_cfg.regime != candidate.regime:
+            blocked_regime_flips += 1
+            LOG.info(
+                "[dynamic-ai][HYSTERESIS] %s rejected regime flip %s -> %s (cooldown=%ss)",
+                sym,
+                final_cfg.regime,
+                candidate.regime,
+                MIN_STATE_LIFETIME_SEC,
+            )
+        smoothed[sym] = final_cfg
+    return smoothed, blocked_regime_flips
 
 
 def _load_json(path: Path) -> list[dict[str, Any]]:
@@ -296,9 +414,10 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "3. Si el mercado esta SLOW, sube spike_pre_filter_target y sube score_min_override.\n"
         "4. Mantener guardrails estrictos: spike_pre_filter_target [50,500], score_min_override [6.5,8.0].\n"
         "5. Guardrail de riesgo confirmado: BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n\n"
+        "6. Evitar cambiar de regime continuamente; privilegia estabilidad macro y cambios por bloques temporales.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
-        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
+        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"is_active\": true}\n"
         "}\n"
     )
 
@@ -380,14 +499,25 @@ def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) 
             spike_pre_filter_target=int(payload.get("spike_pre_filter_target", cur.spike_pre_filter_target)),
             zero_peak_grace_sec=int(payload.get("zero_peak_grace_sec", cur.zero_peak_grace_sec)),
             score_min_override=float(payload.get("score_min_override", cur.score_min_override)),
-            is_active=True,
+            is_active=bool(payload.get("is_active", cur.is_active)),
         ))
     return out
 
 
-async def _apply_cfg(conn: Any, cfgs: dict[str, SymbolCfg]) -> None:
+async def _apply_cfg(
+    conn: Any,
+    current_cfg: dict[str, SymbolCfg],
+    cfgs: dict[str, SymbolCfg],
+    decision_source: str,
+    diff_log_path: Path,
+) -> int:
+    updates = 0
     async with conn.transaction():
         for sym, cfg in cfgs.items():
+            previous = current_cfg.get(sym)
+            if previous is not None and not _cfg_changed(previous, cfg):
+                continue
+
             await conn.execute(
                 """
                 INSERT INTO dynamic_symbol_config (
@@ -410,6 +540,26 @@ async def _apply_cfg(conn: Any, cfgs: dict[str, SymbolCfg]) -> None:
                 cfg.score_min_override,
                 cfg.is_active,
             )
+            updates += 1
+
+            if previous is not None:
+                diffs = _cfg_diff_items(previous, cfg)
+            else:
+                diffs = [f"created: {_cfg_to_dict(cfg)}"]
+            if diffs:
+                LOG.info("[dynamic-ai][DIFF] %s modified | %s", sym, " | ".join(diffs))
+                _append_diff_jsonl(
+                    diff_log_path,
+                    {
+                        "ts": _now_iso(),
+                        "symbol": sym,
+                        "source": decision_source,
+                        "changes": diffs,
+                        "old": _cfg_to_dict(previous) if previous is not None else None,
+                        "new": _cfg_to_dict(cfg),
+                    },
+                )
+    return updates
 
 
 async def run_loop() -> None:
@@ -425,6 +575,10 @@ async def run_loop() -> None:
         or os.getenv("LOGS_DIR")
         or "/data/logs"
     ).expanduser()
+    diff_log_path = Path(
+        os.getenv("DYNAMIC_AI_DIFF_LOG_PATH")
+        or str(logs_dir / "dynamic_ai_config_diffs.jsonl")
+    ).expanduser()
 
     import asyncpg  # noqa: PLC0415
 
@@ -436,6 +590,7 @@ async def run_loop() -> None:
         try:
             conn = await asyncpg.connect(dsn, timeout=12.0)
             current_cfg = await _read_current_cfg(conn)
+            _seed_state_memory(current_cfg)
             telemetry = _build_telemetry_from_logs(logs_dir)
             prompt = _build_prompt(telemetry)
 
@@ -448,14 +603,23 @@ async def run_loop() -> None:
                 new_cfg = _heuristic_from_telemetry(current_cfg, telemetry)
                 decision_source = "heuristic"
 
-            await _apply_cfg(conn, new_cfg)
-            LOG.info(
-                "[dynamic-ai] applied config source=%s symbols=%d sample=%s",
+            smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
+            updates = await _apply_cfg(
+                conn,
+                current_cfg,
+                smoothed_cfg,
                 decision_source,
-                len(new_cfg),
+                diff_log_path,
+            )
+            LOG.info(
+                "[dynamic-ai] applied config source=%s symbols=%d db_updates=%d blocked_flips=%d sample=%s",
+                decision_source,
+                len(smoothed_cfg),
+                updates,
+                blocked_regime_flips,
                 {
-                    "BOOM500": new_cfg.get("BOOM500").__dict__ if new_cfg.get("BOOM500") else None,
-                    "CRASH900": new_cfg.get("CRASH900").__dict__ if new_cfg.get("CRASH900") else None,
+                    "BOOM500": smoothed_cfg.get("BOOM500").__dict__ if smoothed_cfg.get("BOOM500") else None,
+                    "CRASH900": smoothed_cfg.get("CRASH900").__dict__ if smoothed_cfg.get("CRASH900") else None,
                 },
             )
         except Exception as exc:  # noqa: BLE001
