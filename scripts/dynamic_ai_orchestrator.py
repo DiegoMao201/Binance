@@ -41,6 +41,40 @@ SYMBOLS = [
 
 SCORE_MIN_GUARDRAIL = 6.5
 SCORE_MAX_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
+
+
+def _parse_symbol_float_map(raw: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for chunk in str(raw or "").split(","):
+        item = chunk.strip()
+        if not item or ":" not in item:
+            continue
+        sym_raw, val_raw = item.split(":", 1)
+        sym = sym_raw.strip().upper()
+        if not sym:
+            continue
+        try:
+            out[sym] = float(val_raw.strip())
+        except Exception:
+            continue
+    return out
+
+
+SYMBOL_SCORE_FLOOR_MAP: dict[str, float] = {
+    "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "8.0") or 8.0),
+}
+SYMBOL_SCORE_FLOOR_MAP.update(
+    _parse_symbol_float_map(os.getenv("DYNAMIC_AI_SYMBOL_SCORE_FLOOR_MAP", ""))
+)
+
+
+def _symbol_score_floor(symbol: str) -> float:
+    sym = str(symbol or "").upper()
+    base = float(SYMBOL_SCORE_FLOOR_MAP.get(sym, SCORE_MIN_GUARDRAIL))
+    return max(SCORE_MIN_GUARDRAIL, min(base, SCORE_MAX_GUARDRAIL))
+
+
+QUARANTINE_MEMORY: dict[str, bool] = {}
 ZERO_PEAK_FLOOR_BY_SYMBOL = {
     "BOOM500": 60,
     "CRASH500": 60,
@@ -81,11 +115,12 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
     if regime not in {"FAST", "SLOW", "NORMAL"}:
         regime = "NORMAL"
     zero_peak_floor = ZERO_PEAK_FLOOR_BY_SYMBOL.get(sym, 0)
+    score_floor = _symbol_score_floor(sym)
     return SymbolCfg(
         regime=regime,
         spike_pre_filter_target=max(50, min(int(cfg.spike_pre_filter_target), 500)),
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
-        score_min_override=max(SCORE_MIN_GUARDRAIL, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
+        score_min_override=max(score_floor, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
     )
 
@@ -408,6 +443,7 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         base = current_cfg[sym]
         t = telemetry.get(sym, {})
         regime = str(t.get("market_regime_estimate") or base.regime)
+        base_floor = _symbol_score_floor(sym)
 
         spf = base.spike_pre_filter_target
         grace = base.zero_peak_grace_sec
@@ -423,9 +459,13 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         contracts_n = int(t.get("contracts_15m") or 0)
         ai_n = int(t.get("ai_decisions_15m") or 0)
 
+        risk_points = 0
+        recovery_points = 0
+
         # Entry is tick-driven; when lag is high we must be MORE selective,
         # not less selective, to avoid chase entries.
         if (lag_med is not None and lag_med > 120) or late120 >= 35.0:
+            risk_points += 1
             score = score + 0.7
         elif regime == "FAST":
             score = score + 0.4
@@ -434,13 +474,70 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
 
         # Core objective: prevent over-approval when realized edge is negative.
         if contracts_n >= 4 and win_rate < 40.0 and ev_per_trade < 0.0:
+            risk_points += 1
             score = score + 0.6
         if contracts_n >= 6 and win_rate < 30.0 and ev_per_trade < -0.05:
+            risk_points += 1
             score = score + 0.5
         if ai_n >= 8 and ai_approval_rate >= 85.0 and contracts_n >= 4 and win_rate < 45.0:
+            risk_points += 1
             score = score + 0.5
         if ai_n >= 10 and ai_approval_rate >= 92.0 and contracts_n >= 6 and win_rate < 35.0:
+            risk_points += 1
             score = score + 0.4
+
+        # Symbol-agnostic quarantine: any symbol can enter strict mode when quality degrades.
+        quarantine_floor = base_floor
+        if contracts_n >= 4 and late120 >= 25.0:
+            risk_points += 1
+        if contracts_n >= 4 and zero_peak_count >= 3:
+            risk_points += 1
+        if contracts_n >= 4 and risk_points >= 2:
+            quarantine_floor = min(SCORE_MAX_GUARDRAIL, base_floor + 0.30 * float(risk_points - 1))
+            score = score + 0.35 * float(risk_points)
+        if contracts_n >= 6 and risk_points >= 4 and ev_per_trade < -0.05:
+            score = score + 0.40
+            regime = "SLOW"
+
+        # Recovery mode: when symbol improves, gradually relax strictness.
+        if contracts_n >= 6 and win_rate >= 58.0:
+            recovery_points += 1
+        if contracts_n >= 6 and ev_per_trade >= 0.03:
+            recovery_points += 1
+        if contracts_n >= 6 and late120 <= 15.0 and (lag_med is None or lag_med < 100):
+            recovery_points += 1
+        if ai_n >= 6 and ai_approval_rate <= 75.0:
+            recovery_points += 1
+        if recovery_points >= 2 and risk_points <= 1:
+            score = score - 0.45
+        if recovery_points >= 3 and risk_points == 0:
+            score = score - 0.25
+
+        score = max(score, quarantine_floor)
+
+        in_quarantine = bool(contracts_n >= 4 and risk_points >= 2)
+        prev_quarantine = QUARANTINE_MEMORY.get(sym)
+        if prev_quarantine is None or prev_quarantine != in_quarantine:
+            if in_quarantine:
+                LOG.info(
+                    "[dynamic-ai][QUARANTINE_ENTER] %s risk=%d wr=%.1f ev=%.3f late120=%.1f floor=%.2f",
+                    sym,
+                    risk_points,
+                    win_rate,
+                    ev_per_trade,
+                    late120,
+                    quarantine_floor,
+                )
+            else:
+                LOG.info(
+                    "[dynamic-ai][QUARANTINE_EXIT] %s recovery=%d wr=%.1f ev=%.3f late120=%.1f",
+                    sym,
+                    recovery_points,
+                    win_rate,
+                    ev_per_trade,
+                    late120,
+                )
+        QUARANTINE_MEMORY[sym] = in_quarantine
 
         if early80 >= 20.0:
             grace = grace + 50
@@ -473,7 +570,10 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "6. Si ai_approval_rate_15m >85% y win_rate_15m <45% (o ev_per_trade_15m <0), ENDURECER score_min_override inmediatamente.\n"
         f"7. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
         "8. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
-        "9. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
+        "9. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
+        "10. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
+        "11. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
+        "12. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"is_active\": true}\n"

@@ -160,6 +160,10 @@ class DerivDaemon:
             5,
             int(os.getenv("DERIV_DYNAMIC_CONFIG_REFRESH_SEC", "15") or 15),
         )
+        self._dynamic_score_max_guardrail = max(
+            6.5,
+            min(float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2), 12.0),
+        )
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
@@ -1298,7 +1302,10 @@ class DerivDaemon:
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
         _dyn_score_min = max(
             6.5,
-            min(8.0, float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol))),
+            min(
+                self._dynamic_score_max_guardrail,
+                float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol)),
+            ),
         )
         snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
         snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)

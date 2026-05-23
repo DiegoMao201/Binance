@@ -584,13 +584,13 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
-        # Muestra02: 18 bc_escape_env TREND trades → WR=22%, PnL=-$1.19.
-        # Halving stake 2.00→1.00 to limit risk while DPM fix is validated in Muestra 03.
+        # Muestra05+: CRASH900 estabilizado con hold extendido (841-843s observed).
+        # Restore canonical sizing to recover symbol contribution when setup is valid.
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 1.00,
+        "stake_max_usdt": 2.00,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -639,7 +639,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_detected",   # Prueba4-stage4: widen capture window; keep bc_escape_env blocked
+        "fvg_tier_minimo": "fvg_mitigated",  # Tighten quality: require mitigated FVG to cut timeout loops
         "block_bc_escape_env": True,    # Prueba4-restart: 60% zero_peak on bc_escape_env — hard veto
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,

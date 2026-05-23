@@ -1441,3 +1441,96 @@ Fecha: 2026-05-23 (alineación completa bot + orquestador + frontend)
   - `win_rate_15m`
   - `ev_per_trade_15m`
   - cambios de `score_min_override` en `dynamic_ai_config_diffs.jsonl`.
+
+---
+
+## PRUEBA 5G — AJUSTE QUIRÚRGICO (SIN DESCUADRAR LO QUE FUNCIONA)
+
+Fecha: 2026-05-23 (hot-tuning con bot en marcha)
+
+### Estado real observado (muestra rolling reciente)
+
+- BOOM900: 14 trades, WR=71.4%, PnL=+$2.03 (símbolo líder)
+- CRASH500: 11 trades, WR=63.6%, PnL=+$0.36 (consistente)
+- CRASH1000: 4 trades, WR=50.0%, PnL=+$0.12 (estable)
+- BOOM500: 10 trades, WR=40.0%, PnL=-$1.58 (degradado)
+- BOOM600: 13 trades, WR=30.8%, PnL=-$1.35 (timeout dominante)
+- BOOM1000: 0 trades en ventana previa al fix (bloqueo por anti-chase)
+
+### Hallazgos críticos de timing (entradas tardías)
+
+- `BOOM500`: `late>=120s` en 10/10 operaciones, `lag_med=130.4s`.
+- `BOOM600`: `late>=120s` en 8/13 operaciones, `lag_med=123.1s`.
+- `BOOM900`: `late>=120s` en 8/14 operaciones, pero mantiene edge positivo fuerte.
+- `CRASH500`/`CRASH900`: lags medianos bajos (74.8s / 70.4s), menor riesgo de persecución tardía.
+
+### Ajustes aplicados en caliente (LIVE, sin restart)
+
+1. `dynamic_symbol_config.BOOM1000.spike_pre_filter_target`: **500 → 200**.
+2. `dynamic_symbol_config.BOOM500.score_min_override`: mantenido en **8.0** (modo estricto sin bloquear símbolo).
+3. Verificación en `deriv_status.json`: daemon cargó `BOOM1000.spike_pre_filter_target=200` con refresh dinámico OK.
+
+Resultado inmediato en logs (15m post-ajuste):
+- `ENTRY_ALLOWED`: ya aparecen entradas en `BOOM1000` (2), junto a `BOOM900` (4), `CRASH900` (2), `CRASH600` (2), `CRASH500` (2), `BOOM600` (2), `BOOM500` (1).
+- Bloqueador dominante sigue siendo `REGIME_SCORE_GATE_calm_dynamic` (comportamiento esperado de control de calidad).
+
+### Ajustes quirúrgicos en código preparados para siguiente deploy controlado
+
+1. `BOOM600`: `fvg_tier_minimo` endurecido a **`fvg_mitigated`** (manteniendo `block_bc_escape_env=True`).
+2. `CRASH900`: `stake_max_usdt` restaurado de **1.00 → 2.00**.
+3. `dynamic_ai_orchestrator`:
+  - piso configurable para BOOM500 (`DYNAMIC_AI_BOOM500_SCORE_FLOOR`, default 8.0),
+  - heurística de cuarentena BOOM500 (más score cuando pierde o entra tarde, sin deshabilitar).
+4. `main_deriv`:
+  - cap dinámico de score alineado con `DYNAMIC_AI_SCORE_MAX_GUARDRAIL` (ya no fijo en 8.0).
+
+### Contrato operativo 5G (sin romper lo que sí funciona)
+
+- Se preserva edge de `BOOM900` y `CRASH500`.
+- Se reactiva `BOOM1000` eliminando sobrebloqueo por guard de 500s.
+- Se endurece BOOM500 en modo cuarentena inteligente: más exigente para entrar, pero no bloqueado.
+- Se prepara `BOOM600` para estructura FVG real y `CRASH900` para recuperar sizing correcto.
+
+### KPIs de seguimiento (próximas 2-4h)
+
+1. `% late_entry_ge120` por símbolo (objetivo: bajar en BOOM500/600).
+2. `WR/PnL` de BOOM1000 tras `spf=200` (objetivo: reactivación con calidad).
+3. `exit_reason` en BOOM600 (`spike_timeout` debe comprimirse con FVG mitigated).
+4. `score_min_override` dinámico de BOOM500 (debe mantenerse en zona estricta, sin `is_active=false`).
+
+---
+
+## PRUEBA 5H — CUARENTENA DINÁMICA MULTI-SÍMBOLO (IA EN VIVO)
+
+Fecha: 2026-05-23
+
+### Objetivo
+
+Evitar que la cuarentena sea fija por un símbolo puntual. Desde esta etapa, **cualquier símbolo** puede:
+
+1. entrar en cuarentena soft cuando su calidad cae,
+2. mantenerse operativo (sin `is_active=false`),
+3. salir de cuarentena cuando recupera edge.
+
+### Definición operativa de cuarentena soft
+
+- No bloquea el símbolo.
+- Endurece `score_min_override` de forma adaptativa para filtrar entradas de baja calidad.
+- Usa telemetría viva por símbolo (`WR`, `EV`, `late_entry>=120`, `zero_peak_exit`, aprobación IA).
+
+### Reglas dinámicas aplicadas por IA/orquestador
+
+1. **Entrada a cuarentena** (cualquier símbolo):
+  - combinación de señales de degradación (WR bajo, EV negativo, lag alto, sobre-aprobación IA con mala calidad).
+2. **Profundidad de cuarentena**:
+  - a mayor presión de riesgo, mayor `score_min_override` y piso dinámico más estricto.
+3. **Salida de cuarentena**:
+  - cuando el símbolo mejora de forma sostenida (WR/EV/lag), el score se relaja gradualmente.
+4. **Histéresis**:
+  - evita flips bruscos de estado/régimen.
+
+### Resultado esperado
+
+- Si un símbolo pasa de “mejor” a “peor”, la IA reduce su agresividad automáticamente sin apagarlo.
+- Si un símbolo pasa de “peor” a “mejor”, la IA le devuelve capacidad de entrada de forma controlada.
+- PnL y WR se optimizan como proceso continuo guiado por datos, no por reglas estáticas.
