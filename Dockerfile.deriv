@@ -36,6 +36,6 @@ exec python -m src.main_deriv\n\
 ' > /app/entrypoint.deriv.sh && chmod +x /app/entrypoint.deriv.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD python /app/scripts/validate_deriv_runtime.py --logs-dir "${LOGS_DIR:-/data/logs}" >/dev/null || exit 1
+  CMD python /app/scripts/validate_deriv_runtime.py --logs-dir "${LOGS_DIR:-/data/logs}" --max-diff-age-sec 1500 >/dev/null || exit 1
 
 CMD ["/app/entrypoint.deriv.sh"]

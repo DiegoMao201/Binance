@@ -84,6 +84,7 @@ ZERO_PEAK_FLOOR_BY_SYMBOL = {
     "CRASH500": 60,
     "CRASH600": 60,
 }
+STRICT_DISABLE_SYMBOLS = {"BOOM500"}
 
 # Short-term memory to prevent regime oscillation.
 STATE_MEMORY: dict[str, dict[str, Any]] = {}
@@ -558,6 +559,76 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
     return out
 
 
+def _apply_activity_policy(
+    current_cfg: dict[str, SymbolCfg],
+    candidate_cfg: dict[str, SymbolCfg],
+    telemetry: dict[str, Any],
+) -> dict[str, SymbolCfg]:
+    out: dict[str, SymbolCfg] = {}
+    for sym in SYMBOLS:
+        current = current_cfg[sym]
+        candidate = candidate_cfg[sym]
+        t = telemetry.get(sym, {})
+
+        contracts_n = int(t.get("contracts_15m") or 0)
+        win_rate = float(t.get("win_rate_15m") or 0.0)
+        ev_per_trade = float(t.get("ev_per_trade_15m") or 0.0)
+        late120 = float(t.get("late_entry_ge120_pct") or 0.0)
+        lag_med = t.get("entry_lag_sec_median")
+        lag_med_val = float(lag_med) if isinstance(lag_med, (int, float)) else None
+
+        severe_disable = False
+        recovery_enable = False
+
+        if contracts_n >= 4:
+            severe_disable = (
+                (win_rate <= 25.0 and ev_per_trade < 0.0)
+                or (contracts_n >= 6 and win_rate < 35.0 and ev_per_trade <= -0.05)
+                or (late120 >= 45.0 and lag_med_val is not None and lag_med_val >= 180.0)
+            )
+        if sym in STRICT_DISABLE_SYMBOLS and contracts_n >= 4:
+            severe_disable = severe_disable or (win_rate < 45.0 or ev_per_trade < 0.0)
+
+        if contracts_n >= 6:
+            recovery_enable = (
+                win_rate >= 58.0
+                and ev_per_trade >= 0.03
+                and late120 <= 15.0
+                and (lag_med_val is None or lag_med_val < 100.0)
+            )
+
+        next_active = current.is_active
+        if severe_disable:
+            next_active = False
+        elif recovery_enable:
+            next_active = True
+
+        if next_active != current.is_active:
+            LOG.info(
+                "[dynamic-ai][ACTIVITY_POLICY] %s is_active %s -> %s | contracts=%d wr=%.1f ev=%.3f late120=%.1f lag_med=%s",
+                sym,
+                current.is_active,
+                next_active,
+                contracts_n,
+                win_rate,
+                ev_per_trade,
+                late120,
+                f"{lag_med_val:.1f}" if lag_med_val is not None else "n/a",
+            )
+
+        out[sym] = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=candidate.regime,
+                spike_pre_filter_target=candidate.spike_pre_filter_target,
+                zero_peak_grace_sec=candidate.zero_peak_grace_sec,
+                score_min_override=candidate.score_min_override,
+                is_active=next_active,
+            ),
+        )
+    return out
+
+
 def _build_prompt(telemetry_json: dict[str, Any]) -> str:
     score_max = f"{SCORE_MAX_GUARDRAIL:.1f}"
     return (
@@ -580,7 +651,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "12. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
-        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"is_active\": true}\n"
+        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
         "}\n"
     )
 
@@ -663,7 +734,7 @@ def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) 
             spike_pre_filter_target=int(cur.spike_pre_filter_target),
             zero_peak_grace_sec=int(payload.get("zero_peak_grace_sec", cur.zero_peak_grace_sec)),
             score_min_override=float(payload.get("score_min_override", cur.score_min_override)),
-            is_active=bool(payload.get("is_active", cur.is_active)),
+            is_active=cur.is_active,
         ))
     return out
 
@@ -937,8 +1008,8 @@ async def run_loop() -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL is required")
 
-    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "60"
-    loop_sec = max(20, int(loop_raw or 60))
+    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "1200"
+    loop_sec = max(1200, int(loop_raw or 1200))
     logs_dir = Path(
         os.getenv("DYNAMIC_AI_LOGS_DIR")
         or os.getenv("DYNAMIC_AI_LOG_DIR")
@@ -978,6 +1049,8 @@ async def run_loop() -> None:
                 new_cfg = _heuristic_from_telemetry(current_cfg, telemetry)
                 decision_source = "heuristic"
 
+            new_cfg = _apply_activity_policy(current_cfg, new_cfg, telemetry)
+
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
                 conn,
@@ -995,6 +1068,18 @@ async def run_loop() -> None:
                 {
                     "BOOM500": smoothed_cfg.get("BOOM500").__dict__ if smoothed_cfg.get("BOOM500") else None,
                     "CRASH900": smoothed_cfg.get("CRASH900").__dict__ if smoothed_cfg.get("CRASH900") else None,
+                },
+            )
+            # Always write a heartbeat entry so diff_log mtime stays fresh
+            # even when hysteresis blocks all config changes.
+            _append_diff_jsonl(
+                diff_log_path,
+                {
+                    "ts": _now_iso(),
+                    "type": "heartbeat",
+                    "source": decision_source,
+                    "db_updates": updates,
+                    "blocked_flips": blocked_regime_flips,
                 },
             )
         except Exception as exc:  # noqa: BLE001
