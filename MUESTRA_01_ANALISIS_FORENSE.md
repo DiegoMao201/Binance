@@ -1622,3 +1622,25 @@ El `docker-compose.yaml` del app en Coolify se regenera desde su propio estado d
 
 - El sidecar AI queda autogestionado y alineado con la imagen del bot después de cada redeploy.
 - Se elimina la dependencia de hotpatch manual para `dynamic_ai_orchestrator.py`.
+
+---
+
+## PRUEBA 5L — HARDENING FINAL CONTRA DERIVA DE ENV EN COOLIFY
+
+Fecha: 2026-05-23
+
+### Observación
+
+Después de redeploy automático en Coolify, el `.env` efectivo del app no preservó `DYNAMIC_AI_SCORE_MAX_*`, provocando clamping no deseado a 8.0 en algunos ciclos.
+
+### Fix aplicado
+
+1. `scripts/dynamic_ai_orchestrator.py` ahora detecta en runtime el techo real del constraint de DB (`chk_dsc_score_min_override`) leyendo `pg_constraint`.
+2. El clamp de compatibilidad usa ese techo detectado (no depende solo de env).
+3. Deploy live ejecutado con imagen `2380f5a` y sidecar sincronizado inmediatamente por `run_ai_sync.sh`.
+
+### Resultado validado
+
+- Loop AI activo sin `CheckViolation` ni abortos transaccionales.
+- Constraint en DB: `6.5..9.2`.
+- Operación estable incluso si Coolify reescribe variables de entorno no canónicas.
