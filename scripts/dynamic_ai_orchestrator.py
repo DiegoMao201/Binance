@@ -42,7 +42,8 @@ SYMBOLS = [
 SCORE_MIN_GUARDRAIL = 6.5
 SCORE_MAX_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
 SCORE_MAX_DB_COMPAT_FALLBACK = float(
-    os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", "8.0") or 8.0
+    os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", str(SCORE_MAX_GUARDRAIL))
+    or SCORE_MAX_GUARDRAIL
 )
 
 
@@ -675,6 +676,7 @@ async def _apply_cfg(
     diff_log_path: Path,
 ) -> int:
     updates = 0
+    db_score_max = await _detect_db_score_max(conn)
     async with conn.transaction():
         for sym, cfg in cfgs.items():
             previous = current_cfg.get(sym)
@@ -687,15 +689,16 @@ async def _apply_cfg(
             # (score guardrail upper bound 9.2) has not been applied yet.
             fallback_max = max(
                 SCORE_MIN_GUARDRAIL,
-                min(SCORE_MAX_DB_COMPAT_FALLBACK, SCORE_MAX_GUARDRAIL),
+                min(db_score_max, SCORE_MAX_DB_COMPAT_FALLBACK, SCORE_MAX_GUARDRAIL),
             )
             fallback_score = min(float(cfg_to_write.score_min_override), fallback_max)
             if fallback_score < float(cfg_to_write.score_min_override):
                 LOG.warning(
-                    "[dynamic-ai][DB_COMPAT] %s score %.2f -> %.2f due to DB constraint",
+                    "[dynamic-ai][DB_COMPAT] %s score %.2f -> %.2f due to DB constraint (max=%.2f)",
                     sym,
                     float(cfg_to_write.score_min_override),
                     float(fallback_score),
+                    float(fallback_max),
                 )
                 cfg_to_write = _clamp_cfg(
                     sym,
@@ -750,6 +753,34 @@ async def _apply_cfg(
                     },
                 )
     return updates
+
+
+async def _detect_db_score_max(conn: Any) -> float:
+    default_max = max(
+        SCORE_MIN_GUARDRAIL,
+        min(SCORE_MAX_DB_COMPAT_FALLBACK, SCORE_MAX_GUARDRAIL),
+    )
+    try:
+        cdef = await conn.fetchval(
+            """
+            SELECT pg_get_constraintdef(c.oid)
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            WHERE t.relname = 'dynamic_symbol_config'
+              AND c.conname = 'chk_dsc_score_min_override'
+            """
+        )
+        text = str(cdef or "")
+        match = re.search(r"<=\s*\(([-+]?[0-9]*\.?[0-9]+)\)::double precision", text)
+        if not match:
+            match = re.search(r"BETWEEN\s+[-+]?[0-9]*\.?[0-9]+\s+AND\s+([-+]?[0-9]*\.?[0-9]+)", text)
+        if match:
+            parsed = float(match.group(1))
+            if parsed >= SCORE_MIN_GUARDRAIL:
+                return max(SCORE_MIN_GUARDRAIL, min(parsed, SCORE_MAX_GUARDRAIL))
+    except Exception:
+        pass
+    return default_max
 
 
 def _bucket(v: Any, step: float, ndigits: int = 3) -> float:
