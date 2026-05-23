@@ -1534,3 +1534,40 @@ Evitar que la cuarentena sea fija por un símbolo puntual. Desde esta etapa, **c
 - Si un símbolo pasa de “mejor” a “peor”, la IA reduce su agresividad automáticamente sin apagarlo.
 - Si un símbolo pasa de “peor” a “mejor”, la IA le devuelve capacidad de entrada de forma controlada.
 - PnL y WR se optimizan como proceso continuo guiado por datos, no por reglas estáticas.
+
+---
+
+## PRUEBA 5I — ESTABILIZACIÓN PROD POR CONSTRAINT DE DB
+
+Fecha: 2026-05-23
+
+### Incidente observado
+
+Tras activar la cuarentena dinámica multi-símbolo en el contenedor AI, el loop falló con:
+
+- `chk_dsc_score_min_override` en `dynamic_symbol_config`
+- fila fallida típica: `score_min_override=9.2`
+
+Diagnóstico: el entorno productivo mantiene un constraint más estricto (tope efectivo 8.0), por lo que la IA intentaba escribir por encima del límite permitido por la DB.
+
+### Corrección aplicada
+
+1. Hotfix en `scripts/dynamic_ai_orchestrator.py` para compatibilidad de esquema:
+  - nuevo guardrail: `DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK` (default `8.0`),
+  - pre-clamp de `score_min_override` **antes** del `upsert` a DB,
+  - logging explícito: `[dynamic-ai][DB_COMPAT]`.
+2. Fix transaccional: se eliminó estrategia de reintento posterior a `CheckViolation` (PostgreSQL aborta la transacción en ese punto), y se pasó a clamp preventivo.
+3. Deploy:
+  - commits publicados en `main` (`d38602c`, `109bb2d`),
+  - hotpatch live aplicado al contenedor `o4w1ns4cceccmn2ozqt7sol2-ai` y reinicio.
+
+### Verificación post-fix
+
+- El contenedor AI cargó el código nuevo (marcadores `DB_COMPAT` presentes).
+- Se observan ciclos consecutivos de `applied config` sin `CheckViolation` ni `InFailedSQLTransactionError` nuevos.
+- Los símbolos con objetivo `9.2` quedan auto-ajustados a `8.0` en escritura DB cuando aplica compatibilidad.
+
+### Contrato operativo
+
+- Mantener `fallback=8.0` hasta alinear/migrar constraint productivo de `dynamic_symbol_config`.
+- Cuando la migración esté aplicada en prod, elevar `DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK` para habilitar techos >8 sin riesgo de caída del loop.
