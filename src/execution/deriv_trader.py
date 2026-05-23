@@ -297,21 +297,29 @@ class DerivTradeExecutor:
         """Inject runtime dynamic config provider from daemon."""
         self._dynamic_config_provider = provider
 
+    @staticmethod
+    def _symbol_zero_peak_floor(symbol: str) -> int:
+        _sym = str(symbol or "").upper()
+        if _sym in {"BOOM500", "CRASH500", "CRASH600"}:
+            return 60
+        return 0
+
     def _dynamic_zero_peak_grace_sec(self, symbol: str) -> int:
-        """Read zero_peak_grace_sec override (0..120) from dynamic config."""
+        """Read zero_peak_grace_sec override with per-symbol safety floor."""
+        _floor = self._symbol_zero_peak_floor(symbol)
         if self._dynamic_config_provider is None:
-            return 0
+            return _floor
         try:
             cfg = self._dynamic_config_provider(symbol) or {}
         except Exception:  # noqa: BLE001
-            return 0
+            return _floor
         if not bool(cfg.get("is_active", False)):
-            return 0
+            return _floor
         try:
             val = int(cfg.get("zero_peak_grace_sec") or 0)
         except Exception:  # noqa: BLE001
-            return 0
-        return max(0, min(val, 120))
+            return _floor
+        return max(_floor, min(val, 120))
 
     def _zero_peak_grace_ticks(self, symbol: str) -> int:
         """Grace ticks near expected spike to avoid premature zero_peak exits."""

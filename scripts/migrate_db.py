@@ -39,6 +39,7 @@ _MIGRATIONS = [
     "005_broker_discriminator.sql",
     "006_deriv_ticks.sql",
     "009_dynamic_symbol_config.sql",
+    "010_dynamic_guardrails_hardening.sql",
 ]
 
 

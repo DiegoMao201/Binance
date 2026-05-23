@@ -256,14 +256,17 @@ class DerivDaemon:
 
     @staticmethod
     def _clamp_dynamic_values(
+        symbol: str,
         spike_pre_filter_target: int,
         zero_peak_grace_sec: int,
         score_min_override: float,
     ) -> tuple[int, int, float]:
         """Clamp dynamic config values to hard safety guardrails."""
+        _sym = str(symbol or "").upper()
+        _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
         _spf = max(50, min(int(spike_pre_filter_target), 500))
-        _grace = max(0, min(int(zero_peak_grace_sec), 120))
-        _score = max(3.0, min(float(score_min_override), 10.0))
+        _grace = max(_sensitive_zero_peak_floor, min(int(zero_peak_grace_sec), 120))
+        _score = max(6.5, min(float(score_min_override), 8.0))
         return _spf, _grace, _score
 
     def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -283,12 +286,18 @@ class DerivDaemon:
         _db_cfg = self._dynamic_configs.get(_sym)
         if not _db_cfg:
             return _default
+        _spf, _grace, _score = self._clamp_dynamic_values(
+            _sym,
+            int(_db_cfg.get("spike_pre_filter_target") or _default["spike_pre_filter_target"]),
+            int(_db_cfg.get("zero_peak_grace_sec") or 0),
+            float(_db_cfg.get("score_min_override") or _default["score_min_override"]),
+        )
         return {
             "symbol": _sym,
             "market_regime": str(_db_cfg.get("market_regime") or "NORMAL").upper(),
-            "spike_pre_filter_target": int(_db_cfg.get("spike_pre_filter_target") or _default["spike_pre_filter_target"]),
-            "zero_peak_grace_sec": int(_db_cfg.get("zero_peak_grace_sec") or 0),
-            "score_min_override": float(_db_cfg.get("score_min_override") or _default["score_min_override"]),
+            "spike_pre_filter_target": _spf,
+            "zero_peak_grace_sec": _grace,
+            "score_min_override": _score,
             "is_active": bool(_db_cfg.get("is_active", True)),
             "source": "dynamic_db",
             "last_updated": _db_cfg.get("last_updated"),
@@ -324,6 +333,7 @@ class DerivDaemon:
             if not _sym:
                 continue
             _spf, _grace, _score = self._clamp_dynamic_values(
+                _sym,
                 int(row["spike_pre_filter_target"] or 280),
                 int(row["zero_peak_grace_sec"] or 0),
                 float(row["score_min_override"] or 6.0),
@@ -1167,8 +1177,8 @@ class DerivDaemon:
         # spike-market overrides, etc.).  We must NOT shadow it with a second call
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
         _dyn_score_min = max(
-            3.0,
-            min(10.0, float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol))),
+            6.5,
+            min(8.0, float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol))),
         )
         snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
         snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)

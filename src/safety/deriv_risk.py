@@ -1836,6 +1836,12 @@ class DerivRiskManager:
                 # Per-profile override: block_bc_escape_env=True → hard veto even if escape valve open.
                 # Muestra02: BOOM600 bc_escape_env 32t → WR=25%, PnL=-$3.15; score does NOT predict.
                 _profile_blocks_bc = bool(_get_asset_profile(symbol).get("block_bc_escape_env", False))
+                _bc_env_key = f"DERIV_BLOCK_BC_ESCAPE_{str(symbol).upper()}"
+                _bc_env_raw = os.getenv(_bc_env_key, "").strip().lower()
+                if _bc_env_raw in ("1", "true", "yes"):
+                    _profile_blocks_bc = True
+                elif _bc_env_raw in ("0", "false", "no"):
+                    _profile_blocks_bc = False
                 if not _bc_escape_env or _profile_blocks_bc:
                     _block_reason = (
                         f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"

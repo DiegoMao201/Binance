@@ -39,6 +39,14 @@ SYMBOLS = [
     "CRASH1000", "CRASH900", "CRASH600", "CRASH500",
 ]
 
+SCORE_MIN_GUARDRAIL = 6.5
+SCORE_MAX_GUARDRAIL = 8.0
+ZERO_PEAK_FLOOR_BY_SYMBOL = {
+    "BOOM500": 60,
+    "CRASH500": 60,
+    "CRASH600": 60,
+}
+
 
 @dataclass
 class SymbolCfg:
@@ -53,15 +61,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _clamp_cfg(cfg: SymbolCfg) -> SymbolCfg:
+def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
+    sym = str(symbol or "").upper()
     regime = str(cfg.regime or "NORMAL").upper()
     if regime not in {"FAST", "SLOW", "NORMAL"}:
         regime = "NORMAL"
+    zero_peak_floor = ZERO_PEAK_FLOOR_BY_SYMBOL.get(sym, 0)
     return SymbolCfg(
         regime=regime,
         spike_pre_filter_target=max(50, min(int(cfg.spike_pre_filter_target), 500)),
-        zero_peak_grace_sec=max(0, min(int(cfg.zero_peak_grace_sec), 120)),
-        score_min_override=max(3.0, min(float(cfg.score_min_override), 10.0)),
+        zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
+        score_min_override=max(SCORE_MIN_GUARDRAIL, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
     )
 
@@ -264,7 +274,7 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         if early80 >= 20.0:
             grace = grace + 50
 
-        out[sym] = _clamp_cfg(SymbolCfg(
+        out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=regime,
             spike_pre_filter_target=spf,
             zero_peak_grace_sec=grace,
@@ -281,13 +291,14 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "DATOS DE TELEMETRIA (Ultimos 15 mins):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "REGLAS DE AJUSTE:\n"
-        "1. Si entry_lag_sec es >120s o el mercado esta FAST, reduce spike_pre_filter_target y baja score_min_override 1-2 puntos.\n"
-        "2. Si hay alta tasa de zero_peak_exit seguida de spike en <80s, aumenta zero_peak_grace_sec entre 40-80s.\n"
+        "1. Si entry_lag_sec es >120s o el mercado esta FAST, reduce spike_pre_filter_target y baja score_min_override de forma moderada sin romper estructura.\n"
+        "2. Si hay alta tasa de zero_peak_exit seguida de spike en <80s, aumenta zero_peak_grace_sec entre 60-120s.\n"
         "3. Si el mercado esta SLOW, sube spike_pre_filter_target y sube score_min_override.\n"
-        "4. Mantener guardrails estrictos: spike_pre_filter_target [50,500], zero_peak_grace_sec [0,120], score_min_override [3.0,10.0].\n\n"
+        "4. Mantener guardrails estrictos: spike_pre_filter_target [50,500], score_min_override [6.5,8.0].\n"
+        "5. Guardrail de riesgo confirmado: BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
-        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 4.5}\n"
+        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
         "}\n"
     )
 
@@ -345,7 +356,7 @@ async def _read_current_cfg(conn: Any) -> dict[str, SymbolCfg]:
         sym = str(row["symbol"] or "").upper()
         if not sym:
             continue
-        out[sym] = _clamp_cfg(SymbolCfg(
+        out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=str(row["market_regime"] or "NORMAL").upper(),
             spike_pre_filter_target=int(row["spike_pre_filter_target"] or 280),
             zero_peak_grace_sec=int(row["zero_peak_grace_sec"] or 0),
@@ -355,7 +366,7 @@ async def _read_current_cfg(conn: Any) -> dict[str, SymbolCfg]:
 
     # Ensure defaults for missing symbols
     for sym in SYMBOLS:
-        out.setdefault(sym, SymbolCfg("NORMAL", 280, 0, 6.0, True))
+        out.setdefault(sym, _clamp_cfg(sym, SymbolCfg("NORMAL", 280, 0, 7.0, True)))
     return out
 
 
@@ -364,7 +375,7 @@ def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) 
     for sym in SYMBOLS:
         cur = current_cfg[sym]
         payload = raw.get(sym) if isinstance(raw.get(sym), dict) else {}
-        out[sym] = _clamp_cfg(SymbolCfg(
+        out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=str(payload.get("regime", cur.regime)).upper(),
             spike_pre_filter_target=int(payload.get("spike_pre_filter_target", cur.spike_pre_filter_target)),
             zero_peak_grace_sec=int(payload.get("zero_peak_grace_sec", cur.zero_peak_grace_sec)),
@@ -406,8 +417,14 @@ async def run_loop() -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL is required")
 
-    loop_sec = max(20, int(os.getenv("DYNAMIC_AI_LOOP_SEC", "60") or 60))
-    logs_dir = Path(os.getenv("LOGS_DIR", os.getenv("DYNAMIC_AI_LOGS_DIR", "/data/logs"))).expanduser()
+    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "60"
+    loop_sec = max(20, int(loop_raw or 60))
+    logs_dir = Path(
+        os.getenv("DYNAMIC_AI_LOGS_DIR")
+        or os.getenv("DYNAMIC_AI_LOG_DIR")
+        or os.getenv("LOGS_DIR")
+        or "/data/logs"
+    ).expanduser()
 
     import asyncpg  # noqa: PLC0415
 
