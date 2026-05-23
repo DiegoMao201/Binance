@@ -727,7 +727,7 @@ class DerivTradeExecutor:
                 elif (
                     self._zero_peak_exit_enabled
                     and is_spike_market(oc_check.symbol)
-                    held >= _dynamic_hold_limit
+                    and held >= _dynamic_hold_limit
                     and oc_check.peak_profit == 0.0
                     and oc_check.floating_pnl < -0.05
                     and cid not in self._closing
