@@ -42,6 +42,7 @@ Usage (called from main_deriv.py)
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import json
 import logging
 import os
@@ -96,6 +97,25 @@ _AI_CACHE_TTL_SEC       = int(os.getenv("DERIV_AI_CACHE_TTL_SEC", "60"))       #
 _AI_CACHE_TTL_SCALP_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_SCALP_SEC", "15")) # scalping
 _AI_CACHE_TTL_TREND_SEC = int(os.getenv("DERIV_AI_CACHE_TTL_TREND_SEC", "45")) # trend/SMC
 _AI_LOG_MAX_ENTRIES = int(os.getenv("DERIV_AI_LOG_MAX", "500"))        # rolling log
+_AI_ADAPTIVE_CONFIDENCE_ENABLED = os.getenv(
+    "DERIV_AI_ADAPTIVE_CONFIDENCE_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+_AI_ADAPTIVE_REFRESH_SEC = max(
+    10,
+    int(os.getenv("DERIV_AI_ADAPTIVE_REFRESH_SEC", "30") or 30),
+)
+_AI_ADAPTIVE_TRADES_LOOKBACK = max(
+    8,
+    int(os.getenv("DERIV_AI_ADAPTIVE_TRADES_LOOKBACK", "20") or 20),
+)
+_AI_ADAPTIVE_DECISIONS_LOOKBACK = max(
+    20,
+    int(os.getenv("DERIV_AI_ADAPTIVE_DECISIONS_LOOKBACK", "120") or 120),
+)
+_AI_ADAPTIVE_MAX_CONFIDENCE = min(
+    0.95,
+    max(_AI_MIN_CONFIDENCE, float(os.getenv("DERIV_AI_ADAPTIVE_MAX_CONFIDENCE", "0.92"))),
+)
 
 # ── Smart cache invalidation thresholds ─────────────────────────────────────
 _CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5"))   # |Δscore| > 0.5
@@ -136,6 +156,30 @@ class DerivAnalysis:
     ai_reason: str = "ai_gate_disabled"
     ai_model: str = ""
     ai_skipped: bool = False        # True if AI gate disabled or timed out
+
+
+def _safe_ts(v: Any) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            pass
+        s = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+    return None
 
 
 # ── Helpers: Hurst exponent via log-prices variance-at-scale method ─────────
@@ -492,6 +536,7 @@ def _build_ai_prompt(
     r2: float,
     n_ticks: int,
     ai_threshold: float = 7.5,
+    ai_min_confidence: float | None = None,
 ) -> str:
     # Spike markets (BOOM/CRASH) don't require trending Hurst — spikes are stochastic.
     # Use the hurst_min_spike value (0.43) for those; trend requirement only for R_*.
@@ -508,7 +553,7 @@ def _build_ai_prompt(
             f"Approve (true) if: score>={ai_threshold} AND Hurst>0.52 "
             f"AND autocorr aligned with side AND regime not 'volatile'."
         )
-    _min_conf = max(0.65, _AI_MIN_CONFIDENCE)
+    _min_conf = max(0.65, float(ai_min_confidence if ai_min_confidence is not None else _AI_MIN_CONFIDENCE))
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -552,6 +597,9 @@ class DerivAnalyst:
         self._ai_cache: dict[str, dict[str, Any]] = {}
         # Path to the AI decision log JSON (last N entries, rolling).
         self._ai_log_path: Path = settings.logs_dir / "deriv_ai_decisions.json"
+        self._closed_log_path: Path = settings.logs_dir / "deriv_closed_contracts.json"
+        self._ai_quality_cache_ts: float = 0.0
+        self._ai_quality_cache: dict[str, dict[str, Any]] = {}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Startup preload + background refresh
@@ -723,6 +771,124 @@ class DerivAnalyst:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("[deriv-analyst] ai_log write failed: %s", exc)
 
+    def _load_json_list(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _refresh_ai_quality_cache(self) -> None:
+        if not _AI_ADAPTIVE_CONFIDENCE_ENABLED:
+            self._ai_quality_cache = {}
+            self._ai_quality_cache_ts = time.time()
+            return
+
+        now = time.time()
+        if (now - self._ai_quality_cache_ts) < _AI_ADAPTIVE_REFRESH_SEC:
+            return
+
+        decisions = self._load_json_list(self._ai_log_path)
+        closed_rows = self._load_json_list(self._closed_log_path)
+
+        by_symbol_decisions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in decisions:
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            by_symbol_decisions[sym].append(row)
+
+        by_symbol_closed: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in closed_rows:
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            by_symbol_closed[sym].append(row)
+
+        out: dict[str, dict[str, Any]] = {}
+        symbols = set(self._settings.symbols) | set(by_symbol_decisions.keys()) | set(by_symbol_closed.keys())
+        for sym in symbols:
+            dec_rows = by_symbol_decisions.get(sym, [])[-_AI_ADAPTIVE_DECISIONS_LOOKBACK:]
+            close_rows_sym = by_symbol_closed.get(sym, [])[-_AI_ADAPTIVE_TRADES_LOOKBACK:]
+
+            approvals = sum(1 for r in dec_rows if bool(r.get("approved")))
+            decisions_n = len(dec_rows)
+            approval_rate = (approvals / decisions_n * 100.0) if decisions_n else 0.0
+
+            pnl_values: list[float] = []
+            wins = 0
+            weak_exits = 0
+            for c in close_rows_sym:
+                pnl = c.get("realized_pnl_usdt")
+                try:
+                    pnl_f = float(pnl)
+                except Exception:
+                    pnl_f = 0.0
+                pnl_values.append(pnl_f)
+                if pnl_f > 0.0:
+                    wins += 1
+                exit_reason = str(c.get("exit_reason") or c.get("close_reason") or "").strip().lower()
+                if exit_reason in {"zero_peak_exit", "spike_timeout", "sl_inicial"}:
+                    weak_exits += 1
+
+            trades_n = len(close_rows_sym)
+            win_rate = (wins / trades_n * 100.0) if trades_n else 0.0
+            avg_pnl = (sum(pnl_values) / trades_n) if trades_n else 0.0
+            weak_exit_rate = (weak_exits / trades_n * 100.0) if trades_n else 0.0
+
+            adaptive_conf = float(_AI_MIN_CONFIDENCE)
+            reasons: list[str] = []
+
+            if decisions_n >= 12 and approval_rate >= 90.0:
+                adaptive_conf += 0.08
+                reasons.append(f"approval_rate={approval_rate:.1f}%")
+            elif decisions_n >= 12 and approval_rate >= 82.0:
+                adaptive_conf += 0.05
+                reasons.append(f"approval_rate={approval_rate:.1f}%")
+
+            if trades_n >= 8:
+                if win_rate < 35.0:
+                    adaptive_conf += 0.08
+                    reasons.append(f"win_rate={win_rate:.1f}%")
+                if win_rate < 25.0:
+                    adaptive_conf += 0.05
+                if avg_pnl < 0.0:
+                    adaptive_conf += 0.05
+                    reasons.append(f"avg_pnl={avg_pnl:.4f}")
+                if weak_exit_rate >= 55.0:
+                    adaptive_conf += 0.03
+                    reasons.append(f"weak_exits={weak_exit_rate:.1f}%")
+
+            if trades_n >= 8 and win_rate >= 55.0 and avg_pnl > 0.0 and approval_rate <= 70.0:
+                adaptive_conf -= 0.03
+
+            adaptive_conf = max(_AI_MIN_CONFIDENCE, min(adaptive_conf, _AI_ADAPTIVE_MAX_CONFIDENCE))
+            out[sym] = {
+                "ai_min_confidence": adaptive_conf,
+                "quality_note": "adaptive:" + (", ".join(reasons) if reasons else "baseline"),
+                "approval_rate": approval_rate,
+                "win_rate": win_rate,
+                "avg_pnl": avg_pnl,
+                "trades_n": trades_n,
+                "decisions_n": decisions_n,
+            }
+
+        self._ai_quality_cache = out
+        self._ai_quality_cache_ts = now
+
+    def _dynamic_ai_min_confidence(self, symbol: str) -> tuple[float, str]:
+        if not _AI_ADAPTIVE_CONFIDENCE_ENABLED:
+            return _AI_MIN_CONFIDENCE, "adaptive:disabled"
+        self._refresh_ai_quality_cache()
+        row = self._ai_quality_cache.get(str(symbol or "").upper())
+        if not row:
+            return _AI_MIN_CONFIDENCE, "adaptive:baseline"
+        return float(row.get("ai_min_confidence", _AI_MIN_CONFIDENCE)), str(
+            row.get("quality_note", "adaptive:baseline")
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     # Core analysis method
     # ─────────────────────────────────────────────────────────────────────────
@@ -793,6 +959,7 @@ class DerivAnalyst:
             else self._settings.r_indices_ai_min_score
         )
         _hard_score_floor = max(_AI_HARD_SCORE_FLOOR, float(_ai_threshold))
+        _symbol_min_conf, _quality_note = self._dynamic_ai_min_confidence(symbol)
 
         current_snapshot = _build_cache_snapshot(score, hurst, side, score_breakdown)
 
@@ -803,14 +970,16 @@ class DerivAnalyst:
             _cached_approved = bool(cached_ai.get("approved", False))
             analysis.ai_approved = (
                 _cached_approved
-                and _cached_conf >= _AI_MIN_CONFIDENCE
+                and _cached_conf >= _symbol_min_conf
                 and score >= _hard_score_floor
             )
             analysis.ai_confidence = _cached_conf
             _cached_reason = str(cached_ai.get("reason", ""))
+            if _cached_approved and not analysis.ai_approved and _cached_conf < _symbol_min_conf:
+                _cached_reason = f"{_cached_reason} | conf_floor:{_cached_conf:.2f}<{_symbol_min_conf:.2f}"
             if _cached_approved and not analysis.ai_approved and score < _hard_score_floor:
                 _cached_reason = f"{_cached_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
-            analysis.ai_reason = _cached_reason + " [cached]"
+            analysis.ai_reason = f"{_cached_reason} | {_quality_note} [cached]"
             analysis.ai_model      = str(cached_ai.get("model", ""))
             return analysis
 
@@ -834,6 +1003,7 @@ class DerivAnalyst:
             r2=r2,
             n_ticks=len(prices_list),
             ai_threshold=_ai_threshold,
+            ai_min_confidence=_symbol_min_conf,
         )
 
         try:
@@ -888,15 +1058,20 @@ class DerivAnalyst:
             _model_approved = bool(ai_result.get("approved", False))
             analysis.ai_approved = (
                 _model_approved
-                and _ai_conf >= _AI_MIN_CONFIDENCE
+                and _ai_conf >= _symbol_min_conf
                 and score >= _hard_score_floor
             )
             analysis.ai_confidence = _ai_conf
             analysis.ai_reason = str(ai_result.get("reason", ""))
+            if _model_approved and not analysis.ai_approved and _ai_conf < _symbol_min_conf:
+                analysis.ai_reason = (
+                    f"{analysis.ai_reason} | conf_floor:{_ai_conf:.2f}<{_symbol_min_conf:.2f}"
+                )
             if _model_approved and not analysis.ai_approved and score < _hard_score_floor:
                 analysis.ai_reason = (
                     f"{analysis.ai_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
                 )
+            analysis.ai_reason = f"{analysis.ai_reason} | {_quality_note}"
             analysis.ai_model      = str(ai_result.get("model", ""))
             await self._ai_cache_set(
                 symbol, ai_result,

@@ -163,12 +163,13 @@ class DerivDaemon:
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
-        # Tick-only anti-chase guard: never enter right after a materialized spike.
-        # This uses spike telemetry as a veto only (not as an entry trigger).
-        self._post_spike_chase_block_sec = max(
+        # Tick-only anti-chase guard (fallback default): never enter right
+        # after a materialized spike. Per-symbol values may override this.
+        self._post_spike_chase_block_sec_default = max(
             0.0,
             float(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "180") or 180),
         )
+        self._post_spike_chase_block_sec_map = self._load_post_spike_chase_block_map()
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -273,10 +274,80 @@ class DerivDaemon:
         """Clamp dynamic config values to hard safety guardrails."""
         _sym = str(symbol or "").upper()
         _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
+        _score_max = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
         _spf = max(50, min(int(spike_pre_filter_target), 500))
         _grace = max(_sensitive_zero_peak_floor, min(int(zero_peak_grace_sec), 120))
-        _score = max(6.5, min(float(score_min_override), 8.0))
+        _score = max(6.5, min(float(score_min_override), _score_max))
         return _spf, _grace, _score
+
+    @staticmethod
+    def _parse_post_spike_map(raw: str) -> dict[str, float]:
+        """Parse DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP='SYM:sec,SYM:sec'."""
+        out: dict[str, float] = {}
+        for chunk in str(raw or "").split(","):
+            item = chunk.strip()
+            if not item or ":" not in item:
+                continue
+            sym_raw, sec_raw = item.split(":", 1)
+            sym = sym_raw.strip().upper()
+            if not sym:
+                continue
+            try:
+                sec = max(0.0, float(sec_raw.strip()))
+            except ValueError:
+                continue
+            out[sym] = sec
+        return out
+
+    def _load_post_spike_chase_block_map(self) -> dict[str, float]:
+        """Load per-symbol anti-chase overrides from env once at startup."""
+        out = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", ""))
+        prefix = "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"
+        for key, value in os.environ.items():
+            if not key.startswith(prefix):
+                continue
+            symbol = key[len(prefix):].strip().upper()
+            if not symbol:
+                continue
+            try:
+                out[symbol] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _post_spike_chase_block_sec_for_symbol(
+        self,
+        symbol: str,
+        profile: dict[str, Any] | None,
+        dyn_cfg: dict[str, Any],
+        dyn_active: bool,
+    ) -> float:
+        """Resolve anti-chase window per symbol with safe fallbacks."""
+        sym = str(symbol or "").upper()
+
+        # Highest priority: explicit per-symbol env overrides.
+        by_symbol = self._post_spike_chase_block_sec_map.get(sym)
+        if by_symbol is not None:
+            return by_symbol
+
+        # Dynamic config already stores per-symbol spike timing in seconds.
+        if dyn_active:
+            dyn_sec = float(dyn_cfg.get("spike_pre_filter_target") or 0.0)
+            if dyn_sec > 0:
+                return dyn_sec
+
+        # Profile fallback: symbol-specific post-spike delay.
+        prf = profile or {}
+        profile_sec = float(prf.get("spike_min_post_sec") or 0.0)
+        if profile_sec > 0:
+            return profile_sec
+
+        # Last resort derived from cycle if available.
+        cycle_ticks = float(prf.get("spike_interval_ticks") or 0.0)
+        if cycle_ticks > 0:
+            return max(30.0, min(420.0, cycle_ticks * 0.30))
+
+        return self._post_spike_chase_block_sec_default
 
     def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return in-memory dynamic config for a symbol (safe fallback if DB unavailable)."""
@@ -898,22 +969,29 @@ class DerivDaemon:
         if (
             self._entry_tick_only
             and is_spike_market(tick.symbol)
-            and self._post_spike_chase_block_sec > 0
         ):
+            _post_spike_block_sec = self._post_spike_chase_block_sec_for_symbol(
+                tick.symbol,
+                _early_profile,
+                _dyn_cfg,
+                _dyn_active,
+            )
+            if _post_spike_block_sec <= 0:
+                _post_spike_block_sec = 0.0
             _last_spike_ts = self._risk.get_last_spike_ts(tick.symbol)
             if _last_spike_ts > 0:
                 _elapsed_post_spike = time.time() - _last_spike_ts
-                if 0 <= _elapsed_post_spike < self._post_spike_chase_block_sec:
+                if 0 <= _elapsed_post_spike < _post_spike_block_sec:
                     _block_reason = (
                         "post_spike_chase_guard:"
                         f"{_elapsed_post_spike:.1f}s<"
-                        f"{self._post_spike_chase_block_sec:.0f}s"
+                        f"{_post_spike_block_sec:.0f}s"
                     )
                     _LOGGER.debug(
                         "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.1fs < %.0fs",
                         tick.symbol,
                         _elapsed_post_spike,
-                        self._post_spike_chase_block_sec,
+                        _post_spike_block_sec,
                     )
                     self._spike_enrich(
                         tick.symbol,

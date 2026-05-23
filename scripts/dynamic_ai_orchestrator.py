@@ -40,7 +40,7 @@ SYMBOLS = [
 ]
 
 SCORE_MIN_GUARDRAIL = 6.5
-SCORE_MAX_GUARDRAIL = 8.0
+SCORE_MAX_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
 ZERO_PEAK_FLOOR_BY_SYMBOL = {
     "BOOM500": 60,
     "CRASH500": 60,
@@ -52,6 +52,13 @@ STATE_MEMORY: dict[str, dict[str, Any]] = {}
 MIN_STATE_LIFETIME_SEC = max(
     480,
     min(int(os.getenv("DYNAMIC_AI_MIN_STATE_LIFETIME_SEC", "600") or 600), 720),
+)
+PATTERN_MEMORY_ENABLED = os.getenv("DYNAMIC_AI_PATTERN_MEMORY_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+PATTERN_MEMORY_LOOKBACK = max(
+    80,
+    int(os.getenv("DYNAMIC_AI_PATTERN_MEMORY_LOOKBACK", "500") or 500),
 )
 
 
@@ -251,6 +258,7 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
 def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[str, Any]:
     spikes = _load_json(logs_dir / "deriv_spike_events.json")
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
+    ai_decisions = _load_json(logs_dir / "deriv_ai_decisions.json")
 
     now_ts = time.time()
     min_ts = now_ts - lookback_sec
@@ -274,6 +282,14 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
             continue
         if (opened is not None and opened >= min_ts) or (closed_ts is not None and closed_ts >= min_ts):
             closes_by[sym].append(c)
+
+    ai_by: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in ai_decisions:
+        sym = str(row.get("symbol") or "").upper()
+        ts = _safe_ts(row.get("ts") or row.get("timestamp") or row.get("iso"))
+        if not sym or ts is None or ts < min_ts:
+            continue
+        ai_by[sym].append(row)
 
     telemetry: dict[str, Any] = {}
     for sym in SYMBOLS:
@@ -318,6 +334,21 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
 
         exits = Counter(str(c.get("exit_reason") or c.get("close_reason") or "") for c in close_rows)
         block_reasons = Counter(str(s.get("block_reason") or "none") for s in blocked)
+        pnl_values: list[float] = []
+        wins = 0
+        for c in close_rows:
+            try:
+                pnl = float(c.get("realized_pnl_usdt") or 0.0)
+            except Exception:
+                pnl = 0.0
+            pnl_values.append(pnl)
+            if pnl > 0.0:
+                wins += 1
+
+        ai_rows = ai_by.get(sym, [])
+        ai_n = len(ai_rows)
+        ai_approvals = sum(1 for r in ai_rows if bool(r.get("approved")))
+        contracts_n = len(close_rows)
 
         telemetry[sym] = {
             "spikes_15m": len(recent),
@@ -325,7 +356,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
             "blocked_spikes_15m": len(blocked),
             "entry_rate_pct": (len(entered) / len(recent) * 100.0) if recent else 0.0,
             "top_block_reasons": block_reasons.most_common(5),
-            "contracts_15m": len(close_rows),
+            "contracts_15m": contracts_n,
+            "win_rate_15m": pct(wins, contracts_n),
+            "ev_per_trade_15m": (sum(pnl_values) / contracts_n) if contracts_n else 0.0,
+            "ai_decisions_15m": ai_n,
+            "ai_approval_rate_15m": pct(ai_approvals, ai_n),
             "entry_lag_sec_median": statistics_median(lags),
             "entry_lag_sec_p75": statistics_quantile(lags, 0.75),
             "late_entry_ge120_pct": pct(sum(1 for x in lags if x >= 120), len(lags)),
@@ -382,6 +417,11 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         late120 = float(t.get("late_entry_ge120_pct") or 0.0)
         early80 = float(t.get("next_spike_after_close_le80_pct") or 0.0)
         zero_peak_count = int(t.get("zero_peak_exit_count") or 0)
+        win_rate = float(t.get("win_rate_15m") or 0.0)
+        ev_per_trade = float(t.get("ev_per_trade_15m") or 0.0)
+        ai_approval_rate = float(t.get("ai_approval_rate_15m") or 0.0)
+        contracts_n = int(t.get("contracts_15m") or 0)
+        ai_n = int(t.get("ai_decisions_15m") or 0)
 
         # Entry is tick-driven; when lag is high we must be MORE selective,
         # not less selective, to avoid chase entries.
@@ -391,6 +431,16 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
             score = score + 0.4
         elif regime == "SLOW":
             score = score + 0.5
+
+        # Core objective: prevent over-approval when realized edge is negative.
+        if contracts_n >= 4 and win_rate < 40.0 and ev_per_trade < 0.0:
+            score = score + 0.6
+        if contracts_n >= 6 and win_rate < 30.0 and ev_per_trade < -0.05:
+            score = score + 0.5
+        if ai_n >= 8 and ai_approval_rate >= 85.0 and contracts_n >= 4 and win_rate < 45.0:
+            score = score + 0.5
+        if ai_n >= 10 and ai_approval_rate >= 92.0 and contracts_n >= 6 and win_rate < 35.0:
+            score = score + 0.4
 
         if early80 >= 20.0:
             grace = grace + 50
@@ -408,6 +458,7 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
 
 
 def _build_prompt(telemetry_json: dict[str, Any]) -> str:
+    score_max = f"{SCORE_MAX_GUARDRAIL:.1f}"
     return (
         "Actua como un motor cuantitativo de alta frecuencia para indices sinteticos Deriv.\n"
         "Tu objetivo es ajustar los parametros de trading en tiempo real para evitar entradas tardias y salidas prematuras.\n\n"
@@ -419,9 +470,10 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
-        "6. Mantener guardrails: score_min_override [6.5,8.0], zero_peak_grace_sec [0,120].\n"
-        "7. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
-        "8. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
+        "6. Si ai_approval_rate_15m >85% y win_rate_15m <45% (o ev_per_trade_15m <0), ENDURECER score_min_override inmediatamente.\n"
+        f"7. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
+        "8. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
+        "9. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"is_active\": true}\n"
@@ -570,6 +622,155 @@ async def _apply_cfg(
     return updates
 
 
+def _bucket(v: Any, step: float, ndigits: int = 3) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        return 0.0
+    if step <= 0:
+        return round(x, ndigits)
+    return round(round(x / step) * step, ndigits)
+
+
+def _extract_pattern_key(row: dict[str, Any]) -> tuple[str, str, str, str, float, float, float, float]:
+    symbol = str(row.get("symbol") or "").upper()
+    side = str(row.get("side") or "").upper() or "UNKNOWN"
+    sb = row.get("score_breakdown") if isinstance(row.get("score_breakdown"), dict) else {}
+    setup = str(sb.get("setup_type") or sb.get("entry_setup") or "unknown").lower()
+    regime = str(sb.get("market_regime") or sb.get("regime") or "normal").upper()
+    score_raw = row.get("score")
+    if score_raw is None:
+        score_raw = sb.get("score_raw")
+    hurst_raw = row.get("hurst")
+    if hurst_raw is None:
+        hurst_raw = sb.get("hurst")
+    atr_raw = sb.get("atr_pct_at_entry")
+    if atr_raw is None:
+        atr_raw = sb.get("atr_pct")
+    geo_raw = sb.get("geo_channel_pos")
+    return (
+        symbol,
+        side,
+        setup,
+        regime,
+        _bucket(score_raw, 0.25, 2),
+        _bucket(hurst_raw, 0.02, 2),
+        _bucket(atr_raw, 0.001, 4),
+        _bucket(geo_raw, 0.1, 2),
+    )
+
+
+async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
+    if not PATTERN_MEMORY_ENABLED:
+        return
+
+    closed = _load_json(logs_dir / "deriv_closed_contracts.json")
+    if not closed:
+        return
+
+    rows = closed[-PATTERN_MEMORY_LOOKBACK:]
+    agg: dict[tuple[str, str, str, str, float, float, float, float], dict[str, Any]] = {}
+    for row in rows:
+        key = _extract_pattern_key(row)
+        symbol = key[0]
+        if not symbol:
+            continue
+        slot = agg.setdefault(
+            key,
+            {
+                "sample_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "pnl_sum": 0.0,
+                "last_trade_ts": None,
+            },
+        )
+        try:
+            pnl = float(row.get("realized_pnl_usdt") or 0.0)
+        except Exception:
+            pnl = 0.0
+        slot["sample_trades"] += 1
+        slot["pnl_sum"] += pnl
+        if pnl > 0:
+            slot["wins"] += 1
+        elif pnl < 0:
+            slot["losses"] += 1
+        close_ts = _safe_ts(row.get("closed_at_ts") or row.get("closed_at"))
+        prev_ts = slot.get("last_trade_ts")
+        if close_ts is not None and (prev_ts is None or close_ts > prev_ts):
+            slot["last_trade_ts"] = close_ts
+
+    if not agg:
+        return
+
+    async with conn.transaction():
+        for key, stats in agg.items():
+            symbol, side, setup, regime, score_bucket, hurst_bucket, atr_bucket, geo_bucket = key
+            trades = int(stats["sample_trades"])
+            wins = int(stats["wins"])
+            losses = int(stats["losses"])
+            pnl_sum = float(stats["pnl_sum"])
+            win_rate = (wins / trades * 100.0) if trades else 0.0
+            avg_pnl = (pnl_sum / trades) if trades else 0.0
+            last_trade_ts = stats.get("last_trade_ts")
+            last_trade_dt = (
+                datetime.fromtimestamp(last_trade_ts, tz=timezone.utc)
+                if isinstance(last_trade_ts, (int, float))
+                else None
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO ai_entry_pattern_memory (
+                    symbol,
+                    side,
+                    setup_type,
+                    regime,
+                    score_bucket,
+                    hurst_bucket,
+                    atr_bucket,
+                    geo_bucket,
+                    sample_trades,
+                    wins,
+                    losses,
+                    win_rate,
+                    avg_pnl_usdt,
+                    last_trade_ts,
+                    updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13, $14, NOW()
+                )
+                ON CONFLICT (
+                    symbol, side, setup_type, regime,
+                    score_bucket, hurst_bucket, atr_bucket, geo_bucket
+                ) DO UPDATE SET
+                    sample_trades = EXCLUDED.sample_trades,
+                    wins = EXCLUDED.wins,
+                    losses = EXCLUDED.losses,
+                    win_rate = EXCLUDED.win_rate,
+                    avg_pnl_usdt = EXCLUDED.avg_pnl_usdt,
+                    last_trade_ts = EXCLUDED.last_trade_ts,
+                    updated_at = NOW()
+                """,
+                symbol,
+                side,
+                setup,
+                regime,
+                score_bucket,
+                hurst_bucket,
+                atr_bucket,
+                geo_bucket,
+                trades,
+                wins,
+                losses,
+                win_rate,
+                avg_pnl,
+                last_trade_dt,
+            )
+
+
 async def run_loop() -> None:
     dsn = os.getenv("DATABASE_URL", "").strip()
     if not dsn:
@@ -600,6 +801,11 @@ async def run_loop() -> None:
             current_cfg = await _read_current_cfg(conn)
             _seed_state_memory(current_cfg)
             telemetry = _build_telemetry_from_logs(logs_dir)
+            if PATTERN_MEMORY_ENABLED:
+                try:
+                    await _update_pattern_memory(conn, logs_dir)
+                except Exception as memory_exc:  # noqa: BLE001
+                    LOG.warning("[dynamic-ai] pattern memory skipped: %s", memory_exc)
             prompt = _build_prompt(telemetry)
 
             try:

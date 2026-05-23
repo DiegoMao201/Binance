@@ -312,6 +312,7 @@ class DynamicPositionManager:
         entry_price: float,
         entry_ts: float | None = None,
         aggressive_trailing: bool = False,
+        max_duration_override_sec: float | None = None,
     ) -> None:
         """Register a newly opened contract for dynamic management.
 
@@ -326,12 +327,16 @@ class DynamicPositionManager:
         # destroys edge. We keep the flag for telemetry but do NOT tighten params.
         # ALSO FIXED: previous code had `params = _get_params(symbol)` AFTER the
         # if-block, which silently re-overrode any modification (dead branch bug).
-        params = _get_params(symbol)
+        params = dict(_get_params(symbol))
         if aggressive_trailing:
             _LOGGER.info(
                 "[DPM] aggressive_trailing=True for %s (telemetry-only — "
                 "ratchet params unchanged: step=%.2f%% ratio=%.2f) — Phase10",
                 symbol, params["ratchet_step_pct"] * 100, params["ratchet_ratio"],
+            )
+        if max_duration_override_sec is not None and max_duration_override_sec > 0:
+            params["max_duration_seg"] = int(
+                max(float(params.get("max_duration_seg", 0) or 0), float(max_duration_override_sec))
             )
         state = _PositionState(
             contract_id=contract_id,

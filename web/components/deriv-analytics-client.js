@@ -1419,6 +1419,7 @@ function DecisionFunnel({ decisions = [], pipelineCounts }) {
 function TelemetryTab({ data }) {
   const last = data.decisions?.last_by_symbol || {};
   const symbols = Object.keys(last).sort();
+  const aiSummary = data?.ai_quality?.summary || {};
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Panel title="embudo de decisión · señal → ejecución" glow right={
@@ -1426,6 +1427,21 @@ function TelemetryTab({ data }) {
       }>
         <DecisionFunnel decisions={data.decisions?.recent || []} pipelineCounts={data.decisions?.pipeline_counts} />
       </Panel>
+
+      <Panel title="calidad IA adaptativa · live" right={`dec=${aiSummary.decisions_n || 0} · trades=${aiSummary.trades_n || 0}`} glow>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8, marginBottom: 8 }}>
+          <KPI label="Approval" value={pct(aiSummary.approval_rate || 0, 1)} color={(aiSummary.approval_rate || 0) > 0.82 ? T.red : T.green} accent={T.cyan} />
+          <KPI label="Winrate" value={pct(aiSummary.win_rate || 0, 1)} color={(aiSummary.win_rate || 0) >= 0.5 ? T.green : T.red} accent={T.green} />
+          <KPI label="EV/trade" value={`$${n(aiSummary.ev_per_trade, 4)}`} color={tone(aiSummary.ev_per_trade)} accent={T.violet} />
+          <KPI label="Approvals" value={nC(aiSummary.approvals_n || 0)} accent={T.blue} />
+        </div>
+        <AiQualityTable rows={data?.ai_quality?.by_symbol || []} />
+      </Panel>
+
+      <Panel title="pattern memory · combinaciones" right={`${(data?.pattern_memory || []).length} filas`}>
+        <PatternMemoryTable rows={data?.pattern_memory || []} />
+      </Panel>
+
       <Panel title={`per-symbol live state · ${symbols.length} symbols`}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
           {symbols.map(s => <SymbolStateCard key={s} sym={s} dec={last[s]} />)}
@@ -1577,6 +1593,51 @@ function RejectionBars({ counts }) {
           <Bar dataKey="n" fill={T.red} radius={[0, 3, 3, 0]} />
         </BarChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+function AiQualityTable({ rows }) {
+  if (!rows || rows.length === 0) return <div style={{ color: T.mute, fontSize: 11 }}>no ai quality data</div>;
+  const top = rows.slice(0, 12);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "95px 46px 56px 56px 74px 54px", gap: 6, padding: "4px 6px", color: T.mute, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", fontSize: 8 }}>
+        <span>Symbol</span><span style={{ textAlign: "right" }}>Dec</span><span style={{ textAlign: "right" }}>Appr</span><span style={{ textAlign: "right" }}>WR</span><span style={{ textAlign: "right" }}>EV</span><span style={{ textAlign: "right" }}>Press</span>
+      </div>
+      {top.map((r) => (
+        <div key={r.symbol} style={{ display: "grid", gridTemplateColumns: "95px 46px 56px 56px 74px 54px", gap: 6, padding: "5px 6px", background: T.panel2, borderRadius: 4, alignItems: "center" }}>
+          <span style={{ color: T.text, fontWeight: 700 }}>{r.symbol}</span>
+          <span style={{ textAlign: "right", color: T.textD }}>{nC(r.decisions_n || 0)}</span>
+          <span style={{ textAlign: "right", color: (r.approval_rate || 0) > 0.82 ? T.red : T.green }}>{pct(r.approval_rate || 0, 0)}</span>
+          <span style={{ textAlign: "right", color: (r.win_rate || 0) >= 0.5 ? T.green : T.red }}>{pct(r.win_rate || 0, 0)}</span>
+          <span style={{ textAlign: "right", color: tone(r.ev_per_trade), fontWeight: 700 }}>{sign(r.ev_per_trade)}{n(r.ev_per_trade, 3)}</span>
+          <span style={{ textAlign: "right", color: (r.adaptive_pressure || 0) > 0.55 ? T.red : (r.adaptive_pressure || 0) > 0.3 ? T.amber : T.green, fontWeight: 700 }}>{pct(r.adaptive_pressure || 0, 0)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PatternMemoryTable({ rows }) {
+  if (!rows || rows.length === 0) return <div style={{ color: T.mute, fontSize: 11 }}>no pattern memory yet</div>;
+  const top = rows.slice(0, 14);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "86px 56px 64px 54px 46px 62px 66px", gap: 6, padding: "4px 6px", color: T.mute, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", fontSize: 8 }}>
+        <span>Pattern</span><span>Side</span><span>Setup</span><span>Reg</span><span style={{ textAlign: "right" }}>N</span><span style={{ textAlign: "right" }}>WR</span><span style={{ textAlign: "right" }}>AvgPnL</span>
+      </div>
+      {top.map((r, i) => (
+        <div key={`${r.symbol}-${r.setup_type}-${i}`} style={{ display: "grid", gridTemplateColumns: "86px 56px 64px 54px 46px 62px 66px", gap: 6, padding: "5px 6px", background: T.panel2, borderRadius: 4, alignItems: "center" }}>
+          <span style={{ color: T.text, fontWeight: 700 }}>{r.symbol}</span>
+          <span style={{ color: r.side === "MULTUP" ? T.green : r.side === "MULTDOWN" ? T.red : T.textD }}>{r.side || "?"}</span>
+          <span style={{ color: T.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.setup_type || "?"}</span>
+          <span style={{ color: REGIME_COLORS[r.regime] || T.textD }}>{r.regime || "?"}</span>
+          <span style={{ textAlign: "right", color: T.textD }}>{nC(r.sample_trades || 0)}</span>
+          <span style={{ textAlign: "right", color: (r.win_rate || 0) >= 0.5 ? T.green : T.red }}>{pct(r.win_rate || 0, 0)}</span>
+          <span style={{ textAlign: "right", color: tone(r.avg_pnl_usdt), fontWeight: 700 }}>{sign(r.avg_pnl_usdt)}{n(r.avg_pnl_usdt, 3)}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1927,238 +1988,171 @@ function LogsTab({ data }) {
    SPIKES TAB — real-time spike event explorer
    ════════════════════════════════════════════════════════════════════════ */
 function SpikesTab() {
-  const [spikes, setSpikes]       = useState([]);
-  const [total, setTotal]         = useState(0);
-  const [loading, setLoading]     = useState(true);
+  const [spikes, setSpikes] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [filterSym, setFilterSym] = useState("");
-  const [limit, setLimit]         = useState(300);
-  const [sortDesc, setSortDesc]   = useState(true);
-  const [liveMode, setLiveMode]   = useState(true);
+  const [limit, setLimit] = useState(300);
+  const [sortDesc, setSortDesc] = useState(true);
+  const [liveMode, setLiveMode] = useState(true);
 
   const fetchSpikes = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ limit });
+      const params = new URLSearchParams({ limit: String(limit) });
       if (filterSym) params.set("symbol", filterSym);
-      const r = await fetch(`/api/spikes?${params}`, { cache: "no-store" });
+      const r = await fetch(`/api/spikes?${params.toString()}`, { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
-      setSpikes(j.spikes || []);
-      setTotal(j.total || 0);
-    } catch { /* ignore */ } finally {
+      setSpikes(Array.isArray(j.spikes) ? j.spikes : []);
+      setTotal(Number(j.total || 0));
+    } catch {
+      // noop
+    } finally {
       setLoading(false);
     }
   }, [filterSym, limit]);
 
   useEffect(() => { fetchSpikes(); }, [fetchSpikes]);
   useEffect(() => {
-    if (!liveMode) return;
+    if (!liveMode) return undefined;
     const id = setInterval(fetchSpikes, 5000);
     return () => clearInterval(id);
   }, [liveMode, fetchSpikes]);
 
   const sorted = useMemo(() => {
-    const s = [...spikes];
-    return sortDesc ? s.reverse() : s;
+    const rows = [...spikes];
+    return sortDesc ? rows.reverse() : rows;
   }, [spikes, sortDesc]);
 
-  // ── Stats by symbol ───────────────────────────────────────────────────
   const bySym = useMemo(() => {
     const m = {};
     for (const e of spikes) {
       const s = e.symbol || "?";
-      if (!m[s]) m[s] = { n: 0, entered: 0, missed: 0, blocked: 0, win: 0, loss: 0, openPos: 0, ratioSum: 0, ratioMax: 0 };
-      m[s].n++;
+      if (!m[s]) {
+        m[s] = { n: 0, entered: 0, missed: 0, blocked: 0, win: 0, loss: 0, openPos: 0, ratioSum: 0, ratioMax: 0 };
+      }
+      m[s].n += 1;
       m[s].ratioSum += e.ratio || 0;
-      if ((e.ratio || 0) > m[s].ratioMax) m[s].ratioMax = e.ratio;
+      if ((e.ratio || 0) > m[s].ratioMax) m[s].ratioMax = e.ratio || 0;
       if (e.bot_entered === true) {
-        m[s].entered++;
-        if (e.trade_result === "win")  m[s].win++;
-        else if (e.trade_result === "loss") m[s].loss++;
-        else if (e.trade_result === "open") m[s].openPos++;
+        m[s].entered += 1;
+        if (e.trade_result === "win") m[s].win += 1;
+        else if (e.trade_result === "loss") m[s].loss += 1;
+        else if (e.trade_result === "open") m[s].openPos += 1;
       } else if (e.missed_exit === true) {
-        m[s].missed++;
+        m[s].missed += 1;
       } else if (e.bot_entered === false) {
-        m[s].blocked++;
+        m[s].blocked += 1;
       }
     }
     return Object.entries(m).sort((a, b) => b[1].n - a[1].n);
   }, [spikes]);
 
-  const entered   = spikes.filter(e => e.bot_entered === true).length;
-  const missed    = spikes.filter(e => e.missed_exit === true).length;
-  const blocked   = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
-  const unknown   = spikes.filter(e => e.bot_entered == null).length;
-  // WIN/LOSS/OPEN breakdown of entered spikes
-  const spikeWins   = spikes.filter(e => e.bot_entered === true && e.trade_result === "win").length;
+  const entered = spikes.filter(e => e.bot_entered === true).length;
+  const missed = spikes.filter(e => e.missed_exit === true).length;
+  const blocked = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
+  const unknown = spikes.filter(e => e.bot_entered == null).length;
+  const spikeWins = spikes.filter(e => e.bot_entered === true && e.trade_result === "win").length;
   const spikeLosses = spikes.filter(e => e.bot_entered === true && e.trade_result === "loss").length;
-  const spikeOpen   = spikes.filter(e => e.bot_entered === true && e.trade_result === "open").length;
+  const spikeOpen = spikes.filter(e => e.bot_entered === true && e.trade_result === "open").length;
   const spikeClosedEntered = spikeWins + spikeLosses;
-  // Effective capture rate: spikes where bot entered AND won / all known spikes
-  const entryDenom = entered + missed + blocked;
-  const efectivaDenom = entryDenom; // same base = total meaningful spikes
+  const efectivaDenom = entered + missed + blocked;
   const capturaEfectiva = efectivaDenom > 0 ? ((spikeWins / efectivaDenom) * 100).toFixed(1) : "–";
-  const winRateEntered  = spikeClosedEntered > 0 ? ((spikeWins / spikeClosedEntered
-
-  const entered   = spikes.filter(e => e.bot_entered === true).length;
-  const missed    = spikes.filter(e => e.missed_exit === true).length;
-  const blocked   = spikes.filter(e => e.bot_entered === false && !e.missed_exit).length;
-  const unknown   = spikes.filter(e => e.bot_entered == null).length;
-  // WIN/LOSS/OPEN breakdown of entered spikes
-  const spikeWins   = spikes.filter(e => e.bot_entered === true && e.trade_result === "win").length;
-  const spikeLosses = spikes.filter(e => e.bot_entered === true && e.trade_result === "loss").length;
-  const spikeOpen   = spikes.filter(e => e.bot_entered === true && e.trade_result === "open").length;
-  const spikeClosedEntered = spikeWins + spikeLosses;
-  // Effective capture rate: spikes where bot entered AND won / all known spikes
-  const entryDenom = entered + missed + blocked;
-  const efectivaDenom = entryDenom; // same base = total meaningful spikes
-  const capturaEfectiva = efectivaDenom > 0 ? ((spikeWins / efectivaDenom) * 100).toFixed(1) : "–";
-  const winRateEntered  = spikeClosedEntered > 0 ? ((spikeWins / spikeClosedEntered) * 100).toFixed(1) : "–";
+  const winRateEntered = spikeClosedEntered > 0 ? ((spikeWins / spikeClosedEntered) * 100).toFixed(1) : "–";
   const allSymbols = [...new Set(spikes.map(e => e.symbol).filter(Boolean))].sort();
 
-  const dirColor = d => d === "UP" ? T.green : T.red;
-
-  // ── Timing analysis ─────────────────────────────────────────────────
-  const tardeSamples   = spikes.filter(e => e.bot_entered === true && e.post_spike_entry === true);
-  const trueSamples    = spikes.filter(e => e.bot_entered === true && !e.post_spike_entry);
+  const tardeSamples = spikes.filter(e => e.bot_entered === true && e.post_spike_entry === true);
+  const trueSamples = spikes.filter(e => e.bot_entered === true && !e.post_spike_entry);
   const perdidoSamples = spikes.filter(e => e.missed_exit === true);
 
-  const avgTardeLag  = tardeSamples.length > 0
+  const closedTarde = tardeSamples.filter(e => e.trade_result === "win" || e.trade_result === "loss");
+  const tardeWins = closedTarde.filter(e => e.trade_result === "win").length;
+  const tardeLosses = closedTarde.filter(e => e.trade_result === "loss").length;
+  const tardeWinRate = closedTarde.length > 0 ? `${((tardeWins / closedTarde.length) * 100).toFixed(0)}%` : "–";
+  const avgTardeLag = tardeSamples.length > 0
     ? Math.round(tardeSamples.reduce((s, e) => s + (e.entry_lag_sec || 0), 0) / tardeSamples.length)
     : null;
-  const maxTardeLag  = tardeSamples.length > 0
+  const maxTardeLag = tardeSamples.length > 0
     ? Math.round(Math.max(...tardeSamples.map(e => e.entry_lag_sec || 0)))
     : null;
-  const closedTarde  = tardeSamples.filter(e => e.trade_result === "win" || e.trade_result === "loss");
-  const tardeWins    = tardeSamples.filter(e => e.trade_result === "win").length;
-  const tardeLosses  = tardeSamples.filter(e => e.trade_result === "loss").length;
-  const tardeWinRate = closedTarde.length > 0
-    ? ((tardeWins / closedTarde.length) * 100).toFixed(0) + "%"
-    : "–";
+
+  const closedTrue = trueSamples.filter(e => e.trade_result === "win" || e.trade_result === "loss");
+  const trueWins = closedTrue.filter(e => e.trade_result === "win").length;
+  const trueLosses = closedTrue.filter(e => e.trade_result === "loss").length;
+  const trueWinRate = closedTrue.length > 0 ? `${((trueWins / closedTrue.length) * 100).toFixed(0)}%` : "–";
 
   const avgMissedSec = perdidoSamples.length > 0
     ? Math.round(perdidoSamples.reduce((s, e) => s + (e.missed_exit_sec || 0), 0) / perdidoSamples.length)
     : null;
-  const minMissedSec = perdidoSamples.length > 0
-    ? Math.min(...perdidoSamples.map(e => e.missed_exit_sec || 0))
-    : null;
+
   const exitReasonBreakdown = perdidoSamples.reduce((acc, e) => {
-    co{/* FILA 1: contadores brutos */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
-        <KPI label="Total Spikes" value={total} accent={T.cyan} />
-        <KPI label="En pantalla" value={spikes.length} accent={T.violet} />
-        <KPI label="Bot entró" value={entered} color={T.textD} accent={T.textD}
-          sub={`${spikeWins}W · ${spikeLosses}L · ${spikeOpen} abiertas`} />
-        <KPI label="↩ Salió antes" value={missed} color={T.amber} accent={T.amber} sub="spike_timeout prematura" />
-        <KPI label="✗ Bloqueado" value={blocked} color={T.red} accent={T.red} sub="filtros/lockout" />
-        <KPI label="Sin dato" value={unknown} color={T.mute} />
-      </div>
-      {/* FILA 2: métricas reales */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
-        <KPI label="✓ Spike WIN" value={spikeWins} color={T.green} accent={T.green} big
-          sub={`de ${entered} entradas`} />
-        <KPI label="✗ Spike LOSS" value={spikeLosses} color={T.red} accent={T.red} big
-          sub={`de ${entered} entradas`} />
-        <KPI label="Win% (de entradas cerradas)" value={`${winRateEntered}%`}
-          color={Number(winRateEntered) >= 50 ? T.green : T.red} accent={T.cyan} big
-          sub={`${spikeClosedEntered} spikes cerrados`} />
-        <KPI label="Captura efectiva" value={`${capturaEfectiva}%`}
-          color={Number(capturaEfectiva) >= 30 ? T.green : Number(capturaEfectiva) >= 15 ? T.amber : T.red}
-          accent={T.violet} big
-          sub={`WIN / total spikes (${spikeWins}/${efectivaDenom})`
-  const trueWinRate = closedTrue.length > 0
-    ? ((trueWins / closedTrue.length) * 100).toFixed(0) + "%"
-    : "–";
+    const key = e.missed_exit_reason || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  const dirColor = d => (d === "UP" ? T.green : T.red);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* ── Top KPIs ─────────────────────────────────────────────────── */}
-      {/* FILA 1: contadores brutos */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
         <KPI label="Total Spikes" value={total} accent={T.cyan} />
         <KPI label="En pantalla" value={spikes.length} accent={T.violet} />
-        <KPI label="Bot entró" value={entered} color={T.textD} accent={T.textD}
-          sub={`${spikeWins}W · ${spikeLosses}L · ${spikeOpen} abiertas`} />
-        <KPI label="↩ Salió antes" value={missed} color={T.amber} accent={T.amber} sub="spike_timeout prematura" />
-        <KPI label="✗ Bloqueado" value={blocked} color={T.red} accent={T.red} sub="filtros/lockout" />
+        <KPI label="Bot entro" value={entered} color={T.textD} accent={T.textD} sub={`${spikeWins}W · ${spikeLosses}L · ${spikeOpen} abiertas`} />
+        <KPI label="Salio antes" value={missed} color={T.amber} accent={T.amber} sub="spike_timeout prematura" />
+        <KPI label="Bloqueado" value={blocked} color={T.red} accent={T.red} sub="filtros/lockout" />
         <KPI label="Sin dato" value={unknown} color={T.mute} />
       </div>
-      {/* FILA 2: métricas reales */}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
-        <KPI label="✓ Spike WIN" value={spikeWins} color={T.green} accent={T.green} big
-          sub={`de ${entered} entradas`} />
-        <KPI label="✗ Spike LOSS" value={spikeLosses} color={T.red} accent={T.red} big
-          sub={`de ${entered} entradas`} />
-        <KPI label="Win% (de entradas cerradas)" value={`${winRateEntered}%`}
-          color={Number(winRateEntered) >= 50 ? T.green : T.red} accent={T.cyan} big
-          sub={`${spikeClosedEntered} spikes cerrados`} />
-        <KPI label="Captura efectiva" value={`${capturaEfectiva}%`}
-          color={Number(capturaEfectiva) >= 30 ? T.green : Number(capturaEfectiva) >= 15 ? T.amber : T.red}
-          accent={T.violet} big
-          sub={`WIN / total spikes (${spikeWins}/${efectivaDenom})`} />
+        <KPI label="Spike WIN" value={spikeWins} color={T.green} accent={T.green} big sub={`de ${entered} entradas`} />
+        <KPI label="Spike LOSS" value={spikeLosses} color={T.red} accent={T.red} big sub={`de ${entered} entradas`} />
+        <KPI label="Win% entradas cerradas" value={`${winRateEntered}%`} color={Number(winRateEntered) >= 50 ? T.green : T.red} accent={T.cyan} big sub={`${spikeClosedEntered} spikes cerrados`} />
+        <KPI label="Captura efectiva" value={`${capturaEfectiva}%`} color={Number(capturaEfectiva) >= 30 ? T.green : Number(capturaEfectiva) >= 15 ? T.amber : T.red} accent={T.violet} big sub={`WIN / total spikes (${spikeWins}/${efectivaDenom})`} />
       </div>
 
-      {/* ── Controls ─────────────────────────────────────────────────── */}
       <Panel title="Filtros">
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            <Label>Símbolo</Label>
-            <select value={filterSym} onChange={e => setFilterSym(e.target.value)}
-              style={{ ...inputStyle, padding: "5px 8px", minWidth: 120 }}>
+            <Label>Simbolo</Label>
+            <select value={filterSym} onChange={e => setFilterSym(e.target.value)} style={{ ...inputStyle, padding: "5px 8px", minWidth: 120 }}>
               <option value="">Todos</option>
               {allSymbols.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <Label>Mostrar</Label>
-            <select value={limit} onChange={e => setLimit(Number(e.target.value))}
-              style={{ ...inputStyle, padding: "5px 8px" }}>
-              <option value={50}>Últimos 50</option>
-              <option value={100}>Últimos 100</option>
-              <option value={300}>Últimos 300</option>
-              <option value={1000}>Últimos 1000</option>
+            <select value={limit} onChange={e => setLimit(Number(e.target.value))} style={{ ...inputStyle, padding: "5px 8px" }}>
+              <option value={50}>Ultimos 50</option>
+              <option value={100}>Ultimos 100</option>
+              <option value={300}>Ultimos 300</option>
+              <option value={1000}>Ultimos 1000</option>
               <option value={2000}>Todos (2000)</option>
             </select>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <Label>Orden</Label>
             <button onClick={() => setSortDesc(v => !v)} style={{ ...btnStyle(T.cyan), padding: "6px 10px" }}>
-              {sortDesc ? "↓ Más reciente" : "↑ Más antiguo"}
-            </button>WIN","LOSS","Open","↩Perdido","✗Bloq.","Win%","Cap.Efect.","Ratio avg","Ratio max"].map(h => (
-                    <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {bySym.map(([sym, st]) => {
-                  const closed = st.win + st.loss;
-                  const winPct   = closed > 0 ? ((st.win / closed) * 100).toFixed(0) : "–";
-                  const capDenom = st.entered + (st.missed||0) + st.blocked;
-                  const capPct   = capDenom > 0 ? ((st.win / capDenom) * 100).toFixed(0) : "–";
-                  const winColor = closed > 0 && st.win >= st.loss ? T.green : T.red;
-                  return (
-                    <tr key={sym}
-                      style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}
-                      onClick={() => setFilterSym(filterSym === sym ? "" : sym)}
-                      onMouseEnter={e => e.currentTarget.style.background = T.panel2}
-                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                      <td style={{ padding: "5px 8px" }}><Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">{sym}</Pill></td>
-                      <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
-                      <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{st.win}</td>
-                      <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{st.loss}</td>
-                      <td style={{ padding: "5px 8px", color: T.cyan }}>{st.openPos||0}</td>
-                      <td style={{ padding: "5px 8px", color: T.amber }}>{st.missed||0}</td>
-                      <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
-                      <td style={{ padding: "5px 8px", color: winColor, fontWeight: 700 }}>{winPct}{winPct !== "–" ? "%" : ""}</td>
-                      <td style={{ padding: "5px 8px", color: Number(capPct) >= 30 ? T.green : Number(capPct) >= 15 ? T.amber : T.red, fontWeight: 700 }}>{capPct}{capPct !== "–" ? "%" : ""}
+              {sortDesc ? "Desc" : "Asc"}
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <Label>Live</Label>
+            <button onClick={() => setLiveMode(v => !v)} style={{ ...btnStyle(liveMode ? T.green : T.mute), padding: "6px 10px" }}>
+              {liveMode ? "ON" : "OFF"}
+            </button>
+          </div>
+          <button onClick={fetchSpikes} style={{ ...btnStyle(T.violet), padding: "6px 10px", marginTop: 16 }}>Refresh</button>
+        </div>
+      </Panel>
 
-      {/* ── Stats por símbolo ─────────────────────────────────────────── */}
       {bySym.length > 0 && (
-        <Panel title="Stats por símbolo">
+        <Panel title="Stats por simbolo">
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                  {["Símbolo","Spikes","WIN","LOSS","Open","↩Perdido","✗Bloq.","Win%","Cap.Efect.","Ratio avg","Ratio max"].map(h => (
+                  {["Simbolo", "Spikes", "WIN", "LOSS", "Open", "Perdido", "Bloq.", "Win%", "Cap.Efect.", "Ratio avg", "Ratio max"].map(h => (
                     <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
@@ -2166,27 +2160,22 @@ function SpikesTab() {
               <tbody>
                 {bySym.map(([sym, st]) => {
                   const closed = st.win + st.loss;
-                  const winPct   = closed > 0 ? ((st.win / closed) * 100).toFixed(0) : "–";
-                  const capDenom = st.entered + (st.missed||0) + st.blocked;
-                  const capPct   = capDenom > 0 ? ((st.win / capDenom) * 100).toFixed(0) : "–";
-                  const winColor = closed > 0 && st.win >= st.loss ? T.green : T.red;
+                  const winPct = closed > 0 ? ((st.win / closed) * 100).toFixed(0) : "–";
+                  const capDenom = st.entered + st.missed + st.blocked;
+                  const capPct = capDenom > 0 ? ((st.win / capDenom) * 100).toFixed(0) : "–";
                   return (
-                    <tr key={sym}
-                      style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }}
-                      onClick={() => setFilterSym(filterSym === sym ? "" : sym)}
-                      onMouseEnter={e => e.currentTarget.style.background = T.panel2}
-                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    <tr key={sym} style={{ cursor: "pointer", borderBottom: `1px solid ${T.border}22` }} onClick={() => setFilterSym(filterSym === sym ? "" : sym)}>
                       <td style={{ padding: "5px 8px" }}><Pill color={sym.includes("BOOM") ? T.green : T.red} size="sm">{sym}</Pill></td>
                       <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{st.n}</td>
                       <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{st.win}</td>
                       <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{st.loss}</td>
-                      <td style={{ padding: "5px 8px", color: T.cyan }}>{st.openPos||0}</td>
-                      <td style={{ padding: "5px 8px", color: T.amber }}>{st.missed||0}</td>
+                      <td style={{ padding: "5px 8px", color: T.cyan }}>{st.openPos}</td>
+                      <td style={{ padding: "5px 8px", color: T.amber }}>{st.missed}</td>
                       <td style={{ padding: "5px 8px", color: T.red }}>{st.blocked}</td>
-                      <td style={{ padding: "5px 8px", color: winColor, fontWeight: 700 }}>{winPct}{winPct !== "–" ? "%" : ""}</td>
+                      <td style={{ padding: "5px 8px", color: Number(winPct) >= 50 ? T.green : T.red, fontWeight: 700 }}>{winPct}{winPct !== "–" ? "%" : ""}</td>
                       <td style={{ padding: "5px 8px", color: Number(capPct) >= 30 ? T.green : Number(capPct) >= 15 ? T.amber : T.red, fontWeight: 700 }}>{capPct}{capPct !== "–" ? "%" : ""}</td>
-                      <td style={{ padding: "5px 8px", color: T.textD }}>{st.n > 0 ? (st.ratioSum / st.n).toFixed(0) : "–"}×</td>
-                      <td style={{ padding: "5px 8px", color: T.violet }}>{st.ratioMax.toFixed(0)}×</td>
+                      <td style={{ padding: "5px 8px", color: T.textD }}>{st.n > 0 ? (st.ratioSum / st.n).toFixed(0) : "–"}x</td>
+                      <td style={{ padding: "5px 8px", color: T.violet }}>{st.ratioMax.toFixed(0)}x</td>
                     </tr>
                   );
                 })}
@@ -2196,147 +2185,58 @@ function SpikesTab() {
         </Panel>
       )}
 
-      {/* ── Análisis de Timing ─────────────────────────────────────── */}
       {(tardeSamples.length > 0 || perdidoSamples.length > 0) && (
-        <Panel title="Análisis de Timing — Estrategia">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-
-            {/* TARDE: late entries */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <Pill color={T.cyan}>⚡ TARDE</Pill>
-                <span style={{ fontSize: 9, color: T.mute }}>Entró &gt;5s después del spike (persiguió el movimiento)</span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-                <KPI label="Total" value={tardeSamples.length} color={T.cyan} />
-                <KPI label="Lag prom." value={avgTardeLag != null ? avgTardeLag + "s" : "–"} color={T.cyan} />
-                <KPI label="Win rate" value={tardeWinRate} color={closedTarde.length > 0 && tardeWins >= tardeLosses ? T.green : T.red} />
-              </div>
-              {tardeSamples.length > 0 && (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: FONT_MONO }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                        {["Hora Spike", "Símbolo", "Lag entrada", "Resultado"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "3px 6px", color: T.mute, fontSize: 8, letterSpacing: "0.1em", fontWeight: 700 }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tardeSamples.slice(-10).reverse().map((e, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${T.border}18` }}>
-                          <td style={{ padding: "3px 6px", color: T.mute }}>{fmtDT(e.ts)}</td>
-                          <td style={{ padding: "3px 6px" }}><Pill color={(e.symbol||"").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol}</Pill></td>
-                          <td style={{ padding: "3px 6px", color: T.cyan, fontWeight: 700 }}>+{e.entry_lag_sec}s</td>
-                          <td style={{ padding: "3px 6px" }}>
-                            {e.trade_result === "win"  && <Pill color={T.green} size="sm">WIN</Pill>}
-                            {e.trade_result === "loss" && <Pill color={T.red}   size="sm">LOSS</Pill>}
-                            {e.trade_result === "open" && <Pill color={T.cyan}  size="sm">OPEN</Pill>}
-                            {!e.trade_result           && <span style={{ color: T.mute }}>–</span>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <div style={{ fontSize: 9, color: T.amber, background: `${T.amber}0a`, border: `1px solid ${T.amber}33`, borderRadius: 6, padding: "7px 10px", lineHeight: 1.6 }}>
-                💡 Si lag &gt;15s con win rate bajo → reducir ventana case-1 de 180s. Si lag 5-15s con buenos resultados → el bot sigue el impulso correctamente.
-              </div>
+        <Panel title="Analisis de timing">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+            <div style={{ background: `${T.cyan}08`, border: `1px solid ${T.cyan}22`, borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+              <Pill color={T.cyan}>Entrada tarde</Pill>
+              <KPI label="Total" value={tardeSamples.length} color={T.cyan} />
+              <KPI label="Lag prom." value={avgTardeLag != null ? `${avgTardeLag}s` : "–"} color={T.cyan} />
+              <KPI label="Lag max" value={maxTardeLag != null ? `${maxTardeLag}s` : "–"} color={T.cyan} />
+              <KPI label="Win rate" value={tardeWinRate} color={tardeWins >= tardeLosses ? T.green : T.red} />
             </div>
-
-            {/* PERDIDO: missed exits */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <Pill color={T.amber}>↩ PERDIDO</Pill>
-                <span style={{ fontSize: 9, color: T.mute }}>Trade cerrado antes de que llegara el spike</span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                <KPI label="Total" value={perdidoSamples.length} color={T.amber} />
-                <KPI label="Salida prom." value={avgMissedSec != null ? avgMissedSec + "s antes" : "–"} color={T.amber} />
-              </div>
-              {Object.keys(exitReasonBreakdown).length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  <span style={{ fontSize: 8, color: T.mute, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700 }}>Razón de salida</span>
-                  {Object.entries(exitReasonBreakdown).sort((a, b) => b[1] - a[1]).map(([reason, count]) => (
-                    <div key={reason} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 9, color: T.textD }}>{reason}</span>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <div style={{ width: Math.max(16, Math.round((count / perdidoSamples.length) * 80)) + "px", height: 5, background: T.amber, borderRadius: 3 }} />
-                        <span style={{ fontSize: 9, color: T.amber, fontWeight: 700, minWidth: 16, textAlign: "right" }}>{count}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {perdidoSamples.length > 0 && (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: FONT_MONO }}>
-                    <thead>
-                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                        {["Hora Spike", "Símbolo", "Salió X antes", "Razón"].map(h => (
-                          <th key={h} style={{ textAlign: "left", padding: "3px 6px", color: T.mute, fontSize: 8, letterSpacing: "0.1em", fontWeight: 700 }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {perdidoSamples.slice(-10).reverse().map((e, i) => (
-                        <tr key={i} style={{ borderBottom: `1px solid ${T.border}18` }}>
-                          <td style={{ padding: "3px 6px", color: T.mute }}>{fmtDT(e.ts)}</td>
-                          <td style={{ padding: "3px 6px" }}><Pill color={(e.symbol||"").includes("BOOM") ? T.green : T.amber} size="sm">{e.symbol}</Pill></td>
-                          <td style={{ padding: "3px 6px", color: T.amber, fontWeight: 700 }}>-{e.missed_exit_sec}s</td>
-                          <td style={{ padding: "3px 6px", color: T.mute, fontSize: 8 }}>{e.missed_exit_reason || "?"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <div style={{ fontSize: 9, color: T.amber, background: `${T.amber}0a`, border: `1px solid ${T.amber}33`, borderRadius: 6, padding: "7px 10px", lineHeight: 1.6 }}>
-                💡 Si mayoría sale por <code style={{ color: T.amber }}>spike_timeout</code>: considerar aumentar timeout o añadir hold-for-spike si ratio ATR sube bruscamente. Si sale por SL/trailing: re-entrada rápida &lt;30s post-spike es la estrategia correcta.
+            <div style={{ background: `${T.amber}08`, border: `1px solid ${T.amber}22`, borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+              <Pill color={T.amber}>Perdido</Pill>
+              <KPI label="Total" value={perdidoSamples.length} color={T.amber} />
+              <KPI label="Salida prom." value={avgMissedSec != null ? `${avgMissedSec}s` : "–"} color={T.amber} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {Object.entries(exitReasonBreakdown).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([reason, count]) => (
+                  <div key={reason} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.textD }}>
+                    <span>{reason}</span>
+                    <span style={{ color: T.amber, fontWeight: 700 }}>{count}</span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-
-          {/* Comparativa TRUE vs TARDE */}
           {(closedTrue.length > 0 || closedTarde.length > 0) && (
-            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12, marginTop: 4 }}>
-              <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700 }}>Comparativa: Captura Real vs. Entrada Tarde</span>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
-                <div style={{ background: `${T.green}08`, border: `1px solid ${T.green}22`, borderRadius: 6, padding: "10px 12px" }}>
-                  <div style={{ fontSize: 9, color: T.green, fontWeight: 700, marginBottom: 8, letterSpacing: "0.1em" }}>✓ CAPTURA REAL ({trueSamples.length} spikes / {closedTrue.length} cerrados)</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>WIN RATE</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{trueWinRate}</div></div>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>WINS</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{trueWins}</div></div>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>LOSSES</div><div style={{ fontSize: 14, color: T.red, fontWeight: 700, fontFamily: FONT_MONO }}>{trueLosses}</div></div>
-                  </div>
-                </div>
-                <div style={{ background: `${T.cyan}08`, border: `1px solid ${T.cyan}22`, borderRadius: 6, padding: "10px 12px" }}>
-                  <div style={{ fontSize: 9, color: T.cyan, fontWeight: 700, marginBottom: 8, letterSpacing: "0.1em" }}>⚡ ENTRADA TARDE ({tardeSamples.length} spikes / {closedTarde.length} cerrados) · lag máx {maxTardeLag != null ? maxTardeLag+"s" : "–"}</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>WIN RATE</div><div style={{ fontSize: 14, color: T.cyan, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeWinRate}</div></div>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>WINS</div><div style={{ fontSize: 14, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeWins}</div></div>
-                    <div><div style={{ fontSize: 8, color: T.mute }}>LOSSES</div><div style={{ fontSize: 14, color: T.red, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeLosses}</div></div>
-                  </div>
-                </div>
+            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+              <div style={{ background: `${T.green}08`, border: `1px solid ${T.green}22`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10, color: T.mute, marginBottom: 8 }}>Captura real ({trueSamples.length} spikes)</div>
+                <div style={{ fontSize: 18, color: T.green, fontWeight: 700, fontFamily: FONT_MONO }}>{trueWinRate}</div>
+                <div style={{ fontSize: 10, color: T.textD }}>{trueWins}W / {trueLosses}L</div>
+              </div>
+              <div style={{ background: `${T.cyan}08`, border: `1px solid ${T.cyan}22`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10, color: T.mute, marginBottom: 8 }}>Entrada tarde ({tardeSamples.length} spikes)</div>
+                <div style={{ fontSize: 18, color: T.cyan, fontWeight: 700, fontFamily: FONT_MONO }}>{tardeWinRate}</div>
+                <div style={{ fontSize: 10, color: T.textD }}>{tardeWins}W / {tardeLosses}L</div>
               </div>
             </div>
           )}
         </Panel>
       )}
 
-      {/* ── Tabla de eventos ─────────────────────────────────────────── */}
       <Panel title={`Spike events · ${sorted.length} shown`} pad={false}>
         {loading ? (
-          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>Cargando spikes…</div>
+          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>Cargando spikes...</div>
         ) : sorted.length === 0 ? (
-          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>No hay spikes registrados aún.</div>
+          <div style={{ padding: 20, textAlign: "center", color: T.mute, fontSize: 11 }}>No hay spikes registrados aun.</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: FONT_MONO }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${T.border}`, background: T.panel2 }}>
-                  {["Hora","Símbolo","Dir","Jump","ATR","Ratio","Price","Streak","Cooldown","Lockout","Entró","Timing","Trade","Razón"].map(h => (
+                  {["Hora", "Simbolo", "Dir", "Jump", "ATR", "Ratio", "Price", "Streak", "Cooldown", "Lockout", "Entro", "Timing", "Trade", "Razon"].map(h => (
                     <th key={h} style={{ textAlign: "left", padding: "5px 10px", color: T.mute, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", fontSize: 9, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
@@ -2344,65 +2244,37 @@ function SpikesTab() {
               <tbody>
                 {sorted.map((e, i) => {
                   const isEntered = e.bot_entered === true;
-                  const isMissed  = e.missed_exit === true;
+                  const isMissed = e.missed_exit === true;
                   const isBlocked = e.bot_entered === false && !isMissed;
                   const rowBg = isEntered ? `${T.green}08` : isMissed ? `${T.amber}08` : isBlocked ? `${T.red}06` : "transparent";
                   return (
                     <tr key={`${e.ts}-${i}`} style={{ background: rowBg, borderBottom: `1px solid ${T.border}18` }}>
-                      <td style={{ padding: "4px 10px", color: T.mute, whiteSpace: "nowrap" }}>
-                        {fmtDT(e.ts)}
-                      </td>
-                      <td style={{ padding: "4px 10px" }}>
-                        <Pill color={(e.symbol || "").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill>
-                      </td>
-                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>
-                        {e.direction === "UP" ? "▲" : "▼"} {e.direction}
-                      </td>
-                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>
-                        {e.jump != null ? (e.jump > 0 ? "+" : "") + e.jump.toFixed(3) : "–"}
-                      </td>
+                      <td style={{ padding: "4px 10px", color: T.mute, whiteSpace: "nowrap" }}>{fmtDT(e.ts)}</td>
+                      <td style={{ padding: "4px 10px" }}><Pill color={(e.symbol || "").includes("BOOM") ? T.green : T.red} size="sm">{e.symbol || "?"}</Pill></td>
+                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>{e.direction === "UP" ? "UP" : "DOWN"}</td>
+                      <td style={{ padding: "4px 10px", color: dirColor(e.direction), fontWeight: 700 }}>{e.jump != null ? `${e.jump > 0 ? "+" : ""}${e.jump.toFixed(3)}` : "–"}</td>
                       <td style={{ padding: "4px 10px", color: T.textD }}>{e.atr != null ? e.atr.toFixed(4) : "–"}</td>
-                      <td style={{ padding: "4px 10px" }}>
-                        <span style={{ color: (e.ratio || 0) > 500 ? T.red : (e.ratio || 0) > 100 ? T.amber : T.textD, fontWeight: 700 }}>
-                          {e.ratio != null ? e.ratio.toFixed(0) + "×" : "–"}
-                        </span>
-                      </td>
+                      <td style={{ padding: "4px 10px", color: (e.ratio || 0) > 500 ? T.red : (e.ratio || 0) > 100 ? T.amber : T.textD, fontWeight: 700 }}>{e.ratio != null ? `${e.ratio.toFixed(0)}x` : "–"}</td>
                       <td style={{ padding: "4px 10px", color: T.textD }}>{e.price != null ? e.price.toFixed(2) : "–"}</td>
-                      <td style={{ padding: "4px 10px", color: (e.loss_streak || 0) > 0 ? T.amber : T.textD }}>
-                        {e.loss_streak != null ? e.loss_streak : "–"}
-                      </td>
-                      <td style={{ padding: "4px 10px", color: T.textD }}>
-                        {e.since_last_trade_s != null ? `${e.since_last_trade_s}s` : "–"}
-                      </td>
+                      <td style={{ padding: "4px 10px", color: (e.loss_streak || 0) > 0 ? T.amber : T.textD }}>{e.loss_streak != null ? e.loss_streak : "–"}</td>
+                      <td style={{ padding: "4px 10px", color: T.textD }}>{e.since_last_trade_s != null ? `${e.since_last_trade_s}s` : "–"}</td>
+                      <td style={{ padding: "4px 10px" }}>{e.lockout_active ? <Pill color={T.red} size="sm">SI</Pill> : <span style={{ color: T.mute }}>–</span>}</td>
                       <td style={{ padding: "4px 10px" }}>
-                        {e.lockout_active ? <Pill color={T.red} size="sm">SÍ</Pill> : <span style={{ color: T.mute }}>–</span>}
-                      </td>
-                      <td style={{ padding: "4px 10px" }}>
-                        {e.bot_entered === true  && !e.post_spike_entry && <Pill color={T.green} size="sm">✓ SÍ</Pill>}
-                        {e.bot_entered === true  && e.post_spike_entry  && <Pill color={T.cyan}  size="sm">⚡ TARDE</Pill>}
-                        {e.missed_exit === true  && <Pill color={T.amber} size="sm">↩ PERDIDO</Pill>}
-                        {e.bot_entered === false && !e.missed_exit       && <Pill color={T.red}   size="sm">✗ NO</Pill>}
-                        {e.bot_entered == null   && <span style={{ color: T.mute }}>–</span>}
-                        {e.score != null && <span style={{ color: T.textD, marginLeft: 4, fontSize: 9 }}>s={e.score}</span>}
+                        {e.bot_entered === true && !e.post_spike_entry && <Pill color={T.green} size="sm">SI</Pill>}
+                        {e.bot_entered === true && e.post_spike_entry && <Pill color={T.cyan} size="sm">TARDE</Pill>}
+                        {e.missed_exit === true && <Pill color={T.amber} size="sm">PERDIDO</Pill>}
+                        {e.bot_entered === false && !e.missed_exit && <Pill color={T.red} size="sm">NO</Pill>}
+                        {e.bot_entered == null && <span style={{ color: T.mute }}>–</span>}
                       </td>
                       <td style={{ padding: "4px 10px", whiteSpace: "nowrap" }}>
-                        {e.post_spike_entry && e.entry_lag_sec != null && (
-                          <span style={{ color: T.cyan, fontWeight: 700 }}>+{e.entry_lag_sec}s</span>
-                        )}
-                        {e.missed_exit === true && e.missed_exit_sec != null && (
-                          <span style={{ color: T.amber, fontWeight: 700 }}>-{e.missed_exit_sec}s</span>
-                        )}
-                        {e.bot_entered === true && !e.post_spike_entry && e.entry_lag_sec != null && (
-                          <span style={{ color: T.mute, fontSize: 9 }}>{e.entry_lag_sec > 0 ? '+' : ''}{e.entry_lag_sec}s</span>
-                        )}
+                        {e.post_spike_entry && e.entry_lag_sec != null && <span style={{ color: T.cyan, fontWeight: 700 }}>+{e.entry_lag_sec}s</span>}
+                        {e.missed_exit === true && e.missed_exit_sec != null && <span style={{ color: T.amber, fontWeight: 700 }}>-{e.missed_exit_sec}s</span>}
+                        {e.bot_entered === true && !e.post_spike_entry && e.entry_lag_sec != null && <span style={{ color: T.mute, fontSize: 9 }}>{e.entry_lag_sec > 0 ? "+" : ""}{e.entry_lag_sec}s</span>}
                       </td>
                       <td style={{ padding: "4px 10px", whiteSpace: "nowrap" }}>
-                        {e.trade_result === "win"  && <Pill color={T.green} size="sm">WIN</Pill>}
-                        {e.trade_result === "loss" && <Pill color={T.red}   size="sm">LOSS</Pill>}
-                        {e.trade_result === "open" && <Pill color={T.cyan}  size="sm">OPEN</Pill>}
-                        {e.trade_exit_reason && e.trade_result !== "open" && (
-                          <span style={{ color: T.mute, marginLeft: 4, fontSize: 8 }}>{e.trade_exit_reason}</span>
-                        )}
+                        {e.trade_result === "win" && <Pill color={T.green} size="sm">WIN</Pill>}
+                        {e.trade_result === "loss" && <Pill color={T.red} size="sm">LOSS</Pill>}
+                        {e.trade_result === "open" && <Pill color={T.cyan} size="sm">OPEN</Pill>}
                       </td>
                       <td style={{ padding: "4px 10px", color: T.mute, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {e.block_reason || (e.had_open_pos ? "pos_open" : "–")}

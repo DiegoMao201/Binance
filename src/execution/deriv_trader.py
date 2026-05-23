@@ -246,9 +246,24 @@ class DerivTradeExecutor:
         # DERIV_SPIKE_BUFFER_SEC seconds to capture multi-tick spike sequences.
         # dict[contract_id, {started_ts, peak_pnl, entry_pnl}]
         self._spike_buffer: dict[int, dict[str, float]] = {}
+        # Phase 5D: zero_peak emergency cuts are disabled by default while we
+        # stabilize spike timing. Timeout/SL/ratchet remain active.
+        self._zero_peak_exit_enabled = os.getenv(
+            "DERIV_ZERO_PEAK_EXIT_ENABLED",
+            "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        # Optional operator override map: "BOOM600:90,CRASH900:120".
+        self._spike_hold_bonus_map = self._parse_symbol_seconds_map(
+            os.getenv("DERIV_SPIKE_HOLD_BONUS_SEC_MAP", "")
+        )
         # Hook the WS client so open-contract subscriptions are automatically
         # re-established after every WS reconnect.
         self._client.set_reconnect_callback(self._on_ws_reconnect)
+
+        _LOGGER.info(
+            "[deriv-trader] zero_peak_exit_enabled=%s (Phase5D)",
+            self._zero_peak_exit_enabled,
+        )
 
         # ── Restore open contracts from previous session (disk → memory) ─────
         # The process was restarted (e.g. Coolify deploy).  Re-hydrate
@@ -296,6 +311,62 @@ class DerivTradeExecutor:
     ) -> None:
         """Inject runtime dynamic config provider from daemon."""
         self._dynamic_config_provider = provider
+
+    @staticmethod
+    def _parse_symbol_seconds_map(raw: str) -> dict[str, float]:
+        """Parse map strings like 'BOOM600:90,CRASH900:120'."""
+        out: dict[str, float] = {}
+        for chunk in str(raw or "").split(","):
+            item = chunk.strip()
+            if not item or ":" not in item:
+                continue
+            sym_raw, sec_raw = item.split(":", 1)
+            sym = sym_raw.strip().upper()
+            if not sym:
+                continue
+            try:
+                sec = max(0.0, float(sec_raw.strip()))
+            except ValueError:
+                continue
+            out[sym] = min(sec, 300.0)
+        return out
+
+    def _spike_hold_bonus_sec(self, symbol: str) -> float:
+        """Extra patience window per spike symbol (+90/+120s + extra +120s by default)."""
+        if not is_spike_market(symbol):
+            return 0.0
+
+        _sym = str(symbol or "").upper()
+        _extra = max(
+            0.0,
+            min(float(os.getenv("DERIV_SPIKE_HOLD_EXTRA_SEC", "120") or 120), 180.0),
+        )
+        _env_direct = os.getenv(f"DERIV_SPIKE_HOLD_BONUS_SEC_{_sym}")
+        if _env_direct not in (None, ""):
+            try:
+                _base = max(0.0, min(float(_env_direct), 300.0))
+                return min(_base + _extra, 420.0)
+            except ValueError:
+                pass
+
+        if _sym in self._spike_hold_bonus_map:
+            return min(self._spike_hold_bonus_map[_sym] + _extra, 420.0)
+
+        _profile = get_asset_profile(_sym)
+        _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
+        if _cycle <= 0:
+            _default_base = max(
+                0.0,
+                min(float(os.getenv("DERIV_SPIKE_HOLD_BONUS_DEFAULT_SEC", "90") or 90), 300.0),
+            )
+            return min(_default_base + _extra, 420.0)
+        if _cycle <= 600:
+            return min(90.0 + _extra, 420.0)
+        return min(120.0 + _extra, 420.0)
+
+    @staticmethod
+    def _dpm_timeout_buffer_sec() -> float:
+        return max(0.0, float(os.getenv("DERIV_DPM_TIMEOUT_BUFFER_SEC", "30") or 30.0))
 
     @staticmethod
     def _symbol_zero_peak_floor(symbol: str) -> int:
@@ -467,11 +538,17 @@ class DerivTradeExecutor:
                 )
             # Apply ATR dynamic extension stored in score_breakdown
             _atr_ext = float((order.score_breakdown or {}).get("atr_hold_extension", 0.0))
-            order.max_hold_seconds = _profile_mh + _atr_ext
+            _hold_bonus = self._spike_hold_bonus_sec(order.symbol)
+            order.max_hold_seconds = _profile_mh + _atr_ext + _hold_bonus
             if _atr_ext > 0:
                 _LOGGER.info(
                     "[deriv-trader] ATR_HOLD_EXT %s +%.0fs → total=%.0fs",
                     order.symbol, _atr_ext, order.max_hold_seconds,
+                )
+            if _hold_bonus > 0:
+                _LOGGER.info(
+                    "[deriv-trader] SPIKE_HOLD_BONUS %s +%.0fs → total=%.0fs",
+                    order.symbol, _hold_bonus, order.max_hold_seconds,
                 )
         result = await self._client.buy(
             symbol=order.symbol,
@@ -542,6 +619,7 @@ class DerivTradeExecutor:
             entry_price=entry_price,
             entry_ts=oc.opened_at_ts,
             aggressive_trailing=_aggressive_trail,
+            max_duration_override_sec=(order.max_hold_seconds + self._dpm_timeout_buffer_sec()),
         )
 
         # Subscribe to live broker stream for this contract so we settle
@@ -647,6 +725,8 @@ class DerivTradeExecutor:
                 # NEVER recover; waiting the full 480-600s hold just multiplies the loss.
                 # Condition: held>=150s, peak=0.0, floating<-0.05 (to avoid spread noise).
                 elif (
+                    self._zero_peak_exit_enabled
+                    and is_spike_market(oc_check.symbol)
                     held >= _dynamic_hold_limit
                     and oc_check.peak_profit == 0.0
                     and oc_check.floating_pnl < -0.05
@@ -2035,6 +2115,8 @@ class DerivTradeExecutor:
             # 450s limit as freshly-opened ones).
             _oc_profile = get_asset_profile(symbol)
             _max_hold_recovered = float(_oc_profile.get("max_hold_seconds", 0.0))
+            if is_spike_market(symbol) and _max_hold_recovered > 0:
+                _max_hold_recovered += self._spike_hold_bonus_sec(symbol)
 
             oc = DerivOpenContract(
                 contract_id=cid,
@@ -2073,6 +2155,7 @@ class DerivTradeExecutor:
                     stake=stake,
                     entry_price=entry_price,
                     entry_ts=opened_at,
+                    max_duration_override_sec=(_max_hold_recovered + self._dpm_timeout_buffer_sec()),
                 )
 
             # Re-subscribe to broker WS stream so trailing-stop and is_sold

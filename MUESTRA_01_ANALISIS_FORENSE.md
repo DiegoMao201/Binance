@@ -1250,3 +1250,194 @@ Fecha: 2026-05-23 (hotfix inmediato sobre stack live de Prueba 5)
 2. Reducción de `entry_lag_sec` P50/P75 por símbolo.
 3. Menor tasa de aprobación IA en ventanas de ruido.
 4. Menos aperturas con `peak_profit=0` prolongado en los primeros minutos.
+
+---
+
+## PRUEBA 5D — SALIDA TEMPRANA DESACTIVADA + ESPERA PRUDENTE POR SÍMBOLO
+
+Fecha: 2026-05-23 (ajuste de estabilización sin tocar lógica de entrada)
+
+### Objetivo
+
+- Eliminar el cierre ansioso `zero_peak_exit` en BOOM/CRASH, porque estaba cortando operaciones antes del spike esperado.
+- Dar una ventana adicional de espera por símbolo (`+90s` o `+120s`) para honrar entradas ya aprobadas por la capa matemática + IA.
+- Mantener intacta la lógica de entrada (no se tocó scoring, filtros de entrada ni gates de aprobación).
+
+### Cambios de código aplicados
+
+1. **`zero_peak_exit` desactivado por defecto en spike markets**
+- Archivo: `src/execution/deriv_trader.py`
+- Nuevo comportamiento:
+  - `DERIV_ZERO_PEAK_EXIT_ENABLED=false` por defecto.
+  - El branch que ejecuta `pending_close_reason="zero_peak_exit"` no dispara salvo habilitación explícita.
+- Permanecen activos: `spike_timeout`, `sl_inicial`, `ratchet_sl_alcanzado`, `momentum_agotado`.
+
+2. **Espera adicional por símbolo en `max_hold_seconds`**
+- Archivo: `src/execution/deriv_trader.py`
+- En contratos BOOM/CRASH, `max_hold_seconds` final ahora es:
+  - `profile_max_hold` + `atr_hold_extension` + `spike_hold_bonus`.
+- `spike_hold_bonus` por defecto:
+  - `+90s` para símbolos de ciclo `<=600` ticks.
+  - `+120s` para símbolos de ciclo `>600` ticks.
+- Overrides disponibles:
+  - `DERIV_SPIKE_HOLD_BONUS_SEC_MAP="BOOM600:90,CRASH900:120"`
+  - `DERIV_SPIKE_HOLD_BONUS_SEC_<SYMBOL>=...`
+
+3. **Alineación con DPM para evitar cierres antes del nuevo hold**
+- Archivos: `src/execution/deriv_trader.py`, `src/execution/position_manager.py`
+- `DynamicPositionManager.register(...)` ahora acepta `max_duration_override_sec`.
+- El daemon registra cada contrato con `max_duration_override_sec = max_hold_seconds + buffer` (default `+30s`).
+- Objetivo: que el timeout de DPM no recorte antes del nuevo hold operativo.
+
+### Contrato operativo vigente tras 5D
+
+- **Entrada**: sin cambios (tick-driven + filtros vigentes).
+- **Salida temprana `zero_peak_exit`**: desactivada por defecto.
+- **Paciencia de salida por símbolo**: ampliada de forma controlada (+90/+120) para capturar spikes tardíos sin abrir desangre ilimitado.
+
+---
+
+## PRUEBA 5E — +120s ADICIONALES Y AUDITORÍA DE LAS ÚLTIMAS 20 OPERACIONES
+
+Fecha: 2026-05-23 (ajuste incremental sin reinicio)
+
+### Resumen del análisis forense (logs live)
+
+Fuente: `/data/deriv-logs/deriv_closed_contracts.json` + `/data/deriv-logs/deriv_spike_events.json`.
+
+- Muestra analizada: últimas **20** operaciones cerradas.
+- Hallazgo principal:
+  - Con criterio estricto `next_spike <= 120s`: **2** cierres fueron claramente prematuros.
+  - Con criterio operativo de rescate `next_spike <= 240s`: **4** cierres prematuros en últimas 20.
+  - En ventana ampliada de 25-30 operaciones aparecen **5** casos de `zero_peak_exit` que validan la observación operativa de “perdimos ~5 spikes por poco”.
+
+### Por qué se perdieron (causa dominante)
+
+1. `zero_peak_exit` seguía concentrando el patrón de salida prematura (cuando reaparece por config previa o dataset mixto histórico).
+2. Un subconjunto de `spike_timeout` cerró justo antes de un spike tardío (ejemplo observado ~219s).
+3. La entrada no muestra patrón de degradación; la pérdida está en la ventana de paciencia de salida, no en detección de entrada.
+
+### Evidencia concreta (últimas 20, misses <=240s)
+
+1. `contract_id=682121219` | `CRASH500` | `zero_peak_exit` | `held=215.3s` | `next_spike=90.7s` | `realized_pnl=-0.21`
+2. `contract_id=681812779` | `BOOM500`  | `zero_peak_exit` | `held=377.0s` | `next_spike=45.7s` | `realized_pnl=-0.50`
+3. `contract_id=681757819` | `BOOM600`  | `spike_timeout`  | `held=280.3s` | `next_spike=219.3s`| `realized_pnl=-0.17`
+4. `contract_id=680988619` | `CRASH500` | `zero_peak_exit` | `held=214.8s` | `next_spike=210.0s`| `realized_pnl=-0.21`
+
+Interpretación: en 3 de 4 casos el patrón es `zero_peak_exit` antes del spike siguiente; en el caso restante el `spike_timeout` cortó ~219s antes del siguiente evento.
+
+### Cambio aplicado en 5E
+
+- Archivo: `src/execution/deriv_trader.py`
+- Política nueva:
+  - Se mantiene el bonus por símbolo/ciclo introducido en 5D.
+  - Se suma **`+120s` adicionales** por defecto vía `DERIV_SPIKE_HOLD_EXTRA_SEC=120`.
+
+### Acción LIVE sin reinicio (aplicada)
+
+- Se detectó límite de esquema en `dynamic_symbol_config`:
+  - `zero_peak_grace_sec` está acotado por constraint a `0..120`.
+  - Intentar subir de `60` a `180` falla por `chk_dsc_zero_peak_grace_sec`.
+- Para no detener el bot, se aplicó ajuste inmediato al máximo permitido:
+  - `zero_peak_grace_sec = 120` en todos los símbolos BOOM/CRASH activos.
+
+Estado resultante en DB dinámica (live):
+
+- `BOOM1000=120`, `BOOM500=120`, `BOOM600=120`, `BOOM900=120`
+- `CRASH1000=120`, `CRASH500=120`, `CRASH600=120`, `CRASH900=120`
+
+Nota: el **+120s adicional completo** queda garantizado por el cambio de código (bonus extra), mientras que el ajuste DB en caliente da el máximo margen permitido por esquema sin reinicio.
+
+Fórmula de hold bonus desde 5E:
+
+- `hold_bonus_total = hold_bonus_base_por_simbolo + hold_extra`
+- `hold_extra` default = `120s` (cap controlado a 180s por seguridad)
+- Resultado típico:
+  - símbolos `<=600` ticks: `90 + 120 = 210s` extra
+  - símbolos `>600` ticks: `120 + 120 = 240s` extra
+
+### Contrato operativo vigente tras 5E
+
+- Entrada: intacta (sin cambios de scoring/gates).
+- Salidas rápidas: más paciencia estructural para no cortar “a centímetros” del spike.
+- Riesgo: se mantiene acotado por timeout DPM alineado + SL/ratchet existentes.
+
+---
+
+## PRUEBA 5F — FILTRO ADAPTATIVO DE CALIDAD IA + MEMORIA DE PATRONES + FRONTEND LIVE
+
+Fecha: 2026-05-23 (alineación completa bot + orquestador + frontend)
+
+### Objetivo
+
+- Corregir el desbalance observado en live: aprobación IA muy alta con winrate/EV débiles en ciertos símbolos.
+- Endurecer la selectividad de forma adaptativa por símbolo (sin romper modo tick-only anti-chase).
+- Persistir combinaciones ganadoras/perdedoras para aprendizaje continuo en DB.
+- Exponer todo en frontend para ver en tiempo real qué está pasando.
+
+### Cambios backend/orquestador aplicados
+
+1. `src/analysis/deriv_analyst.py`
+- Se agregó umbral dinámico de confianza IA por símbolo.
+- El piso de confianza sube cuando detecta:
+  - aprobación excesiva,
+  - winrate bajo,
+  - EV negativo,
+  - alta tasa de salidas débiles (`zero_peak_exit`, `spike_timeout`, `sl_inicial`).
+- Se aplica tanto en decisiones fresh como en decisiones cacheadas.
+- Se agrega trazabilidad en `ai_reason` con nota adaptativa.
+
+2. `scripts/dynamic_ai_orchestrator.py`
+- Telemetría ampliada por símbolo:
+  - `ai_approval_rate_15m`
+  - `win_rate_15m`
+  - `ev_per_trade_15m`
+- Heurística reforzada: aumenta `score_min_override` cuando hay sobre-aprobación con mala calidad realizada.
+- Guardrail superior de `score_min_override` ampliado y parametrizable (`DYNAMIC_AI_SCORE_MAX_GUARDRAIL`, default `9.2`).
+- Memoria de patrones activa:
+  - agrega buckets por combinación,
+  - upsert a `ai_entry_pattern_memory`.
+
+3. `src/main_deriv.py`
+- Clamp runtime de score alineado con nuevo guardrail superior dinámico.
+
+4. Migración DB nueva
+- `db/migrations/011_ai_pattern_memory_and_score_guardrail.sql`
+- Cambios:
+  - constraint de `dynamic_symbol_config.score_min_override` en `[6.5, 9.2]`.
+  - creación de tabla `ai_entry_pattern_memory` + índice por símbolo/actualización.
+
+### Cambios frontend aplicados (observabilidad en vivo)
+
+1. `web/app/api/deriv-analytics/route.js`
+- Se añadió payload para frontend:
+  - `ai_quality.summary`
+  - `ai_quality.by_symbol`
+  - `pattern_memory`
+- `pattern_memory` intenta leer DB (`ai_entry_pattern_memory`) y cae a fallback desde logs si la tabla no existe aún.
+
+2. `web/components/deriv-analytics-client.js`
+- En TAB `Telemetry` se añadieron paneles nuevos:
+  - `calidad IA adaptativa · live` (approval, winrate, EV, presión adaptativa por símbolo)
+  - `pattern memory · combinaciones` (setup/regime/WR/avgPnL)
+
+### Estado operativo esperado tras 5F
+
+- Menos aprobaciones IA “automáticas” en símbolos degradados.
+- Más fricción de entrada cuando la calidad realizada cae.
+- Memoria persistente en DB lista para consumo por PostgREST/analytics.
+- Frontend Deriv mostrando en tiempo real la presión adaptativa y las combinaciones con mejor/peor desempeño.
+
+### Checklist de despliegue/sincronización
+
+1. Aplicar migración `011` en DB productiva.
+2. Deploy del daemon + orchestrator + frontend con estos cambios.
+3. Verificar en `/deriv` (Telemetry):
+  - panel de `calidad IA adaptativa`,
+  - panel de `pattern memory`,
+  - consistencia de `approval_rate` vs `win_rate`.
+4. Monitoreo inicial 30–60 min por símbolo:
+  - `ai_approval_rate_15m`
+  - `win_rate_15m`
+  - `ev_per_trade_15m`
+  - cambios de `score_min_override` en `dynamic_ai_config_diffs.jsonl`.
