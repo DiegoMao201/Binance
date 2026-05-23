@@ -1571,3 +1571,54 @@ Diagnóstico: el entorno productivo mantiene un constraint más estricto (tope e
 
 - Mantener `fallback=8.0` hasta alinear/migrar constraint productivo de `dynamic_symbol_config`.
 - Cuando la migración esté aplicada en prod, elevar `DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK` para habilitar techos >8 sin riesgo de caída del loop.
+
+---
+
+## PRUEBA 5J — CIERRE REAL DEL PENDIENTE 1 (CONSTRAINT + MIGRACIÓN RUNTIME)
+
+Fecha: 2026-05-23
+
+### Qué pasó
+
+1. Se aplicó manualmente en producción el constraint `score_min_override BETWEEN 6.5 AND 9.2`.
+2. Al reiniciar el bot, volvió a `<=8.0` porque `scripts/migrate_db.py` todavía ejecutaba hasta migración 010.
+
+### Fix definitivo
+
+1. Se añadió `011_ai_pattern_memory_and_score_guardrail.sql` al orden de migraciones runtime en `scripts/migrate_db.py`.
+2. Se desplegó imagen actualizada (`c57f784`) y se reinició daemon.
+3. Se alinearon env vars en producción:
+  - `DYNAMIC_AI_SCORE_MAX_GUARDRAIL=9.2`
+  - `DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK=9.2`
+
+### Verificación
+
+- Constraint activo en DB: `chk_dsc_score_min_override` con `6.5..9.2`.
+- Rango observado en tabla: `min=6.5`, `max=9.2`.
+- Orquestador AI volvió a escribir `9.2` sin `CheckViolation`.
+
+---
+
+## PRUEBA 5K — CIERRE PRÁCTICO DEL PENDIENTE 2 (AUTOSYNC AI)
+
+Fecha: 2026-05-23
+
+### Restricción encontrada
+
+El `docker-compose.yaml` del app en Coolify se regenera desde su propio estado de servicio; por eso insertar manualmente `-ai` en ese archivo no queda como fuente estable tras redeploy.
+
+### Solución aplicada (sin hotpatch manual)
+
+1. Script nuevo: `scripts/deriv_ai_sidecar_sync.sh`
+  - detecta imagen activa del bot,
+  - compara imagen/cmd del sidecar AI,
+  - recrea `o4w1ns4cceccmn2ozqt7sol2-ai` solo si hay drift.
+2. Instalador remoto: `scripts/install_deriv_ai_sidecar_sync_cron_remote.sh`
+  - despliega runner en `/opt/deriv-ai-sync/`,
+  - instala cron cada 3 minutos (`/etc/cron.d/deriv-ai-sidecar-sync`),
+  - ejecuta sync inmediato.
+
+### Resultado
+
+- El sidecar AI queda autogestionado y alineado con la imagen del bot después de cada redeploy.
+- Se elimina la dependencia de hotpatch manual para `dynamic_ai_orchestrator.py`.

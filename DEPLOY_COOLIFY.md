@@ -250,6 +250,27 @@ No ejecutes limpieza destructiva sobre `open_positions.json`, `closed_trades.jso
 3. `GET /api/state` debe devolver JSON fresco
 4. El `serverTime` del API puede cambiar aunque los archivos estén congelados; lo autoritativo es el `heartbeat_at` dentro de `status.json`
 
+## AI sidecar autosync (sin hotpatch manual)
+
+Para mantener el orquestador AI alineado con la imagen activa del bot después de cada redeploy:
+
+1. Instalar en remoto (una sola vez):
+
+```bash
+REMOTE_PASSWORD='***' ./scripts/install_deriv_ai_sidecar_sync_cron_remote.sh
+```
+
+2. Qué hace:
+	- sincroniza `o4w1ns4cceccmn2ozqt7sol2-ai` con la imagen actual del bot,
+	- recrea sidecar solo si detecta drift de imagen/comando,
+	- corre cada 3 minutos vía cron.
+
+3. Archivos/paths relevantes:
+	- script local: `scripts/deriv_ai_sidecar_sync.sh`
+	- instalador: `scripts/install_deriv_ai_sidecar_sync_cron_remote.sh`
+	- runner remoto: `/opt/deriv-ai-sync/run_ai_sync.sh`
+	- log remoto: `/data/deriv-logs/deriv_ai_sidecar_sync.log`
+
 ## Nota importante
 
 Hoy el `stop loss` y el `take profit` siguen siendo gestionados localmente por el bot, no por órdenes residentes en Binance. Migrar a Coolify elimina la dependencia del portátil, pero no elimina todavía el riesgo de que una caída del contenedor deje una posición abierta sin protección nativa en exchange.
