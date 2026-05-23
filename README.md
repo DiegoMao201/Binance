@@ -89,6 +89,50 @@ El despliegue recomendado es:
 
 El bot ya incluye healthcheck por heartbeat sobre `logs/status.json`, pensado para reinicio automático en Coolify.
 
+## Validador runtime Deriv (IA dinamica)
+
+Para validar en una sola pasada que el runtime de Deriv esta saludable (heartbeat, refresco dinamico, diff audit y flags criticos):
+
+```bash
+python scripts/validate_deriv_runtime.py --logs-dir /data/deriv-logs
+```
+
+Si quieres incluir validacion de guardrails en PostgreSQL (requiere `DATABASE_URL` y `asyncpg`):
+
+```bash
+python scripts/validate_deriv_runtime.py --logs-dir /data/deriv-logs --check-db
+```
+
+### Watchdog activo (cron cada 5 minutos)
+
+Instala en el servidor un monitor que ejecuta el validador cada 5 minutos y dispara alerta critica cuando pasa de `PASS` a `FAIL` (o cambia la firma del fallo):
+
+```bash
+REMOTE_PASSWORD='TU_PASS_SSH' bash scripts/install_deriv_watchdog_cron_remote.sh
+```
+
+Notas:
+
+- El watchdog envia alertas por Telegram usando `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- Opcionalmente puede enviar tambien webhook JSON si defines `WATCHDOG_ALERT_WEBHOOK_URL` en el `.env` del servicio.
+- Log operativo: `/data/deriv-logs/deriv_runtime_watchdog.log`.
+
+### Release blocker (preflight de despliegue)
+
+Este gate devuelve exit code no-cero si el runtime no cumple (incluye DB guardrails):
+
+```bash
+bash scripts/deriv_release_gate.sh
+```
+
+Si falla, el deploy debe bloquearse.
+
+Para ejecutar el gate directamente contra produccion remota (recomendado en pipeline CD):
+
+```bash
+REMOTE_PASSWORD='TU_PASS_SSH' bash scripts/deriv_release_gate_remote.sh
+```
+
 ## Garantía de reanudación tras caída
 
 Comportamiento esperado del bot live:

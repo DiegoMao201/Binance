@@ -381,16 +381,18 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         lag_med = t.get("entry_lag_sec_median")
         late120 = float(t.get("late_entry_ge120_pct") or 0.0)
         early80 = float(t.get("next_spike_after_close_le80_pct") or 0.0)
+        zero_peak_count = int(t.get("zero_peak_exit_count") or 0)
 
+        # Entry is tick-driven; tune conviction threshold only (not spike pre-filter).
         if regime == "FAST" or (lag_med is not None and lag_med > 120) or late120 >= 35.0:
-            spf = int(spf * 0.60)
-            score = score - 1.2
+            score = score - 0.8
         elif regime == "SLOW":
-            spf = int(spf * 1.20)
-            score = score + 0.7
+            score = score + 0.5
 
         if early80 >= 20.0:
             grace = grace + 50
+        if early80 >= 35.0 or zero_peak_count >= 3:
+            grace = grace + 30
 
         out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=regime,
@@ -409,12 +411,14 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "DATOS DE TELEMETRIA (Ultimos 15 mins):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "REGLAS DE AJUSTE:\n"
-        "1. Si entry_lag_sec es >120s o el mercado esta FAST, reduce spike_pre_filter_target y baja score_min_override de forma moderada sin romper estructura.\n"
-        "2. Si hay alta tasa de zero_peak_exit seguida de spike en <80s, aumenta zero_peak_grace_sec entre 60-120s.\n"
-        "3. Si el mercado esta SLOW, sube spike_pre_filter_target y sube score_min_override.\n"
-        "4. Mantener guardrails estrictos: spike_pre_filter_target [50,500], score_min_override [6.5,8.0].\n"
-        "5. Guardrail de riesgo confirmado: BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n\n"
-        "6. Evitar cambiar de regime continuamente; privilegia estabilidad macro y cambios por bloques temporales.\n\n"
+        "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
+        "2. No modificar spike_pre_filter_target automaticamente; mantener el valor actual (solo observabilidad).\n"
+        "3. Si entry_lag_sec >120s o mercado FAST, baja score_min_override de forma moderada (sin romper guardrails).\n"
+        "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
+        "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
+        "6. Mantener guardrails: score_min_override [6.5,8.0], zero_peak_grace_sec [0,120].\n"
+        "7. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
+        "8. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"is_active\": true}\n"
@@ -494,9 +498,10 @@ def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) 
     for sym in SYMBOLS:
         cur = current_cfg[sym]
         payload = raw.get(sym) if isinstance(raw.get(sym), dict) else {}
+        # spike_pre_filter_target intentionally frozen: entry is tick-driven.
         out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=str(payload.get("regime", cur.regime)).upper(),
-            spike_pre_filter_target=int(payload.get("spike_pre_filter_target", cur.spike_pre_filter_target)),
+            spike_pre_filter_target=int(cur.spike_pre_filter_target),
             zero_peak_grace_sec=int(payload.get("zero_peak_grace_sec", cur.zero_peak_grace_sec)),
             score_min_override=float(payload.get("score_min_override", cur.score_min_override)),
             is_active=bool(payload.get("is_active", cur.is_active)),

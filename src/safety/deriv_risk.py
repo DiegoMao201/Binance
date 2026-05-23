@@ -515,6 +515,21 @@ class DerivRiskManager:
         # Used by main_deriv spike_pre_filter to adapt min_post window per symbol.
         self._spike_intervals: dict[str, list[int]] = {}
         self._MAX_SPIKE_INTERVALS = 80
+        _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
+        # Tick-only entry mode: spike events remain for telemetry and dynamic tuning,
+        # but cannot directly gate or force entry decisions.
+        self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
+        self._allow_spike_history_entry_gates = not self._entry_tick_only
+        _allow_spike_ai_override_raw = os.getenv(
+            "DERIV_ALLOW_SPIKE_ACTIVE_AI_OVERRIDE",
+            "false",
+        ).strip().lower()
+        self._allow_spike_active_ai_override = _allow_spike_ai_override_raw in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
         if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
             lf = settings.lockout_file
@@ -1050,7 +1065,11 @@ class DerivRiskManager:
         _spike_gate_elapsed  = 0.0
         _spike_gate_min_wait = 0.0
         _spike_gate_interval = 300     # updated from symbol name below
-        if _is_spike_market(symbol) and not _force_test_active:
+        if (
+            _is_spike_market(symbol)
+            and not _force_test_active
+            and self._allow_spike_history_entry_gates
+        ):
             _last_spike = self._last_spike_ts.get(symbol, 0.0)
             if _last_spike > 0:
                 _sg_elapsed = time.time() - _last_spike
@@ -1721,7 +1740,13 @@ class DerivRiskManager:
                 and (time.time() - _last_spike_for_sym) <= _spike_active_bypass
             )
             _bc_escape_active = bool(snap.score_breakdown.get("bc_escape_env"))
-            if _is_spike and _spike_just_fired and _bc_escape_active and not _override_reason:
+            if (
+                self._allow_spike_active_ai_override
+                and _is_spike
+                and _spike_just_fired
+                and _bc_escape_active
+                and not _override_reason
+            ):
                 _elapsed_spike = time.time() - _last_spike_for_sym
                 _override_reason = (
                     f"spike_active_override: spike {_elapsed_spike:.0f}s ago "

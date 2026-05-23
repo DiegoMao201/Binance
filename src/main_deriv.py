@@ -160,6 +160,9 @@ class DerivDaemon:
             5,
             int(os.getenv("DERIV_DYNAMIC_CONFIG_REFRESH_SEC", "15") or 15),
         )
+        _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
+        # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
+        self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -827,7 +830,7 @@ class DerivDaemon:
         # Data basis: cycle=900s, hold=500s → need entry at t≥400s; for cycle=600s,
         # hold=350s → need entry at t≥250s.
         # ═══════════════════════════════════════════════════════════════════
-        if is_spike_market(tick.symbol):
+        if is_spike_market(tick.symbol) and not self._entry_tick_only:
             _spf_source = "profile"
             _spf_expected = int(_early_profile.get("spike_interval_ticks", 0) or 0)
             _spf_min_post = 0
@@ -1906,6 +1909,7 @@ class DerivDaemon:
                 "dynamic_config": {
                     "enabled": self._dynamic_enabled,
                     "refresh_sec": self._dynamic_refresh_sec,
+                    "entry_tick_only": self._entry_tick_only,
                     "last_refresh": self._dynamic_last_refresh,
                     "symbols_loaded": sorted(self._dynamic_configs.keys()),
                     "configs": self._dynamic_configs,

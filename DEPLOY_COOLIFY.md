@@ -117,6 +117,50 @@ El bot se detuvo 3 veces porque `KILL_SWITCH_DRAWDOWN=0.07` (7%) con un HWM hist
 - si Binance conserva una posición live y `open_positions.json` está vacío o viejo, el bot debe reconstruirla antes de seguir operando
 - los errores transitorios de red, timeout o rate limit no deben dejar el control en `stopped`
 
+## SRE: monitor activo y release blocker
+
+### 1) Monitor activo (cron cada 5m)
+
+Instalar watchdog en servidor:
+
+```bash
+REMOTE_PASSWORD='TU_PASS_SSH' bash scripts/install_deriv_watchdog_cron_remote.sh
+```
+
+Comportamiento:
+
+- ejecuta `validate_deriv_runtime.py` cada 5 minutos
+- si pierde `PASS`, dispara alerta critica con detalle de checks fallidos
+- si se recupera, envia alerta de recovery
+- escribe trazabilidad en `/data/deriv-logs/deriv_runtime_watchdog.log`
+
+### 2) Release blocker (gate obligatorio)
+
+Antes de marcar un release como exitoso, ejecutar:
+
+```bash
+bash scripts/deriv_release_gate.sh
+```
+
+En pipelines que disparan despliegue remoto, usar:
+
+```bash
+REMOTE_PASSWORD='TU_PASS_SSH' bash scripts/deriv_release_gate_remote.sh
+```
+
+Regla operacional:
+
+- si el gate devuelve exit code `!= 0`, el despliegue se considera bloqueado
+- no promover a produccion mientras haya checks en `FAIL`
+
+Adicionalmente, el contenedor Deriv ya puede exponer healthcheck runtime via:
+
+```bash
+python /app/scripts/validate_deriv_runtime.py --logs-dir "${LOGS_DIR:-/data/logs}"
+```
+
+Eso endurece la señal de salud del servicio para reinicio/observabilidad en plataforma.
+
 ## Recovery cuando el panel vuelve pero el frontend está desalineado
 
 Síntomas típicos:

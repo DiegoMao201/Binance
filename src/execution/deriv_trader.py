@@ -327,12 +327,29 @@ class DerivTradeExecutor:
         _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
         if _cycle <= 0:
             return self._dynamic_zero_peak_grace_sec(symbol)
-        _frac = float(os.getenv("DERIV_ZERO_PEAK_GRACE_FRAC", "0.15"))
-        _min_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MIN_TICKS", "30"))
-        _max_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MAX_TICKS", "140"))
+        _frac = float(os.getenv("DERIV_ZERO_PEAK_GRACE_FRAC", "0.35"))
+        _min_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MIN_TICKS", "45"))
+        _max_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MAX_TICKS", str(max(120, _cycle - 1))))
         _raw = int(_cycle * _frac)
         _cycle_grace = max(_min_ticks, min(_raw, _max_ticks))
-        return _cycle_grace + self._dynamic_zero_peak_grace_sec(symbol)
+        _dyn_bonus_mult = max(1, int(os.getenv("DERIV_ZERO_PEAK_DYNAMIC_BONUS_MULT", "2") or 2))
+        _dyn_bonus = self._dynamic_zero_peak_grace_sec(symbol) * _dyn_bonus_mult
+        return min(_cycle - 1, _cycle_grace + _dyn_bonus)
+
+    def _dynamic_zero_peak_wait_limit_sec(self, symbol: str, base_limit_sec: float) -> float:
+        """Compute IA-driven minimum wait before zero_peak_exit can trigger."""
+        _profile = get_asset_profile(symbol)
+        _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
+        if _cycle <= 0:
+            return max(0.0, float(base_limit_sec))
+
+        _base_frac = float(os.getenv("DERIV_ZERO_PEAK_WAIT_FRAC_BASE", "0.55"))
+        _dyn_grace = self._dynamic_zero_peak_grace_sec(symbol)
+        # IA controls zero_peak_grace_sec; convert it into extra hold-time weight.
+        _dyn_frac_boost = min(0.30, float(_dyn_grace) / 300.0)
+        _wait_frac = min(0.90, max(0.35, _base_frac + _dyn_frac_boost))
+        _cycle_wait = float(int(_cycle * _wait_frac))
+        return max(float(base_limit_sec), _cycle_wait)
 
     def _should_defer_zero_peak_exit(self, symbol: str, held_s: float) -> tuple[bool, str]:
         """Return True when the trade is close to expected spike timing.
@@ -593,6 +610,18 @@ class DerivTradeExecutor:
                 _base_zero_peak_sec = float(os.getenv("DERIV_ZERO_PEAK_BASE_SEC", "150"))
                 _dyn_zero_peak_grace = self._dynamic_zero_peak_grace_sec(oc_check.symbol)
                 _dynamic_hold_limit = _base_zero_peak_sec + float(_dyn_zero_peak_grace)
+                if is_spike_market(oc_check.symbol):
+                    _dynamic_hold_limit = self._dynamic_zero_peak_wait_limit_sec(
+                        oc_check.symbol,
+                        _dynamic_hold_limit,
+                    )
+                    # zero_peak_exit is emergency-only; never fire too far ahead of timeout.
+                    _pre_timeout_margin = max(
+                        10.0,
+                        float(os.getenv("DERIV_ZERO_PEAK_PRE_TIMEOUT_MARGIN_SEC", "20") or 20),
+                    )
+                    _max_emergency_limit = max(0.0, oc_check.max_hold_seconds - _pre_timeout_margin)
+                    _dynamic_hold_limit = min(_dynamic_hold_limit, _max_emergency_limit)
                 if held >= oc_check.max_hold_seconds:
                     # Phase 35: close-lock guard
                     if cid in self._closing:

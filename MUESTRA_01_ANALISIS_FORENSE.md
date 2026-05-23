@@ -1131,3 +1131,70 @@ Nota: el orquestador continúa aceptando `DYNAMIC_AI_LOOP_SEC` y alias `DYNAMIC_
 - Menos bloqueos por `spike_pre_filter` durante ventanas FAST.
 - Menos `zero_peak_exit` justo antes del spike siguiente.
 - Rebalanceo de agresividad por símbolo sin redeploy de código.
+
+---
+
+## PRUEBA 5B — CORRECCIÓN ESTRUCTURAL (MUESTRA >200 OPERACIONES)
+
+### Hallazgo consolidado
+
+Con muestra acumulada >200 operaciones se confirmó un patrón doble:
+
+1. **Entradas tardías perseguiendo spike** (`lag 120-150s`) cuando la capa de entrada estaba influida por memoria de spike.
+2. **`zero_peak_exit` prematuro** en ventanas donde el spike llegaba `30-60s` después del cierre.
+
+Diagnóstico operativo: el histórico de spikes debe servir para **calibrar** (riesgo/espera), no para decidir entrada. La entrada debe permanecer **tick-driven**.
+
+### Evidencia operativa de reset/arranque limpio (2026-05-23 ~06:10-06:15 UTC)
+
+- Se forzó cierre broker-side de contratos abiertos heredados (`remaining_portfolio=[]` tras cierre).
+- Se creó backup limpio de estado:
+  - `/data/deriv-logs/archive_stage5_20260523_061241/`
+- Se resetearon archivos de muestra (`open/closed/spikes/status/ai_decisions`) y se reinició stack principal + IA.
+- Validación runtime post-arranque:
+  - watchdog: `status=PASS`
+  - heartbeat fresco + `dynamic_config` cargado para 8 símbolos
+- Snapshot bootstrap guardado:
+  - `/data/deriv-logs/sample5_bootstrap_20260523_061452.json`
+
+### Cambios de arquitectura aplicados en código (Prueba 5B)
+
+1. **Entrada tick-only (sin gate de historial spike)**
+- `src/main_deriv.py`
+  - Nuevo flag `DERIV_ENTRY_TICK_ONLY` (default: `true`).
+  - Si está activo, se desactiva el bloque `spike_pre_filter` en la ruta de entrada.
+  - `deriv_status.json` expone `dynamic_config.entry_tick_only`.
+- `src/safety/deriv_risk.py`
+  - Cuando `DERIV_ENTRY_TICK_ONLY=true`, se desactiva `SPIKE_CYCLE_GATE` como veto de entrada.
+  - El override `spike_active_override` queda deshabilitado por defecto
+    (solo se habilita si `DERIV_ALLOW_SPIKE_ACTIVE_AI_OVERRIDE=true`).
+
+2. **Salida de emergencia realmente dinámica (anti-cierre prematuro)**
+- `src/execution/deriv_trader.py`
+  - `zero_peak_exit` ahora usa una espera mínima dinámica ligada a:
+    - `zero_peak_grace_sec` (IA),
+    - ciclo esperado del símbolo,
+    - límite pre-timeout (margen antes de `spike_timeout`).
+  - Se amplió la lógica de defer pre-spike para evitar cerrar justo antes del spike.
+  - Objetivo: que `zero_peak_exit` vuelva a ser un **freno de emergencia tardío**, no un cierre por ansiedad.
+
+3. **Orquestador IA alineado al nuevo contrato operativo**
+- `scripts/dynamic_ai_orchestrator.py`
+  - Se congela `spike_pre_filter_target` en escritura automática (no se usa para decidir entrada).
+  - IA ajusta principalmente:
+    - `score_min_override` (convicción de entrada tick-driven),
+    - `zero_peak_grace_sec` (espera dinámica de salida).
+  - Prompt actualizado para reforzar explícitamente: *entrada por ticks; spikes solo para calibración*.
+
+### Contrato operativo final (vigente para Prueba 5B)
+
+- **Entrada**: matemática de ticks (microestructura + riesgo), no memoria de spike.
+- **Spikes**: señal histórica para ajustar paciencia/sensibilidad, nunca trigger directo de entrada.
+- **Salida `zero_peak_exit`**: dinámica y tardía; prioriza no perder spikes inminentes.
+
+### KPIs de validación inmediata (2-6h)
+
+1. `P75 entry_lag_sec` por símbolo (debe bajar de forma sostenida)
+2. `% late_entry_ge120` (objetivo: compresión fuerte)
+3. `% zero_peak_exit con spike <=80s posterior` (objetivo: caída marcada)
+4. Distribución de `exit_reason` (`zero_peak_exit` debe dejar de dominar cierres antes de spike)
