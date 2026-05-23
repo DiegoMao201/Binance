@@ -558,7 +558,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_mitigated",  # Prueba4-restart: detected→mitigated (require price back to FVG zone)
+        "fvg_tier_minimo": "fvg_detected",   # Prueba4-stage4: widen capture window; keep bc_escape_env blocked
         "block_bc_escape_env": True,    # Prueba4-restart: 62% zero_peak on bc_escape_env — hard veto
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -604,6 +604,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
+        # Stage 4: avoid CRASH900 late-chase entries (~135s after spike in live sample).
+        # cycle=900s, hold=600s → min_post=300 keeps entries in middle/late accumulation.
+        "spike_min_post_sec": 300,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
@@ -636,7 +639,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_mitigated",  # Prueba4-restart: detected→mitigated (FVG touched = support confirmed)
+        "fvg_tier_minimo": "fvg_detected",   # Prueba4-stage4: widen capture window; keep bc_escape_env blocked
         "block_bc_escape_env": True,    # Prueba4-restart: 60% zero_peak on bc_escape_env — hard veto
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,

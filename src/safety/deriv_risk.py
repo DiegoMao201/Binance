@@ -511,6 +511,10 @@ class DerivRiskManager:
         self._ingest_tick_count: dict[str, int] = {}
         # Tick count at the moment of the last detected spike (for ticks_since_last_spike).
         self._last_spike_tick: dict[str, int] = {}
+        # Rolling inter-spike intervals in tick domain (noise-filtered).
+        # Used by main_deriv spike_pre_filter to adapt min_post window per symbol.
+        self._spike_intervals: dict[str, list[int]] = {}
+        self._MAX_SPIKE_INTERVALS = 80
         # Honor DERIV_RESET_LOCKOUT=true env var — clears stale lockout on restart
         if os.getenv("DERIV_RESET_LOCKOUT", "").lower() in ("1", "true", "yes"):
             lf = settings.lockout_file
@@ -725,6 +729,14 @@ class DerivRiskManager:
                         # Update trackers
                         self._last_spike_ts[symbol]   = _spike_ts
                         self._last_spike_tick[symbol] = _cur_tick_n
+                        # Persist inter-spike intervals for adaptive pre-filter.
+                        # Ignore ultra-short clusters (same impulse burst).
+                        _min_real_interval = int(os.getenv("DERIV_SPIKE_INTERVAL_MIN_TICKS", "25"))
+                        if _ticks_since_sp >= _min_real_interval:
+                            _hist = self._spike_intervals.setdefault(symbol, [])
+                            _hist.append(int(_ticks_since_sp))
+                            if len(_hist) > self._MAX_SPIKE_INTERVALS:
+                                del _hist[: len(_hist) - self._MAX_SPIKE_INTERVALS]
                         _LOGGER.info(
                             "[SPIKE_DETECTED] %s direction=%s jump=%.5f atr=%.5f ratio=%.1f× — "
                             "spike-cycle timer reset",
@@ -829,6 +841,53 @@ class DerivRiskManager:
         ticks_since_last_spike in per-trade and per-spike telemetry.
         """
         return self._ingest_tick_count.get(symbol, 0)
+
+    def get_adaptive_spike_min_post_ticks(
+        self,
+        symbol: str,
+        base_min_post_ticks: int,
+        expected_cycle_ticks: int,
+    ) -> int:
+        """Return adaptive post-spike wait window in ticks for spike markets.
+
+        The adaptive window only relaxes (never increases) the profile baseline.
+        It is derived from recent real inter-spike intervals and bounded by
+        expected_cycle_ticks so noisy bursts cannot collapse the gate.
+        """
+        base = int(base_min_post_ticks or 0)
+        if base <= 0:
+            return 0
+
+        _enabled = os.getenv("DERIV_SPIKE_PREFILTER_ADAPTIVE", "true").lower() in (
+            "1", "true", "yes"
+        )
+        if not _enabled:
+            return base
+
+        _hist = self._spike_intervals.get(symbol, [])
+        _min_samples = int(os.getenv("DERIV_SPIKE_PREFILTER_MIN_SAMPLES", "6"))
+        if len(_hist) < _min_samples:
+            return base
+
+        _obs = list(_hist[-40:])
+        _obs.sort()
+        _median_obs = int(_obs[len(_obs) // 2])
+
+        _expected = int(expected_cycle_ticks or _spike_interval_ticks(symbol) or 0)
+        if _expected <= 0:
+            _expected = max(base * 2, _median_obs)
+
+        _frac = float(os.getenv("DERIV_SPIKE_PREFILTER_ADAPTIVE_FRAC", "0.55"))
+        _min_frac = float(os.getenv("DERIV_SPIKE_PREFILTER_MIN_FLOOR_FRAC", "0.35"))
+        _max_frac = float(os.getenv("DERIV_SPIKE_PREFILTER_MAX_CAP_FRAC", "0.85"))
+
+        _candidate = int(_median_obs * _frac)
+        _floor = int(_expected * _min_frac)
+        _cap = int(_expected * _max_frac)
+        _adaptive = max(_floor, min(_candidate, _cap))
+
+        # Never tighten more than profile baseline; only relax when justified.
+        return max(25, min(base, _adaptive))
 
     def enrich_last_spike(
         self,

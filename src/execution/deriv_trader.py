@@ -287,6 +287,46 @@ class DerivTradeExecutor:
                     _disk_exc,
                 )
 
+    def _zero_peak_grace_ticks(self, symbol: str) -> int:
+        """Grace ticks near expected spike to avoid premature zero_peak exits."""
+        _profile = get_asset_profile(symbol)
+        _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
+        if _cycle <= 0:
+            return 0
+        _frac = float(os.getenv("DERIV_ZERO_PEAK_GRACE_FRAC", "0.15"))
+        _min_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MIN_TICKS", "30"))
+        _max_ticks = int(os.getenv("DERIV_ZERO_PEAK_GRACE_MAX_TICKS", "140"))
+        _raw = int(_cycle * _frac)
+        return max(_min_ticks, min(_raw, _max_ticks))
+
+    def _should_defer_zero_peak_exit(self, symbol: str, held_s: float) -> tuple[bool, str]:
+        """Return True when the trade is close to expected spike timing.
+
+        This keeps zero_peak_exit enabled, but defers it briefly when the symbol
+        is inside a short pre-spike window where late acceleration is common.
+        """
+        if self._risk is None or held_s <= 0:
+            return False, ""
+        _profile = get_asset_profile(symbol)
+        _cycle = int(_profile.get("spike_interval_ticks", 0) or 0)
+        if _cycle <= 0:
+            return False, ""
+
+        _cur_tick = int(self._risk.get_tick_count(symbol) or 0)
+        _last_spike_tick = int(self._risk.get_last_spike_tick_count(symbol) or 0)
+        if _cur_tick <= 0 or _last_spike_tick <= 0 or _cur_tick <= _last_spike_tick:
+            return False, ""
+
+        _elapsed = _cur_tick - _last_spike_tick
+        _remaining = _cycle - _elapsed
+        _grace = self._zero_peak_grace_ticks(symbol)
+        if _grace <= 0:
+            return False, ""
+
+        if 0 < _remaining <= _grace:
+            return True, f"remaining={_remaining}t<=grace={_grace}t cycle={_cycle}t"
+        return False, ""
+
     # ─────────────────────────────────────────────────────────────────────────
     # Public API consumed by the OrderRouter
     # ─────────────────────────────────────────────────────────────────────────
@@ -545,6 +585,20 @@ class DerivTradeExecutor:
                     and oc_check.floating_pnl < -0.05
                     and cid not in self._closing
                 ):
+                    _defer_zero_peak, _defer_reason = self._should_defer_zero_peak_exit(
+                        oc_check.symbol,
+                        held,
+                    )
+                    if _defer_zero_peak:
+                        _LOGGER.info(
+                            "[deriv-trader] zero_peak_exit deferred: %s (%s) held=%.1fs pnl=%.4f %s",
+                            cid,
+                            oc_check.symbol,
+                            held,
+                            oc_check.floating_pnl,
+                            _defer_reason,
+                        )
+                        continue
                     self._closing.add(cid)
                     oc_check.pending_close_reason = "zero_peak_exit"
                     _LOGGER.info(

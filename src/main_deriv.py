@@ -672,14 +672,23 @@ class DerivDaemon:
             # spike_min_post_sec values are reused as tick counts (≈1 tick/s for BOOM/CRASH).
             _spf_min_post = float(_early_profile.get("spike_min_post_sec", 0))
             if _spf_min_post > 0:
+                _spf_base = int(_spf_min_post)
+                _spf_expected = int(_early_profile.get("spike_interval_ticks", 0) or 0)
+                _spf_min_post = self._risk.get_adaptive_spike_min_post_ticks(
+                    tick.symbol,
+                    _spf_base,
+                    _spf_expected,
+                )
                 _spf_last_tick = self._risk.get_last_spike_tick_count(tick.symbol)
                 if _spf_last_tick > 0:
                     _spf_ticks_since = self._risk.get_tick_count(tick.symbol) - _spf_last_tick
                     if _spf_ticks_since < _spf_min_post:
                         _LOGGER.debug(
-                            "[SPIKE_PRE_FILTER] %s %d ticks since spike < %d ticks window — "
+                            "[SPIKE_PRE_FILTER] %s %d ticks since spike < %d ticks window "
+                            "(base=%d expected=%d) — "
                             "blocking eval entry (post-spike drift phase)",
                             tick.symbol, _spf_ticks_since, int(_spf_min_post),
+                            _spf_base, _spf_expected,
                         )
                         self._spike_enrich(
                             tick.symbol, bot_entered=False,

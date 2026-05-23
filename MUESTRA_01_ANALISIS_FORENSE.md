@@ -953,3 +953,60 @@ Spike detectado → ¿hay FVG mitigado en BOOM600/900?
 ---
 
 *Actualizado: 22 Mayo 2026 — post-implementación commit b41bd8b — bot operativo container d1ff6700f5a6*
+
+---
+
+## PRUEBA 4 — STAGE 4 (TUNING LIVE PARA CAPTURA DE SPIKES)
+
+### Cambios implementados en código (sin quitar protecciones)
+
+1. **Spike pre-filter adaptativo por símbolo (tick-domain)**
+- Se mantiene `spike_min_post_sec` del perfil como baseline.
+- Nuevo ajuste dinámico con intervalos reales entre spikes (`_spike_intervals`) para **relajar** bloqueo cuando el mercado acelera.
+- Nunca endurece más allá del baseline del perfil.
+
+2. **`zero_peak_exit` inteligente con ventana de gracia pre-spike**
+- Se mantiene el corte temprano (no se eliminó).
+- Si el símbolo está en ventana cercana al spike esperado (`remaining <= grace_ticks`), el cierre se **difiere** temporalmente.
+- Evita cerrar justo antes del spike en casos BOOM500/BOOM600 observados en vivo.
+
+3. **Ajuste de perfiles BOOM/CRASH para Stage 4**
+- `BOOM900`: `fvg_tier_minimo` de `fvg_mitigated` → `fvg_detected`.
+- `BOOM600`: `fvg_tier_minimo` de `fvg_mitigated` → `fvg_detected`.
+- `CRASH900`: se agrega `spike_min_post_sec=300` para evitar entradas tempranas/tardías de persecución.
+
+### Aclaración técnica del "lag 130s"
+
+- El `entry_lag_sec` NO es delay de lectura de datos ni latencia del feed.
+- Es diferencia temporal entre:
+  - `ts` del spike detectado
+  - `opened_at_ts` del contrato que terminó asociado a ese spike en la reconstrucción analítica.
+- En CRASH900, `lag ~135s` significa que el bot abrió después del spike detectado previo (timing operativo/estratégico), no que el websocket llegó tarde.
+
+### Uso de histórico PostgreSQL
+
+- Se verificó estado de tablas `deriv_contracts` y `deriv_tick_snapshots` en `optiferre_pamm`.
+- Ambas tablas están vacías en este entorno (`count(*)=0`), por lo que el tuning Stage 4 se apoyó en:
+  - `/data/deriv-logs/deriv_spike_events.json`
+  - `/data/deriv-logs/deriv_closed_contracts.json`
+  - `/data/deriv-logs/deriv_open_contracts.json`
+
+### Protocolo de arranque limpio Prueba 4 (Stage 4)
+
+1. Confirmar `deriv_open_contracts.json` sin posiciones abiertas.
+2. Archivar snapshots previos de `deriv_closed_contracts.json` y `deriv_spike_events.json`.
+3. Reset controlado:
+   - `deriv_closed_contracts.json` → `[]`
+   - `deriv_open_contracts.json` → `[]`
+   - `deriv_spike_events.json` → `[]`
+   - `deriv_spikes.json` → `[]`
+   - `deriv_ai_decisions.json` → `[]`
+   - `deriv_lockout.json` → `{}`
+   - `deriv_status.json` → `{}`
+4. Redeploy por `git push` (Coolify webhook).
+5. Verificar que solo exista un contenedor activo del bot Deriv (`o4w1ns4cceccmn2ozqt7sol2`).
+
+### Commit Stage 4
+
+- Commit: `PENDIENTE_PUSH`
+- Estado: `PENDIENTE_DEPLOY`
