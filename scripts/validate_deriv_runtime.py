@@ -247,20 +247,20 @@ def main() -> int:
     valve = (os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").strip().lower() in TRUE_VALUES)
     block_b600_raw = os.getenv("DERIV_BLOCK_BC_ESCAPE_BOOM600", "").strip().lower()
     block_b900_raw = os.getenv("DERIV_BLOCK_BC_ESCAPE_BOOM900", "").strip().lower()
-    block_b600_false = block_b600_raw in FALSE_VALUES
-    block_b900_false = block_b900_raw in FALSE_VALUES
-    results.append(CheckResult("env_escape_valve", valve, f"DERIV_BOOM_CRASH_ESCAPE_VALVE={valve}"))
+    block_b600_safe = block_b600_raw in {"", *TRUE_VALUES}
+    block_b900_safe = block_b900_raw in {"", *TRUE_VALUES}
+    results.append(CheckResult("env_escape_valve", not valve, f"DERIV_BOOM_CRASH_ESCAPE_VALVE={valve}"))
     results.append(
         CheckResult(
             "env_block_boom600",
-            block_b600_false,
+            block_b600_safe,
             f"DERIV_BLOCK_BC_ESCAPE_BOOM600={block_b600_raw or 'unset'}",
         )
     )
     results.append(
         CheckResult(
             "env_block_boom900",
-            block_b900_false,
+            block_b900_safe,
             f"DERIV_BLOCK_BC_ESCAPE_BOOM900={block_b900_raw or 'unset'}",
         )
     )
