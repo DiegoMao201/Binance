@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 const ROOT = path.join(process.cwd(), "..");
 const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
+const TICK_RECENT_WINDOW_SEC = Math.max(900, Number(process.env.DERIV_TICK_RECENT_WINDOW_SEC || 7200));
+const TICK_BASELINE_WINDOW_SEC = Math.max(TICK_RECENT_WINDOW_SEC + 1800, Number(process.env.DERIV_TICK_BASELINE_WINDOW_SEC || 21600));
 
 async function readJson(fileName, fallback, dir = DERIV_LOGS) {
   try {
@@ -18,6 +20,18 @@ const pnlOf = c => Number(c?.realized_pnl_usdt ?? c?.pnl ?? 0) || 0;
 const tsOf = c => {
   const t = Number(c?.closed_at_ts ?? c?.opened_at_ts ?? c?.ts ?? 0);
   return t > 1e12 ? t : t * 1000;
+};
+const safeTsMs = v => {
+  if (v == null) return null;
+  if (typeof v === "number") return v > 1e12 ? v : v * 1000;
+  const n = Number(v);
+  if (Number.isFinite(n)) return n > 1e12 ? n : n * 1000;
+  const p = Date.parse(String(v));
+  return Number.isFinite(p) ? p : null;
+};
+const safeNum = v => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 };
 const holdOf = c => {
   const o = Number(c?.opened_at_ts ?? 0);
@@ -48,6 +62,91 @@ const scoreBand = s => {
   return "9+";
 };
 const isoDay = ts => new Date(ts).toISOString().slice(0, 10);
+
+function intervalsFromCtx(points) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  const sorted = points.slice().sort((a, b) => a.ts - b.ts);
+  const out = [];
+  let prev = sorted[0]?.ticks;
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i]?.ticks;
+    if (!Number.isFinite(prev) || !Number.isFinite(cur)) {
+      prev = cur;
+      continue;
+    }
+    if (cur < prev && prev > 0) out.push(prev);
+    prev = cur;
+  }
+  return out;
+}
+
+function quantile(values, q) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const vals = values.slice().sort((a, b) => a - b);
+  const pos = (vals.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.min(lo + 1, vals.length - 1);
+  if (lo === hi) return vals[lo];
+  const frac = pos - lo;
+  return vals[lo] * (1 - frac) + vals[hi] * frac;
+}
+
+function buildSymbolTickTelemetry(status, marketCtxRows, nowMs = Date.now()) {
+  const out = {};
+
+  const fromStatus = status?.symbol_tick_context;
+  if (fromStatus && typeof fromStatus === "object") {
+    for (const [symRaw, row] of Object.entries(fromStatus)) {
+      const sym = String(symRaw || "").toUpperCase();
+      if (!sym) continue;
+      const ticksSince = safeNum(row?.ticks_since_last_spike);
+      out[sym] = {
+        symbol: sym,
+        ticks_since_last_spike_now: ticksSince != null ? Math.max(0, Math.round(ticksSince)) : null,
+        source: "status",
+      };
+    }
+  }
+
+  const grouped = {};
+  for (const row of Array.isArray(marketCtxRows) ? marketCtxRows : []) {
+    const sym = String(row?.symbol || "").toUpperCase();
+    const ts = safeTsMs(row?.ts ?? row?.timestamp ?? row?.iso);
+    const ticks = safeNum(row?.ticks_since_last_spike);
+    if (!sym || ts == null || ticks == null || ticks < 0) continue;
+    (grouped[sym] ||= []).push({ ts, ticks });
+  }
+
+  const recentMin = nowMs - TICK_RECENT_WINDOW_SEC * 1000;
+  const baselineMin = nowMs - TICK_BASELINE_WINDOW_SEC * 1000;
+
+  for (const [sym, points] of Object.entries(grouped)) {
+    const baselinePoints = points.filter(p => p.ts >= baselineMin);
+    const recentPoints = baselinePoints.filter(p => p.ts >= recentMin);
+    const intervalsBaseline = intervalsFromCtx(baselinePoints);
+    const intervalsRecent = intervalsFromCtx(recentPoints);
+    const p50Baseline = quantile(intervalsBaseline, 0.5);
+    const p50Recent = quantile(intervalsRecent, 0.5);
+    const ratio =
+      Number.isFinite(p50Recent) && Number.isFinite(p50Baseline) && p50Baseline > 0
+        ? p50Recent / p50Baseline
+        : null;
+    const latest = points.reduce((acc, cur) => (!acc || cur.ts > acc.ts ? cur : acc), null);
+
+    out[sym] = {
+      symbol: sym,
+      ticks_since_last_spike_now: latest ? Math.max(0, Math.round(latest.ticks)) : out[sym]?.ticks_since_last_spike_now ?? null,
+      tick_interval_recent_p50: Number.isFinite(p50Recent) ? +p50Recent.toFixed(2) : null,
+      tick_interval_baseline_p50: Number.isFinite(p50Baseline) ? +p50Baseline.toFixed(2) : null,
+      tick_acceleration_ratio_2h_vs_6h: Number.isFinite(ratio) ? +ratio.toFixed(4) : null,
+      tick_intervals_recent_count: intervalsRecent.length,
+      tick_intervals_baseline_count: intervalsBaseline.length,
+      source: "market_context",
+    };
+  }
+
+  return out;
+}
 
 function emptyBucket() {
   return { n: 0, wins: 0, losses: 0, pnl: 0, gross_profit: 0, gross_loss: 0, hold_sum: 0, hold_n: 0 };
@@ -118,11 +217,12 @@ function pearson(x, y) {
 }
 
 export async function GET() {
-  const [status, open, closed, sessionFile] = await Promise.all([
+  const [status, open, closed, sessionFile, marketCtx] = await Promise.all([
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
     readJson("deriv_session.json", null, LOGS),
+    readJson("deriv_market_context.json", [], DERIV_LOGS),
   ]);
   const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
   // Session filter: only for global KPIs (SESSION, WIN%, PF, TRADES). Reports unaffected.
@@ -130,7 +230,31 @@ export async function GET() {
   const sessionClosed = sessionStartMs
     ? allClosed.filter(c => tsOf(c) >= sessionStartMs)
     : allClosed;
-  const openContracts = Array.isArray(open) ? open : [];
+  const tickTelemetryBySymbol = buildSymbolTickTelemetry(status, marketCtx);
+  const dynamicCfgBySymbol = status?.dynamic_config?.configs || {};
+  const openContracts = (Array.isArray(open) ? open : []).map(c => {
+    const sym = String(symOf(c) || "").toUpperCase();
+    const tickCtx = tickTelemetryBySymbol[sym] || {};
+    const dyn = dynamicCfgBySymbol[sym] || {};
+    const ticksNow = safeNum(tickCtx?.ticks_since_last_spike_now);
+    const targetTicks = safeNum(dyn?.spike_pre_filter_target);
+    const ticksToTarget =
+      ticksNow != null && targetTicks != null
+        ? Math.max(0, Math.round(targetTicks - ticksNow))
+        : null;
+    return {
+      ...c,
+      ticks_since_last_spike_now: ticksNow != null ? Math.round(ticksNow) : null,
+      tick_interval_recent_p50: safeNum(tickCtx?.tick_interval_recent_p50),
+      tick_interval_baseline_p50: safeNum(tickCtx?.tick_interval_baseline_p50),
+      tick_acceleration_ratio_2h_vs_6h: safeNum(tickCtx?.tick_acceleration_ratio_2h_vs_6h),
+      spike_pre_filter_target_live: targetTicks != null ? Math.round(targetTicks) : null,
+      ticks_to_prefilter_target: ticksToTarget,
+      multispike_buffer_ticks_live: safeNum(dyn?.multispike_buffer_ticks),
+      multispike_retention_pct_live: safeNum(dyn?.multispike_retention_pct),
+      multispike_mode_live: dyn?.market_regime || null,
+    };
+  });
 
   let cum = 0;
   const equity_curve = allClosed.map(c => {
@@ -313,6 +437,7 @@ export async function GET() {
     scatter, correlations,
     histograms: { score: scoreHist, hurst: hurstHist },
     decisions: { recent, last_by_symbol, rejection_count },
+    symbol_tick_telemetry: tickTelemetryBySymbol,
     open_contracts: openContracts,
     closed_contracts: allClosed,
   }, { headers: { "Cache-Control": "no-store, max-age=0" } });

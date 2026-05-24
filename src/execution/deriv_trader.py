@@ -242,10 +242,10 @@ class DerivTradeExecutor:
         # DynamicPositionManager — replaces static tiered trailing stop.
         # Manages ratchet SL + momentum-based exit for every open contract.
         self._dpm = DynamicPositionManager()
-        # Phase 37: spike buffer — when spike_tp/capture fires, hold for up to
-        # DERIV_SPIKE_BUFFER_SEC seconds to capture multi-tick spike sequences.
-        # dict[contract_id, {started_ts, peak_pnl, entry_pnl}]
-        self._spike_buffer: dict[int, dict[str, float]] = {}
+        # Phase 37+: multispike buffer state (tick-domain ratchet).
+        # dict[contract_id, {peak_pnl, entry_pnl, start_tick, buffer_ticks,
+        #                    retention_pct, min_floor_usdt, drift_ticks, regime}]
+        self._spike_buffer: dict[int, dict[str, Any]] = {}
         # Phase 5D: zero_peak emergency cuts are disabled by default while we
         # stabilize spike timing. Timeout/SL/ratchet remain active.
         self._zero_peak_exit_enabled = os.getenv(
@@ -363,6 +363,108 @@ class DerivTradeExecutor:
         if _cycle <= 600:
             return min(90.0 + _extra, 420.0)
         return min(120.0 + _extra, 420.0)
+
+    def _multispike_policy(self, symbol: str) -> dict[str, Any]:
+        """Resolve multispike ratchet policy (dynamic config + env fallback)."""
+        cfg: dict[str, Any] = {}
+        if self._dynamic_config_provider is not None:
+            try:
+                cfg = self._dynamic_config_provider(symbol) or {}
+            except Exception:  # noqa: BLE001
+                cfg = {}
+
+        regime = str(cfg.get("market_regime") or "NORMAL").upper()
+
+        def _env_float(name: str, default: float) -> float:
+            try:
+                return float(os.getenv(name, str(default)) or default)
+            except Exception:
+                return float(default)
+
+        def _env_int(name: str, default: int) -> int:
+            try:
+                return int(float(os.getenv(name, str(default)) or default))
+            except Exception:
+                return int(default)
+
+        buf_default = _env_int("DERIV_MULTISPIKE_BUFFER_TICKS_DEFAULT", 45)
+        buf_fast = _env_int("DERIV_MULTISPIKE_BUFFER_TICKS_FAST", 60)
+        buf_slow = _env_int("DERIV_MULTISPIKE_BUFFER_TICKS_SLOW", 10)
+
+        ret_default = _env_float("DERIV_MULTISPIKE_RETENTION_PCT_DEFAULT", 0.70)
+        ret_fast = _env_float("DERIV_MULTISPIKE_RETENTION_PCT_FAST", 0.50)
+        ret_slow = _env_float("DERIV_MULTISPIKE_RETENTION_PCT_SLOW", 0.85)
+
+        floor_default = _env_float("DERIV_MULTISPIKE_MIN_FLOOR_USDT", 0.15)
+
+        drift_default = _env_int("DERIV_MULTISPIKE_DRIFT_TICKS_DEFAULT", buf_default)
+        drift_fast = _env_int("DERIV_MULTISPIKE_DRIFT_TICKS_FAST", buf_fast)
+        drift_slow = _env_int("DERIV_MULTISPIKE_DRIFT_TICKS_SLOW", buf_slow)
+
+        if regime == "FAST":
+            buffer_ticks = buf_fast
+            retention_pct = ret_fast
+            drift_ticks = drift_fast
+        elif regime == "SLOW":
+            buffer_ticks = buf_slow
+            retention_pct = ret_slow
+            drift_ticks = drift_slow
+        else:
+            buffer_ticks = buf_default
+            retention_pct = ret_default
+            drift_ticks = drift_default
+
+        if cfg.get("multispike_buffer_ticks") is not None:
+            try:
+                buffer_ticks = int(float(cfg.get("multispike_buffer_ticks")))
+            except Exception:
+                pass
+        if cfg.get("multispike_retention_pct") is not None:
+            try:
+                retention_pct = float(cfg.get("multispike_retention_pct"))
+            except Exception:
+                pass
+        if cfg.get("multispike_min_floor_usdt") is not None:
+            try:
+                floor_default = float(cfg.get("multispike_min_floor_usdt"))
+            except Exception:
+                pass
+        if cfg.get("multispike_timeout_drift_ticks") is not None:
+            try:
+                drift_ticks = int(float(cfg.get("multispike_timeout_drift_ticks")))
+            except Exception:
+                pass
+
+        return {
+            "regime": regime,
+            "buffer_ticks": max(5, min(int(buffer_ticks), 300)),
+            "retention_pct": max(0.30, min(float(retention_pct), 0.95)),
+            "min_floor_usdt": max(0.01, min(float(floor_default), 5.00)),
+            "drift_ticks": max(5, min(int(drift_ticks), 400)),
+        }
+
+    def _current_tick_count(self, symbol: str) -> int:
+        if self._risk is None:
+            return 0
+        try:
+            return int(self._risk.get_tick_count(symbol) or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _ticks_since_last_spike(self, symbol: str, fallback_start_tick: int = 0) -> int:
+        """Return ticks elapsed since last detected spike for symbol."""
+        cur_tick = self._current_tick_count(symbol)
+        if self._risk is None:
+            return max(0, cur_tick - int(fallback_start_tick or 0))
+        try:
+            last_spike_tick = int(self._risk.get_last_spike_tick_count(symbol) or 0)
+        except Exception:  # noqa: BLE001
+            last_spike_tick = 0
+        if cur_tick <= 0:
+            return 0
+        if last_spike_tick > 0 and cur_tick >= last_spike_tick:
+            return max(0, cur_tick - last_spike_tick)
+        return max(0, cur_tick - int(fallback_start_tick or 0))
 
     @staticmethod
     def _dpm_timeout_buffer_sec() -> float:
@@ -1088,7 +1190,12 @@ class DerivTradeExecutor:
         tmp.write_text(json.dumps(existing, indent=2, default=str))
         tmp.replace(path)
         # Enrich spike record when an existing position captured the spike
-        if record.get("exit_reason") in ("spike_tp", "spike_capture"):
+        if record.get("exit_reason") in (
+            "spike_tp",
+            "spike_capture",
+            "ratchet_hit",
+            "timeout_multispike",
+        ):
             self._enrich_spike_captured_by_pos(
                 record.get("symbol", ""),
                 float(record.get("realized_pnl_usdt", 0)),
@@ -1334,45 +1441,50 @@ class DerivTradeExecutor:
             if current_profit > 0:
                 self._dpm.sync_external_peak(cid, current_profit)
 
-            # ── Phase 37: Spike Buffer + Phase 20: Spike Capture for BOOM/CRASH ─
-            # When a spike fires, instead of selling immediately we enter a short
-            # buffer window (DERIV_SPIKE_BUFFER_SEC, default 3s) to capture
-            # multi-tick spike sequences (e.g. 5-6 consecutive spikes observed
-            # in Muestra 02). Safety valve: if profit drops more than
-            # DERIV_SPIKE_BUFFER_DECAY_PCT (default 35%) from the buffer peak,
-            # sell immediately to protect gains.
-            _spike_buf_sec   = float(os.environ.get("DERIV_SPIKE_BUFFER_SEC", "3.0"))
-            _spike_buf_decay = float(os.environ.get("DERIV_SPIKE_BUFFER_DECAY_PCT", "0.35"))
+            # ── Multispike ratchet (tick-domain) for BOOM/CRASH ─────────────
+            # We do not close immediately at spike_tp. Instead we open a short
+            # observation window measured in ticks and protect gains with a
+            # ratchet floor:
+            #   close if pnl <= max(min_floor, peak * retention_pct)
+            #   OR if ticks_since_last_spike > drift_ticks.
+            # This captures clustered spikes while avoiding long drift givebacks.
 
             if is_spike_market(oc_check.symbol) and current_profit > 0.10:
 
                 # ── Check active spike buffer first ──────────────────────────
                 _sbuf = self._spike_buffer.get(cid)
                 if _sbuf is not None:
-                    # Update peak during buffer window
+                    # Update peak while observing potential multi-spike cluster.
                     if current_profit > _sbuf["peak_pnl"]:
                         _sbuf["peak_pnl"] = current_profit
 
-                    _buf_elapsed    = time.time() - _sbuf["started_ts"]
-                    _decay_floor    = _sbuf["peak_pnl"] * (1.0 - _spike_buf_decay)
-                    _safety_valve   = current_profit < _decay_floor and current_profit < _sbuf["peak_pnl"]
-                    _buffer_expired = _buf_elapsed >= _spike_buf_sec
+                    _ticks_since_spike = self._ticks_since_last_spike(
+                        oc_check.symbol,
+                        int(_sbuf.get("start_tick") or 0),
+                    )
+                    _retention_pct = float(_sbuf.get("retention_pct") or 0.70)
+                    _min_floor = float(_sbuf.get("min_floor_usdt") or 0.15)
+                    _drift_ticks = int(_sbuf.get("drift_ticks") or _sbuf.get("buffer_ticks") or 45)
 
-                    if _safety_valve or _buffer_expired:
+                    _ratchet_floor = max(_min_floor, _sbuf["peak_pnl"] * _retention_pct)
+                    _ratchet_hit = current_profit <= _ratchet_floor
+                    _timeout_hit = _ticks_since_spike > _drift_ticks
+                    _close_reason = "ratchet_hit" if _ratchet_hit else "timeout_multispike"
+
+                    if _ratchet_hit or _timeout_hit:
                         if cid not in self._closing:
                             self._closing.add(cid)
-                            _sb_why = "spike_tp" if _sbuf["peak_pnl"] >= float(
-                                get_asset_profile(oc_check.symbol).get(
-                                    "spike_capture_tp_usdt", oc_check.stake_usdt * 0.25)
-                            ) else "spike_capture"
                             _LOGGER.info(
                                 "[SPIKE-BUFFER] cid=%s sym=%s CLOSE reason=%s "
-                                "pnl=%.4f peak=%.4f buf_elapsed=%.1fs safety_valve=%s",
-                                cid, oc_check.symbol, _sb_why,
+                                "pnl=%.4f peak=%.4f ratchet=%.4f ticks_since_spike=%dt drift_ticks=%dt regime=%s",
+                                cid, oc_check.symbol, _close_reason,
                                 current_profit, _sbuf["peak_pnl"],
-                                _buf_elapsed, _safety_valve,
+                                _ratchet_floor,
+                                _ticks_since_spike,
+                                _drift_ticks,
+                                str(_sbuf.get("regime") or "NORMAL"),
                             )
-                            oc_check.pending_close_reason = _sb_why
+                            oc_check.pending_close_reason = _close_reason
                             del self._spike_buffer[cid]
                             oc_check.last_profit = current_profit
                             try:
@@ -1402,19 +1514,33 @@ class DerivTradeExecutor:
                         _LOGGER.debug(
                             "[SPIKE-BUFFER] cid=%s already closing — skipped", cid)
                         return
+                    _policy = self._multispike_policy(oc_check.symbol)
+                    _start_tick = self._current_tick_count(oc_check.symbol)
                     # Enter spike buffer instead of selling immediately
                     self._spike_buffer[cid] = {
-                        "started_ts": time.time(),
-                        "peak_pnl":   current_profit,
-                        "entry_pnl":  current_profit,
+                        "peak_pnl": current_profit,
+                        "entry_pnl": current_profit,
+                        "start_tick": _start_tick,
+                        "buffer_ticks": int(_policy["buffer_ticks"]),
+                        "retention_pct": float(_policy["retention_pct"]),
+                        "min_floor_usdt": float(_policy["min_floor_usdt"]),
+                        "drift_ticks": int(_policy["drift_ticks"]),
+                        "regime": str(_policy["regime"]),
                     }
                     _sc_why = "spike_tp" if _tp_hit else "spike_capture"
                     _LOGGER.info(
                         "[SPIKE-BUFFER] cid=%s sym=%s ENTER reason=%s pnl=%.4f "
-                        "jump=%.4f tp_thresh=%.4f delta_thresh=%.4f buf_sec=%.1f",
+                        "jump=%.4f tp_thresh=%.4f delta_thresh=%.4f "
+                        "buffer_ticks=%dt retention=%.2f floor=%.2f drift_ticks=%dt regime=%s",
                         cid, oc_check.symbol, _sc_why, current_profit,
                         current_profit - max(oc_check.last_profit, 0.0),
-                        _sc_tp, _sc_delta, _spike_buf_sec,
+                        _sc_tp,
+                        _sc_delta,
+                        int(_policy["buffer_ticks"]),
+                        float(_policy["retention_pct"]),
+                        float(_policy["min_floor_usdt"]),
+                        int(_policy["drift_ticks"]),
+                        str(_policy["regime"]),
                     )
                     oc_check.last_profit = current_profit
                     return  # Don't close yet — buffer will decide

@@ -45,12 +45,21 @@ SCORE_MAX_DB_COMPAT_FALLBACK = float(
     os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", str(SCORE_MAX_GUARDRAIL))
     or SCORE_MAX_GUARDRAIL
 )
+TICK_RECENT_WINDOW_SEC = max(
+    900,
+    int(os.getenv("DYNAMIC_AI_TICK_RECENT_WINDOW_SEC", "7200") or 7200),
+)
+TICK_BASELINE_WINDOW_SEC = max(
+    TICK_RECENT_WINDOW_SEC + 1800,
+    int(os.getenv("DYNAMIC_AI_TICK_BASELINE_WINDOW_SEC", "21600") or 21600),
+)
 TELEMETRY_MICRO_WINDOW_SEC = max(
     300,
     int(os.getenv("DYNAMIC_AI_MICRO_WINDOW_SEC", "900") or 900),
 )
 TELEMETRY_LOOKBACK_SEC_DEFAULT = max(
     3600,
+    TICK_BASELINE_WINDOW_SEC,
     int(
         os.getenv(
             "DYNAMIC_AI_TELEMETRY_LOOKBACK_SEC",
@@ -93,6 +102,54 @@ TICK_WINDOW_MIN_SAMPLES = max(
 TICK_TARGET_BLEND_MEAN = max(
     0.0,
     min(float(os.getenv("DYNAMIC_AI_TICK_TARGET_BLEND_MEAN", "0.20") or 0.20), 0.80),
+)
+ACCEL_RATIO_SLOW_THRESHOLD = max(
+    1.01,
+    float(os.getenv("DYNAMIC_AI_ACCEL_RATIO_SLOW_THRESHOLD", "1.20") or 1.20),
+)
+ACCEL_RATIO_FAST_THRESHOLD = min(
+    ACCEL_RATIO_SLOW_THRESHOLD - 0.01,
+    max(0.01, float(os.getenv("DYNAMIC_AI_ACCEL_RATIO_FAST_THRESHOLD", "0.80") or 0.80)),
+)
+ACCEL_SLOW_TARGET_MULT = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_ACCEL_SLOW_TARGET_MULT", "0.75") or 0.75), 1.50),
+)
+ACCEL_FAST_TARGET_MULT = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_ACCEL_FAST_TARGET_MULT", "0.40") or 0.40), 1.00),
+)
+ACCEL_FAST_SCORE_RELAX = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_ACCEL_FAST_SCORE_RELAX", "0.15") or 0.15), 0.20),
+)
+ACCEL_SLOW_SCORE_BONUS = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_ACCEL_SLOW_SCORE_BONUS", "0.10") or 0.10), 0.60),
+)
+MULTISPIKE_BUFFER_TICKS_DEFAULT = max(
+    5,
+    int(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_DEFAULT", "45") or 45),
+)
+MULTISPIKE_BUFFER_TICKS_FAST = max(
+    5,
+    int(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_FAST", "60") or 60),
+)
+MULTISPIKE_BUFFER_TICKS_SLOW = max(
+    5,
+    int(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_SLOW", "10") or 10),
+)
+MULTISPIKE_RETENTION_PCT_DEFAULT = max(
+    0.30,
+    min(float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_DEFAULT", "0.70") or 0.70), 0.95),
+)
+MULTISPIKE_RETENTION_PCT_FAST = max(
+    0.30,
+    min(float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_FAST", "0.50") or 0.50), 0.95),
+)
+MULTISPIKE_RETENTION_PCT_SLOW = max(
+    0.30,
+    min(float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_SLOW", "0.85") or 0.85), 0.95),
 )
 
 
@@ -456,6 +513,10 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
 
     now_ts = time.time()
     min_ts = now_ts - lookback_sec
+    baseline_window_sec = min(lookback_sec, TICK_BASELINE_WINDOW_SEC)
+    baseline_min_ts = now_ts - baseline_window_sec
+    recent_window_sec = min(baseline_window_sec, TICK_RECENT_WINDOW_SEC)
+    recent_min_ts = now_ts - recent_window_sec
     micro_window_sec = min(lookback_sec, TELEMETRY_MICRO_WINDOW_SEC)
     micro_min_ts = now_ts - micro_window_sec
 
@@ -534,6 +595,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
         early_exit_next_spike: list[float] = []
         early_exit_next_spike_micro: list[float] = []
         close_rows = closes_by.get(sym, [])
+        close_rows_recent = [
+            c for c in close_rows
+            if (_safe_ts(c.get("opened_at_ts") or c.get("opened_at")) or 0.0) >= recent_min_ts
+            or (_safe_ts(c.get("closed_at_ts") or c.get("closed_at")) or 0.0) >= recent_min_ts
+        ]
         close_rows_micro = [
             c for c in close_rows
             if (_safe_ts(c.get("opened_at_ts") or c.get("opened_at")) or 0.0) >= micro_min_ts
@@ -598,6 +664,10 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
                 wins_micro += 1
 
         ai_rows = ai_by.get(sym, [])
+        ai_rows_recent = [
+            r for r in ai_rows
+            if (_safe_ts(r.get("ts") or r.get("timestamp") or r.get("iso")) or 0.0) >= recent_min_ts
+        ]
         ai_rows_micro = [
             r for r in ai_rows
             if (_safe_ts(r.get("ts") or r.get("timestamp") or r.get("iso")) or 0.0) >= micro_min_ts
@@ -615,24 +685,59 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             return out
 
         ctx_points = ctx_by.get(sym, [])
+        ctx_points_baseline = [p for p in ctx_points if p[0] >= baseline_min_ts]
+        ctx_points_recent = [p for p in ctx_points if p[0] >= recent_min_ts]
         ctx_points_micro = [p for p in ctx_points if p[0] >= micro_min_ts]
-        tick_intervals_6h = _intervals_from_ctx(ctx_points)
+        tick_intervals_6h = _intervals_from_ctx(ctx_points_baseline)
+        tick_intervals_2h = _intervals_from_ctx(ctx_points_recent)
         tick_intervals_15m = _intervals_from_ctx(ctx_points_micro)
         ticks_since_spike_now = (
             int(round(ctx_points[-1][1])) if ctx_points else None
         )
+        tick_p50_2h = statistics_median(tick_intervals_2h)
+        tick_p50_6h = statistics_median(tick_intervals_6h)
+        accel_ratio_2h_vs_6h = None
+        if isinstance(tick_p50_2h, (int, float)) and isinstance(tick_p50_6h, (int, float)) and float(tick_p50_6h) > 0:
+            accel_ratio_2h_vs_6h = float(tick_p50_2h) / float(tick_p50_6h)
+        if isinstance(accel_ratio_2h_vs_6h, (int, float)) and float(accel_ratio_2h_vs_6h) < ACCEL_RATIO_FAST_THRESHOLD:
+            multispike_buffer_suggested = MULTISPIKE_BUFFER_TICKS_FAST
+            multispike_retention_suggested = MULTISPIKE_RETENTION_PCT_FAST
+            multispike_mode_suggested = "CLUSTER"
+        elif isinstance(accel_ratio_2h_vs_6h, (int, float)) and float(accel_ratio_2h_vs_6h) > ACCEL_RATIO_SLOW_THRESHOLD:
+            multispike_buffer_suggested = MULTISPIKE_BUFFER_TICKS_SLOW
+            multispike_retention_suggested = MULTISPIKE_RETENTION_PCT_SLOW
+            multispike_mode_suggested = "CALM"
+        else:
+            multispike_buffer_suggested = MULTISPIKE_BUFFER_TICKS_DEFAULT
+            multispike_retention_suggested = MULTISPIKE_RETENTION_PCT_DEFAULT
+            multispike_mode_suggested = "BALANCED"
         ai_n = len(ai_rows)
+        ai_n_recent = len(ai_rows_recent)
         ai_n_micro = len(ai_rows_micro)
         ai_approvals = sum(1 for r in ai_rows if bool(r.get("approved")))
+        ai_approvals_recent = sum(1 for r in ai_rows_recent if bool(r.get("approved")))
         ai_approvals_micro = sum(1 for r in ai_rows_micro if bool(r.get("approved")))
         contracts_n = len(close_rows)
+        contracts_n_recent = len(close_rows_recent)
         contracts_n_micro = len(close_rows_micro)
+        pnl_values_recent: list[float] = []
+        wins_recent = 0
+        for c in close_rows_recent:
+            try:
+                pnl_recent = float(c.get("realized_pnl_usdt") or 0.0)
+            except Exception:
+                pnl_recent = 0.0
+            pnl_values_recent.append(pnl_recent)
+            if pnl_recent > 0.0:
+                wins_recent += 1
 
         lookback_hours = round(float(lookback_sec) / 3600.0, 2)
 
         telemetry[sym] = {
             "lookback_sec": lookback_sec,
             "lookback_hours": lookback_hours,
+            "tick_window_recent_sec": recent_window_sec,
+            "tick_window_baseline_sec": baseline_window_sec,
             "micro_window_sec": micro_window_sec,
             "spikes_15m": len(recent_micro),
             "entered_spikes_15m": len(entered_micro),
@@ -649,6 +754,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "ev_per_trade_15m": (sum(pnl_values_micro) / contracts_n_micro) if contracts_n_micro else 0.0,
             "ai_decisions_15m": ai_n_micro,
             "ai_approval_rate_15m": pct(ai_approvals_micro, ai_n_micro),
+            "contracts_2h": contracts_n_recent,
+            "win_rate_2h": pct(wins_recent, contracts_n_recent),
+            "ev_per_trade_2h": (sum(pnl_values_recent) / contracts_n_recent) if contracts_n_recent else 0.0,
+            "ai_decisions_2h": ai_n_recent,
+            "ai_approval_rate_2h": pct(ai_approvals_recent, ai_n_recent),
             "entry_lag_sec_median": statistics_median(lags_micro),
             "entry_lag_sec_p75": statistics_quantile(lags_micro, 0.75),
             "late_entry_ge120_pct": pct(sum(1 for x in lags_micro if x >= 120), len(lags_micro)),
@@ -665,12 +775,22 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "tick_interval_p50_15m": statistics_median(tick_intervals_15m),
             "tick_interval_p75_15m": statistics_quantile(tick_intervals_15m, 0.75),
             "tick_interval_p90_15m": statistics_quantile(tick_intervals_15m, 0.90),
+            "tick_intervals_2h": len(tick_intervals_2h),
+            "tick_interval_mean_2h": (sum(tick_intervals_2h) / len(tick_intervals_2h)) if tick_intervals_2h else None,
+            "tick_interval_p25_2h": statistics_quantile(tick_intervals_2h, 0.25),
+            "tick_interval_p50_2h": tick_p50_2h,
+            "tick_interval_p75_2h": statistics_quantile(tick_intervals_2h, 0.75),
+            "tick_interval_p90_2h": statistics_quantile(tick_intervals_2h, 0.90),
             "tick_intervals_6h": len(tick_intervals_6h),
             "tick_interval_mean_6h": (sum(tick_intervals_6h) / len(tick_intervals_6h)) if tick_intervals_6h else None,
             "tick_interval_p25_6h": statistics_quantile(tick_intervals_6h, 0.25),
-            "tick_interval_p50_6h": statistics_median(tick_intervals_6h),
+            "tick_interval_p50_6h": tick_p50_6h,
             "tick_interval_p75_6h": statistics_quantile(tick_intervals_6h, 0.75),
             "tick_interval_p90_6h": statistics_quantile(tick_intervals_6h, 0.90),
+            "tick_interval_accel_ratio_2h_vs_6h": accel_ratio_2h_vs_6h,
+            "multispike_mode_suggested": multispike_mode_suggested,
+            "multispike_buffer_ticks_suggested": multispike_buffer_suggested,
+            "multispike_retention_pct_suggested": multispike_retention_suggested,
             "ticks_since_last_spike_now": ticks_since_spike_now,
             "entry_lag_sec_median_6h": statistics_median(lags),
             "entry_lag_sec_p75_6h": statistics_quantile(lags, 0.75),
@@ -848,41 +968,82 @@ def _apply_tick_window_policy(
         candidate = candidate_cfg[sym]
         t = telemetry.get(sym, {})
 
-        n = int(t.get("tick_intervals_6h") or 0)
-        p50 = t.get("tick_interval_p50_6h")
-        mean = t.get("tick_interval_mean_6h")
-
-        target_raw: float | None = None
-        if isinstance(p50, (int, float)):
-            target_raw = float(p50)
-        elif isinstance(mean, (int, float)):
-            target_raw = float(mean)
-
-        if target_raw is None or n < TICK_WINDOW_MIN_SAMPLES:
-            out[sym] = candidate
-            continue
-
-        if isinstance(mean, (int, float)) and TICK_TARGET_BLEND_MEAN > 0:
-            target_raw = (
-                target_raw * (1.0 - TICK_TARGET_BLEND_MEAN)
-                + float(mean) * TICK_TARGET_BLEND_MEAN
-            )
-
-        target = int(round(target_raw))
-        target = max(SPIKE_PREFILTER_MIN_TICKS, min(target, SPIKE_PREFILTER_MAX_TICKS))
+        n_recent = int(t.get("tick_intervals_2h") or 0)
+        n_baseline = int(t.get("tick_intervals_6h") or 0)
+        p50_recent = t.get("tick_interval_p50_2h")
+        mean_recent = t.get("tick_interval_mean_2h")
+        p50_baseline = t.get("tick_interval_p50_6h")
+        ratio = t.get("tick_interval_accel_ratio_2h_vs_6h")
+        if not isinstance(ratio, (int, float)) and isinstance(p50_recent, (int, float)) and isinstance(p50_baseline, (int, float)) and float(p50_baseline) > 0:
+            ratio = float(p50_recent) / float(p50_baseline)
 
         current_target = int(current.spike_pre_filter_target)
-        delta = target - current_target
-        if abs(delta) > SPIKE_PREFILTER_MAX_STEP_TICKS:
-            target = current_target + (SPIKE_PREFILTER_MAX_STEP_TICKS if delta > 0 else -SPIKE_PREFILTER_MAX_STEP_TICKS)
+        target = current_target
+        target_branch = "hold"
+        target_raw: float | None = None
+
+        if (
+            isinstance(ratio, (int, float))
+            and n_recent >= TICK_WINDOW_MIN_SAMPLES
+            and n_baseline >= TICK_WINDOW_MIN_SAMPLES
+        ):
+            if float(ratio) > ACCEL_RATIO_SLOW_THRESHOLD:
+                if isinstance(p50_recent, (int, float)):
+                    target_raw = float(p50_recent)
+                elif isinstance(mean_recent, (int, float)):
+                    target_raw = float(mean_recent)
+                if target_raw is not None and isinstance(mean_recent, (int, float)) and TICK_TARGET_BLEND_MEAN > 0:
+                    target_raw = (
+                        target_raw * (1.0 - TICK_TARGET_BLEND_MEAN)
+                        + float(mean_recent) * TICK_TARGET_BLEND_MEAN
+                    )
+                if target_raw is not None:
+                    target_raw *= ACCEL_SLOW_TARGET_MULT
+                    target_branch = "slow"
+            elif float(ratio) < ACCEL_RATIO_FAST_THRESHOLD:
+                if isinstance(p50_recent, (int, float)):
+                    target_raw = float(p50_recent)
+                elif isinstance(mean_recent, (int, float)):
+                    target_raw = float(mean_recent)
+                if target_raw is not None and isinstance(mean_recent, (int, float)) and TICK_TARGET_BLEND_MEAN > 0:
+                    target_raw = (
+                        target_raw * (1.0 - TICK_TARGET_BLEND_MEAN)
+                        + float(mean_recent) * TICK_TARGET_BLEND_MEAN
+                    )
+                if target_raw is not None:
+                    target_raw *= ACCEL_FAST_TARGET_MULT
+                    target_branch = "fast"
+            else:
+                target_branch = "stable"
+
+        if target_raw is not None:
+            target = int(round(target_raw))
+            target = max(SPIKE_PREFILTER_MIN_TICKS, min(target, SPIKE_PREFILTER_MAX_TICKS))
+            delta = target - current_target
+            if abs(delta) > SPIKE_PREFILTER_MAX_STEP_TICKS:
+                target = current_target + (SPIKE_PREFILTER_MAX_STEP_TICKS if delta > 0 else -SPIKE_PREFILTER_MAX_STEP_TICKS)
+
+        wr_recent = float(t.get("win_rate_2h") or 0.0)
+        ev_recent = float(t.get("ev_per_trade_2h") or 0.0)
+        score = float(candidate.score_min_override)
+        regime = candidate.regime
+
+        if target_branch == "slow":
+            regime = "SLOW"
+            slow_bonus = ACCEL_SLOW_SCORE_BONUS if (wr_recent < 50.0 or ev_recent < 0.0) else 0.0
+            score = max(score, float(current.score_min_override), float(candidate.score_min_override) + slow_bonus)
+        elif target_branch == "fast":
+            regime = "FAST"
+            if wr_recent > 50.0:
+                score = max(_symbol_score_floor(sym), score - ACCEL_FAST_SCORE_RELAX)
 
         adjusted = _clamp_cfg(
             sym,
             SymbolCfg(
-                regime=candidate.regime,
+                regime=regime,
                 spike_pre_filter_target=target,
                 zero_peak_grace_sec=candidate.zero_peak_grace_sec,
-                score_min_override=candidate.score_min_override,
+                score_min_override=score,
                 is_active=candidate.is_active,
             ),
         )
@@ -1049,7 +1210,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "REGLAS DE AJUSTE:\n"
         "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
-        "2. No modificar spike_pre_filter_target automaticamente; el sidecar lo recalcula fuera del LLM con percentiles de ticks (ventana 6h).\n"
+        "2. No modificar spike_pre_filter_target automaticamente; el sidecar lo recalcula fuera del LLM con ventana reactiva 2h y baseline 6h.\n"
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
@@ -1500,13 +1661,29 @@ async def run_loop() -> None:
                 },
             )
             LOG.info(
-                "[dynamic-ai][TICK_WINDOW_6H] spike_pre_filter_updates=%d sample_ticks=%s",
+                "[dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=%d sample=%s",
                 tick_updates,
                 {
-                    "BOOM500": telemetry.get("BOOM500", {}).get("tick_interval_p50_6h"),
-                    "CRASH500": telemetry.get("CRASH500", {}).get("tick_interval_p50_6h"),
-                    "BOOM900": telemetry.get("BOOM900", {}).get("tick_interval_p50_6h"),
-                    "CRASH900": telemetry.get("CRASH900", {}).get("tick_interval_p50_6h"),
+                    "BOOM500": {
+                        "ratio": telemetry.get("BOOM500", {}).get("tick_interval_accel_ratio_2h_vs_6h"),
+                        "p50_2h": telemetry.get("BOOM500", {}).get("tick_interval_p50_2h"),
+                        "p50_6h": telemetry.get("BOOM500", {}).get("tick_interval_p50_6h"),
+                    },
+                    "CRASH500": {
+                        "ratio": telemetry.get("CRASH500", {}).get("tick_interval_accel_ratio_2h_vs_6h"),
+                        "p50_2h": telemetry.get("CRASH500", {}).get("tick_interval_p50_2h"),
+                        "p50_6h": telemetry.get("CRASH500", {}).get("tick_interval_p50_6h"),
+                    },
+                    "BOOM900": {
+                        "ratio": telemetry.get("BOOM900", {}).get("tick_interval_accel_ratio_2h_vs_6h"),
+                        "p50_2h": telemetry.get("BOOM900", {}).get("tick_interval_p50_2h"),
+                        "p50_6h": telemetry.get("BOOM900", {}).get("tick_interval_p50_6h"),
+                    },
+                    "CRASH900": {
+                        "ratio": telemetry.get("CRASH900", {}).get("tick_interval_accel_ratio_2h_vs_6h"),
+                        "p50_2h": telemetry.get("CRASH900", {}).get("tick_interval_p50_2h"),
+                        "p50_6h": telemetry.get("CRASH900", {}).get("tick_interval_p50_6h"),
+                    },
                 },
             )
             # Always write a heartbeat entry so diff_log mtime stays fresh

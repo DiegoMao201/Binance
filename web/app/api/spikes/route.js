@@ -9,6 +9,8 @@ const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 const SPIKE_FILE = path.join(DERIV_LOGS, "deriv_spike_events.json");
 const CLOSED_FILE = path.join(DERIV_LOGS, "deriv_closed_contracts.json");
 const OPEN_FILE = path.join(DERIV_LOGS, "deriv_open_contracts.json");
+const BOT_SESSION_FILE = path.join(LOGS, "deriv_session.json");
+const DERIV_SESSION_FILE = path.join(DERIV_LOGS, "deriv_session.json");
 
 function parseJson(content, fallback) {
   try {
@@ -16,6 +18,27 @@ function parseJson(content, fallback) {
   } catch {
     return fallback;
   }
+}
+
+async function readSessionSinceSec() {
+  let latest = 0;
+  const sessionFiles = [...new Set([BOT_SESSION_FILE, DERIV_SESSION_FILE])];
+
+  for (const sessionFile of sessionFiles) {
+    try {
+      const content = await fs.readFile(sessionFile, "utf8");
+      const session = parseJson(content, {});
+      const ts = Number(session?.session_start_ts || 0);
+      if (!Number.isFinite(ts) || ts <= 0) continue;
+      // session_start_ts is stored in ms; spikes use epoch seconds.
+      const since = ts > 1e12 ? ts / 1000 : ts;
+      if (since > latest) latest = since;
+    } catch {
+      // ignore missing session file on either path
+    }
+  }
+
+  return latest;
 }
 
 // Match a spike to a contract (open or closed).
@@ -225,7 +248,9 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const symbol = searchParams.get("symbol") || null;
   const limit = Math.min(parseInt(searchParams.get("limit") || "200", 10), 2000);
-  const since = parseFloat(searchParams.get("since") || "0");
+  const sinceParam = parseFloat(searchParams.get("since") || "0");
+  const sessionSince = await readSessionSinceSec();
+  const since = sinceParam > 0 ? sinceParam : sessionSince;
 
   let spikes = [];
   let closedContracts = [];

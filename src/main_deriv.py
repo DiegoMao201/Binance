@@ -555,10 +555,54 @@ class DerivDaemon:
             _reason += f" vel_dir={_velocity_dir}!={snap.side}"
         return False, _reason
 
+    @staticmethod
+    def _multispike_policy_for_regime(regime: str) -> dict[str, Any]:
+        """Resolve multispike ratchet policy from dynamic market regime.
+
+        FAST  -> cluster mode (more patience, looser retention).
+        SLOW  -> calm mode (short patience, tighter retention).
+        NORMAL-> balanced defaults.
+        """
+        _regime = str(regime or "NORMAL").upper()
+        _buf_default = int(float(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_DEFAULT", "45") or 45))
+        _buf_fast = int(float(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_FAST", "60") or 60))
+        _buf_slow = int(float(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_SLOW", "10") or 10))
+
+        _ret_default = float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_DEFAULT", "0.70") or 0.70)
+        _ret_fast = float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_FAST", "0.50") or 0.50)
+        _ret_slow = float(os.getenv("DERIV_MULTISPIKE_RETENTION_PCT_SLOW", "0.85") or 0.85)
+
+        _floor_default = float(os.getenv("DERIV_MULTISPIKE_MIN_FLOOR_USDT", "0.15") or 0.15)
+
+        _drift_default = int(float(os.getenv("DERIV_MULTISPIKE_DRIFT_TICKS_DEFAULT", str(_buf_default)) or _buf_default))
+        _drift_fast = int(float(os.getenv("DERIV_MULTISPIKE_DRIFT_TICKS_FAST", str(_buf_fast)) or _buf_fast))
+        _drift_slow = int(float(os.getenv("DERIV_MULTISPIKE_DRIFT_TICKS_SLOW", str(_buf_slow)) or _buf_slow))
+
+        if _regime == "FAST":
+            _buf = _buf_fast
+            _ret = _ret_fast
+            _drift = _drift_fast
+        elif _regime == "SLOW":
+            _buf = _buf_slow
+            _ret = _ret_slow
+            _drift = _drift_slow
+        else:
+            _buf = _buf_default
+            _ret = _ret_default
+            _drift = _drift_default
+
+        return {
+            "multispike_buffer_ticks": max(5, min(_buf, 300)),
+            "multispike_retention_pct": max(0.30, min(_ret, 0.95)),
+            "multispike_min_floor_usdt": max(0.01, min(_floor_default, 5.00)),
+            "multispike_timeout_drift_ticks": max(5, min(_drift, 400)),
+        }
+
     def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return in-memory dynamic config for a symbol (safe fallback if DB unavailable)."""
         _sym = symbol.upper()
         _profile = profile or get_asset_profile(_sym)
+        _default_policy = self._multispike_policy_for_regime("NORMAL")
         _default = {
             "symbol": _sym,
             "market_regime": "NORMAL",
@@ -566,6 +610,7 @@ class DerivDaemon:
             "zero_peak_grace_sec": 0,
             "score_min_override": float(min_score_for(_sym)),
             "is_active": False,
+            **_default_policy,
             "source": "default",
             "last_updated": None,
         }
@@ -578,13 +623,17 @@ class DerivDaemon:
             int(_db_cfg.get("zero_peak_grace_sec") or 0),
             float(_db_cfg.get("score_min_override") or _default["score_min_override"]),
         )
+        _regime = str(_db_cfg.get("market_regime") or "NORMAL").upper()
+        _policy = self._multispike_policy_for_regime(_regime)
+
         return {
             "symbol": _sym,
-            "market_regime": str(_db_cfg.get("market_regime") or "NORMAL").upper(),
+            "market_regime": _regime,
             "spike_pre_filter_target": _spf,
             "zero_peak_grace_sec": _grace,
             "score_min_override": _score,
             "is_active": bool(_db_cfg.get("is_active", True)),
+            **_policy,
             "source": "dynamic_db",
             "last_updated": _db_cfg.get("last_updated"),
         }
@@ -2258,6 +2307,24 @@ class DerivDaemon:
             # Per-symbol stats from the executor (closed contract history)
             per_sym = self._executor.get_per_symbol_stats()
             open_contracts = self._executor.get_open_contracts_for_status()
+            symbol_tick_context = {}
+            for _sym in self._settings.symbols:
+                _tick_count = int(self._risk.get_tick_count(_sym) or 0)
+                _last_spike_tick = int(self._risk.get_last_spike_tick_count(_sym) or 0)
+                _ticks_since_spike = None
+                if _tick_count > 0 and _last_spike_tick > 0 and _tick_count >= _last_spike_tick:
+                    _ticks_since_spike = _tick_count - _last_spike_tick
+                symbol_tick_context[_sym] = {
+                    "tick_count": _tick_count,
+                    "last_spike_tick_count": _last_spike_tick,
+                    "ticks_since_last_spike": _ticks_since_spike,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            _dyn_symbols = set(self._settings.symbols) | set(self._dynamic_configs.keys())
+            _export_cfg = {
+                _sym: self.get_dynamic_config(_sym)
+                for _sym in sorted(_dyn_symbols)
+            }
             data = {
                 "status": "running" if connected else "stopped",
                 "connected": connected,
@@ -2274,6 +2341,7 @@ class DerivDaemon:
                 "last_ticks": dict(self._last_ticks),
                 "last_decisions": list(self._last_decisions[-15:]),
                 "per_symbol_stats": per_sym,
+                "symbol_tick_context": symbol_tick_context,
                 "open_contracts_live": open_contracts,
                 "equity_history": list(self._equity_history[-50:]),  # last 50 snapshots
                 # ── Analyst statistics (Hurst, vol regime, AI gate) ───────
@@ -2284,8 +2352,8 @@ class DerivDaemon:
                     "refresh_sec": self._dynamic_refresh_sec,
                     "entry_tick_only": self._entry_tick_only,
                     "last_refresh": self._dynamic_last_refresh,
-                    "symbols_loaded": sorted(self._dynamic_configs.keys()),
-                    "configs": self._dynamic_configs,
+                    "symbols_loaded": sorted(_export_cfg.keys()),
+                    "configs": _export_cfg,
                 },
             }
             tmp = path.with_suffix(".tmp")

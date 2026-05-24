@@ -568,6 +568,23 @@ function OpenContractCard({ c }) {
   const openedTs = c.opened_at_ts;
   const openedSec = openedTs ? Number(openedTs > 1e12 ? openedTs / 1000 : openedTs) : null;
   const duration = openedSec ? Math.round(Date.now() / 1000 - openedSec) : null;
+  const ticksSinceSpikeRaw = Number(c.ticks_since_last_spike_now);
+  const ticksSinceSpike = Number.isFinite(ticksSinceSpikeRaw) ? Math.max(0, Math.round(ticksSinceSpikeRaw)) : null;
+  const tickTargetRaw = Number(c.spike_pre_filter_target_live ?? c.spike_pre_filter_target);
+  const tickTarget = Number.isFinite(tickTargetRaw) ? Math.max(0, Math.round(tickTargetRaw)) : null;
+  const ticksToTargetRaw = Number(c.ticks_to_prefilter_target);
+  const ticksToTarget = Number.isFinite(ticksToTargetRaw)
+    ? Math.max(0, Math.round(ticksToTargetRaw))
+    : (ticksSinceSpike != null && tickTarget != null ? Math.max(0, tickTarget - ticksSinceSpike) : null);
+  const accelRatioRaw = Number(c.tick_acceleration_ratio_2h_vs_6h);
+  const accelRatio = Number.isFinite(accelRatioRaw) ? accelRatioRaw : null;
+  const accelColor = accelRatio == null ? T.textD : accelRatio > 1.2 ? T.red : accelRatio < 0.8 ? T.green : T.cyan;
+  const multispikeBufferRaw = Number(c.multispike_buffer_ticks_live);
+  const multispikeBuffer = Number.isFinite(multispikeBufferRaw) ? Math.max(0, Math.round(multispikeBufferRaw)) : null;
+  const multispikeMode = String(c.multispike_mode_live || "").toUpperCase();
+  const multispikeModeColor = multispikeMode === "FAST" ? T.green : multispikeMode === "SLOW" ? T.red : T.cyan;
+  const tickProgressMax = tickTarget != null ? Math.max(1, tickTarget) : Math.max(1, ticksSinceSpike || 0);
+  const tickProgress = ticksSinceSpike != null ? Math.min(tickProgressMax, ticksSinceSpike) : 0;
   // DPM panel always shows — stake_usdt is always present in deriv_open_contracts.json.
   // Note: the JSON key is "trail_sl_locked" (from _persist_open), not "trail_sl".
   // DpmTierPanel handles both names via c.trail_sl ?? c.trail_sl_locked fallback.
@@ -594,6 +611,33 @@ function OpenContractCard({ c }) {
         <MicroStat lbl="ENTRY"   val={n(c.entry_price, 4)} color={T.cyan} />
         <MicroStat lbl="DUR."    val={dur(duration)} color={T.amber} />
       </div>
+      {ticksSinceSpike != null && (
+        <div style={{
+          border: `1px solid ${T.border}`,
+          borderRadius: 7,
+          background: "rgba(255,255,255,0.02)",
+          padding: "7px 8px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            <MicroStat lbl="TICKS SIN SPIKE" val={nC(ticksSinceSpike, 0)} color={T.amber} />
+            <MicroStat lbl="TARGET IA" val={tickTarget != null ? nC(tickTarget, 0) : "–"} color={T.cyan} />
+            <MicroStat lbl="RATIO 2H/6H" val={accelRatio != null ? n(accelRatio, 2) : "–"} color={accelColor} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            <MicroStat lbl="MODO" val={multispikeMode || "–"} color={multispikeModeColor} />
+            <MicroStat lbl="BUFFER" val={multispikeBuffer != null ? `${nC(multispikeBuffer, 0)}t` : "–"} color={T.violet} />
+            <MicroStat lbl="A TARGET" val={ticksToTarget != null ? `${nC(ticksToTarget, 0)}t` : "–"} color={T.textD} />
+          </div>
+          <MiniBar value={tickProgress} max={tickProgressMax} color={ticksSinceSpike >= (tickTarget || Infinity) ? T.green : T.amber} height={5} />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: T.mute }}>
+            <span>{ticksToTarget != null ? `faltan ${nC(ticksToTarget, 0)} ticks` : "target IA no disponible"}</span>
+            <span>{tickTarget != null && ticksSinceSpike >= tickTarget ? "prefiltro listo" : "acumulando"}</span>
+          </div>
+        </div>
+      )}
       {(c.score != null || c.regime != null) && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
           <MicroStat
