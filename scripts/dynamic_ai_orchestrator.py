@@ -64,6 +64,15 @@ def _parse_symbol_float_map(raw: str) -> dict[str, float]:
     return out
 
 
+def _parse_symbol_set(raw: str) -> set[str]:
+    out: set[str] = set()
+    for item in (raw or "").split(","):
+        sym = item.strip().upper()
+        if sym:
+            out.add(sym)
+    return out
+
+
 SYMBOL_SCORE_FLOOR_MAP: dict[str, float] = {
     "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "8.0") or 8.0),
     "BOOM600": float(os.getenv("DYNAMIC_AI_BOOM600_SCORE_FLOOR", "5.8") or 5.8),
@@ -88,7 +97,13 @@ ZERO_PEAK_FLOOR_BY_SYMBOL = {
     "CRASH500": 60,
     "CRASH600": 60,
 }
-STRICT_DISABLE_SYMBOLS = {"BOOM500"}
+STRICT_DISABLE_SYMBOLS = _parse_symbol_set(
+    os.getenv("DYNAMIC_AI_STRICT_DISABLE_SYMBOLS", "BOOM500")
+)
+STRICT_DISABLE_MIN_CONTRACTS = max(
+    1,
+    int(os.getenv("DYNAMIC_AI_STRICT_DISABLE_MIN_CONTRACTS", "4") or 4),
+)
 
 # Short-term memory to prevent regime oscillation.
 STATE_MEMORY: dict[str, dict[str, Any]] = {}
@@ -590,7 +605,7 @@ def _apply_activity_policy(
                 or (contracts_n >= 6 and win_rate < 35.0 and ev_per_trade <= -0.05)
                 or (late120 >= 45.0 and lag_med_val is not None and lag_med_val >= 180.0)
             )
-        if sym in STRICT_DISABLE_SYMBOLS and contracts_n >= 4:
+        if sym in STRICT_DISABLE_SYMBOLS and contracts_n >= STRICT_DISABLE_MIN_CONTRACTS:
             severe_disable = severe_disable or (win_rate < 45.0 or ev_per_trade < 0.0)
 
         if contracts_n >= 6:
@@ -1027,7 +1042,13 @@ async def run_loop() -> None:
 
     import asyncpg  # noqa: PLC0415
 
-    LOG.info("[dynamic-ai] starting loop interval=%ss logs_dir=%s", loop_sec, logs_dir)
+    LOG.info(
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s strict_disable=%s min_contracts=%d",
+        loop_sec,
+        logs_dir,
+        sorted(STRICT_DISABLE_SYMBOLS),
+        STRICT_DISABLE_MIN_CONTRACTS,
+    )
 
     while True:
         started = time.time()
