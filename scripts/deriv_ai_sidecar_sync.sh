@@ -22,13 +22,16 @@ fi
 BOT_IMAGE="$(docker inspect -f '{{.Config.Image}}' "${BOT_CONTAINER}")"
 CURRENT_AI_IMAGE=""
 CURRENT_AI_CMD=""
+CURRENT_AI_ENV_HASH=""
+ENV_HASH="$(sha256sum "${ENV_FILE}" | awk '{print $1}')"
 
 if docker ps -a --format '{{.Names}}' | grep -qx "${AI_CONTAINER}"; then
   CURRENT_AI_IMAGE="$(docker inspect -f '{{.Config.Image}}' "${AI_CONTAINER}")"
   CURRENT_AI_CMD="$(docker inspect -f '{{join .Config.Cmd " "}}' "${AI_CONTAINER}")"
+  CURRENT_AI_ENV_HASH="$(docker inspect -f '{{ index .Config.Labels "deriv.env_hash" }}' "${AI_CONTAINER}" 2>/dev/null || true)"
 fi
 
-if [[ "${CURRENT_AI_IMAGE}" == "${BOT_IMAGE}" && "${CURRENT_AI_CMD}" == "${AI_CMD}" ]]; then
+if [[ "${CURRENT_AI_IMAGE}" == "${BOT_IMAGE}" && "${CURRENT_AI_CMD}" == "${AI_CMD}" && "${CURRENT_AI_ENV_HASH}" == "${ENV_HASH}" ]]; then
   if docker ps --format '{{.Names}}' | grep -qx "${AI_CONTAINER}"; then
     echo "[ai-sync] up-to-date (${AI_CONTAINER} -> ${BOT_IMAGE})"
     exit 0
@@ -41,6 +44,7 @@ docker run -d \
   --name "${AI_CONTAINER}" \
   --network "${NETWORK}" \
   --restart unless-stopped \
+  --label "deriv.env_hash=${ENV_HASH}" \
   --env-file "${ENV_FILE}" \
   -v "${LOGS_VOLUME}" \
   "${BOT_IMAGE}" \
