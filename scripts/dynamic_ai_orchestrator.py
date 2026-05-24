@@ -127,6 +127,14 @@ ACCEL_SLOW_SCORE_BONUS = max(
     0.0,
     min(float(os.getenv("DYNAMIC_AI_ACCEL_SLOW_SCORE_BONUS", "0.10") or 0.10), 0.60),
 )
+SCORE_RECOVERY_BASE = max(
+    SCORE_MIN_GUARDRAIL,
+    min(float(os.getenv("DYNAMIC_AI_SCORE_RECOVERY_BASE", "6.80") or 6.80), SCORE_MAX_GUARDRAIL),
+)
+SCORE_RECOVERY_STEP_STABLE = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_SCORE_RECOVERY_STEP_STABLE", "0.80") or 0.80), 1.20),
+)
 MULTISPIKE_BUFFER_TICKS_DEFAULT = max(
     5,
     int(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_DEFAULT", "45") or 45),
@@ -1036,6 +1044,12 @@ def _apply_tick_window_policy(
             regime = "FAST"
             if wr_recent > 50.0:
                 score = max(_symbol_score_floor(sym), score - ACCEL_FAST_SCORE_RELAX)
+        elif target_branch == "stable":
+            regime = "NORMAL"
+            recovery_floor = max(_symbol_score_floor(sym), SCORE_RECOVERY_BASE)
+            if score > recovery_floor:
+                step = min(SCORE_RECOVERY_STEP_STABLE, score - recovery_floor)
+                score = max(recovery_floor, score - step)
 
         adjusted = _clamp_cfg(
             sym,
@@ -1214,13 +1228,14 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
-        "6. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override inmediatamente.\n"
-        f"7. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
-        "8. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
-        "9. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
-        "10. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
-        "11. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
-        "12. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
+        "6. Regla de Recuperacion (Regimen Estable): Si 0.8 <= Ratio <= 1.2 (el mercado esta a un ritmo normal y estable), tu obligacion es RELAJAR la cuarentena. Debes bajar gradualmente el score_min_override acercandolo de nuevo al valor base de 6.80 (ejemplo: si estaba en 8.00, bajalo a 7.20; si estaba en 7.20, bajalo a 6.80). No mantengas los scores en 8.00 si el ratio de aceleracion es normal, o asfixiaras la estrategia.\n"
+        "7. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override inmediatamente.\n"
+        f"8. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
+        "9. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
+        "10. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
+        "11. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
+        "12. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
+        "13. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
