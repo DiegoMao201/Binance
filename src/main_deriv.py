@@ -358,6 +358,118 @@ class DerivDaemon:
 
         return self._post_spike_chase_block_sec_default
 
+    def _passes_post_spike_strength_gate(
+        self,
+        *,
+        symbol: str,
+        snap: Any,
+        profile: dict[str, Any] | None,
+        dyn_cfg: dict[str, Any],
+        dyn_active: bool,
+        score_floor: float,
+    ) -> tuple[bool, str]:
+        """Allow post-spike entries only when continuation strength is explicit.
+
+        Intent:
+          - Prefer NO entry right after a spike unless the continuation is strong.
+          - Reduce late/chasing entries that often end in spike_timeout.
+        """
+        if not self._entry_tick_only or not is_spike_market(symbol):
+            return True, ""
+
+        _last_spike_ts = self._risk.get_last_spike_ts(symbol)
+        if _last_spike_ts <= 0:
+            return True, ""
+
+        _elapsed = max(0.0, time.time() - _last_spike_ts)
+        _chase_block = self._post_spike_chase_block_sec_for_symbol(
+            symbol,
+            profile,
+            dyn_cfg,
+            dyn_active,
+        )
+
+        # Keep safety invariant even if caller path changes in the future.
+        if _elapsed < _chase_block:
+            return (
+                False,
+                f"post_spike_chase_guard:{_elapsed:.1f}s<{_chase_block:.0f}s",
+            )
+
+        _window_default = max(180.0, _chase_block * 3.0)
+        _strength_window = max(
+            _chase_block,
+            float(
+                os.getenv(
+                    "DERIV_POST_SPIKE_STRENGTH_WINDOW_SEC",
+                    str(_window_default),
+                )
+                or _window_default
+            ),
+        )
+        if _elapsed > _strength_window:
+            return True, ""
+
+        _sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+        _score_margin = float(snap.score or 0.0) - float(score_floor or 0.0)
+        _momentum = float(_sb.get("momentum") or 0.0)
+        _atr_score = float(_sb.get("atr") or 0.0)
+        _velocity_score = float(_sb.get("velocity_score") or 0.0)
+        _hd_bonus = float(_sb.get("hd_bonus") or 0.0)
+        _velocity_dir = str(_sb.get("velocity_dir") or "").upper()
+
+        _min_margin = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_SCORE_MARGIN", "0.60") or 0.60)
+        _min_momentum = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_MOMENTUM_MIN", "1.10") or 1.10)
+        _min_velocity = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_VELOCITY_MIN", "0.45") or 0.45)
+        _min_atr = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_ATR_MIN", "1.00") or 1.00)
+        _min_hd = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_HD_MIN", "0.50") or 0.50)
+        _required_signals = max(
+            1,
+            min(
+                5,
+                int(os.getenv("DERIV_POST_SPIKE_STRENGTH_MIN_SIGNALS", "3") or 3),
+            ),
+        )
+
+        _signals: list[str] = []
+        if _score_margin >= _min_margin:
+            _signals.append("score")
+        if _momentum >= _min_momentum:
+            _signals.append("momentum")
+        if _velocity_score >= _min_velocity:
+            _signals.append("velocity")
+        if _atr_score >= _min_atr:
+            _signals.append("atr")
+        if _hd_bonus >= _min_hd:
+            _signals.append("hd")
+
+        _dir_conflict = bool(
+            _velocity_dir
+            and snap.side
+            and _velocity_dir != str(snap.side).upper()
+        )
+        _strong_enough = (len(_signals) >= _required_signals) and not _dir_conflict
+
+        _sb["post_spike_strength_elapsed_sec"] = round(_elapsed, 1)
+        _sb["post_spike_strength_window_sec"] = round(_strength_window, 1)
+        _sb["post_spike_strength_signals"] = list(_signals)
+        _sb["post_spike_strength_required"] = _required_signals
+        _sb["post_spike_strength_ok"] = _strong_enough
+
+        if _strong_enough:
+            return True, ""
+
+        _reason = (
+            "post_spike_strength_veto:"
+            f"{_elapsed:.1f}s<{_strength_window:.0f}s "
+            f"signals={len(_signals)}/{_required_signals} "
+            f"margin={_score_margin:.2f} mom={_momentum:.2f} "
+            f"vel={_velocity_score:.2f} atr={_atr_score:.2f}"
+        )
+        if _dir_conflict:
+            _reason += f" vel_dir={_velocity_dir}!={snap.side}"
+        return False, _reason
+
     def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return in-memory dynamic config for a symbol (safe fallback if DB unavailable)."""
         _sym = symbol.upper()
@@ -1402,6 +1514,47 @@ class DerivDaemon:
                     "profile": _asset_profile,
                     "dynamic_cfg": _dyn_cfg,
                 },
+            )
+            return
+
+        # Post-spike intelligent gate: after the anti-chase window, only allow
+        # continuation entries when multi-signal strength is explicit.
+        _post_spike_ok, _post_spike_reason = self._passes_post_spike_strength_gate(
+            symbol=tick.symbol,
+            snap=snap,
+            profile=_asset_profile,
+            dyn_cfg=_dyn_cfg,
+            dyn_active=_dyn_active,
+            score_floor=_profile_min_score,
+        )
+        if not _post_spike_ok:
+            self._log_entry_block(
+                tick.symbol,
+                "POST_SPIKE_STRENGTH_VETO",
+                score=snap.score,
+                effective_min_score=_profile_min_score,
+                side=snap.side,
+                regime=snap.regime,
+                hurst=_eval_hurst,
+                score_breakdown=snap.score_breakdown,
+            )
+            self._record_decision(
+                symbol=tick.symbol,
+                allowed=False,
+                side=snap.side,
+                score=snap.score,
+                reason=_post_spike_reason,
+                extra={
+                    "score_breakdown": snap.score_breakdown,
+                    "regime": snap.regime,
+                    "dynamic_cfg": _dyn_cfg,
+                },
+            )
+            self._spike_enrich(
+                tick.symbol,
+                bot_entered=False,
+                block_reason=_post_spike_reason,
+                score=snap.score,
             )
             return
 
