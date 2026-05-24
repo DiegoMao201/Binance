@@ -957,6 +957,7 @@ class DerivRiskManager:
         hurst: float | None = None,
         autocorr_lag1: float | None = None,
         ai_confidence: float | None = None,
+        dynamic_cfg: dict[str, Any] | None = None,
     ) -> DerivRiskSnapshot:
         """Score the current state for `symbol` and return an actionable snapshot.
 
@@ -965,6 +966,7 @@ class DerivRiskManager:
           hurst          — Hurst exponent for the current symbol (0–1)
           autocorr_lag1  — autocorrelation of log-returns at lag 1
           ai_confidence  — AI gate confidence (0–1); used for the math-override rule
+                    dynamic_cfg    — runtime per-symbol config from dynamic_symbol_config
         """
         snap = DerivRiskSnapshot(allowed=False, score=0.0, side=None, spread_pct=spread_pct)
         snap.effective_min_score = self._settings.min_score
@@ -1833,27 +1835,72 @@ class DerivRiskManager:
                 self._fvg_credit[_su_credit] = {
                     "cycles_remaining": _FVG_CREDIT_CYCLES,
                     "score_at_detection": snap.score,
+                    "was_mitigated": bool(_has_fvg_mitigated),
                 }
                 _LOGGER.info(
                     "[FVG_CREDIT] %s ISSUED cycles=%d score_at_detection=%.2f "
-                    "(fvg_active=True score>=%.1f)",
-                    symbol, _FVG_CREDIT_CYCLES, snap.score, _FVG_CREDIT_SCORE_MIN,
+                    "mitigated=%s (fvg_active=True score>=%.1f)",
+                    symbol, _FVG_CREDIT_CYCLES, snap.score,
+                    bool(_has_fvg_mitigated), _FVG_CREDIT_SCORE_MIN,
                 )
             elif not _has_fvg_active and _credit and _credit.get("cycles_remaining", 0) > 0:
-                # Consume credit cycle — treat as FVG active
+                # Consume credit cycle — preserve the last observed FVG tier.
                 _credit["cycles_remaining"] -= 1
-                _has_fvg_active = True   # override for Tier gate below
-                _has_fvg_mitigated = True  # credit implies previously mitigated
+                _has_fvg_active = True
+                _has_fvg_mitigated = bool(_credit.get("was_mitigated", False))
                 _LOGGER.info(
                     "[FVG_CREDIT] %s ACTIVE cycles_remaining=%d score_at_detection=%.2f "
-                    "— bridging ATR race (fvg_active reinstated for this cycle)",
-                    symbol, _credit["cycles_remaining"], _credit.get("score_at_detection", 0),
+                    "mitigated=%s — bridging ATR race (fvg_active reinstated for this cycle)",
+                    symbol, _credit["cycles_remaining"],
+                    _credit.get("score_at_detection", 0),
+                    _has_fvg_mitigated,
                 )
                 snap.score_breakdown["fvg_credit_active"] = True
                 snap.score_breakdown["fvg_credit_cycles"] = _credit["cycles_remaining"]
+                snap.score_breakdown["fvg_credit_was_mitigated"] = _has_fvg_mitigated
             elif _credit and _credit.get("cycles_remaining", 0) <= 0:
                 # Credit expired — remove
                 del self._fvg_credit[_su_credit]
+
+            _dyn_cfg = dynamic_cfg if isinstance(dynamic_cfg, dict) else {}
+            _dyn_is_active = bool(_dyn_cfg.get("is_active", False))
+            _dyn_regime = str(_dyn_cfg.get("market_regime") or "NORMAL").upper()
+            _dyn_relax_enabled = (
+                os.getenv("DERIV_DYNAMIC_STRUCTURAL_RELAX_ENABLED", "true").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
+            _dyn_relax_symbols = {
+                s.strip().upper()
+                for s in os.getenv(
+                    "DERIV_DYNAMIC_STRUCTURAL_RELAX_SYMBOLS",
+                    "BOOM600,BOOM900,CRASH600,CRASH900",
+                ).split(",")
+                if s.strip()
+            }
+            _dyn_relax_regimes = {
+                s.strip().upper()
+                for s in os.getenv(
+                    "DERIV_DYNAMIC_STRUCTURAL_RELAX_REGIMES",
+                    "FAST,NORMAL",
+                ).split(",")
+                if s.strip()
+            }
+            _dyn_relax_score_margin = float(
+                os.getenv("DERIV_DYNAMIC_STRUCTURAL_RELAX_SCORE_MARGIN", "0.40") or 0.40
+            )
+            _dyn_relax_no_fvg_penalty = float(
+                os.getenv("DERIV_DYNAMIC_STRUCTURAL_NO_FVG_PENALTY", "1.10") or 1.10
+            )
+            _dyn_relax_tier1_penalty = float(
+                os.getenv("DERIV_DYNAMIC_STRUCTURAL_TIER1_PENALTY", "0.75") or 0.75
+            )
+            _dyn_relax_structural = (
+                _dyn_relax_enabled
+                and _dyn_is_active
+                and symbol.upper() in _dyn_relax_symbols
+                and _dyn_regime in _dyn_relax_regimes
+                and score >= (effective_min_score + _dyn_relax_score_margin)
+            )
 
             if not _has_fvg_active and not _has_spike_hunter:
                 # ── Tier 0: No FVG detected, no EMA200 spike-hunter ──────────
@@ -1875,15 +1922,36 @@ class DerivRiskManager:
                 elif _bc_env_raw in ("0", "false", "no"):
                     _profile_blocks_bc = False
                 if not _bc_escape_env or _profile_blocks_bc:
-                    _block_reason = (
-                        f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
-                        if _profile_blocks_bc else
-                        f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
-                    )
-                    snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
-                    snap.reasons.append(_block_reason)
-                    snap.allowed = False
-                    return snap
+                    if _dyn_relax_structural:
+                        score = max(0.0, score - _dyn_relax_no_fvg_penalty)
+                        snap.score = round(score, 3)
+                        snap.score_breakdown["fvg_tier"] = "dynamic_soft_veto_no_fvg"
+                        snap.score_breakdown["dynamic_structural_relax"] = True
+                        snap.score_breakdown["dynamic_structural_penalty"] = round(
+                            _dyn_relax_no_fvg_penalty, 2
+                        )
+                        snap.reasons.append(
+                            f"dynamic_structural_relax_no_fvg: regime={_dyn_regime} "
+                            f"penalty={_dyn_relax_no_fvg_penalty:.2f} score_after={score:.2f}"
+                        )
+                        _LOGGER.info(
+                            "[STRUCTURAL_RELAX_DYNAMIC] %s no_fvg_hard_veto→soft "
+                            "regime=%s penalty=%.2f score_after=%.2f",
+                            symbol,
+                            _dyn_regime,
+                            _dyn_relax_no_fvg_penalty,
+                            score,
+                        )
+                    else:
+                        _block_reason = (
+                            f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
+                            if _profile_blocks_bc else
+                            f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
+                        )
+                        snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
+                        snap.reasons.append(_block_reason)
+                        snap.allowed = False
+                        return snap
                 else:
                     # Debug escape valve: apply mild penalty instead of hard block.
                     _no_fvg_penalty = float(
@@ -1907,13 +1975,34 @@ class DerivRiskManager:
                 # Check if the profile requires mitigated FVG (e.g. BOOM600/CRASH600).
                 _fvg_tier_min = _get_asset_profile(symbol).get("fvg_tier_minimo", "fvg_detected")
                 if _fvg_tier_min == "fvg_mitigated":
-                    snap.score_breakdown["fvg_tier"] = "fvg_detected_insufficient"
-                    snap.reasons.append(
-                        f"boom_crash_structural_veto: {symbol} requires fvg_tier=fvg_mitigated, "
-                        f"only fvg_detected active — awaiting mitigation"
-                    )
-                    snap.allowed = False
-                    return snap
+                    if _dyn_relax_structural:
+                        score = max(0.0, score - _dyn_relax_tier1_penalty)
+                        snap.score = round(score, 3)
+                        snap.score_breakdown["fvg_tier"] = "dynamic_soft_veto_tier1"
+                        snap.score_breakdown["dynamic_structural_relax"] = True
+                        snap.score_breakdown["dynamic_structural_penalty"] = round(
+                            _dyn_relax_tier1_penalty, 2
+                        )
+                        snap.reasons.append(
+                            f"dynamic_structural_relax_tier1: regime={_dyn_regime} "
+                            f"penalty={_dyn_relax_tier1_penalty:.2f} score_after={score:.2f}"
+                        )
+                        _LOGGER.info(
+                            "[STRUCTURAL_RELAX_DYNAMIC] %s tier1_fvg_detected→soft "
+                            "regime=%s penalty=%.2f score_after=%.2f",
+                            symbol,
+                            _dyn_regime,
+                            _dyn_relax_tier1_penalty,
+                            score,
+                        )
+                    else:
+                        snap.score_breakdown["fvg_tier"] = "fvg_detected_insufficient"
+                        snap.reasons.append(
+                            f"boom_crash_structural_veto: {symbol} requires fvg_tier=fvg_mitigated, "
+                            f"only fvg_detected active — awaiting mitigation"
+                        )
+                        snap.allowed = False
+                        return snap
                 # Tier 1 OK — allow at normal effective_min (no extra SMC bonus).
                 snap.score_breakdown["fvg_tier"] = "fvg_detected"
                 _LOGGER.debug(

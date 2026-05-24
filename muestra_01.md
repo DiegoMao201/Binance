@@ -22,6 +22,40 @@
 
 ## MUESTRA 6 — EN CURSO (desde 24-05-2026 UTC)
 
+### ACTUALIZACIÓN CRÍTICA — RESET FINAL ATÓMICO (24-05-2026 UTC)
+
+- MARKER CANÓNICO FINAL: `/data/deriv-logs/muestra6_FINAL_ATOMICO_20260524T011540Z.json`
+- BACKUP FINAL ATÓMICO: `/data/deriv-logs/archive_muestra6_final_atomico_20260524T011540Z/`
+- FRONTEND RUNNING ÚNICO: `m0ks004osk4cw444gsokg8os-005410260139` (SIN DUPLICADOS ACTIVOS)
+- DB FINAL VERIFICADA EN CERO:
+  - deriv_contracts = 0
+  - spike_events = 0
+  - deriv_tick_snapshots = 0
+- JSON FINAL VERIFICADOS EN CERO:
+  - deriv_spike_events.json = []
+  - deriv_closed_contracts.json = []
+  - deriv_open_contracts.json = []
+  - deriv_ai_decisions.json = []
+  - deriv_spikes.json = []
+  - deriv_market_context.json = []
+  - deriv_lockout.json = {}
+
+### DIAGNÓSTICO: POR QUÉ HABÍA POCO MOVIMIENTO ANTES DEL RESET
+
+- NO ERA FALLA DE INFRA.
+- EL BOT ESTABA HEALTHY, PERO HIPER-FILTRADO EN RÉGIMEN CALM.
+- EVIDENCIA PRE-RESET (45 MIN):
+  - ENTRY_BLOCKED = 4032
+  - REGIME_SCORE_GATE = 7177
+  - STRUCTURAL_VETO/BC_ESCAPE_BLOCKED = 832
+  - ATR pass=False = 1353
+  - AI_VETO_TRUE = 0
+- INTERPRETACIÓN:
+  - POCAS ÓRDENES Y POCOS SPIKES "ÚTILES" EN FRONTEND POR EXCESO DE GATES,
+    NO POR BOT CAÍDO.
+  - LA IA ESTABA ACTIVA Y DINÁMICA (APPLIED_CONFIG + DIFF + HYSTERESIS),
+    PERO EL RIESGO/REGIME BLOQUEABA CASI TODO.
+
 ### Estado de arranque
 
 | Componente                | Estado           |
@@ -40,8 +74,43 @@
 
 ### Bootstrap
 
-- Bootstrap marker: `/data/logs/sample6_bootstrap_20260524T000140Z.json`
-- Archivo de archivo pre-reset: `/data/logs/archive_muestra6_start_20260524T000124Z/`
+- Bootstrap marker: `/data/deriv-logs/sample6_bootstrap_20260524T000140Z.json`
+- Archivo de archivo pre-reset: `/data/deriv-logs/archive_muestra6_start_20260524T000124Z/`
+
+### Reset total frontend + DB aplicado (24-05-2026 UTC)
+
+- Marker oficial: `/data/deriv-logs/sample6_reset_marker_20260524T001925Z.json`
+- Backup de archivos: `/data/deriv-logs/archive_muestra6_reset_20260524T001925Z/`
+- Reset JSON aplicado:
+  - deriv_spike_events.json = []
+  - deriv_closed_contracts.json = []
+  - deriv_open_contracts.json = []
+  - deriv_ai_decisions.json = []
+  - deriv_lockout.json = {}
+  - deriv_spikes.json = []
+  - deriv_market_context.json = []
+  - deriv_session.json = session_start_ts=now (reset visual)
+- Reset DB aplicado:
+  - deriv_contracts = 0
+  - spike_events = 0
+  - deriv_tick_snapshots = 0
+
+### Reset final estricto aplicado (24-05-2026 UTC)
+
+- Marker final: `/data/deriv-logs/muestra6_final_clean_start_20260524T002737Z.json`
+- Backup final: `/data/deriv-logs/archive_muestra6_final_clean_20260524T002737Z/`
+- Estado posterior al reset final:
+  - deriv_spike_events.json = []
+  - deriv_closed_contracts.json = []
+  - deriv_open_contracts.json = [] (si vuelve a aparecer, es una entrada NUEVA posterior al reset)
+  - DB deriv_contracts/spike_events/deriv_tick_snapshots = 0
+
+### Aclaración importante de frontend
+
+- El botón `RESET·S` del HUD es solo visual (mueve sesión), no borra operaciones/spikes.
+- Para muestra limpia real, hay que resetear JSON + DB.
+- Si después del reset vuelven a aparecer spikes rápido, son datos nuevos en vivo.
+- El dashboard usa zona horaria local; el servidor reporta en UTC.
 
 ### Objetivo de la muestra 6
 
@@ -57,8 +126,22 @@ Capturar operaciones y spikes desde cero con:
 DERIV_ESCAPE_VALVE=false
 DERIV_BLOCK_BC_ESCAPE_BOOM600=  (UNSET)
 DERIV_BLOCK_BC_ESCAPE_BOOM900=  (UNSET)
-LOGS_DIR=/data/logs
+LOGS_DIR=/data/logs  (dentro del contenedor bot)
+HOST_LOGS=/data/deriv-logs  (ruta real que consume el frontend publicado)
 ```
+
+### ACTUALIZACIÓN CRÍTICA — IA DINÁMICA CON AUTORIDAD REAL (24-05-2026 UTC)
+
+- EL SIDECAR IA AJUSTA `score_min_override` EN DB Y EL BOT LO APLICA EN CALIENTE.
+- CADENCIA DEL ORQUESTADOR IA:
+  - DEFAULT: 500s
+  - MÍNIMO: 120s
+- NUEVO RANGO OPERATIVO PARA `score_min_override`: 5.5 → 9.2
+  - MIGRACIÓN: `012_dynamic_score_relax_for_activity.sql`
+- RELAJACIÓN ESTRUCTURAL DINÁMICA (CONTROLADA) PARA:
+  - BOOM600, BOOM900, CRASH600, CRASH900
+  - SI IA ESTÁ ACTIVA + RÉGIMEN FAVORABLE + SCORE CON MARGEN,
+    EL VETO ESTRUCTURAL DURO SE DEGRADA A PENALIZACIÓN (SOFT VETO).
 
 ---
 
@@ -185,7 +268,7 @@ Documentadas en `MUESTRA_01_ANALISIS_FORENSE.md`.
 │  │  o4w1ns4cceccmn2ozqt7sol2       │  │  o4w1ns4cceccmn2..ai │  │
 │  │  src/main_deriv.py              │  │  scripts/dynamic_ai_ │  │
 │  │  src/execution/deriv_trader.py  │  │  orchestrator.py     │  │
-│  │  src/analysis/deriv_analyst.py  │  │  Loop: 1200s         │  │
+│  │  src/analysis/deriv_analyst.py  │  │  Loop: 500s (min120) │  │
 │  │  src/safety/deriv_risk.py       │  │  Escribe heartbeat   │  │
 │  └──────────┬──────────────────────┘  └──────────────────────┘  │
 │             │ /data/logs (volumen compartido)                    │

@@ -160,8 +160,12 @@ class DerivDaemon:
             5,
             int(os.getenv("DERIV_DYNAMIC_CONFIG_REFRESH_SEC", "15") or 15),
         )
+        self._dynamic_score_min_guardrail = max(
+            3.0,
+            min(float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5), 9.2),
+        )
         self._dynamic_score_max_guardrail = max(
-            6.5,
+            self._dynamic_score_min_guardrail,
             min(float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2), 12.0),
         )
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
@@ -278,10 +282,11 @@ class DerivDaemon:
         """Clamp dynamic config values to hard safety guardrails."""
         _sym = str(symbol or "").upper()
         _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
+        _score_min = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
         _score_max = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
         _spf = max(50, min(int(spike_pre_filter_target), 500))
         _grace = max(_sensitive_zero_peak_floor, min(int(zero_peak_grace_sec), 120))
-        _score = max(6.5, min(float(score_min_override), _score_max))
+        _score = max(_score_min, min(float(score_min_override), _score_max))
         return _spf, _grace, _score
 
     @staticmethod
@@ -891,6 +896,7 @@ class DerivDaemon:
         _early_profile = get_asset_profile(tick.symbol)
         _dyn_cfg = self.get_dynamic_config(tick.symbol, _early_profile)
         _dyn_active = bool(_dyn_cfg.get("is_active", False))
+        _dyn_source = str(_dyn_cfg.get("source") or "")
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
@@ -898,6 +904,10 @@ class DerivDaemon:
         if _early_profile.get("suspended"):
             _LOGGER.debug("[PIPELINE] SYMBOL_SUSPENDED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_suspended")
+            return
+        if _dyn_source == "dynamic_db" and not _dyn_active:
+            _LOGGER.info("[PIPELINE] SYMBOL_DYNAMIC_INACTIVE %s — skipping", tick.symbol)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="dynamic_symbol_inactive")
             return
 
         # ═══════════════════════════════════════════════════════════════════
@@ -1086,6 +1096,7 @@ class DerivDaemon:
             tick.symbol, spread_pct,
             hurst=_eval_hurst,
             autocorr_lag1=pre_autocorr,
+            dynamic_cfg=_dyn_cfg,
         )
 
         # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
@@ -1301,7 +1312,7 @@ class DerivDaemon:
         # spike-market overrides, etc.).  We must NOT shadow it with a second call
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
         _dyn_score_min = max(
-            6.5,
+            self._dynamic_score_min_guardrail,
             min(
                 self._dynamic_score_max_guardrail,
                 float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol)),

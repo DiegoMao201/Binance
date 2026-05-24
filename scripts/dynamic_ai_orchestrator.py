@@ -39,7 +39,7 @@ SYMBOLS = [
     "CRASH1000", "CRASH900", "CRASH600", "CRASH500",
 ]
 
-SCORE_MIN_GUARDRAIL = 6.5
+SCORE_MIN_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
 SCORE_MAX_GUARDRAIL = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
 SCORE_MAX_DB_COMPAT_FALLBACK = float(
     os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", str(SCORE_MAX_GUARDRAIL))
@@ -66,6 +66,10 @@ def _parse_symbol_float_map(raw: str) -> dict[str, float]:
 
 SYMBOL_SCORE_FLOOR_MAP: dict[str, float] = {
     "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "8.0") or 8.0),
+    "BOOM600": float(os.getenv("DYNAMIC_AI_BOOM600_SCORE_FLOOR", "5.8") or 5.8),
+    "BOOM900": float(os.getenv("DYNAMIC_AI_BOOM900_SCORE_FLOOR", "5.8") or 5.8),
+    "CRASH600": float(os.getenv("DYNAMIC_AI_CRASH600_SCORE_FLOOR", "5.8") or 5.8),
+    "CRASH900": float(os.getenv("DYNAMIC_AI_CRASH900_SCORE_FLOOR", "5.8") or 5.8),
 }
 SYMBOL_SCORE_FLOOR_MAP.update(
     _parse_symbol_float_map(os.getenv("DYNAMIC_AI_SYMBOL_SCORE_FLOOR_MAP", ""))
@@ -1008,8 +1012,8 @@ async def run_loop() -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL is required")
 
-    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "1200"
-    loop_sec = max(1200, int(loop_raw or 1200))
+    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "500"
+    loop_sec = max(120, int(loop_raw or 500))
     logs_dir = Path(
         os.getenv("DYNAMIC_AI_LOGS_DIR")
         or os.getenv("DYNAMIC_AI_LOG_DIR")

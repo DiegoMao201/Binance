@@ -89,24 +89,118 @@ Usa este documento como contexto base para continuar el desarrollo de este proye
 #  Contenedor IA:        o4w1ns4cceccmn2ozqt7sol2-ai    (Orquestador IA sidecar)
 #  Contenedor frontend:  (Next.js - nombre en Coolify)   (Dashboard web)
 #  Base de datos:        PostgreSQL en 10.0.1.8:5432, db=optiferre_pamm
-#  Logs compartidos:     /data/logs (volumen montado en ambos contenedores)
+#  Logs compartidos:     HOST=/data/deriv-logs  |  CONTENEDOR BOT=/data/logs
+#                        (el frontend published lee /data/deriv-logs)
 #
 #  7. MUESTRAS Y DATOS DE ANÁLISIS
 #  ─────────────────────────────────────────────────────────────────────────────────────────
 #  Las "muestras" son períodos de operación limpia para análisis forense.
 #  Para iniciar una nueva muestra:
 #    a) Truncar en DB: deriv_contracts, deriv_tick_snapshots, ai_entry_pattern_memory
-#    b) Resetear JSON en /data/logs:
+#    b) Resetear JSON en /data/deriv-logs (host):
 #         deriv_spike_events.json → []
 #         deriv_closed_contracts.json → []
 #         deriv_ai_decisions.json → []
 #         deriv_lockout.json → {}
-#    c) Crear bootstrap marker: /data/logs/sample{N}_bootstrap_{STAMP}.json
+#    c) Crear bootstrap marker: /data/deriv-logs/sample{N}_bootstrap_{STAMP}.json
 #    d) NO hacer restart del bot si ya está running y el warmup ya ocurrió.
 #       El warmup de 1000 ticks es necesario para indicadores pero sus spikes
 #       contaminan la muestra si se guardan en el archivo JSON ANTES del reset.
 #       Respetar el orden: reset DESPUÉS de que el bot ya cargó su warmup.
 #    e) Actualizar muestra_01.md con el estado del nuevo inicio.
+#
+#  7B. REINICIO TOTAL DEL FRONTEND (RESET REAL DE SPIKES Y OPERACIONES)
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  IMPORTANTE: EL BOTÓN "RESET·S" DEL HUD ES SOLO VISUAL.
+#  SOLO MUEVE EL INICIO DE SESIÓN EN deriv_session.json.
+#  NO BORRA deriv_spike_events.json NI deriv_closed_contracts.json.
+#
+#  SI QUIERES EMPEZAR UNA MUESTRA LIMPIA DE VERDAD, DEBES HACER ESTE RESET:
+#
+#  A) RESET DE ARCHIVOS JSON EN /data/deriv-logs (HOST)
+#     - deriv_spike_events.json   -> []
+#     - deriv_closed_contracts.json -> []
+#     - deriv_open_contracts.json -> []
+#     - deriv_ai_decisions.json   -> []
+#     - deriv_lockout.json        -> {}
+#     - deriv_spikes.json         -> []
+#     - deriv_market_context.json -> []
+#     - deriv_session.json        -> session_start_ts = now
+#
+#  B) RESET DE TABLAS ANALÍTICAS EN DB
+#     - TRUNCATE deriv_contracts
+#     - TRUNCATE spike_events
+#     - TRUNCATE deriv_tick_snapshots
+#
+#  C) CREAR MARKER DE RESET
+#     - /data/deriv-logs/sample6_reset_marker_{STAMP}.json
+#
+#  D) ACLARACIÓN DE HORARIOS
+#     - El dashboard muestra hora local del navegador.
+#     - El servidor usa UTC.
+#     - Si ves "23/5" en pantalla y el reset fue "24/5 UTC", puede ser el
+#       MISMO evento visto en otra zona horaria, no datos viejos.
+#
+#  E) REGLA OPERATIVA
+#     - DESPUÉS DEL RESET, TODO LO QUE APARECE ES NUEVO EN VIVO.
+#     - Si vuelven a salir spikes en minutos, no es contaminación: es mercado real.
+#
+#  7C. MUESTRA 6 — RESET FINAL ATÓMICO (CANÓNICO)
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  EJECUTADO: 20260524T011540Z (UTC)
+#
+#  SECUENCIA CANÓNICA OBLIGATORIA:
+#  1) DETENER BOT + IA.
+#  2) BACKUP DE JSON EN /data/deriv-logs/archive_muestra6_final_atomico_{STAMP}/
+#  3) LIMPIAR JSON EN /data/deriv-logs:
+#       deriv_spike_events.json=[]
+#       deriv_closed_contracts.json=[]
+#       deriv_open_contracts.json=[]
+#       deriv_ai_decisions.json=[]
+#       deriv_lockout.json={}
+#       deriv_spikes.json=[]
+#       deriv_market_context.json=[]
+#  4) TRUNCAR DB:
+#       TRUNCATE deriv_contracts RESTART IDENTITY CASCADE
+#       TRUNCATE spike_events RESTART IDENTITY CASCADE
+#       TRUNCATE deriv_tick_snapshots RESTART IDENTITY CASCADE
+#  5) CREAR MARKER FINAL:
+#       /data/deriv-logs/muestra6_FINAL_ATOMICO_{STAMP}.json
+#  6) LEVANTAR BOT + IA Y VERIFICAR HEALTHY.
+#
+#  RESULTADO ESPERADO INMEDIATO:
+#  - JSON EN CERO
+#  - DB EN CERO
+#  - lockout {}
+#  - FRONTEND ACTIVO ÚNICO (SIN DUPLICADOS RUNNING)
+#
+#  REGLA DE ORO:
+#  - SI APARECEN SPIKES/ÓRDENES DESPUÉS DEL MARKER FINAL, ES TRÁFICO NUEVO.
+#  - NUNCA CONFUNDIR DATOS NUEVOS CON "BASURA DE DEPLOY" SI EL RESET ATÓMICO YA PASÓ.
+#
+#  7D. IA DINÁMICA: AUTORIDAD REAL SOBRE ENTRADAS (2026-05-24)
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  - EL SIDECAR IA SÍ MANDA SOBRE EL UMBRAL DE ENTRADA POR SÍMBOLO:
+#      dynamic_symbol_config.score_min_override
+#  - EL BOT REFRESCA ESA CONFIG EN CALIENTE Y LA USA COMO GATE DINÁMICO.
+#  - EL LOOP IA QUEDÓ MÁS RÁPIDO (POR DEFECTO 500s, MÍNIMO 120s), YA NO 1200s FIJOS.
+#  - SE RELAJÓ EL MÍNIMO DINÁMICO PARA ACTIVIDAD CONTROLADA:
+#      score_min_override: [5.5, 9.2]
+#  - SE HABILITÓ RELAJACIÓN ESTRUCTURAL DINÁMICA PARA 600/900:
+#      BOOM600, BOOM900, CRASH600, CRASH900
+#    CUANDO IA ESTÁ ACTIVA + RÉGIMEN DINÁMICO FAVORABLE,
+#    EL VETO ESTRUCTURAL DURO PUEDE PASAR A PENALIZACIÓN (SOFT VETO), NO BLOQUEO TOTAL.
+#
+#  VARIABLES CLAVE NUEVAS:
+#  - DYNAMIC_AI_SCORE_MIN_GUARDRAIL=5.5
+#  - DYNAMIC_AI_LOOP_SEC=500
+#  - DERIV_DYNAMIC_STRUCTURAL_RELAX_ENABLED=true
+#  - DERIV_DYNAMIC_STRUCTURAL_RELAX_SYMBOLS=BOOM600,BOOM900,CRASH600,CRASH900
+#  - DERIV_DYNAMIC_STRUCTURAL_RELAX_REGIMES=FAST,NORMAL
+#
+#  PRINCIPIO OPERATIVO:
+#  - IA NO "ADIVINA" ENTRADAS DIRECTAS.
+#  - IA AJUSTA UMBRALES Y EL BOT EJECUTA SOLO SI PASA TODAS LAS CAPAS DE RIESGO.
 #
 #  8. ACCESO AL SERVIDOR
 #  ─────────────────────────────────────────────────────────────────────────────────────────
