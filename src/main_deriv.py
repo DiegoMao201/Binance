@@ -362,19 +362,36 @@ class DerivDaemon:
     def _load_post_spike_chase_block_map(self) -> dict[str, float]:
         """Load per-symbol anti-chase overrides from env once at startup."""
         out = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_MAP", ""))
-        out.update(self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", "")))
 
-        for prefix in ("DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_", "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"):
-            for key, value in os.environ.items():
-                if not key.startswith(prefix):
-                    continue
-                symbol = key[len(prefix):].strip().upper()
-                if not symbol:
-                    continue
-                try:
-                    out[symbol] = max(0.0, float(value))
-                except (TypeError, ValueError):
-                    continue
+        for key, value in os.environ.items():
+            prefix = "DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_"
+            if not key.startswith(prefix):
+                continue
+            symbol = key[len(prefix):].strip().upper()
+            if not symbol:
+                continue
+            try:
+                out[symbol] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+
+        # In tick-only mode we intentionally ignore legacy *_SEC maps/vars to
+        # avoid interpreting stale seconds values as ticks.
+        if self._entry_tick_only:
+            return out
+
+        out.update(self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", "")))
+        for key, value in os.environ.items():
+            prefix = "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"
+            if not key.startswith(prefix):
+                continue
+            symbol = key[len(prefix):].strip().upper()
+            if not symbol:
+                continue
+            try:
+                out[symbol] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
         return out
 
     def _post_spike_chase_block_ticks_for_symbol(
