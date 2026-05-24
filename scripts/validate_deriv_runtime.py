@@ -61,14 +61,37 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
             detail=f"asyncpg not available: {exc}",
         )
 
+    score_min_guardrail = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
+    score_max_guardrail = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
+    spf_min_guardrail = max(
+        50,
+        int(
+            os.getenv(
+                "DYNAMIC_AI_SPIKE_PREFILTER_MIN_TICKS",
+                os.getenv("DERIV_SPIKE_PREFILTER_MIN_TICKS", "50"),
+            )
+            or 50
+        ),
+    )
+    spf_max_guardrail = max(
+        spf_min_guardrail,
+        int(
+            os.getenv(
+                "DYNAMIC_AI_SPIKE_PREFILTER_MAX_TICKS",
+                os.getenv("DERIV_SPIKE_PREFILTER_MAX_TICKS", "2500"),
+            )
+            or 2500
+        ),
+    )
+
     query = """
     SELECT
         COUNT(*)::int AS total_rows,
         COUNT(*) FILTER (
-            WHERE score_min_override < 6.5 OR score_min_override > 8.0
+            WHERE score_min_override < $1 OR score_min_override > $2
         )::int AS bad_score,
         COUNT(*) FILTER (
-            WHERE spike_pre_filter_target < 50 OR spike_pre_filter_target > 500
+            WHERE spike_pre_filter_target < $3 OR spike_pre_filter_target > $4
         )::int AS bad_spf,
         COUNT(*) FILTER (
             WHERE zero_peak_grace_sec < 0 OR zero_peak_grace_sec > 120
@@ -83,7 +106,13 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
     conn = None
     try:
         conn = await asyncpg.connect(database_url)
-        row = await conn.fetchrow(query)
+        row = await conn.fetchrow(
+            query,
+            score_min_guardrail,
+            score_max_guardrail,
+            spf_min_guardrail,
+            spf_max_guardrail,
+        )
     except Exception as exc:
         return CheckResult(name="db_guardrails", ok=False, detail=f"db query failed: {exc}")
     finally:
@@ -108,7 +137,8 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
     )
 
     detail = (
-        f"rows={total_rows}, bad_score={bad_score}, bad_spf={bad_spf}, "
+        f"rows={total_rows}, bad_score={bad_score} [range={score_min_guardrail:.2f}..{score_max_guardrail:.2f}], "
+        f"bad_spf={bad_spf} [range={spf_min_guardrail}..{spf_max_guardrail}], "
         f"bad_grace={bad_grace}, bad_sensitive_grace={bad_sensitive_grace}"
     )
     return CheckResult(name="db_guardrails", ok=ok, detail=detail)

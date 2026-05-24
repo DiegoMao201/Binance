@@ -173,13 +173,28 @@ class DerivDaemon:
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
         # Tick-only anti-chase guard (fallback default): never enter right
         # after a materialized spike. Per-symbol values may override this.
-        self._post_spike_chase_min_sec = max(
+        self._post_spike_chase_min_ticks = max(
             0.0,
-            min(float(os.getenv("DERIV_POST_SPIKE_CHASE_MIN_SEC", "420") or 420), 900.0),
+            min(
+                float(
+                    os.getenv(
+                        "DERIV_POST_SPIKE_CHASE_MIN_TICKS",
+                        os.getenv("DERIV_POST_SPIKE_CHASE_MIN_SEC", "180"),
+                    )
+                    or 180
+                ),
+                5000.0,
+            ),
         )
-        self._post_spike_chase_block_sec_default = max(
-            self._post_spike_chase_min_sec,
-            float(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "480") or 480),
+        self._post_spike_chase_block_ticks_default = max(
+            self._post_spike_chase_min_ticks,
+            float(
+                os.getenv(
+                    "DERIV_POST_SPIKE_CHASE_BLOCK_TICKS",
+                    os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "300"),
+                )
+                or 300
+            ),
         )
         self._post_spike_chase_block_sec_map = self._load_post_spike_chase_block_map()
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
@@ -288,20 +303,46 @@ class DerivDaemon:
         _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
         _score_min = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
         _score_max = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
-        _spike_floor = 50
+        _spike_max = max(
+            500,
+            int(
+                float(
+                    os.getenv(
+                        "DERIV_SPIKE_PREFILTER_MAX_TICKS",
+                        os.getenv("DERIV_SPIKE_PREFILTER_CAP_TICKS", "2500"),
+                    )
+                    or 2500
+                )
+            ),
+        )
+        _spike_floor = max(
+            50,
+            min(
+                int(
+                    float(
+                        os.getenv(
+                            "DERIV_SPIKE_PREFILTER_MIN_TICKS",
+                            os.getenv(
+                                "DERIV_SPIKE_PREFILTER_FLOOR_TICKS",
+                                os.getenv("DERIV_SPIKE_PREFILTER_FLOOR_SEC", "90"),
+                            ),
+                        )
+                        or 90
+                    )
+                ),
+                _spike_max,
+            ),
+        )
         if is_spike_market(_sym):
-            _spike_floor = max(
-                50,
-                min(int(float(os.getenv("DERIV_SPIKE_PREFILTER_FLOOR_SEC", "420") or 420)), 500),
-            )
-        _spf = max(_spike_floor, min(int(spike_pre_filter_target), 500))
+            _spike_floor = max(50, _spike_floor)
+        _spf = max(_spike_floor, min(int(spike_pre_filter_target), _spike_max))
         _grace = max(_sensitive_zero_peak_floor, min(int(zero_peak_grace_sec), 120))
         _score = max(_score_min, min(float(score_min_override), _score_max))
         return _spf, _grace, _score
 
     @staticmethod
     def _parse_post_spike_map(raw: str) -> dict[str, float]:
-        """Parse DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP='SYM:sec,SYM:sec'."""
+        """Parse DERIV_POST_SPIKE_CHASE_BLOCK_*_MAP='SYM:ticks,SYM:ticks'."""
         out: dict[str, float] = {}
         for chunk in str(raw or "").split(","):
             item = chunk.strip()
@@ -320,21 +361,23 @@ class DerivDaemon:
 
     def _load_post_spike_chase_block_map(self) -> dict[str, float]:
         """Load per-symbol anti-chase overrides from env once at startup."""
-        out = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", ""))
-        prefix = "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"
-        for key, value in os.environ.items():
-            if not key.startswith(prefix):
-                continue
-            symbol = key[len(prefix):].strip().upper()
-            if not symbol:
-                continue
-            try:
-                out[symbol] = max(0.0, float(value))
-            except (TypeError, ValueError):
-                continue
+        out = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_MAP", ""))
+        out.update(self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", "")))
+
+        for prefix in ("DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_", "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"):
+            for key, value in os.environ.items():
+                if not key.startswith(prefix):
+                    continue
+                symbol = key[len(prefix):].strip().upper()
+                if not symbol:
+                    continue
+                try:
+                    out[symbol] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    continue
         return out
 
-    def _post_spike_chase_block_sec_for_symbol(
+    def _post_spike_chase_block_ticks_for_symbol(
         self,
         symbol: str,
         profile: dict[str, Any] | None,
@@ -351,32 +394,32 @@ class DerivDaemon:
         else:
             resolved = 0.0
 
-        # Dynamic config already stores per-symbol spike timing in seconds.
+        # Dynamic config stores per-symbol spike timing in tick domain.
         if resolved <= 0 and dyn_active:
-            dyn_sec = float(dyn_cfg.get("spike_pre_filter_target") or 0.0)
-            if dyn_sec > 0:
-                resolved = dyn_sec
+            dyn_ticks = float(dyn_cfg.get("spike_pre_filter_target") or 0.0)
+            if dyn_ticks > 0:
+                resolved = dyn_ticks
 
         # Profile fallback: symbol-specific post-spike delay.
         prf = profile or {}
+        if resolved <= 0:
+            cycle_ticks = float(prf.get("spike_interval_ticks") or 0.0)
+            if cycle_ticks > 0:
+                resolved = max(30.0, min(1500.0, cycle_ticks * 0.30))
+
+        # Legacy fallback: some profiles still expose *_sec keys only.
         if resolved <= 0:
             profile_sec = float(prf.get("spike_min_post_sec") or 0.0)
             if profile_sec > 0:
                 resolved = profile_sec
 
-        # Last resort derived from cycle if available.
         if resolved <= 0:
-            cycle_ticks = float(prf.get("spike_interval_ticks") or 0.0)
-            if cycle_ticks > 0:
-                resolved = max(30.0, min(420.0, cycle_ticks * 0.30))
-
-        if resolved <= 0:
-            resolved = self._post_spike_chase_block_sec_default
+            resolved = self._post_spike_chase_block_ticks_default
 
         # Sniper safety floor for spike markets: never allow very-short
         # anti-chase windows that lead to late pursuit entries.
         if is_spike_market(sym):
-            return max(self._post_spike_chase_min_sec, resolved)
+            return max(self._post_spike_chase_min_ticks, resolved)
 
         return resolved
 
@@ -399,12 +442,12 @@ class DerivDaemon:
         if not self._entry_tick_only or not is_spike_market(symbol):
             return True, ""
 
-        _last_spike_ts = self._risk.get_last_spike_ts(symbol)
-        if _last_spike_ts <= 0:
+        _last_spike_tick = self._risk.get_last_spike_tick_count(symbol)
+        if _last_spike_tick <= 0:
             return True, ""
 
-        _elapsed = max(0.0, time.time() - _last_spike_ts)
-        _chase_block = self._post_spike_chase_block_sec_for_symbol(
+        _elapsed = max(0.0, float(self._risk.get_tick_count(symbol) - _last_spike_tick))
+        _chase_block = self._post_spike_chase_block_ticks_for_symbol(
             symbol,
             profile,
             dyn_cfg,
@@ -415,7 +458,7 @@ class DerivDaemon:
         if _elapsed < _chase_block:
             return (
                 False,
-                f"post_spike_chase_guard:{_elapsed:.1f}s<{_chase_block:.0f}s",
+                f"post_spike_chase_guard:{_elapsed:.0f}t<{_chase_block:.0f}t",
             )
 
         _window_default = max(180.0, _chase_block * 3.0)
@@ -423,7 +466,8 @@ class DerivDaemon:
             _chase_block,
             float(
                 os.getenv(
-                    "DERIV_POST_SPIKE_STRENGTH_WINDOW_SEC",
+                    "DERIV_POST_SPIKE_STRENGTH_WINDOW_TICKS",
+                    os.getenv("DERIV_POST_SPIKE_STRENGTH_WINDOW_SEC", str(_window_default)),
                     str(_window_default),
                 )
                 or _window_default
@@ -472,6 +516,9 @@ class DerivDaemon:
         )
         _strong_enough = (len(_signals) >= _required_signals) and not _dir_conflict
 
+        _sb["post_spike_strength_elapsed_ticks"] = round(_elapsed, 1)
+        _sb["post_spike_strength_window_ticks"] = round(_strength_window, 1)
+        # Backward-compatible keys for existing dashboards/parsers.
         _sb["post_spike_strength_elapsed_sec"] = round(_elapsed, 1)
         _sb["post_spike_strength_window_sec"] = round(_strength_window, 1)
         _sb["post_spike_strength_signals"] = list(_signals)
@@ -483,7 +530,7 @@ class DerivDaemon:
 
         _reason = (
             "post_spike_strength_veto:"
-            f"{_elapsed:.1f}s<{_strength_window:.0f}s "
+            f"{_elapsed:.0f}t<{_strength_window:.0f}t "
             f"signals={len(_signals)}/{_required_signals} "
             f"margin={_score_margin:.2f} mom={_momentum:.2f} "
             f"vel={_velocity_score:.2f} atr={_atr_score:.2f}"
@@ -1118,7 +1165,7 @@ class DerivDaemon:
             self._entry_tick_only
             and is_spike_market(tick.symbol)
         ):
-            _post_spike_block_sec = self._post_spike_chase_block_sec_for_symbol(
+            _post_spike_block_sec = self._post_spike_chase_block_ticks_for_symbol(
                 tick.symbol,
                 _early_profile,
                 _dyn_cfg,
@@ -1126,17 +1173,17 @@ class DerivDaemon:
             )
             if _post_spike_block_sec <= 0:
                 _post_spike_block_sec = 0.0
-            _last_spike_ts = self._risk.get_last_spike_ts(tick.symbol)
-            if _last_spike_ts > 0:
-                _elapsed_post_spike = time.time() - _last_spike_ts
+            _last_spike_tick = self._risk.get_last_spike_tick_count(tick.symbol)
+            if _last_spike_tick > 0:
+                _elapsed_post_spike = float(self._risk.get_tick_count(tick.symbol) - _last_spike_tick)
                 if 0 <= _elapsed_post_spike < _post_spike_block_sec:
                     _block_reason = (
                         "post_spike_chase_guard:"
-                        f"{_elapsed_post_spike:.1f}s<"
-                        f"{_post_spike_block_sec:.0f}s"
+                        f"{_elapsed_post_spike:.0f}t<"
+                        f"{_post_spike_block_sec:.0f}t"
                     )
                     _LOGGER.debug(
-                        "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.1fs < %.0fs",
+                        "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.0ft < %.0ft",
                         tick.symbol,
                         _elapsed_post_spike,
                         _post_spike_block_sec,

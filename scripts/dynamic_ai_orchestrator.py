@@ -59,9 +59,40 @@ TELEMETRY_LOOKBACK_SEC_DEFAULT = max(
         or 21600
     ),
 )
-SPIKE_PREFILTER_FLOOR_SEC = max(
+SPIKE_PREFILTER_MIN_TICKS = max(
     50,
-    min(int(os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_FLOOR_SEC", "420") or 420), 500),
+    int(
+        os.getenv(
+            "DYNAMIC_AI_SPIKE_PREFILTER_MIN_TICKS",
+            os.getenv(
+                "DYNAMIC_AI_SPIKE_PREFILTER_FLOOR_TICKS",
+                os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_FLOOR_SEC", "90"),
+            ),
+        )
+        or 90
+    ),
+)
+SPIKE_PREFILTER_MAX_TICKS = max(
+    500,
+    int(
+        os.getenv(
+            "DYNAMIC_AI_SPIKE_PREFILTER_MAX_TICKS",
+            os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_CAP_TICKS", "2500"),
+        )
+        or 2500
+    ),
+)
+SPIKE_PREFILTER_MAX_STEP_TICKS = max(
+    20,
+    int(os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_MAX_STEP_TICKS", "180") or 180),
+)
+TICK_WINDOW_MIN_SAMPLES = max(
+    2,
+    int(os.getenv("DYNAMIC_AI_TICK_WINDOW_MIN_SAMPLES", "4") or 4),
+)
+TICK_TARGET_BLEND_MEAN = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_TICK_TARGET_BLEND_MEAN", "0.20") or 0.20), 0.80),
 )
 
 
@@ -186,7 +217,10 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
     score_floor = _symbol_score_floor(sym)
     return SymbolCfg(
         regime=regime,
-        spike_pre_filter_target=max(SPIKE_PREFILTER_FLOOR_SEC, min(int(cfg.spike_pre_filter_target), 500)),
+        spike_pre_filter_target=max(
+            SPIKE_PREFILTER_MIN_TICKS,
+            min(int(cfg.spike_pre_filter_target), SPIKE_PREFILTER_MAX_TICKS),
+        ),
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
         score_min_override=max(score_floor, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
@@ -418,6 +452,7 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
     spikes = _load_json(logs_dir / "deriv_spike_events.json")
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
     ai_decisions = _load_json(logs_dir / "deriv_ai_decisions.json")
+    market_ctx = _load_json(logs_dir / "deriv_market_context.json")
 
     now_ts = time.time()
     min_ts = now_ts - lookback_sec
@@ -451,6 +486,24 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
         if not sym or ts is None or ts < min_ts:
             continue
         ai_by[sym].append(row)
+
+    ctx_by: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for row in market_ctx:
+        sym = str(row.get("symbol") or "").upper()
+        ts = _safe_ts(row.get("ts") or row.get("timestamp") or row.get("iso"))
+        ticks_since = row.get("ticks_since_last_spike")
+        if not sym or ts is None or ticks_since is None:
+            continue
+        try:
+            ticks_f = float(ticks_since)
+        except Exception:
+            continue
+        if ticks_f < 0:
+            continue
+        if ts >= min_ts:
+            ctx_by[sym].append((ts, ticks_f))
+    for sym in ctx_by:
+        ctx_by[sym].sort(key=lambda x: x[0])
 
     telemetry: dict[str, Any] = {}
     for sym in SYMBOLS:
@@ -549,6 +602,25 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             r for r in ai_rows
             if (_safe_ts(r.get("ts") or r.get("timestamp") or r.get("iso")) or 0.0) >= micro_min_ts
         ]
+
+        def _intervals_from_ctx(points: list[tuple[float, float]]) -> list[float]:
+            if len(points) < 2:
+                return []
+            out: list[float] = []
+            prev = points[0][1]
+            for _, curr in points[1:]:
+                if curr < prev and prev > 0:
+                    out.append(prev)
+                prev = curr
+            return out
+
+        ctx_points = ctx_by.get(sym, [])
+        ctx_points_micro = [p for p in ctx_points if p[0] >= micro_min_ts]
+        tick_intervals_6h = _intervals_from_ctx(ctx_points)
+        tick_intervals_15m = _intervals_from_ctx(ctx_points_micro)
+        ticks_since_spike_now = (
+            int(round(ctx_points[-1][1])) if ctx_points else None
+        )
         ai_n = len(ai_rows)
         ai_n_micro = len(ai_rows_micro)
         ai_approvals = sum(1 for r in ai_rows if bool(r.get("approved")))
@@ -587,6 +659,19 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "ev_per_trade_6h": (sum(pnl_values) / contracts_n) if contracts_n else 0.0,
             "ai_decisions_6h": ai_n,
             "ai_approval_rate_6h": pct(ai_approvals, ai_n),
+            "tick_intervals_15m": len(tick_intervals_15m),
+            "tick_interval_mean_15m": (sum(tick_intervals_15m) / len(tick_intervals_15m)) if tick_intervals_15m else None,
+            "tick_interval_p25_15m": statistics_quantile(tick_intervals_15m, 0.25),
+            "tick_interval_p50_15m": statistics_median(tick_intervals_15m),
+            "tick_interval_p75_15m": statistics_quantile(tick_intervals_15m, 0.75),
+            "tick_interval_p90_15m": statistics_quantile(tick_intervals_15m, 0.90),
+            "tick_intervals_6h": len(tick_intervals_6h),
+            "tick_interval_mean_6h": (sum(tick_intervals_6h) / len(tick_intervals_6h)) if tick_intervals_6h else None,
+            "tick_interval_p25_6h": statistics_quantile(tick_intervals_6h, 0.25),
+            "tick_interval_p50_6h": statistics_median(tick_intervals_6h),
+            "tick_interval_p75_6h": statistics_quantile(tick_intervals_6h, 0.75),
+            "tick_interval_p90_6h": statistics_quantile(tick_intervals_6h, 0.90),
+            "ticks_since_last_spike_now": ticks_since_spike_now,
             "entry_lag_sec_median_6h": statistics_median(lags),
             "entry_lag_sec_p75_6h": statistics_quantile(lags, 0.75),
             "late_entry_ge120_pct_6h": pct(sum(1 for x in lags if x >= 120), len(lags)),
@@ -751,6 +836,63 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
     return out
 
 
+def _apply_tick_window_policy(
+    current_cfg: dict[str, SymbolCfg],
+    candidate_cfg: dict[str, SymbolCfg],
+    telemetry: dict[str, Any],
+) -> tuple[dict[str, SymbolCfg], int]:
+    out: dict[str, SymbolCfg] = {}
+    updates = 0
+    for sym in SYMBOLS:
+        current = current_cfg[sym]
+        candidate = candidate_cfg[sym]
+        t = telemetry.get(sym, {})
+
+        n = int(t.get("tick_intervals_6h") or 0)
+        p50 = t.get("tick_interval_p50_6h")
+        mean = t.get("tick_interval_mean_6h")
+
+        target_raw: float | None = None
+        if isinstance(p50, (int, float)):
+            target_raw = float(p50)
+        elif isinstance(mean, (int, float)):
+            target_raw = float(mean)
+
+        if target_raw is None or n < TICK_WINDOW_MIN_SAMPLES:
+            out[sym] = candidate
+            continue
+
+        if isinstance(mean, (int, float)) and TICK_TARGET_BLEND_MEAN > 0:
+            target_raw = (
+                target_raw * (1.0 - TICK_TARGET_BLEND_MEAN)
+                + float(mean) * TICK_TARGET_BLEND_MEAN
+            )
+
+        target = int(round(target_raw))
+        target = max(SPIKE_PREFILTER_MIN_TICKS, min(target, SPIKE_PREFILTER_MAX_TICKS))
+
+        current_target = int(current.spike_pre_filter_target)
+        delta = target - current_target
+        if abs(delta) > SPIKE_PREFILTER_MAX_STEP_TICKS:
+            target = current_target + (SPIKE_PREFILTER_MAX_STEP_TICKS if delta > 0 else -SPIKE_PREFILTER_MAX_STEP_TICKS)
+
+        adjusted = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=candidate.regime,
+                spike_pre_filter_target=target,
+                zero_peak_grace_sec=candidate.zero_peak_grace_sec,
+                score_min_override=candidate.score_min_override,
+                is_active=candidate.is_active,
+            ),
+        )
+        out[sym] = adjusted
+        if int(adjusted.spike_pre_filter_target) != int(current_target):
+            updates += 1
+
+    return out, updates
+
+
 def _apply_activity_policy(
     current_cfg: dict[str, SymbolCfg],
     candidate_cfg: dict[str, SymbolCfg],
@@ -907,7 +1049,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "REGLAS DE AJUSTE:\n"
         "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
-        "2. No modificar spike_pre_filter_target automaticamente; mantener el valor actual (solo observabilidad).\n"
+        "2. No modificar spike_pre_filter_target automaticamente; el sidecar lo recalcula fuera del LLM con percentiles de ticks (ventana 6h).\n"
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
@@ -1336,6 +1478,7 @@ async def run_loop() -> None:
                 decision_source = "heuristic"
 
             new_cfg = _apply_activity_policy(current_cfg, new_cfg, telemetry)
+            new_cfg, tick_updates = _apply_tick_window_policy(current_cfg, new_cfg, telemetry)
 
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
@@ -1356,6 +1499,16 @@ async def run_loop() -> None:
                     "CRASH900": smoothed_cfg.get("CRASH900").__dict__ if smoothed_cfg.get("CRASH900") else None,
                 },
             )
+            LOG.info(
+                "[dynamic-ai][TICK_WINDOW_6H] spike_pre_filter_updates=%d sample_ticks=%s",
+                tick_updates,
+                {
+                    "BOOM500": telemetry.get("BOOM500", {}).get("tick_interval_p50_6h"),
+                    "CRASH500": telemetry.get("CRASH500", {}).get("tick_interval_p50_6h"),
+                    "BOOM900": telemetry.get("BOOM900", {}).get("tick_interval_p50_6h"),
+                    "CRASH900": telemetry.get("CRASH900", {}).get("tick_interval_p50_6h"),
+                },
+            )
             # Always write a heartbeat entry so diff_log mtime stays fresh
             # even when hysteresis blocks all config changes.
             _append_diff_jsonl(
@@ -1366,6 +1519,7 @@ async def run_loop() -> None:
                     "source": decision_source,
                     "db_updates": updates,
                     "blocked_flips": blocked_regime_flips,
+                    "tick_window_updates": tick_updates,
                 },
             )
             _save_activity_memory(activity_state_path)
