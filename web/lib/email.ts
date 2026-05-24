@@ -7,9 +7,6 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? "");
 const FROM_EMAIL = process.env.MAIL_FROM_EMAIL ?? process.env.SENDGRID_FROM_EMAIL ?? "";
 const FROM_NAME  = process.env.MAIL_FROM_NAME  ?? "OptiFerre Portal";
 const PRODUCT_NAME = FROM_NAME;
-const EMAIL_SENDING_ENABLED = ["1", "true", "yes", "on"].includes(
-  (process.env.EMAIL_SENDING_ENABLED ?? "false").trim().toLowerCase(),
-);
 
 /**
  * Sends a one-time password email to the investor.
@@ -20,10 +17,6 @@ const EMAIL_SENDING_ENABLED = ["1", "true", "yes", "on"].includes(
  * @throws {Error} if SendGrid returns a non-2xx status or the env vars are absent.
  */
 export async function sendOtpEmail(to: string, otp: string): Promise<void> {
-  if (!EMAIL_SENDING_ENABLED) {
-    console.info(`[email] EMAIL_SENDING_ENABLED=false. OTP email skipped for ${to}.`);
-    return;
-  }
   if (!process.env.SENDGRID_API_KEY) {
     console.warn(
       `[email] SENDGRID_API_KEY not set. OTP for ${to}: ${otp}  (expires in 10 min)`
@@ -131,10 +124,6 @@ export async function sendTradeClosedEmail(
   symbol: string,
   netPnlPct: number
 ): Promise<void> {
-  if (!EMAIL_SENDING_ENABLED) {
-    console.info(`[email] EMAIL_SENDING_ENABLED=false. Trade email skipped for ${to}.`);
-    return;
-  }
   if (!process.env.SENDGRID_API_KEY) {
     console.warn(`[email] SENDGRID_API_KEY not set. Trade closed for ${to}: ${symbol} +${netPnlPct}%`);
     return;
@@ -300,10 +289,6 @@ export async function sendPammAllocationEmail(
   netPnlUsdt: number,
   newBalance: number,
 ): Promise<void> {
-  if (!EMAIL_SENDING_ENABLED) {
-    console.info(`[email] EMAIL_SENDING_ENABLED=false. PAMM email skipped for ${to}.`);
-    return;
-  }
   if (!process.env.SENDGRID_API_KEY) {
     console.warn(
       `[email] SENDGRID_API_KEY not set. PAMM win for ${to}: ${symbol} +${netPnlUsdt.toFixed(4)} USDT`,

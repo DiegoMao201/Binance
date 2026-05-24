@@ -1,15 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { prisma } from "../../../lib/db";
 
 export const dynamic = "force-dynamic";
 
 const ROOT = path.join(process.cwd(), "..");
 const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
-const AI_DECISIONS_LOOKBACK = 220;
-const AI_TRADES_LOOKBACK = 80;
-const PATTERN_MEMORY_LIMIT = 30;
 
 async function readJson(fileName, fallback, dir = DERIV_LOGS) {
   try {
@@ -121,220 +117,12 @@ function pearson(x, y) {
   return den === 0 ? 0 : +(num / den).toFixed(3);
 }
 
-function toRatio(v) {
-  const x = Number(v);
-  if (!Number.isFinite(x)) return 0;
-  if (x > 1.01) return x / 100;
-  if (x < 0) return 0;
-  return x;
-}
-
-function computeAiQualityBySymbol(aiDecisions, closes) {
-  const bySymbol = {};
-  const aiRows = (Array.isArray(aiDecisions) ? aiDecisions : []).slice(-AI_DECISIONS_LOOKBACK);
-  const closeRows = (Array.isArray(closes) ? closes : []).slice(-AI_TRADES_LOOKBACK);
-
-  for (const row of aiRows) {
-    const sym = String(row?.symbol || "").toUpperCase();
-    if (!sym) continue;
-    bySymbol[sym] ||= {
-      symbol: sym,
-      decisions_n: 0,
-      approvals_n: 0,
-      trades_n: 0,
-      wins_n: 0,
-      ev_sum: 0,
-      weak_exits_n: 0,
-    };
-    bySymbol[sym].decisions_n += 1;
-    if (Boolean(row?.approved)) bySymbol[sym].approvals_n += 1;
-  }
-
-  for (const row of closeRows) {
-    const sym = String(row?.symbol || "").toUpperCase();
-    if (!sym) continue;
-    bySymbol[sym] ||= {
-      symbol: sym,
-      decisions_n: 0,
-      approvals_n: 0,
-      trades_n: 0,
-      wins_n: 0,
-      ev_sum: 0,
-      weak_exits_n: 0,
-    };
-    const pnl = Number(row?.realized_pnl_usdt ?? 0) || 0;
-    const reason = String(row?.exit_reason || row?.close_reason || "").toLowerCase();
-    bySymbol[sym].trades_n += 1;
-    bySymbol[sym].ev_sum += pnl;
-    if (pnl > 0) bySymbol[sym].wins_n += 1;
-    if (reason === "zero_peak_exit" || reason === "spike_timeout" || reason === "sl_inicial") {
-      bySymbol[sym].weak_exits_n += 1;
-    }
-  }
-
-  const rows = Object.values(bySymbol).map((r) => {
-    const approval_rate = r.decisions_n ? r.approvals_n / r.decisions_n : 0;
-    const win_rate = r.trades_n ? r.wins_n / r.trades_n : 0;
-    const weak_exit_rate = r.trades_n ? r.weak_exits_n / r.trades_n : 0;
-    const ev_per_trade = r.trades_n ? r.ev_sum / r.trades_n : 0;
-    let pressure = 0;
-    if (r.decisions_n >= 12 && approval_rate >= 0.82) pressure += 0.3;
-    if (r.decisions_n >= 12 && approval_rate >= 0.90) pressure += 0.15;
-    if (r.trades_n >= 8 && win_rate < 0.35) pressure += 0.3;
-    if (r.trades_n >= 8 && ev_per_trade < 0) pressure += 0.2;
-    if (r.trades_n >= 8 && weak_exit_rate >= 0.55) pressure += 0.1;
-    return {
-      symbol: r.symbol,
-      decisions_n: r.decisions_n,
-      approvals_n: r.approvals_n,
-      trades_n: r.trades_n,
-      wins_n: r.wins_n,
-      approval_rate: +approval_rate.toFixed(4),
-      win_rate: +win_rate.toFixed(4),
-      weak_exit_rate: +weak_exit_rate.toFixed(4),
-      ev_per_trade: +ev_per_trade.toFixed(4),
-      adaptive_pressure: +Math.min(1, pressure).toFixed(4),
-    };
-  }).sort((a, b) => b.adaptive_pressure - a.adaptive_pressure || b.decisions_n - a.decisions_n);
-
-  const summaryBase = rows.reduce((acc, r) => {
-    acc.decisions_n += r.decisions_n;
-    acc.approvals_n += r.approvals_n;
-    acc.trades_n += r.trades_n;
-    acc.wins_n += r.wins_n;
-    acc.ev_sum += (r.ev_per_trade * r.trades_n);
-    return acc;
-  }, { decisions_n: 0, approvals_n: 0, trades_n: 0, wins_n: 0, ev_sum: 0 });
-
-  return {
-    by_symbol: rows,
-    summary: {
-      decisions_n: summaryBase.decisions_n,
-      approvals_n: summaryBase.approvals_n,
-      trades_n: summaryBase.trades_n,
-      wins_n: summaryBase.wins_n,
-      approval_rate: summaryBase.decisions_n ? +(summaryBase.approvals_n / summaryBase.decisions_n).toFixed(4) : 0,
-      win_rate: summaryBase.trades_n ? +(summaryBase.wins_n / summaryBase.trades_n).toFixed(4) : 0,
-      ev_per_trade: summaryBase.trades_n ? +(summaryBase.ev_sum / summaryBase.trades_n).toFixed(4) : 0,
-    },
-  };
-}
-
-function buildPatternFallback(closes) {
-  const rows = (Array.isArray(closes) ? closes : []).slice(-220);
-  const map = new Map();
-  for (const row of rows) {
-    const sb = (typeof row?.score_breakdown === "object" && row?.score_breakdown) ? row.score_breakdown : {};
-    const symbol = String(row?.symbol || "").toUpperCase();
-    if (!symbol) continue;
-    const side = String(row?.side || "UNKNOWN").toUpperCase();
-    const setup = String(sb?.setup_type || sb?.entry_setup || "unknown").toLowerCase();
-    const regime = String(sb?.market_regime || sb?.regime || "NORMAL").toUpperCase();
-    const score = Math.round(((Number(row?.score ?? sb?.score_raw ?? 0) || 0) / 0.25)) * 0.25;
-    const hurst = Math.round(((Number(sb?.hurst ?? 0) || 0) / 0.02)) * 0.02;
-    const atr = Math.round(((Number(sb?.atr_pct_at_entry ?? sb?.atr_pct ?? 0) || 0) / 0.001)) * 0.001;
-    const geo = Math.round(((Number(sb?.geo_channel_pos ?? 0) || 0) / 0.1)) * 0.1;
-    const key = `${symbol}|${side}|${setup}|${regime}|${score}|${hurst}|${atr}|${geo}`;
-    if (!map.has(key)) {
-      map.set(key, {
-        symbol,
-        side,
-        setup_type: setup,
-        regime,
-        score_bucket: +score.toFixed(2),
-        hurst_bucket: +hurst.toFixed(2),
-        atr_bucket: +atr.toFixed(4),
-        geo_bucket: +geo.toFixed(2),
-        sample_trades: 0,
-        wins: 0,
-        losses: 0,
-        pnl_sum: 0,
-      });
-    }
-    const slot = map.get(key);
-    const pnl = Number(row?.realized_pnl_usdt ?? 0) || 0;
-    slot.sample_trades += 1;
-    slot.pnl_sum += pnl;
-    if (pnl > 0) slot.wins += 1;
-    else if (pnl < 0) slot.losses += 1;
-  }
-  return Array.from(map.values())
-    .map((r) => ({
-      symbol: r.symbol,
-      side: r.side,
-      setup_type: r.setup_type,
-      regime: r.regime,
-      score_bucket: r.score_bucket,
-      hurst_bucket: r.hurst_bucket,
-      atr_bucket: r.atr_bucket,
-      geo_bucket: r.geo_bucket,
-      sample_trades: r.sample_trades,
-      wins: r.wins,
-      losses: r.losses,
-      win_rate: r.sample_trades ? +(r.wins / r.sample_trades).toFixed(4) : 0,
-      avg_pnl_usdt: r.sample_trades ? +(r.pnl_sum / r.sample_trades).toFixed(4) : 0,
-      source: "fallback_logs",
-    }))
-    .filter((r) => r.sample_trades >= 3)
-    .sort((a, b) => b.win_rate - a.win_rate || b.sample_trades - a.sample_trades)
-    .slice(0, PATTERN_MEMORY_LIMIT);
-}
-
-async function fetchPatternMemory(closes) {
-  try {
-    const rows = await prisma.$queryRaw`
-      SELECT
-        symbol,
-        side,
-        setup_type,
-        regime,
-        score_bucket,
-        hurst_bucket,
-        atr_bucket,
-        geo_bucket,
-        sample_trades,
-        wins,
-        losses,
-        win_rate,
-        avg_pnl_usdt,
-        last_trade_ts
-      FROM ai_entry_pattern_memory
-      ORDER BY updated_at DESC
-      LIMIT ${PATTERN_MEMORY_LIMIT}
-    `;
-    const normalized = (rows || [])
-      .map((r) => ({
-        symbol: String(r.symbol || ""),
-        side: String(r.side || ""),
-        setup_type: String(r.setup_type || ""),
-        regime: String(r.regime || ""),
-        score_bucket: +(Number(r.score_bucket) || 0).toFixed(2),
-        hurst_bucket: +(Number(r.hurst_bucket) || 0).toFixed(2),
-        atr_bucket: +(Number(r.atr_bucket) || 0).toFixed(4),
-        geo_bucket: +(Number(r.geo_bucket) || 0).toFixed(2),
-        sample_trades: Number(r.sample_trades) || 0,
-        wins: Number(r.wins) || 0,
-        losses: Number(r.losses) || 0,
-        win_rate: +toRatio(r.win_rate).toFixed(4),
-        avg_pnl_usdt: +(Number(r.avg_pnl_usdt) || 0).toFixed(4),
-        last_trade_ts: r.last_trade_ts ? new Date(r.last_trade_ts).toISOString() : null,
-        source: "db",
-      }))
-      .filter((r) => r.symbol);
-    if (normalized.length) return normalized;
-    return buildPatternFallback(closes);
-  } catch {
-    return buildPatternFallback(closes);
-  }
-}
-
 export async function GET() {
-  const [status, open, closed, sessionFile, aiDecisions] = await Promise.all([
+  const [status, open, closed, sessionFile] = await Promise.all([
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
     readJson("deriv_session.json", null, LOGS),
-    readJson("deriv_ai_decisions.json", []),
   ]);
   const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
   // Session filter: only for global KPIs (SESSION, WIN%, PF, TRADES). Reports unaffected.
@@ -508,9 +296,6 @@ export async function GET() {
     rejection_count[k] = (rejection_count[k] || 0) + 1;
   }
 
-  const ai_quality = computeAiQualityBySymbol(aiDecisions, allClosed);
-  const pattern_memory = await fetchPatternMemory(allClosed);
-
   return Response.json({
     ts: Date.now(),
     status: {
@@ -527,8 +312,6 @@ export async function GET() {
     rolling_20, rolling_50,
     scatter, correlations,
     histograms: { score: scoreHist, hurst: hurstHist },
-    ai_quality,
-    pattern_memory,
     decisions: { recent, last_by_symbol, rejection_count },
     open_contracts: openContracts,
     closed_contracts: allClosed,

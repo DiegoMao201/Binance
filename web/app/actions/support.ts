@@ -19,9 +19,6 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY ?? "");
 const FROM_EMAIL  = process.env.MAIL_FROM_EMAIL ?? process.env.SENDGRID_FROM_EMAIL ?? "";
 const FROM_NAME   = process.env.MAIL_FROM_NAME  ?? "OptiFerre Portal";
 const ADMIN_EMAIL = process.env.ADMIN_SUPPORT_EMAIL ?? process.env.MAIL_FROM_EMAIL ?? "";
-const EMAIL_SENDING_ENABLED = ["1", "true", "yes", "on"].includes(
-  (process.env.EMAIL_SENDING_ENABLED ?? "false").trim().toLowerCase(),
-);
 
 // ─── Input schema ─────────────────────────────────────────────────────────────
 const SupportSchema = z.object({
@@ -60,11 +57,6 @@ export async function sendSupportMessage(
     select: { email: true },
   });
   const senderEmail = user?.email ?? null;
-
-  if (!EMAIL_SENDING_ENABLED) {
-    console.info("[support] EMAIL_SENDING_ENABLED=false — support email skipped.");
-    return { success: true };
-  }
 
   // ── Env guard ─────────────────────────────────────────────────────────────
   if (!process.env.SENDGRID_API_KEY || !FROM_EMAIL || !ADMIN_EMAIL) {
