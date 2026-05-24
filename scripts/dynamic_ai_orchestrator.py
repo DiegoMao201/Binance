@@ -105,6 +105,32 @@ STRICT_DISABLE_MIN_CONTRACTS = max(
     int(os.getenv("DYNAMIC_AI_STRICT_DISABLE_MIN_CONTRACTS", "4") or 4),
 )
 
+# Activity re-enable policy:
+# - Re-enable only after sustained recovery across N sidecar cycles.
+# - Once re-enabled, keep temporary hard thresholds while the symbol stabilizes.
+ACTIVITY_RECOVERY_CYCLES = max(
+    3,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_RECOVERY_CYCLES", "5") or 5),
+)
+ACTIVITY_STABILIZATION_CYCLES = max(
+    2,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_STABILIZATION_CYCLES", "5") or 5),
+)
+ACTIVITY_STABILIZATION_SCORE_BONUS = max(
+    0.0,
+    float(os.getenv("DYNAMIC_AI_ACTIVITY_STABILIZATION_SCORE_BONUS", "0.8") or 0.8),
+)
+ACTIVITY_STABILIZATION_RELAX_STEP = max(
+    0.0,
+    float(os.getenv("DYNAMIC_AI_ACTIVITY_STABILIZATION_RELAX_STEP", "0.2") or 0.2),
+)
+ACTIVITY_STABILIZATION_GRACE_FLOOR = max(
+    0,
+    min(int(os.getenv("DYNAMIC_AI_ACTIVITY_STABILIZATION_GRACE_FLOOR", "90") or 90), 120),
+)
+
+ACTIVITY_POLICY_MEMORY: dict[str, dict[str, Any]] = {}
+
 # Short-term memory to prevent regime oscillation.
 STATE_MEMORY: dict[str, dict[str, Any]] = {}
 MIN_STATE_LIFETIME_SEC = max(
@@ -246,6 +272,62 @@ def _seed_state_memory(current_cfg: dict[str, SymbolCfg]) -> None:
                 "last_changed": now_ts,
             },
         )
+
+
+def _default_activity_state() -> dict[str, Any]:
+    return {
+        "recovery_streak": 0,
+        "stabilization_left": 0,
+        "strict_bonus": 0.0,
+    }
+
+
+def _seed_activity_memory(current_cfg: dict[str, SymbolCfg]) -> None:
+    for sym, cfg in current_cfg.items():
+        state = ACTIVITY_POLICY_MEMORY.setdefault(sym, _default_activity_state())
+        state["recovery_streak"] = int(state.get("recovery_streak") or 0)
+        state["stabilization_left"] = int(state.get("stabilization_left") or 0)
+        state["strict_bonus"] = float(state.get("strict_bonus") or 0.0)
+        if not cfg.is_active:
+            # Inactive symbols should not carry stale post-reactivation state.
+            state["stabilization_left"] = 0
+            state["strict_bonus"] = 0.0
+
+
+def _load_activity_memory(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return
+        for sym, raw_state in payload.items():
+            sym_u = str(sym or "").upper()
+            if sym_u not in SYMBOLS or not isinstance(raw_state, dict):
+                continue
+            ACTIVITY_POLICY_MEMORY[sym_u] = {
+                "recovery_streak": max(0, int(raw_state.get("recovery_streak") or 0)),
+                "stabilization_left": max(0, int(raw_state.get("stabilization_left") or 0)),
+                "strict_bonus": max(0.0, float(raw_state.get("strict_bonus") or 0.0)),
+            }
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[dynamic-ai] could not load activity memory: %s", exc)
+
+
+def _save_activity_memory(path: Path) -> None:
+    try:
+        payload: dict[str, dict[str, Any]] = {}
+        for sym in SYMBOLS:
+            state = ACTIVITY_POLICY_MEMORY.get(sym) or _default_activity_state()
+            payload[sym] = {
+                "recovery_streak": max(0, int(state.get("recovery_streak") or 0)),
+                "stabilization_left": max(0, int(state.get("stabilization_left") or 0)),
+                "strict_bonus": round(max(0.0, float(state.get("strict_bonus") or 0.0)), 4),
+            }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[dynamic-ai] could not save activity memory: %s", exc)
 
 
 def apply_temporal_smoothing(symbol: str, new_config: SymbolCfg) -> tuple[SymbolCfg, bool]:
@@ -616,11 +698,72 @@ def _apply_activity_policy(
                 and (lag_med_val is None or lag_med_val < 100.0)
             )
 
+        state = ACTIVITY_POLICY_MEMORY.setdefault(sym, _default_activity_state())
+        streak_before = int(state.get("recovery_streak") or 0)
+        stabilization_before = int(state.get("stabilization_left") or 0)
+        strict_bonus = max(0.0, float(state.get("strict_bonus") or 0.0))
+
         next_active = current.is_active
         if severe_disable:
             next_active = False
-        elif recovery_enable:
-            next_active = True
+            if streak_before > 0:
+                LOG.info(
+                    "[dynamic-ai][RECOVERY_RESET] %s streak %d -> 0 (severe_disable)",
+                    sym,
+                    streak_before,
+                )
+            state["recovery_streak"] = 0
+            state["stabilization_left"] = 0
+            state["strict_bonus"] = 0.0
+        elif current.is_active:
+            state["recovery_streak"] = 0
+            if stabilization_before > 0:
+                if recovery_enable:
+                    state["stabilization_left"] = stabilization_before - 1
+                    state["strict_bonus"] = max(0.0, strict_bonus - ACTIVITY_STABILIZATION_RELAX_STEP)
+                else:
+                    state["stabilization_left"] = stabilization_before
+                    state["strict_bonus"] = strict_bonus
+            else:
+                state["stabilization_left"] = 0
+                state["strict_bonus"] = 0.0
+        else:
+            if recovery_enable:
+                next_streak = streak_before + 1
+                state["recovery_streak"] = next_streak
+                if next_streak == 1 or next_streak == ACTIVITY_RECOVERY_CYCLES:
+                    LOG.info(
+                        "[dynamic-ai][RECOVERY_PROGRESS] %s streak=%d/%d | contracts=%d wr=%.1f ev=%.3f late120=%.1f lag_med=%s",
+                        sym,
+                        next_streak,
+                        ACTIVITY_RECOVERY_CYCLES,
+                        contracts_n,
+                        win_rate,
+                        ev_per_trade,
+                        late120,
+                        f"{lag_med_val:.1f}" if lag_med_val is not None else "n/a",
+                    )
+            else:
+                if streak_before > 0:
+                    LOG.info(
+                        "[dynamic-ai][RECOVERY_RESET] %s streak %d -> 0 (recovery conditions lost)",
+                        sym,
+                        streak_before,
+                    )
+                state["recovery_streak"] = 0
+
+            if int(state.get("recovery_streak") or 0) >= ACTIVITY_RECOVERY_CYCLES:
+                next_active = True
+                state["recovery_streak"] = 0
+                state["stabilization_left"] = ACTIVITY_STABILIZATION_CYCLES
+                state["strict_bonus"] = ACTIVITY_STABILIZATION_SCORE_BONUS
+                LOG.info(
+                    "[dynamic-ai][ACTIVITY_RECOVERY] %s re-enabled after %d cycles | stabilize_cycles=%d strict_bonus=%.2f",
+                    sym,
+                    ACTIVITY_RECOVERY_CYCLES,
+                    ACTIVITY_STABILIZATION_CYCLES,
+                    ACTIVITY_STABILIZATION_SCORE_BONUS,
+                )
 
         if next_active != current.is_active:
             LOG.info(
@@ -635,13 +778,29 @@ def _apply_activity_policy(
                 f"{lag_med_val:.1f}" if lag_med_val is not None else "n/a",
             )
 
+        final_regime = candidate.regime
+        final_grace = candidate.zero_peak_grace_sec
+        final_score = candidate.score_min_override
+        stabilization_left_now = int(state.get("stabilization_left") or 0)
+        strict_bonus_now = max(0.0, float(state.get("strict_bonus") or 0.0))
+
+        # Post-reactivation hard mode: keep stricter thresholds while symbol proves stability.
+        if next_active and stabilization_left_now > 0:
+            final_regime = "SLOW"
+            final_grace = max(final_grace, ACTIVITY_STABILIZATION_GRACE_FLOOR)
+            strict_floor = min(
+                SCORE_MAX_GUARDRAIL,
+                _symbol_score_floor(sym) + strict_bonus_now,
+            )
+            final_score = max(final_score, strict_floor)
+
         out[sym] = _clamp_cfg(
             sym,
             SymbolCfg(
-                regime=candidate.regime,
+                regime=final_regime,
                 spike_pre_filter_target=candidate.spike_pre_filter_target,
-                zero_peak_grace_sec=candidate.zero_peak_grace_sec,
-                score_min_override=candidate.score_min_override,
+                zero_peak_grace_sec=final_grace,
+                score_min_override=final_score,
                 is_active=next_active,
             ),
         )
@@ -1039,15 +1198,23 @@ async def run_loop() -> None:
         os.getenv("DYNAMIC_AI_DIFF_LOG_PATH")
         or str(logs_dir / "dynamic_ai_config_diffs.jsonl")
     ).expanduser()
+    activity_state_path = Path(
+        os.getenv("DYNAMIC_AI_ACTIVITY_STATE_PATH")
+        or str(logs_dir / "dynamic_ai_activity_state.json")
+    ).expanduser()
+
+    _load_activity_memory(activity_state_path)
 
     import asyncpg  # noqa: PLC0415
 
     LOG.info(
-        "[dynamic-ai] starting loop interval=%ss logs_dir=%s strict_disable=%s min_contracts=%d",
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d",
         loop_sec,
         logs_dir,
         sorted(STRICT_DISABLE_SYMBOLS),
         STRICT_DISABLE_MIN_CONTRACTS,
+        ACTIVITY_RECOVERY_CYCLES,
+        ACTIVITY_STABILIZATION_CYCLES,
     )
 
     while True:
@@ -1057,6 +1224,7 @@ async def run_loop() -> None:
             conn = await asyncpg.connect(dsn, timeout=12.0)
             current_cfg = await _read_current_cfg(conn)
             _seed_state_memory(current_cfg)
+            _seed_activity_memory(current_cfg)
             telemetry = _build_telemetry_from_logs(logs_dir)
             if PATTERN_MEMORY_ENABLED:
                 try:
@@ -1107,8 +1275,10 @@ async def run_loop() -> None:
                     "blocked_flips": blocked_regime_flips,
                 },
             )
+            _save_activity_memory(activity_state_path)
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[dynamic-ai] loop failure: %s", exc)
+            _save_activity_memory(activity_state_path)
         finally:
             if conn is not None:
                 with suppress(Exception):
