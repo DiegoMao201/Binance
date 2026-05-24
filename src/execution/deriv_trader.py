@@ -332,14 +332,14 @@ class DerivTradeExecutor:
         return out
 
     def _spike_hold_bonus_sec(self, symbol: str) -> float:
-        """Extra patience window per spike symbol (+90/+120s + extra +120s by default)."""
+        """Extra patience window per spike symbol with opt-in global extra hold."""
         if not is_spike_market(symbol):
             return 0.0
 
         _sym = str(symbol or "").upper()
         _extra = max(
             0.0,
-            min(float(os.getenv("DERIV_SPIKE_HOLD_EXTRA_SEC", "120") or 120), 180.0),
+            min(float(os.getenv("DERIV_SPIKE_HOLD_EXTRA_SEC", "0") or 0), 180.0),
         )
         _env_direct = os.getenv(f"DERIV_SPIKE_HOLD_BONUS_SEC_{_sym}")
         if _env_direct not in (None, ""):

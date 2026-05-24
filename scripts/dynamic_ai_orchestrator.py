@@ -45,6 +45,24 @@ SCORE_MAX_DB_COMPAT_FALLBACK = float(
     os.getenv("DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK", str(SCORE_MAX_GUARDRAIL))
     or SCORE_MAX_GUARDRAIL
 )
+TELEMETRY_MICRO_WINDOW_SEC = max(
+    300,
+    int(os.getenv("DYNAMIC_AI_MICRO_WINDOW_SEC", "900") or 900),
+)
+TELEMETRY_LOOKBACK_SEC_DEFAULT = max(
+    3600,
+    int(
+        os.getenv(
+            "DYNAMIC_AI_TELEMETRY_LOOKBACK_SEC",
+            os.getenv("DYNAMIC_AI_LOOKBACK_SEC", "21600"),
+        )
+        or 21600
+    ),
+)
+SPIKE_PREFILTER_FLOOR_SEC = max(
+    50,
+    min(int(os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_FLOOR_SEC", "420") or 420), 500),
+)
 
 
 def _parse_symbol_float_map(raw: str) -> dict[str, float]:
@@ -168,7 +186,7 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
     score_floor = _symbol_score_floor(sym)
     return SymbolCfg(
         regime=regime,
-        spike_pre_filter_target=max(50, min(int(cfg.spike_pre_filter_target), 500)),
+        spike_pre_filter_target=max(SPIKE_PREFILTER_FLOOR_SEC, min(int(cfg.spike_pre_filter_target), 500)),
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
         score_min_override=max(score_floor, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
@@ -396,13 +414,15 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
         return []
 
 
-def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[str, Any]:
+def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOOKBACK_SEC_DEFAULT) -> dict[str, Any]:
     spikes = _load_json(logs_dir / "deriv_spike_events.json")
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
     ai_decisions = _load_json(logs_dir / "deriv_ai_decisions.json")
 
     now_ts = time.time()
     min_ts = now_ts - lookback_sec
+    micro_window_sec = min(lookback_sec, TELEMETRY_MICRO_WINDOW_SEC)
+    micro_min_ts = now_ts - micro_window_sec
 
     spikes_by: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
     for s in spikes:
@@ -435,9 +455,12 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
     telemetry: dict[str, Any] = {}
     for sym in SYMBOLS:
         arr = spikes_by.get(sym, [])
-        recent = [(t, s) for t, s in arr if t >= min_ts]
-        entered = [s for _, s in recent if bool(s.get("bot_entered"))]
-        blocked = [s for _, s in recent if not bool(s.get("bot_entered"))]
+        recent_macro = [(t, s) for t, s in arr if t >= min_ts]
+        entered_macro = [s for _, s in recent_macro if bool(s.get("bot_entered"))]
+        blocked_macro = [s for _, s in recent_macro if not bool(s.get("bot_entered"))]
+        recent_micro = [(t, s) for t, s in arr if t >= micro_min_ts]
+        entered_micro = [s for _, s in recent_micro if bool(s.get("bot_entered"))]
+        blocked_micro = [s for _, s in recent_micro if not bool(s.get("bot_entered"))]
 
         # Pace split: last 5 min vs previous 10 min
         split_5m = now_ts - 300
@@ -454,9 +477,17 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
 
         # Entry lag from closed contracts vs previous spike
         lags: list[float] = []
+        lags_micro: list[float] = []
         early_exit_next_spike: list[float] = []
+        early_exit_next_spike_micro: list[float] = []
         close_rows = closes_by.get(sym, [])
+        close_rows_micro = [
+            c for c in close_rows
+            if (_safe_ts(c.get("opened_at_ts") or c.get("opened_at")) or 0.0) >= micro_min_ts
+            or (_safe_ts(c.get("closed_at_ts") or c.get("closed_at")) or 0.0) >= micro_min_ts
+        ]
         spike_times = [t for t, _ in arr]
+        spike_times_micro = [t for t, _ in arr if t >= micro_min_ts]
         for c in close_rows:
             ot = _safe_ts(c.get("opened_at_ts") or c.get("opened_at"))
             ct = _safe_ts(c.get("closed_at_ts") or c.get("closed_at"))
@@ -472,11 +503,30 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
                     dt = nxt[0] - ct
                     if dt >= 0:
                         early_exit_next_spike.append(dt)
+        for c in close_rows_micro:
+            ot = _safe_ts(c.get("opened_at_ts") or c.get("opened_at"))
+            ct = _safe_ts(c.get("closed_at_ts") or c.get("closed_at"))
+            if ot is not None:
+                prev = [x for x in spike_times_micro if x <= ot]
+                if prev:
+                    lag = ot - prev[-1]
+                    if lag >= 0:
+                        lags_micro.append(lag)
+            if ct is not None:
+                nxt = [x for x in spike_times_micro if x >= ct]
+                if nxt:
+                    dt = nxt[0] - ct
+                    if dt >= 0:
+                        early_exit_next_spike_micro.append(dt)
 
         exits = Counter(str(c.get("exit_reason") or c.get("close_reason") or "") for c in close_rows)
-        block_reasons = Counter(str(s.get("block_reason") or "none") for s in blocked)
+        exits_micro = Counter(str(c.get("exit_reason") or c.get("close_reason") or "") for c in close_rows_micro)
+        block_reasons = Counter(str(s.get("block_reason") or "none") for s in blocked_macro)
+        block_reasons_micro = Counter(str(s.get("block_reason") or "none") for s in blocked_micro)
         pnl_values: list[float] = []
+        pnl_values_micro: list[float] = []
         wins = 0
+        wins_micro = 0
         for c in close_rows:
             try:
                 pnl = float(c.get("realized_pnl_usdt") or 0.0)
@@ -485,28 +535,63 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = 900) -> dict[
             pnl_values.append(pnl)
             if pnl > 0.0:
                 wins += 1
+        for c in close_rows_micro:
+            try:
+                pnl = float(c.get("realized_pnl_usdt") or 0.0)
+            except Exception:
+                pnl = 0.0
+            pnl_values_micro.append(pnl)
+            if pnl > 0.0:
+                wins_micro += 1
 
         ai_rows = ai_by.get(sym, [])
+        ai_rows_micro = [
+            r for r in ai_rows
+            if (_safe_ts(r.get("ts") or r.get("timestamp") or r.get("iso")) or 0.0) >= micro_min_ts
+        ]
         ai_n = len(ai_rows)
+        ai_n_micro = len(ai_rows_micro)
         ai_approvals = sum(1 for r in ai_rows if bool(r.get("approved")))
+        ai_approvals_micro = sum(1 for r in ai_rows_micro if bool(r.get("approved")))
         contracts_n = len(close_rows)
+        contracts_n_micro = len(close_rows_micro)
+
+        lookback_hours = round(float(lookback_sec) / 3600.0, 2)
 
         telemetry[sym] = {
-            "spikes_15m": len(recent),
-            "entered_spikes_15m": len(entered),
-            "blocked_spikes_15m": len(blocked),
-            "entry_rate_pct": (len(entered) / len(recent) * 100.0) if recent else 0.0,
+            "lookback_sec": lookback_sec,
+            "lookback_hours": lookback_hours,
+            "micro_window_sec": micro_window_sec,
+            "spikes_15m": len(recent_micro),
+            "entered_spikes_15m": len(entered_micro),
+            "blocked_spikes_15m": len(blocked_micro),
+            "entry_rate_pct": (len(entered_micro) / len(recent_micro) * 100.0) if recent_micro else 0.0,
+            "spikes_6h": len(recent_macro),
+            "entered_spikes_6h": len(entered_macro),
+            "blocked_spikes_6h": len(blocked_macro),
+            "entry_rate_pct_6h": (len(entered_macro) / len(recent_macro) * 100.0) if recent_macro else 0.0,
             "top_block_reasons": block_reasons.most_common(5),
-            "contracts_15m": contracts_n,
-            "win_rate_15m": pct(wins, contracts_n),
-            "ev_per_trade_15m": (sum(pnl_values) / contracts_n) if contracts_n else 0.0,
-            "ai_decisions_15m": ai_n,
-            "ai_approval_rate_15m": pct(ai_approvals, ai_n),
-            "entry_lag_sec_median": statistics_median(lags),
-            "entry_lag_sec_p75": statistics_quantile(lags, 0.75),
-            "late_entry_ge120_pct": pct(sum(1 for x in lags if x >= 120), len(lags)),
-            "zero_peak_exit_count": exits.get("zero_peak_exit", 0),
-            "next_spike_after_close_le80_pct": pct(sum(1 for x in early_exit_next_spike if 0 < x <= 80), len(early_exit_next_spike)),
+            "top_block_reasons_15m": block_reasons_micro.most_common(5),
+            "contracts_15m": contracts_n_micro,
+            "win_rate_15m": pct(wins_micro, contracts_n_micro),
+            "ev_per_trade_15m": (sum(pnl_values_micro) / contracts_n_micro) if contracts_n_micro else 0.0,
+            "ai_decisions_15m": ai_n_micro,
+            "ai_approval_rate_15m": pct(ai_approvals_micro, ai_n_micro),
+            "entry_lag_sec_median": statistics_median(lags_micro),
+            "entry_lag_sec_p75": statistics_quantile(lags_micro, 0.75),
+            "late_entry_ge120_pct": pct(sum(1 for x in lags_micro if x >= 120), len(lags_micro)),
+            "zero_peak_exit_count": exits_micro.get("zero_peak_exit", 0),
+            "next_spike_after_close_le80_pct": pct(sum(1 for x in early_exit_next_spike_micro if 0 < x <= 80), len(early_exit_next_spike_micro)),
+            "contracts_6h": contracts_n,
+            "win_rate_6h": pct(wins, contracts_n),
+            "ev_per_trade_6h": (sum(pnl_values) / contracts_n) if contracts_n else 0.0,
+            "ai_decisions_6h": ai_n,
+            "ai_approval_rate_6h": pct(ai_approvals, ai_n),
+            "entry_lag_sec_median_6h": statistics_median(lags),
+            "entry_lag_sec_p75_6h": statistics_quantile(lags, 0.75),
+            "late_entry_ge120_pct_6h": pct(sum(1 for x in lags if x >= 120), len(lags)),
+            "zero_peak_exit_count_6h": exits.get("zero_peak_exit", 0),
+            "next_spike_after_close_le80_pct_6h": pct(sum(1 for x in early_exit_next_spike if 0 < x <= 80), len(early_exit_next_spike)),
             "spike_rate_prev10m": rate_prev10,
             "spike_rate_last5m": rate_last5,
             "market_regime_estimate": regime,
@@ -555,15 +640,21 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         grace = base.zero_peak_grace_sec
         score = base.score_min_override
 
-        lag_med = t.get("entry_lag_sec_median")
-        late120 = float(t.get("late_entry_ge120_pct") or 0.0)
-        early80 = float(t.get("next_spike_after_close_le80_pct") or 0.0)
-        zero_peak_count = int(t.get("zero_peak_exit_count") or 0)
-        win_rate = float(t.get("win_rate_15m") or 0.0)
-        ev_per_trade = float(t.get("ev_per_trade_15m") or 0.0)
-        ai_approval_rate = float(t.get("ai_approval_rate_15m") or 0.0)
-        contracts_n = int(t.get("contracts_15m") or 0)
-        ai_n = int(t.get("ai_decisions_15m") or 0)
+        lag_med = t.get("entry_lag_sec_median_6h")
+        if lag_med is None:
+            lag_med = t.get("entry_lag_sec_median")
+        late120 = float(t.get("late_entry_ge120_pct_6h") or t.get("late_entry_ge120_pct") or 0.0)
+        early80 = float(
+            t.get("next_spike_after_close_le80_pct_6h")
+            or t.get("next_spike_after_close_le80_pct")
+            or 0.0
+        )
+        zero_peak_count = int(t.get("zero_peak_exit_count_6h") or t.get("zero_peak_exit_count") or 0)
+        win_rate = float(t.get("win_rate_6h") or t.get("win_rate_15m") or 0.0)
+        ev_per_trade = float(t.get("ev_per_trade_6h") or t.get("ev_per_trade_15m") or 0.0)
+        ai_approval_rate = float(t.get("ai_approval_rate_6h") or t.get("ai_approval_rate_15m") or 0.0)
+        contracts_n = int(t.get("contracts_6h") or t.get("contracts_15m") or 0)
+        ai_n = int(t.get("ai_decisions_6h") or t.get("ai_decisions_15m") or 0)
 
         risk_points = 0
         recovery_points = 0
@@ -812,7 +903,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
     return (
         "Actua como un motor cuantitativo de alta frecuencia para indices sinteticos Deriv.\n"
         "Tu objetivo es ajustar los parametros de trading en tiempo real para evitar entradas tardias y salidas prematuras.\n\n"
-        "DATOS DE TELEMETRIA (Ultimos 15 mins):\n"
+        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "REGLAS DE AJUSTE:\n"
         "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
@@ -820,7 +911,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
-        "6. Si ai_approval_rate_15m >85% y win_rate_15m <45% (o ev_per_trade_15m <0), ENDURECER score_min_override inmediatamente.\n"
+        "6. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override inmediatamente.\n"
         f"7. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
         "8. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
         "9. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
@@ -1188,6 +1279,7 @@ async def run_loop() -> None:
 
     loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "500"
     loop_sec = max(120, int(loop_raw or 500))
+    lookback_sec = TELEMETRY_LOOKBACK_SEC_DEFAULT
     logs_dir = Path(
         os.getenv("DYNAMIC_AI_LOGS_DIR")
         or os.getenv("DYNAMIC_AI_LOG_DIR")
@@ -1208,9 +1300,10 @@ async def run_loop() -> None:
     import asyncpg  # noqa: PLC0415
 
     LOG.info(
-        "[dynamic-ai] starting loop interval=%ss logs_dir=%s strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d",
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d",
         loop_sec,
         logs_dir,
+        lookback_sec,
         sorted(STRICT_DISABLE_SYMBOLS),
         STRICT_DISABLE_MIN_CONTRACTS,
         ACTIVITY_RECOVERY_CYCLES,
@@ -1225,7 +1318,7 @@ async def run_loop() -> None:
             current_cfg = await _read_current_cfg(conn)
             _seed_state_memory(current_cfg)
             _seed_activity_memory(current_cfg)
-            telemetry = _build_telemetry_from_logs(logs_dir)
+            telemetry = _build_telemetry_from_logs(logs_dir, lookback_sec=lookback_sec)
             if PATTERN_MEMORY_ENABLED:
                 try:
                     await _update_pattern_memory(conn, logs_dir)

@@ -3,6 +3,16 @@
 
 ---
 
+## ⚠️ AVISO OPERATIVO EN MAYÚSCULAS (ANTI-CONFUSIÓN)
+
+- ESTE ARCHIVO ES HISTÓRICO (MUESTRA 01), NO ES EL ESTADO LIVE ACTUAL.
+- PARA OPERACIÓN ACTUAL DE MUESTRA 6, USAR `muestra_01.md` Y `AI_HANDOFF_PROMPT.md`.
+- EL BOTÓN `RESET·S` DEL FRONTEND ES SOLO VISUAL; NO BORRA SPIKES NI OPERACIONES.
+- EL RESET REAL DE MUESTRA DEBE SER ATÓMICO: JSON + DB + MARKER + VERIFICACIÓN HEALTHY.
+- SI APARECEN SPIKES DESPUÉS DEL MARKER FINAL, SON DATOS NUEVOS, NO CONTAMINACIÓN.
+
+---
+
 ## METADATOS DE LA MUESTRA
 
 | Campo | Valor |
@@ -1644,3 +1654,51 @@ Después de redeploy automático en Coolify, el `.env` efectivo del app no prese
 - Loop AI activo sin `CheckViolation` ni abortos transaccionales.
 - Constraint en DB: `6.5..9.2`.
 - Operación estable incluso si Coolify reescribe variables de entorno no canónicas.
+
+---
+
+## PRUEBA 6A — ARRANQUE CONTROLADO FASE 6 Y RECUPERACION WATCHDOG
+
+Fecha: 2026-05-23
+
+### Contexto
+
+Se recibio alerta critica por Telegram:
+
+- `DERIV WATCHDOG EN FAIL`
+- razon: `transition_pass_to_fail`
+- check: `db_guardrails`
+- causa puntual: filas de `dynamic_symbol_config` con `score_min_override` por encima de 8.0 (politica actual del watchdog).
+
+### Intervencion operativa realizada
+
+1. Se cerraron posiciones abiertas heredadas para limpiar exposicion en linea.
+2. Se aplico clamp operativo en DB a `score_min_override <= 8.0`.
+3. Se alinio entorno productivo (Coolify `.env`) para Fase 6:
+  - `DYNAMIC_AI_SCORE_MAX_GUARDRAIL=8.0`
+  - `DYNAMIC_AI_SCORE_MAX_DB_COMPAT_FALLBACK=8.0`
+4. Se archivo y reseteo baseline de logs para nueva muestra real:
+  - backup: `/data/deriv-logs/archive_phase6_20260523T205249Z`
+  - marker: `/data/deriv-logs/phase6_bootstrap_marker.json`
+5. Reinicio limpio de bot e IA sidecar con estado healthy.
+
+### Verificacion final
+
+- `deriv_release_gate_remote.sh`: PASS.
+- watchdog manual: PASS con `db_guardrails` en verde.
+- AI sidecar activo con ciclos de histeresis y eventos DIFF.
+
+### Nota analitica importante
+
+En arranque, el bot precarga 1000 ticks (`DERIV_HISTORY_TICKS=1000`).
+Eso puede contaminar lectura temprana de spikes y debe tratarse como ventana de warmup al analizar muestra 6.
+
+### Accion adicional para vigilancia de muestra
+
+Se ejecuto reset no destructivo de JSON de spikes para iniciar monitoreo limpio:
+
+- `deriv_spike_events.json` -> `[]`
+- `deriv_spikes.json` -> `[]`
+- backups:
+  - `/data/deriv-logs/archive_phase6_reset_20260523T210250Z_deriv_spike_events.json`
+  - `/data/deriv-logs/archive_phase6_reset_20260523T210250Z_deriv_spikes.json`

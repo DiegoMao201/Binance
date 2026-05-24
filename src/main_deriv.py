@@ -173,9 +173,13 @@ class DerivDaemon:
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
         # Tick-only anti-chase guard (fallback default): never enter right
         # after a materialized spike. Per-symbol values may override this.
-        self._post_spike_chase_block_sec_default = max(
+        self._post_spike_chase_min_sec = max(
             0.0,
-            float(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "180") or 180),
+            min(float(os.getenv("DERIV_POST_SPIKE_CHASE_MIN_SEC", "420") or 420), 900.0),
+        )
+        self._post_spike_chase_block_sec_default = max(
+            self._post_spike_chase_min_sec,
+            float(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC", "480") or 480),
         )
         self._post_spike_chase_block_sec_map = self._load_post_spike_chase_block_map()
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
@@ -284,7 +288,13 @@ class DerivDaemon:
         _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
         _score_min = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
         _score_max = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
-        _spf = max(50, min(int(spike_pre_filter_target), 500))
+        _spike_floor = 50
+        if is_spike_market(_sym):
+            _spike_floor = max(
+                50,
+                min(int(float(os.getenv("DERIV_SPIKE_PREFILTER_FLOOR_SEC", "420") or 420)), 500),
+            )
+        _spf = max(_spike_floor, min(int(spike_pre_filter_target), 500))
         _grace = max(_sensitive_zero_peak_floor, min(int(zero_peak_grace_sec), 120))
         _score = max(_score_min, min(float(score_min_override), _score_max))
         return _spf, _grace, _score
@@ -337,26 +347,38 @@ class DerivDaemon:
         # Highest priority: explicit per-symbol env overrides.
         by_symbol = self._post_spike_chase_block_sec_map.get(sym)
         if by_symbol is not None:
-            return by_symbol
+            resolved = by_symbol
+        else:
+            resolved = 0.0
 
         # Dynamic config already stores per-symbol spike timing in seconds.
-        if dyn_active:
+        if resolved <= 0 and dyn_active:
             dyn_sec = float(dyn_cfg.get("spike_pre_filter_target") or 0.0)
             if dyn_sec > 0:
-                return dyn_sec
+                resolved = dyn_sec
 
         # Profile fallback: symbol-specific post-spike delay.
         prf = profile or {}
-        profile_sec = float(prf.get("spike_min_post_sec") or 0.0)
-        if profile_sec > 0:
-            return profile_sec
+        if resolved <= 0:
+            profile_sec = float(prf.get("spike_min_post_sec") or 0.0)
+            if profile_sec > 0:
+                resolved = profile_sec
 
         # Last resort derived from cycle if available.
-        cycle_ticks = float(prf.get("spike_interval_ticks") or 0.0)
-        if cycle_ticks > 0:
-            return max(30.0, min(420.0, cycle_ticks * 0.30))
+        if resolved <= 0:
+            cycle_ticks = float(prf.get("spike_interval_ticks") or 0.0)
+            if cycle_ticks > 0:
+                resolved = max(30.0, min(420.0, cycle_ticks * 0.30))
 
-        return self._post_spike_chase_block_sec_default
+        if resolved <= 0:
+            resolved = self._post_spike_chase_block_sec_default
+
+        # Sniper safety floor for spike markets: never allow very-short
+        # anti-chase windows that lead to late pursuit entries.
+        if is_spike_market(sym):
+            return max(self._post_spike_chase_min_sec, resolved)
+
+        return resolved
 
     def _passes_post_spike_strength_gate(
         self,
