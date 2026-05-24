@@ -20,7 +20,104 @@
 
 ---
 
+## MUESTRA 07 — OPERATIVA (desde 24-05-2026 UTC)
+
+### Cierre de cambio previo al arranque
+
+- Commit bot/sidecar desplegado: `2199f12`.
+- Cambio principal: regla de recuperacion para regimen estable agregada al prompt del LLM en `dynamic_ai_orchestrator.py`:
+  - Si `0.8 <= Ratio <= 1.2`, el sistema debe relajar cuarentena de score y acercar `score_min_override` a base `6.80`.
+  - Ejemplo operativo: `8.00 -> 7.20 -> 6.80`.
+- Refuerzo adicional en codigo: rama estable del sidecar reduce score por paso controlado hacia `6.80`.
+- Restriccion preservada: NO se toco la logica de ticks ni `post_spike_chase_guard`.
+
+### Verificacion de despliegue y salud
+
+- Contenedores bot y sidecar activos en imagen `2199f12`.
+- Release gate remoto: PASS.
+- Verificacion en contenedor:
+  - `prompt_rule_present=True`
+  - `stable_step_present=True`
+
+### Reset oficial para inicio limpio de muestra 07
+
+Acciones ejecutadas:
+1. Flatten broker por API Deriv (`broker_open_before=0`, `broker_open_after=0`).
+2. Stop bot y sidecar.
+3. Reset de telemetria JSON en `/data/deriv-logs`:
+   - `deriv_spike_events.json=[]`
+   - `deriv_closed_contracts.json=[]`
+   - `deriv_open_contracts.json=[]`
+   - `deriv_ai_decisions.json=[]`
+   - `deriv_spikes.json=[]`
+   - `deriv_market_context.json=[]`
+   - `deriv_lockout.json={}`
+4. Arranque operativo de bot + sidecar para comenzar captura de muestra.
+
+Observacion de arranque:
+- Hubo un FAIL transitorio del gate por `missing/invalid last_refresh` en cold-start.
+- Revalidacion inmediata: PASS completo.
+
+### Notas de lectura para esta muestra
+
+- Si aparecen spikes justo despues del arranque, ya pertenecen a la muestra 07 (datos nuevos en vivo).
+- El objetivo de este ciclo es validar que, en regimen estable, el muro de `score_min_override` baje gradualmente y deje de asfixiar setups validos sin romper la defensa post-spike.
+
+---
+
 ## MUESTRA 6 — EN CURSO (desde 24-05-2026 UTC)
+
+### ACTUALIZACION OPERATIVA (24-05-2026 UTC, post deploy 8a9e58e)
+
+Estado:
+- Bot principal y sidecar en healthy.
+- Frontend en healthy.
+- Release gate remoto: PASS.
+
+Diagnostico de bloqueos (logs reales):
+- Ventana 30m: total=74, entered=0, blocked=74
+  - `post_spike_chase_guard`: 68
+  - `post_spike_strength_veto`: 5
+  - `spike_forced_dir`: 1
+- Ventana 1h: total=97, entered=0, blocked=97
+  - `post_spike_chase_guard`: 91
+  - `post_spike_strength_veto`: 5
+  - `spike_forced_dir`: 1
+- Ventana 6h: total=453, entered=1, blocked=452
+  - `post_spike_chase_guard`: 333
+  - `trade_cooldown`: 32
+  - `AI_VETO`: 24
+  - `dynamic_symbol_inactive`: 23
+  - `post_spike_strength_veto`: 22
+  - `spike_forced_dir`: 17
+
+Lectura operativa:
+- El guardrail post-spike en ticks esta bien y se mantiene.
+- La puerta post-spike si abre, pero despues la capa de guardrails esta demasiado dura.
+- El score dinamico por simbolo esta alto en casi todo (`score_min_override` en `8.0` para la mayoria).
+
+Micro-ajuste recomendado (MINIMO, SIN FLEXIBILIZAR DE MAS):
+1. Mantener `post_spike_chase_guard` sin cambios.
+2. Bajar `score_min_override` en `-0.5` donde esta en `8.0` (quedaria en `7.5`).
+3. No cambiar el piso global (`5.5`) ni desactivar `AI_VETO`.
+4. Re-medicion en 60-90 min con mismas metricas por razon de bloqueo.
+
+Aplicado en vivo (24-05-2026 UTC):
+- Se aplico el ajuste `-0.5` en score dinamico para 6 simbolos con `8.0`.
+- Estado final de score por simbolo:
+  - `BOOM1000=6.5`
+  - `BOOM500=7.5`
+  - `BOOM600=7.5`
+  - `BOOM900=7.85`
+  - `CRASH1000=7.5`
+  - `CRASH500=7.5`
+  - `CRASH600=7.5`
+  - `CRASH900=7.5`
+- Validacion post-ajuste: release gate remoto en PASS.
+
+Resultado esperado del micro-ajuste:
+- Menos rechazos por score en setups ya filtrados por post-spike.
+- Incremento moderado de entradas validas sin romper el perfil defensivo.
 
 ### ACTUALIZACIÓN CRÍTICA — RESET FINAL ATÓMICO (24-05-2026 UTC)
 
