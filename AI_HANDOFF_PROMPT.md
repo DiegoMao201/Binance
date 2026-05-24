@@ -4,6 +4,90 @@ Usa este documento como contexto base para continuar el desarrollo de este proye
 
 ---
 
+## ACTUALIZACION MUESTRA 07 (24-05-2026 UTC)
+
+Estado live mas reciente:
+- Commit bot/sidecar desplegado: `2199f12`.
+- Contenedores bot y sidecar healthy en Coolify.
+- Release gate remoto: PASS (post warm-up).
+
+Cambio funcional clave aplicado:
+- `scripts/dynamic_ai_orchestrator.py` ahora incluye regla explicita de recuperacion en regimen estable:
+  - Si `0.8 <= Ratio <= 1.2`, relajar cuarentena y bajar `score_min_override` gradualmente hacia base `6.80`.
+  - Ejemplo esperado: `8.00 -> 7.20 -> 6.80`.
+- Adicionalmente, la logica local del sidecar implementa ese descenso por pasos en rama estable.
+
+Regla de oro preservada:
+- NO tocar logica de ticks ni `post_spike_chase_guard`.
+- El ajuste es solo sobre el muro de `score_min_override` cuando el mercado ya esta estable.
+
+Reset oficial para inicio de muestra 07:
+1. Flatten broker (open contracts: 0 -> 0).
+2. Stop bot y sidecar.
+3. Reset JSON en `/data/deriv-logs`:
+   - `deriv_spike_events.json=[]`
+   - `deriv_closed_contracts.json=[]`
+   - `deriv_open_contracts.json=[]`
+   - `deriv_ai_decisions.json=[]`
+   - `deriv_spikes.json=[]`
+   - `deriv_market_context.json=[]`
+   - `deriv_lockout.json={}`
+4. Start bot + sidecar para comenzar captura operativa.
+
+Nota operativa:
+- Primer gate tras start puede fallar transitoriamente por `missing/invalid last_refresh` en cold-start.
+- Revalidar de inmediato; en este ciclo paso a PASS en la siguiente corrida.
+
+## ACTUALIZACION LIVE CRITICA (24-05-2026 UTC)
+
+Estado operativo confirmado en produccion:
+- Commit live bot y frontend: `8a9e58e`.
+- Bot y sidecar healthy en Coolify.
+- Release gate remoto en PASS.
+
+Hallazgo clave de bloqueo (ULTIMAS 6H, `deriv_spike_events.json`):
+- blocked_total: 454
+- blocked_no_chase: 117
+- Distribucion de bloqueos NO chase:
+  - `trade_cooldown`: 32
+  - `AI_VETO`: 24
+  - `dynamic_symbol_inactive`: 22
+  - `post_spike_strength_veto`: 22
+  - `spike_forced_dir`: 16
+
+Importante:
+- En 30m y 1h el bloqueo dominante sigue siendo `post_spike_chase_guard`.
+- Ese guardrail esta basado en ticks post-spike y SE MANTIENE por diseno.
+- El problema actual no es abrir la puerta post-spike, sino la dureza de guardrails posteriores cuando la puerta ya se abre.
+
+Configuracion dinamica observada en DB (`dynamic_symbol_config`):
+- `score_min_override` alto en casi todos los simbolos (muchos en `8.0`).
+- Ejemplos recientes de veto por `post_spike_strength_veto` con scores entre `6.5` y `7.1`.
+
+Micro-flexibilizacion recomendada (sin perder robustez):
+1. No tocar `post_spike_chase_guard`.
+2. Relajar score minimo dinamico en `-0.5` donde hoy esta en `8.0` (pasar a `7.5`).
+3. Mantener guardrail inferior global en `5.5` (sin bajar mas).
+4. No quitar `AI_VETO`; solo permitir que setups de score medio-alto no se descarten tan pronto.
+
+Aplicado en vivo (24-05-2026 UTC):
+- `dynamic_symbol_config.score_min_override` ajustado en 6 simbolos:
+  - `BOOM500: 8.0 -> 7.5`
+  - `BOOM600: 8.0 -> 7.5`
+  - `CRASH1000: 8.0 -> 7.5`
+  - `CRASH500: 8.0 -> 7.5`
+  - `CRASH600: 8.0 -> 7.5`
+  - `CRASH900: 8.0 -> 7.5`
+- Sin cambios en:
+  - `BOOM1000: 6.5`
+  - `BOOM900: 7.85`
+- Validacion posterior: release gate remoto `PASS`.
+
+Objetivo de esta relajacion:
+- Subir conversion post-spike sin abrir entradas de baja calidad.
+- Evitar sobre-filtrado en fase de confirmacion tardia cuando ya paso la proteccion de chase.
+
+
 # ==========================================================================================
 # ⚠️  PROTOCOLO OPERACIONAL OBLIGATORIO — LEE ESTO ANTES DE HACER CUALQUIER CAMBIO ⚠️
 # ==========================================================================================
