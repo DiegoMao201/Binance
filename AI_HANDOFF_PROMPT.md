@@ -2,6 +2,124 @@
 
 Usa este documento como contexto base para continuar el desarrollo de este proyecto con otra IA. La meta es que puedas retomar el trabajo sin perder decisiones previas, sin romper la arquitectura actual y sin reabrir problemas ya resueltos.
 
+---
+
+# ==========================================================================================
+# ⚠️  PROTOCOLO OPERACIONAL OBLIGATORIO — LEE ESTO ANTES DE HACER CUALQUIER CAMBIO ⚠️
+# ==========================================================================================
+#
+#  ESTE BOT CORRE EN COOLIFY. COOLIFY ES LA ÚNICA FUENTE DE VERDAD EN PRODUCCIÓN.
+#  TODA IA QUE TRABAJE EN ESTE PROYECTO DEBE CONOCER Y RESPETAR ESTE PROTOCOLO.
+#
+# ==========================================================================================
+#
+#  1. DÓNDE VIVE EL BOT
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  - El bot principal corre en Coolify: https://panel.datovatenexuspro.com/
+#  - Servidor: root@192.81.216.49
+#  - Los contenedores son gestionados 100% por Coolify via Docker.
+#  - El código fuente está en GitHub: github.com/DiegoMao201/Binance (rama main).
+#  - Coolify detecta commits en main y hace auto-deploy cuando está configurado.
+#  - NO se editan archivos directamente en el servidor como solución permanente.
+#    Se puede parchear en emergencia pero el cambio DEBE ir al repo.
+#
+#  2. VARIABLES DE ENTORNO — VAN EN COOLIFY, NO EN ARCHIVOS
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  - TODAS las variables de entorno del bot se configuran en Coolify UI.
+#  - NO se deben poner en .env en producción ni hardcodear en scripts.
+#  - Las variables clave de fase-6 son:
+#      DERIV_ESCAPE_VALVE=false                   (false = activo, no bypass)
+#      DERIV_BLOCK_BC_ESCAPE_BOOM600=             (UNSET = no bloquear)
+#      DERIV_BLOCK_BC_ESCAPE_BOOM900=             (UNSET = no bloquear)
+#      LOGS_DIR=/data/logs
+#  - Para ver las variables actuales: Coolify > Servicio > Environment
+#  - Cambiar una variable en Coolify requiere redeploy del contenedor.
+#
+#  3. CÓMO HACER UN CAMBIO CORRECTAMENTE
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  PASO 1: Editar el archivo en el repo local (VSCode).
+#  PASO 2: git add + git commit + git push origin main
+#  PASO 3: Coolify detecta el commit y despliega automáticamente (o hacer redeploy manual).
+#  PASO 4: Verificar que los contenedores volvieron a "healthy".
+#  PASO 5: Correr el release-gate: bash scripts/deriv_release_gate_remote.sh
+#
+#  NO HAGAS:
+#  - No edites scripts dentro del contenedor directamente como solución final.
+#  - No cambies variables de entorno en archivos del repo (van en Coolify UI).
+#  - No hagas docker build/push manual para producción (Coolify lo hace).
+#  - No dejes el bot local y el bot remoto corriendo simultáneamente.
+#
+#  4. ⚠️  REGLA CRÍTICA: EL WATCHDOG Y TODOS LOS ALERTAS TELEGRAM DEBEN ACTUALIZARSE
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#
+#  CADA VEZ QUE CAMBIAS LÓGICA, VARIABLES O COMPORTAMIENTO DEL BOT,
+#  DEBES ACTUALIZAR LOS SIGUIENTES ARCHIVOS PARA EVITAR FALSAS ALERTAS:
+#
+#    scripts/deriv_runtime_watchdog.py  → función _advice_for() y _run_validator()
+#    scripts/validate_deriv_runtime.py  → lógica de validación de env vars
+#    /opt/deriv-watchdog/ (HOST)        → copia del watchdog que corre en cron cada 5 min
+#
+#  El watchdog corre en el HOST del servidor (no en el contenedor) via cron:
+#    /etc/cron.d/deriv-runtime-watchdog  → cada 5 minutos, llama a run_watchdog.sh
+#    /opt/deriv-watchdog/run_watchdog.sh → lanza deriv_runtime_watchdog.py
+#    /opt/deriv-watchdog/deriv_runtime_watchdog.py → envía alertas a Telegram
+#    /data/deriv-logs/deriv_runtime_watchdog_state.json → estado PASS/FAIL persistido
+#
+#  Después de actualizar el watchdog:
+#    1. scp el archivo al servidor: /opt/deriv-watchdog/
+#    2. Correr manualmente para verificar: bash /opt/deriv-watchdog/run_watchdog.sh
+#    3. Confirmar que el resultado es {"status":"PASS"} antes de cerrar la sesión.
+#    4. Si había un FAIL previo, el watchdog enviará "recovery_fail_to_pass" a Telegram.
+#
+#  NO CERRAR UNA SESIÓN DE TRABAJO SIN VERIFICAR QUE EL WATCHDOG ESTÁ EN PASS.
+#  UN WATCHDOG EN FAIL GENERA ALERTAS SPAM EN TELEGRAM CADA 5 MINUTOS.
+#
+#  5. DEPLOY LIMPIO — CHECKLIST RÁPIDO
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  [ ] git push origin main (cambio en repo)
+#  [ ] Coolify redeploy completado (contenedores healthy)
+#  [ ] bash scripts/deriv_release_gate_remote.sh → PASS
+#  [ ] scp watchdog actualizado a /opt/deriv-watchdog/ si cambió lógica de validación
+#  [ ] bash /opt/deriv-watchdog/run_watchdog.sh → {"status":"PASS"}
+#  [ ] Telegram no recibe alertas falsas (esperar 10 min post-deploy)
+#
+#  6. ESTRUCTURA DE CONTENEDORES
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  Contenedor bot:       o4w1ns4cceccmn2ozqt7sol2       (Python bot principal)
+#  Contenedor IA:        o4w1ns4cceccmn2ozqt7sol2-ai    (Orquestador IA sidecar)
+#  Contenedor frontend:  (Next.js - nombre en Coolify)   (Dashboard web)
+#  Base de datos:        PostgreSQL en 10.0.1.8:5432, db=optiferre_pamm
+#  Logs compartidos:     /data/logs (volumen montado en ambos contenedores)
+#
+#  7. MUESTRAS Y DATOS DE ANÁLISIS
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  Las "muestras" son períodos de operación limpia para análisis forense.
+#  Para iniciar una nueva muestra:
+#    a) Truncar en DB: deriv_contracts, deriv_tick_snapshots, ai_entry_pattern_memory
+#    b) Resetear JSON en /data/logs:
+#         deriv_spike_events.json → []
+#         deriv_closed_contracts.json → []
+#         deriv_ai_decisions.json → []
+#         deriv_lockout.json → {}
+#    c) Crear bootstrap marker: /data/logs/sample{N}_bootstrap_{STAMP}.json
+#    d) NO hacer restart del bot si ya está running y el warmup ya ocurrió.
+#       El warmup de 1000 ticks es necesario para indicadores pero sus spikes
+#       contaminan la muestra si se guardan en el archivo JSON ANTES del reset.
+#       Respetar el orden: reset DESPUÉS de que el bot ya cargó su warmup.
+#    e) Actualizar muestra_01.md con el estado del nuevo inicio.
+#
+#  8. ACCESO AL SERVIDOR
+#  ─────────────────────────────────────────────────────────────────────────────────────────
+#  SSH:  ssh root@192.81.216.49
+#  Pass: R3cov3ry-N3xus!
+#  (Usar sshpass para automatizar: sshpass -p 'R3cov3ry-N3xus!' ssh ...)
+#
+# ==========================================================================================
+# FIN DEL PROTOCOLO OPERACIONAL
+# ==========================================================================================
+
+---
+
 ## Rol esperado de la otra IA
 
 Actúa como arquitecto y desarrollador principal de una plataforma de trading algorítmico para Binance llamada OptiFerre-Trader, cuyo entorno live canónico corre en Coolify.
