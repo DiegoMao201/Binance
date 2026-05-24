@@ -18,11 +18,14 @@ const LOGS_DIR = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 const DERIV_LOGS_DIR = process.env.DERIV_STATE_DIR || LOGS_DIR;
 const SESSION_PATH = path.join(LOGS_DIR, "deriv_session.json");
 const DERIV_SESSION_PATH = path.join(DERIV_LOGS_DIR, "deriv_session.json");
+const MAX_FUTURE_SESSION_DRIFT_MS = 24 * 60 * 60 * 1000;
 
 function normalizeSessionTs(value) {
   const ts = Number(value || 0);
   if (!Number.isFinite(ts) || ts <= 0) return 0;
-  return ts > 1e12 ? ts : ts * 1000;
+  const tsMs = ts > 1e12 ? ts : ts * 1000;
+  if (tsMs > Date.now() + MAX_FUTURE_SESSION_DRIFT_MS) return 0;
+  return tsMs;
 }
 
 async function readSessionFile(filePath) {

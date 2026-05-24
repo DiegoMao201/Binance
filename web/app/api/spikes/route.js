@@ -11,6 +11,7 @@ const CLOSED_FILE = path.join(DERIV_LOGS, "deriv_closed_contracts.json");
 const OPEN_FILE = path.join(DERIV_LOGS, "deriv_open_contracts.json");
 const BOT_SESSION_FILE = path.join(LOGS, "deriv_session.json");
 const DERIV_SESSION_FILE = path.join(DERIV_LOGS, "deriv_session.json");
+const MAX_FUTURE_SESSION_DRIFT_SEC = 24 * 60 * 60;
 
 function parseJson(content, fallback) {
   try {
@@ -23,6 +24,7 @@ function parseJson(content, fallback) {
 async function readSessionSinceSec() {
   let latest = 0;
   const sessionFiles = [...new Set([BOT_SESSION_FILE, DERIV_SESSION_FILE])];
+  const nowSec = Date.now() / 1000;
 
   for (const sessionFile of sessionFiles) {
     try {
@@ -32,6 +34,7 @@ async function readSessionSinceSec() {
       if (!Number.isFinite(ts) || ts <= 0) continue;
       // session_start_ts is stored in ms; spikes use epoch seconds.
       const since = ts > 1e12 ? ts / 1000 : ts;
+      if (since > nowSec + MAX_FUTURE_SESSION_DRIFT_SEC) continue;
       if (since > latest) latest = since;
     } catch {
       // ignore missing session file on either path
