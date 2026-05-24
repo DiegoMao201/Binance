@@ -468,7 +468,6 @@ class DerivDaemon:
                 os.getenv(
                     "DERIV_POST_SPIKE_STRENGTH_WINDOW_TICKS",
                     os.getenv("DERIV_POST_SPIKE_STRENGTH_WINDOW_SEC", str(_window_default)),
-                    str(_window_default),
                 )
                 or _window_default
             ),
