@@ -63,6 +63,23 @@ function fmtUSDT(v: string, showSign = false): string {
   });
 }
 
+function toIsoDateString(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toISOString();
+    }
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    const d = new Date(ms);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toISOString();
+    }
+  }
+  return undefined;
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default async function ClientDashboardPage() {
 
@@ -122,22 +139,34 @@ export default async function ClientDashboardPage() {
           uta.admin_fee_usdt::text                     AS admin_fee_usdt,
           uta.user_net_pnl_usdt::text                  AS user_net_pnl_usdt,
           uta.allocated_at,
-          COALESCE(uta.broker, 'binance')              AS broker
+          COALESCE(uta.broker, 'deriv')                AS broker
         FROM user_trade_allocations uta
         JOIN master_trades mt ON mt.id = uta.master_trade_id
         WHERE uta.user_id = ${userId}::uuid
+          AND COALESCE(uta.broker, 'binance') = 'deriv'
         ORDER BY uta.allocated_at DESC
         LIMIT 500
       `.catch(() => [] as TradeQueryRow[]),
 
-      // D. Bot active: check open_positions.json on the shared volume.
+      // D. Bot active: check Deriv open contracts on the shared volume.
       //    Returns [] on any read/parse error (safe fallback).
       (async () => {
+        const candidates = ["deriv_open_contracts.json", "open_positions.json"];
         try {
           const logsDir = process.env.BOT_STATE_DIR
             ?? path.join(process.cwd(), "..", "logs");
-          const raw = await fs.readFile(path.join(logsDir, "open_positions.json"), "utf8");
-          return JSON.parse(raw) as unknown[];
+          for (const fileName of candidates) {
+            try {
+              const raw = await fs.readFile(path.join(logsDir, fileName), "utf8");
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) {
+                return parsed as unknown[];
+              }
+            } catch {
+              // try next candidate file
+            }
+          }
+          return [] as unknown[];
         } catch {
           return [] as unknown[];
         }
@@ -161,12 +190,13 @@ export default async function ClientDashboardPage() {
     : new Prisma.Decimal(0);
 
   // ── 5. Bot status ────────────────────────────────────────────────────────────
-  const isBotActive = Array.isArray(openPositions) && openPositions.length > 0;
+  const openContractsCount = Array.isArray(openPositions) ? openPositions.length : 0;
+  const isBotActive = openContractsCount > 0;
   const firstPosition = isBotActive
     ? (openPositions[0] as Record<string, unknown>)
     : null;
   const liveSymbol  = typeof firstPosition?.symbol  === "string" ? firstPosition.symbol  : undefined;
-  const liveOpenedAt = typeof firstPosition?.opened_at === "string" ? firstPosition.opened_at : undefined;
+  const liveOpenedAt = toIsoDateString(firstPosition?.opened_at ?? firstPosition?.opened_at_ts);
 
   // ── 6. Trade rows for the table ─────────────────────────────────────────────
   // bot already computes user_net_pnl_usdt correctly (asymmetric fee).
@@ -187,7 +217,7 @@ export default async function ClientDashboardPage() {
     grossPnl:    new Prisma.Decimal(row.gross_user_pnl_usdt).toFixed(2),
     adminFee:    new Prisma.Decimal(row.admin_fee_usdt).toFixed(2),
     netPnl:      new Prisma.Decimal(row.user_net_pnl_usdt).toFixed(2),
-    broker:      (row.broker ?? "binance").toLowerCase(),
+    broker:      (row.broker ?? "deriv").toLowerCase(),
   }));
 
   // ── 7. Equity curve: running balance from oldest trade to newest ─────────────
@@ -382,13 +412,13 @@ export default async function ClientDashboardPage() {
               >
                 <div style={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", background: "radial-gradient(circle, rgba(192,132,252,0.13), transparent 70%)", pointerEvents: "none" }} />
                 <p style={{ position: "relative", color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 10, fontFamily: "ui-monospace, Menlo, monospace" }}>
-                  Operaciones
+                  Operaciones Cerradas
                 </p>
                 <p style={{ position: "relative", color: "#c084fc", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(192,132,252,0.5)", lineHeight: 1.05 }}>
                   {trades.length}
                 </p>
                 <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
-                  Historial completo de asignaciones
+                  Deriv cerradas · Abiertas ahora: {openContractsCount}
                 </p>
               </div>
 
@@ -444,7 +474,7 @@ export default async function ClientDashboardPage() {
                   {kpiTotalFees}
                 </p>
                 <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
-                  Binance fee + comisión de rendimiento
+                  Execution fee + comisión de rendimiento
                 </p>
               </div>
             </div>

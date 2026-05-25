@@ -35,28 +35,35 @@ const CreateInvestorSchema = z.object({
     .max(320, "Email demasiado largo.")
     .toLowerCase()
     .trim(),
-  // Accept the string from FormData and validate as a positive decimal.
-  // Using z.string() → .refine() preserves precision for Decimal construction.
-  initial_deposit: z
-    .string({ required_error: "El depósito es obligatorio." })
-    .regex(/^\d+(\.\d{1,8})?$/, "Introduce un número válido.")
-    .refine(
-      (v) => new Prisma.Decimal(v).gt(0),
-      "El depósito debe ser mayor a 0."
-    )
-    .refine(
-      (v) => new Prisma.Decimal(v).lte(new Prisma.Decimal("10000000")),
-      "El depósito no puede superar 10,000,000 USDT."
-    ),
 });
+
+const DecimalStringSchema = z
+  .string({ required_error: "El monto es obligatorio." })
+  .regex(/^\d+(\.\d{1,8})?$/, "Introduce un número válido.");
+
+const MAX_BALANCE = new Prisma.Decimal("10000000");
+const FIXED_INITIAL_BALANCE = new Prisma.Decimal("100");
+const DEFAULT_PERFORMANCE_FEE_PCT = new Prisma.Decimal("0.20");
 
 // ─── Return type ──────────────────────────────────────────────────────────────
 
 export type CreateInvestorState = {
   success: boolean;
   error?: string;
-  fieldErrors?: Partial<Record<"name" | "email" | "initial_deposit", string[]>>;
+  fieldErrors?: Partial<Record<"name" | "email", string[]>>;
 };
+
+export type AdminMutationResult = {
+  success: boolean;
+  error?: string;
+};
+
+async function requireAdminRole(): Promise<boolean> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get("auth_token")?.value;
+  const payload = token ? await verifyJWT(token) : null;
+  return payload?.role === "admin";
+}
 
 // ─── Server Action ────────────────────────────────────────────────────────────
 
@@ -78,11 +85,7 @@ export async function createInvestor(
   formData: FormData
 ): Promise<CreateInvestorState> {
   // ── 1. Auth guard ────────────────────────────────────────────────────────────
-  const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-
-  if (!payload || payload.role !== "admin") {
+  if (!(await requireAdminRole())) {
     return { success: false, error: "Acceso denegado." };
   }
 
@@ -90,7 +93,6 @@ export async function createInvestor(
   const raw = {
     name:            formData.get("name"),
     email:           formData.get("email"),
-    initial_deposit: formData.get("initial_deposit"),
   };
 
   const parsed = CreateInvestorSchema.safeParse(raw);
@@ -103,14 +105,11 @@ export async function createInvestor(
     };
   }
 
-  const { name, email, initial_deposit } = parsed.data;
+  const { name, email } = parsed.data;
 
   // ── 3. ACID transaction ──────────────────────────────────────────────────────
   try {
-    // Use string constructor to avoid IEEE 754 representation issues.
-    const depositDec  = new Prisma.Decimal(initial_deposit);
-    const entryFee    = depositDec.mul("0.02");
-    const clientBal   = depositDec.mul("0.98");
+    const depositDec = FIXED_INITIAL_BALANCE;
 
     await prisma.$transaction(async (tx) => {
       // 3a. Explicit uniqueness check → friendly error message.
@@ -128,9 +127,9 @@ export async function createInvestor(
           name,
           email,
           role:              "client",
-          entryFeePct:       new Prisma.Decimal("0.02"),
-          performanceFeePct: new Prisma.Decimal("0.05"),
-          balanceUsdt:       clientBal,
+          entryFeePct:       new Prisma.Decimal("0.00"),
+          performanceFeePct: DEFAULT_PERFORMANCE_FEE_PCT,
+          balanceUsdt:       depositDec,
           isActive:          true,
         },
         select: { id: true },
@@ -142,17 +141,7 @@ export async function createInvestor(
           userId:      user.id,
           type:        "DEPOSIT",
           amountUsdt:  depositDec,
-          description: `Depósito inicial — ${name}`,
-        },
-      });
-
-      // 3d. ENTRY_FEE ledger entry — 2% fee retained by admin.
-      await tx.ledgerTransaction.create({
-        data: {
-          userId:      user.id,
-          type:        "ENTRY_FEE",
-          amountUsdt:  entryFee,
-          description: `Entry fee 2% — ${name}`,
+          description: `Capital inicial fijo $100.00 — ${name}`,
         },
       });
     });
@@ -172,5 +161,141 @@ export async function createInvestor(
       success: false,
       error: "Error interno al crear el inversor. Intenta de nuevo.",
     };
+  }
+}
+
+export async function setInvestorBalance(
+  userId: string,
+  targetBalanceRaw: string,
+): Promise<AdminMutationResult> {
+  if (!(await requireAdminRole())) {
+    return { success: false, error: "Acceso denegado." };
+  }
+
+  const uid = z.string().uuid().safeParse(userId);
+  if (!uid.success) {
+    return { success: false, error: "ID de inversor inválido." };
+  }
+
+  const parsedAmount = DecimalStringSchema.safeParse(targetBalanceRaw);
+  if (!parsedAmount.success) {
+    return { success: false, error: "Balance inválido." };
+  }
+
+  const target = new Prisma.Decimal(parsedAmount.data);
+  if (target.lt(0) || target.gt(MAX_BALANCE)) {
+    return { success: false, error: "Balance fuera de rango permitido." };
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findFirst({
+        where: {
+          id: uid.data,
+          role: { in: ["client", "investor"] },
+        },
+        select: { id: true, balanceUsdt: true, isActive: true },
+      });
+      if (!user) {
+        throw new Error("USER_NOT_FOUND");
+      }
+
+      const before = new Prisma.Decimal(user.balanceUsdt);
+      const delta = target.sub(before);
+
+      await tx.user.update({
+        where: { id: uid.data },
+        data: { balanceUsdt: target },
+      });
+
+      if (delta.gt(0)) {
+        await tx.ledgerTransaction.create({
+          data: {
+            userId: uid.data,
+            type: "DEPOSIT",
+            amountUsdt: delta,
+            description: `Ajuste manual admin: ${before.toFixed(2)} -> ${target.toFixed(2)}`,
+          },
+        });
+      } else if (delta.lt(0)) {
+        await tx.ledgerTransaction.create({
+          data: {
+            userId: uid.data,
+            type: "WITHDRAWAL",
+            amountUsdt: delta.abs(),
+            description: `Ajuste manual admin: ${before.toFixed(2)} -> ${target.toFixed(2)}`,
+          },
+        });
+      }
+    });
+
+    revalidatePath("/admin/dashboard");
+    return { success: true };
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "USER_NOT_FOUND") {
+      return { success: false, error: "Inversor no encontrado." };
+    }
+    console.error("[setInvestorBalance] Error inesperado:", err);
+    return { success: false, error: "No se pudo actualizar el balance." };
+  }
+}
+
+export async function deactivateInvestor(userId: string): Promise<AdminMutationResult> {
+  if (!(await requireAdminRole())) {
+    return { success: false, error: "Acceso denegado." };
+  }
+
+  const uid = z.string().uuid().safeParse(userId);
+  if (!uid.success) {
+    return { success: false, error: "ID de inversor inválido." };
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findFirst({
+        where: {
+          id: uid.data,
+          role: { in: ["client", "investor"] },
+        },
+        select: { id: true, isActive: true, balanceUsdt: true },
+      });
+
+      if (!user) {
+        throw new Error("USER_NOT_FOUND");
+      }
+      if (!user.isActive) {
+        return;
+      }
+
+      const balance = new Prisma.Decimal(user.balanceUsdt);
+
+      await tx.user.update({
+        where: { id: uid.data },
+        data: {
+          isActive: false,
+          balanceUsdt: new Prisma.Decimal(0),
+        },
+      });
+
+      if (balance.gt(0)) {
+        await tx.ledgerTransaction.create({
+          data: {
+            userId: uid.data,
+            type: "WITHDRAWAL",
+            amountUsdt: balance,
+            description: "Cierre de cuenta por admin (desactivada)",
+          },
+        });
+      }
+    });
+
+    revalidatePath("/admin/dashboard");
+    return { success: true };
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "USER_NOT_FOUND") {
+      return { success: false, error: "Inversor no encontrado." };
+    }
+    console.error("[deactivateInvestor] Error inesperado:", err);
+    return { success: false, error: "No se pudo desactivar la cuenta." };
   }
 }

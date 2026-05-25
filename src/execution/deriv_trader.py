@@ -31,6 +31,7 @@ from src.data.deriv_client import DerivClient, DerivClientError
 from src.execution.position_manager import DynamicPositionManager
 from src.strategies.deriv_signals import get_asset_profile, is_spike_market
 from src.utils.deriv_config import DerivSettings
+from src.utils.deriv_multi_accounts import load_multi_accounts_config, resolve_multi_accounts_path
 from src.utils.telegram_telemetry import TelegramTelemetry
 
 
@@ -1314,12 +1315,59 @@ class DerivTradeExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     # PAMM webhook (broker='deriv')
     # ─────────────────────────────────────────────────────────────────────────
+    def _resolve_webhook_user_ids(self) -> list[str]:
+        """Resolve unique recipient user_ids for Deriv PAMM settlements.
+
+        Priority order:
+          1) DERIV_USER_ID from runtime settings (backward compatibility)
+          2) enabled entries from DERIV_MULTI_ACCOUNTS_FILE
+        """
+        candidates: list[str] = []
+
+        primary_user_id = str(self._settings.user_id or "").strip()
+        if primary_user_id:
+            candidates.append(primary_user_id)
+
+        path = resolve_multi_accounts_path()
+        if path is not None and path.exists():
+            try:
+                cfg = load_multi_accounts_config(path)
+                for account in cfg.accounts:
+                    if not account.enabled:
+                        continue
+                    user_id = str(account.user_id or "").strip()
+                    if user_id:
+                        candidates.append(user_id)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "[deriv-trader] webhook recipients fallback to DERIV_USER_ID only: "
+                    "cannot read multi-account file %s (%s)",
+                    path,
+                    exc,
+                )
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for user_id in candidates:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            unique.append(user_id)
+        return unique
+
     async def _post_pamm_webhook(self, record: dict[str, Any]) -> None:
         url = self._settings.pamm_webhook_url
         secret = self._settings.webhook_secret
-        if not url or not secret or not self._settings.user_id:
+        if not url or not secret:
             _LOGGER.warning(
-                "[deriv-trader] webhook skipped — missing PAMM_WEBHOOK_URL/WEBHOOK_SECRET/DERIV_USER_ID",
+                "[deriv-trader] webhook skipped — missing PAMM_WEBHOOK_URL/WEBHOOK_SECRET",
+            )
+            return
+
+        webhook_user_ids = self._resolve_webhook_user_ids()
+        if not webhook_user_ids:
+            _LOGGER.warning(
+                "[deriv-trader] webhook skipped — no recipient user_ids (DERIV_USER_ID or multi-account file)",
             )
             return
 
@@ -1337,9 +1385,8 @@ class DerivTradeExecutor:
             )
             return
 
-        payload = {
+        base_payload = {
             "tradeId": f"deriv:{record['contract_id']}",
-            "userId": self._settings.user_id,
             "rawPnl": float(record["realized_pnl_usdt"]),
             "binanceFee": 0.0,    # Deriv fees already netted into realized PnL
             "symbol": record["symbol"],
@@ -1349,38 +1396,87 @@ class DerivTradeExecutor:
             # Entry context — backend stores in deriv_contracts.score_breakdown JSONB
             "score_breakdown": record.get("score_breakdown"),
         }
-        try:
-            timeout = aiohttp.ClientTimeout(total=8)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers={"Authorization": f"Bearer {secret}"},
-                ) as resp:
-                    text = await resp.text()
-                    if resp.status == 500:
-                        _LOGGER.warning(
-                            "[deriv-trader] webhook %s -> HTTP 500 (frontend DB issue) "
-                            "contract_id=%s saved locally — trade audit intact",
-                            url, record["contract_id"],
-                        )
-                    elif resp.status >= 300:
-                        _LOGGER.warning(
-                            "[deriv-trader] webhook %s -> HTTP %s: %s",
-                            url, resp.status, text[:200],
-                        )
-                    else:
+        timeout = aiohttp.ClientTimeout(total=8)
+        semaphore = asyncio.Semaphore(32)
+
+        async def _post_one_user(session: aiohttp.ClientSession, user_id: str) -> bool:
+            payload = {**base_payload, "userId": user_id}
+            short_uid = user_id[:8]
+            async with semaphore:
+                try:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers={"Authorization": f"Bearer {secret}"},
+                    ) as resp:
+                        text = await resp.text()
+                        if resp.status == 500:
+                            _LOGGER.warning(
+                                "[deriv-trader] webhook user=%s -> HTTP 500 "
+                                "contract_id=%s (trade kept locally)",
+                                short_uid,
+                                record["contract_id"],
+                            )
+                            return False
+                        if resp.status >= 300:
+                            _LOGGER.warning(
+                                "[deriv-trader] webhook user=%s -> HTTP %s: %s",
+                                short_uid,
+                                resp.status,
+                                text[:200],
+                            )
+                            return False
                         _LOGGER.info(
-                            "[deriv-trader] webhook OK — contract_id=%s pnl=%.4f",
-                            record["contract_id"], payload["rawPnl"],
+                            "[deriv-trader] webhook OK user=%s contract_id=%s pnl=%.4f",
+                            short_uid,
+                            record["contract_id"],
+                            base_payload["rawPnl"],
                         )
-        except asyncio.TimeoutError:
-            _LOGGER.warning(
-                "[deriv-trader] webhook timeout (>8s) contract_id=%s — continuing",
-                record["contract_id"],
-            )
+                        return True
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(
+                        "[deriv-trader] webhook timeout user=%s contract_id=%s (>8s)",
+                        short_uid,
+                        record["contract_id"],
+                    )
+                    return False
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "[deriv-trader] webhook POST failed user=%s contract_id=%s: %s",
+                        short_uid,
+                        record["contract_id"],
+                        exc,
+                    )
+                    return False
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                tasks = [
+                    asyncio.create_task(
+                        _post_one_user(session, user_id),
+                        name=f"pamm-webhook-{user_id[:8]}",
+                    )
+                    for user_id in webhook_user_ids
+                ]
+                outcomes = await asyncio.gather(*tasks, return_exceptions=False)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("[deriv-trader] webhook POST failed: %s — trade saved locally", exc)
+            _LOGGER.warning(
+                "[deriv-trader] webhook batch failed contract_id=%s users=%d: %s",
+                record["contract_id"],
+                len(webhook_user_ids),
+                exc,
+            )
+            return
+
+        ok_count = sum(1 for ok in outcomes if ok)
+        fail_count = len(outcomes) - ok_count
+        _LOGGER.info(
+            "[deriv-trader] webhook batch done contract_id=%s users=%d ok=%d fail=%d",
+            record["contract_id"],
+            len(webhook_user_ids),
+            ok_count,
+            fail_count,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers

@@ -9,9 +9,11 @@
  * Each row has "Aportar" / "Retirar" action buttons that open TreasuryModal.
  */
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import type { InvestorRow } from "@/lib/pamm";
 import { TreasuryModal, type ModalAction } from "./TreasuryModal";
+import { deactivateInvestor, setInvestorBalance } from "@/app/actions/admin";
 
 const CARD   = "#0a1018";
 const BORD   = "#1a2b3c";
@@ -40,7 +42,11 @@ type ActiveModal = {
 };
 
 export function InvestorTable({ investors }: Props) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
   const [activeModal, setActiveModal] = useState<ActiveModal | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [processingUserId, setProcessingUserId] = useState<string | null>(null);
 
   function openModal(inv: InvestorRow, action: ModalAction) {
     setActiveModal({
@@ -48,6 +54,49 @@ export function InvestorTable({ investors }: Props) {
       userName:       inv.name,
       currentBalance: inv.balance,
       action,
+    });
+  }
+
+  function handleSetBalance(inv: InvestorRow) {
+    const nextBalance = window.prompt(
+      `Nuevo balance para ${inv.name} (USDT):`,
+      inv.balance,
+    );
+    if (nextBalance === null) {
+      return;
+    }
+
+    setActionError(null);
+    setProcessingUserId(inv.id);
+    startTransition(async () => {
+      const result = await setInvestorBalance(inv.id, nextBalance);
+      if (!result.success) {
+        setActionError(result.error ?? "No se pudo actualizar el balance.");
+      } else {
+        router.refresh();
+      }
+      setProcessingUserId(null);
+    });
+  }
+
+  function handleDeactivate(inv: InvestorRow) {
+    const confirmed = window.confirm(
+      `Se desactivara la cuenta de ${inv.name} y su balance pasara a 0. ¿Continuar?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setActionError(null);
+    setProcessingUserId(inv.id);
+    startTransition(async () => {
+      const result = await deactivateInvestor(inv.id);
+      if (!result.success) {
+        setActionError(result.error ?? "No se pudo desactivar la cuenta.");
+      } else {
+        router.refresh();
+      }
+      setProcessingUserId(null);
     });
   }
 
@@ -146,6 +195,7 @@ export function InvestorTable({ investors }: Props) {
               {investors.map((inv) => {
                 const roi = parseFloat(inv.roi);
                 const positive = roi >= 0;
+                  const rowBusy = isPending && processingUserId === inv.id;
                 return (
                   <tr
                     key={inv.id}
@@ -220,6 +270,7 @@ export function InvestorTable({ investors }: Props) {
                     <td style={{ padding: "8px 0", whiteSpace: "nowrap" }}>
                       <button
                         onClick={() => openModal(inv, "add")}
+                        disabled={rowBusy}
                         title="Aportar capital"
                         style={{
                           background: "rgba(18,217,139,0.1)",
@@ -232,6 +283,7 @@ export function InvestorTable({ investors }: Props) {
                           cursor: "pointer",
                           marginRight: 6,
                           transition: "background 0.15s",
+                          opacity: rowBusy ? 0.5 : 1,
                         }}
                         onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.2)")}
                         onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(18,217,139,0.1)")}
@@ -240,6 +292,7 @@ export function InvestorTable({ investors }: Props) {
                       </button>
                       <button
                         onClick={() => openModal(inv, "withdraw")}
+                        disabled={rowBusy}
                         title="Retirar capital"
                         style={{
                           background: "rgba(99,102,241,0.1)",
@@ -251,11 +304,50 @@ export function InvestorTable({ investors }: Props) {
                           padding: "5px 10px",
                           cursor: "pointer",
                           transition: "background 0.15s",
+                          opacity: rowBusy ? 0.5 : 1,
                         }}
                         onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.2)")}
                         onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = "rgba(99,102,241,0.1)")}
                       >
                         − Retirar
+                      </button>
+                      <button
+                        onClick={() => handleSetBalance(inv)}
+                        disabled={rowBusy}
+                        title="Editar balance exacto"
+                        style={{
+                          background: "rgba(87,193,255,0.1)",
+                          border: "1px solid rgba(87,193,255,0.35)",
+                          borderRadius: 6,
+                          color: "#57c1ff",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          marginLeft: 6,
+                          opacity: rowBusy ? 0.5 : 1,
+                        }}
+                      >
+                        Editar saldo
+                      </button>
+                      <button
+                        onClick={() => handleDeactivate(inv)}
+                        disabled={rowBusy}
+                        title="Desactivar cuenta"
+                        style={{
+                          background: "rgba(235,75,97,0.12)",
+                          border: "1px solid rgba(235,75,97,0.35)",
+                          borderRadius: 6,
+                          color: RED,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "5px 10px",
+                          cursor: "pointer",
+                          marginLeft: 6,
+                          opacity: rowBusy ? 0.5 : 1,
+                        }}
+                      >
+                        Eliminar
                       </button>
                     </td>
                   </tr>
@@ -263,6 +355,21 @@ export function InvestorTable({ investors }: Props) {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {actionError && (
+        <div
+          style={{
+            marginTop: 12,
+            background: "rgba(235,75,97,0.08)",
+            border: `1px solid rgba(235,75,97,0.30)`,
+            borderRadius: 8,
+            color: RED,
+            padding: "9px 12px",
+            fontSize: 12,
+          }}
+        >
+          {actionError}
         </div>
       )}
     </div>

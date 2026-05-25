@@ -11,14 +11,33 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { verifyJWT } from "@/lib/auth";
 import { getAdminStats } from "@/lib/pamm";
 import { prisma } from "@/lib/db";
+import { Prisma } from "@prisma/client";
 import { OnboardingForm } from "./_components/OnboardingForm";
 import { InvestorTable } from "./_components/InvestorTable";
-import { GlobalOpsLog, type LedgerRow } from "./_components/GlobalOpsLog";
 
 export const dynamic = "force-dynamic";
+
+type DerivOperationRow = {
+  trade_id: string;
+  symbol: string;
+  side: string;
+  exit_reason: string;
+  allocated_at: Date;
+  mirror_accounts: number;
+  gross_pnl_total_usdt: Prisma.Decimal;
+  net_pnl_total_usdt: Prisma.Decimal;
+};
+
+type MirrorRuntimeSnapshot = {
+  mirrorEnabled: boolean;
+  mirrorCount: number;
+  openContracts: number;
+};
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
 const BG     = "#04070c";
@@ -27,7 +46,6 @@ const BORD   = "rgba(63,87,114,0.28)";
 const TEXT   = "#dce7f5";
 const MUTE   = "#6b8299";
 const GREEN  = "#10b981";
-const GLASSB = "rgba(4,7,12,0.72)";
 
 function fmtUSDT(v: string): string {
   return "$" + Number(v).toLocaleString("en-US", {
@@ -55,50 +73,58 @@ export default async function AdminDashboardPage() {
     redirect("/portal/login?next=/admin/dashboard");
   }
 
-  // ── Fetch KPIs, investor list, and full ledger log ────────────────────────────
-  const [stats, rawLedger] = await Promise.all([
+  // ── Fetch KPIs + compact Deriv operation summary ─────────────────────────────
+  const [stats, derivOps, runtime] = await Promise.all([
     getAdminStats(),
-    // Fetch last 2 000 ledger entries (all users, DESC) for the Ops Log.
-    // Joined with users to get a display alias without a second query.
-    prisma.ledgerTransaction.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 2000,
-      include: { user: { select: { email: true, name: true } } },
-    }),
+    prisma.$queryRaw<DerivOperationRow[]>`
+      SELECT
+        uta.trade_id,
+        MAX(uta.symbol)                                  AS symbol,
+        MAX(uta.side)                                    AS side,
+        MAX(uta.exit_reason)                             AS exit_reason,
+        MAX(uta.allocated_at)                            AS allocated_at,
+        COUNT(*)::int                                    AS mirror_accounts,
+        COALESCE(SUM(uta.gross_pnl_usdt), 0)::numeric    AS gross_pnl_total_usdt,
+        COALESCE(SUM(uta.net_pnl_usdt), 0)::numeric      AS net_pnl_total_usdt
+      FROM user_trade_allocations uta
+      WHERE COALESCE(uta.broker, 'binance') = 'deriv'
+      GROUP BY uta.trade_id
+      ORDER BY MAX(uta.allocated_at) DESC
+      LIMIT 30
+    `.catch(() => [] as DerivOperationRow[]),
+    readMirrorRuntimeSnapshot(),
   ]);
 
-  // Serialise Decimal + Date + BigInt → plain strings (Server → Client boundary).
-  const ledgerRows: LedgerRow[] = rawLedger.map((row) => ({
-    id:          row.id.toString(),
-    userId:      row.userId,
-    userAlias:   row.user.name ?? row.user.email,
-    type:        row.type,
-    amount:      row.amountUsdt.toFixed(8),
-    description: row.description ?? null,
-    createdAt:   row.createdAt instanceof Date
-                   ? row.createdAt.toISOString()
-                   : String(row.createdAt),
-    broker:      ((row as { broker?: string | null }).broker ?? "binance").toLowerCase(),
-  }));
+  const latestOp = derivOps[0] ?? null;
+  const latestGross = new Prisma.Decimal(latestOp?.gross_pnl_total_usdt ?? 0);
+  const latestNet = new Prisma.Decimal(latestOp?.net_pnl_total_usdt ?? 0);
+  const latestFee20 = latestGross.gt(0)
+    ? latestGross.mul("0.20")
+    : new Prisma.Decimal(0);
+  const feePositive = latestFee20.gt(0);
 
   const kpis: KpiCardData[] = [
     {
       label:  "AUM",
       value:  fmtUSDT(stats.aum),
-      sub:    "Capital operativo total",
+      sub:    "Capital activo total",
       accent: "#57c1ff",
     },
     {
-      label:  "Total Revenue",
-      value:  fmtUSDT(stats.totalRevenue),
-      sub:    `Entry ${fmtUSDT(stats.entryFeeRevenue)} + Perf ${fmtUSDT(stats.performanceFeeRevenue)}`,
-      accent: GREEN,
+      label:  "Cuentas Espejo Activas",
+      value:  runtime.mirrorCount.toString(),
+      sub:    runtime.openContracts > 0
+        ? `Operando ahora (${runtime.openContracts} contrato/s abierto/s)`
+        : "Sin contratos abiertos ahora",
+      accent: runtime.openContracts > 0 ? GREEN : "#a78bfa",
     },
     {
-      label:  "Active Clients",
-      value:  stats.activeClients.toString(),
-      sub:    "Inversores activos",
-      accent: "#a78bfa",
+      label:  "Fee Modelo 20% (Ult. Op)",
+      value:  fmtUSDT(latestFee20.toFixed(2)),
+      sub:    latestOp
+        ? `${latestGross.gt(0) ? "Ganancia" : "Sin ganancia"} bruta: ${fmtUSDT(latestGross.toFixed(2))}`
+        : "Sin operaciones Deriv cerradas",
+      accent: feePositive ? GREEN : "#a78bfa",
     },
   ];
 
@@ -193,7 +219,7 @@ export default async function AdminDashboardPage() {
         <InvestorTable investors={stats.investors} />
       </div>
 
-      {/* ── Global Operations Log ── */}
+      {/* ── Compact Deriv audit (one line per operation) ── */}
       <section
         style={{
           background: CARD,
@@ -205,8 +231,151 @@ export default async function AdminDashboardPage() {
           boxShadow: "0 0 0 1px rgba(255,255,255,0.02) inset, 0 16px 40px -20px rgba(6,182,212,0.25)",
         }}
       >
-        <GlobalOpsLog rows={ledgerRows} />
+        <p
+          style={{
+            color: MUTE,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            margin: "0 0 8px",
+          }}
+        >
+          Auditoria Deriv Compacta
+        </p>
+
+        {latestOp ? (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "2fr 1fr 1fr 1fr",
+              gap: 12,
+              alignItems: "center",
+              background: "rgba(4,7,12,0.62)",
+              border: `1px solid ${BORD}`,
+              borderRadius: 12,
+              padding: "14px 16px",
+            }}
+          >
+            <div>
+              <p style={{ margin: 0, color: TEXT, fontSize: 14, fontWeight: 700 }}>
+                {latestOp.symbol} [{latestOp.side}] - {latestOp.exit_reason}
+              </p>
+              <p style={{ margin: "4px 0 0", color: MUTE, fontSize: 11 }}>
+                {new Date(latestOp.allocated_at).toLocaleString("es-ES", { timeZone: "UTC" })} UTC · Trade {latestOp.trade_id}
+              </p>
+            </div>
+
+            <MetricPill
+              label="Cuentas en espejo"
+              value={String(latestOp.mirror_accounts)}
+              accent="#57c1ff"
+            />
+
+            <MetricPill
+              label="Ganancia bruta"
+              value={fmtUSDT(latestGross.toFixed(2))}
+              accent={latestGross.gte(0) ? GREEN : "#fb7185"}
+            />
+
+            <MetricPill
+              label="Cobro 20%"
+              value={fmtUSDT(latestFee20.toFixed(2))}
+              accent={latestFee20.gt(0) ? "#f4b942" : MUTE}
+            />
+          </div>
+        ) : (
+          <div
+            style={{
+              background: "rgba(4,7,12,0.62)",
+              border: `1px solid ${BORD}`,
+              borderRadius: 12,
+              padding: "14px 16px",
+              color: MUTE,
+              fontSize: 13,
+            }}
+          >
+            Aun no hay operaciones Deriv para resumir.
+          </div>
+        )}
+
+        <p style={{ margin: "10px 0 0", color: MUTE, fontSize: 11 }}>
+          Neto ultima operacion: {fmtUSDT(latestNet.toFixed(2))} · Inversores activos: {stats.activeClients}
+        </p>
       </section>
+    </div>
+  );
+}
+
+async function readMirrorRuntimeSnapshot(): Promise<MirrorRuntimeSnapshot> {
+  const root = path.join(process.cwd(), "..");
+  const logsDir = process.env.DERIV_STATE_DIR
+    ?? process.env.BOT_STATE_DIR
+    ?? path.join(root, "logs");
+
+  let mirrorEnabled = false;
+  let mirrorCount = 0;
+  let openContracts = 0;
+
+  try {
+    const statusRaw = await fs.readFile(path.join(logsDir, "deriv_status.json"), "utf8");
+    const status = JSON.parse(statusRaw) as Record<string, unknown>;
+    const multi = (status.multi_account ?? {}) as Record<string, unknown>;
+    mirrorEnabled = Boolean(multi.mirror_enabled);
+    mirrorCount = Number(multi.mirror_count ?? 0) || 0;
+  } catch {
+    // keep defaults
+  }
+
+  try {
+    const openRaw = await fs.readFile(path.join(logsDir, "deriv_open_contracts.json"), "utf8");
+    const open = JSON.parse(openRaw);
+    if (Array.isArray(open)) {
+      openContracts = open.length;
+    }
+  } catch {
+    // keep defaults
+  }
+
+  if (!mirrorEnabled) {
+    mirrorCount = 0;
+  }
+
+  return { mirrorEnabled, mirrorCount, openContracts };
+}
+
+function MetricPill({ label, value, accent }: { label: string; value: string; accent: string }) {
+  return (
+    <div
+      style={{
+        background: "rgba(255,255,255,0.02)",
+        border: `1px solid ${BORD}`,
+        borderRadius: 10,
+        padding: "10px 12px",
+      }}
+    >
+      <p
+        style={{
+          margin: 0,
+          color: MUTE,
+          fontSize: 10,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </p>
+      <p
+        style={{
+          margin: "4px 0 0",
+          color: accent,
+          fontSize: 16,
+          fontWeight: 700,
+          fontFamily: "ui-monospace, Menlo, monospace",
+        }}
+      >
+        {value}
+      </p>
     </div>
   );
 }

@@ -115,6 +115,21 @@ usa un JSON de credenciales por cuenta + mapeo a `user_id` del portal:
 2. Ruta recomendada en produccion: `/data/logs/deriv_multi_accounts.json`.
 3. Usa `config/deriv_multi_accounts.template.json` como plantilla base.
 
+Flujo recomendado para alta de nuevas cuentas:
+
+1. Crea primero el usuario cliente en el portal (rol `client`/`investor`) y copia su `user_id`.
+2. Inserta o actualiza la cuenta Deriv en el JSON con `scripts/upsert_deriv_multi_account.py`.
+3. Valida estructura + linkage DB con `scripts/validate_deriv_multi_accounts.py --check-db`.
+4. Reinicia el servicio `bot` en Coolify para recargar el JSON en runtime.
+5. Verifica en logs la activacion de mirrors y en `deriv_status.json` que `multi_account.mirror_enabled=true`.
+
+Regla operativa:
+
+- Si una cuenta esta `enabled=true` en el JSON, entra al fanout espejo automaticamente en la siguiente ejecucion del bot.
+- Las operaciones se disparan en paralelo (principal + mirrors) con las mismas condiciones de entrada/salida.
+- Las asignaciones PAMM de Deriv se envian por `user_id` a todas las cuentas habilitadas para que cada cliente vea su propio balance/historial.
+- Una cuenta nueva empieza su curva desde su propio capital inicial; no hereda historico previo.
+
 Comandos utiles:
 
 ```bash
@@ -129,6 +144,41 @@ python scripts/upsert_deriv_multi_account.py \
 # validacion estructural (+ link a users en DB si pasas --check-db)
 python scripts/validate_deriv_multi_accounts.py \
   --file /data/logs/deriv_multi_accounts.json --check-db
+```
+
+## Admin PAMM (modo espejo simplificado)
+
+Modelo operativo desde ahora:
+
+- Cada nuevo inversionista entra con capital inicial fijo de `100 USDT`.
+- `Entry fee = 0%`.
+- `Performance fee = 20%` sobre PnL positivo.
+- El dashboard admin muestra auditoria compacta por operacion Deriv (una linea principal con cuentas espejo y cobro 20%).
+- El admin puede ajustar saldo exacto por cuenta y desactivar cuentas desde la tabla de inversores.
+
+Sincronizacion opcional de saldos reales Deriv hacia DB (preview por defecto):
+
+```bash
+python scripts/sync_deriv_real_balances.py \
+  --file /data/logs/deriv_multi_accounts.json
+```
+
+Aplicar cambios en DB (actualiza balances, activa cuentas y normaliza fee schedule a 20%):
+
+```bash
+python scripts/sync_deriv_real_balances.py \
+  --file /data/logs/deriv_multi_accounts.json \
+  --database-url "$DATABASE_URL" \
+  --apply
+```
+
+Reset de auditoria Deriv + sync de balances reales (modo destructivo, usar con cuidado):
+
+```bash
+python scripts/sync_deriv_real_balances.py \
+  --file /data/logs/deriv_multi_accounts.json \
+  --database-url "$DATABASE_URL" \
+  --apply --reset-deriv-audit
 ```
 
 Este mapeo deja listo el enlace bot Deriv -> login/panel (atribucion por

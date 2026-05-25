@@ -80,17 +80,6 @@ export function OnboardingForm() {
           disabled={isPending}
         />
 
-        {/* ── Initial deposit ── */}
-        <Field
-          label="Depósito inicial (USDT)"
-          name="initial_deposit"
-          type="text"
-          inputMode="decimal"
-          placeholder="10000.00"
-          error={state.fieldErrors?.initial_deposit?.[0]}
-          disabled={isPending}
-        />
-
         {/* ── Fee preview card ── */}
         <div
           style={{
@@ -103,9 +92,9 @@ export function OnboardingForm() {
             gap: 4,
           }}
         >
-          <FeeRow label="Entry Fee (2%)" value="−2% deducido al crear" color={YELLOW} />
-          <FeeRow label="Capital operativo" value="98% al trading" color={GREEN} />
-          <FeeRow label="Performance Fee" value="5% sobre PnL positivo" color={MUTE} />
+          <FeeRow label="Capital inicial" value="100 USDT fijo" color={GREEN} />
+          <FeeRow label="Entry Fee" value="0%" color={MUTE} />
+          <FeeRow label="Performance Fee" value="20% sobre PnL positivo" color={YELLOW} />
         </div>
 
         {/* ── Submit ── */}
