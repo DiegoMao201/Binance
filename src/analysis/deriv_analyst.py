@@ -116,6 +116,35 @@ _AI_ADAPTIVE_MAX_CONFIDENCE = min(
     0.95,
     max(_AI_MIN_CONFIDENCE, float(os.getenv("DERIV_AI_ADAPTIVE_MAX_CONFIDENCE", "0.92"))),
 )
+_AI_QUALITY_VETO_ENABLED = os.getenv(
+    "DERIV_AI_QUALITY_VETO_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+_AI_QUALITY_VETO_MIN_TRADES = max(
+    4,
+    int(os.getenv("DERIV_AI_QUALITY_VETO_MIN_TRADES", "8") or 8),
+)
+_AI_QUALITY_VETO_MIN_DECISIONS = max(
+    6,
+    int(os.getenv("DERIV_AI_QUALITY_VETO_MIN_DECISIONS", "12") or 12),
+)
+_AI_QUALITY_VETO_APPROVAL_RATE = max(
+    70.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_VETO_APPROVAL_RATE", "90") or 90), 100.0),
+)
+_AI_QUALITY_VETO_WIN_RATE = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_VETO_WIN_RATE", "35") or 35), 100.0),
+)
+_AI_QUALITY_VETO_AVG_PNL = float(os.getenv("DERIV_AI_QUALITY_VETO_AVG_PNL", "0.0") or 0.0)
+_AI_QUALITY_VETO_TAIL_TRADES = max(
+    3,
+    int(os.getenv("DERIV_AI_QUALITY_VETO_TAIL_TRADES", "5") or 5),
+)
+_AI_QUALITY_VETO_TAIL_WIN_RATE = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_VETO_TAIL_WIN_RATE", "25") or 25), 100.0),
+)
+_AI_QUALITY_VETO_TAIL_AVG_PNL = float(os.getenv("DERIV_AI_QUALITY_VETO_TAIL_AVG_PNL", "-0.03") or -0.03)
 
 # ── Smart cache invalidation thresholds ─────────────────────────────────────
 _CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5"))   # |Δscore| > 0.5
@@ -838,6 +867,21 @@ class DerivAnalyst:
             avg_pnl = (sum(pnl_values) / trades_n) if trades_n else 0.0
             weak_exit_rate = (weak_exits / trades_n * 100.0) if trades_n else 0.0
 
+            tail_n = min(_AI_QUALITY_VETO_TAIL_TRADES, trades_n)
+            tail_rows = close_rows_sym[-tail_n:] if tail_n > 0 else []
+            tail_pnls: list[float] = []
+            tail_wins = 0
+            for c in tail_rows:
+                try:
+                    pnl_tail = float(c.get("realized_pnl_usdt") or 0.0)
+                except Exception:
+                    pnl_tail = 0.0
+                tail_pnls.append(pnl_tail)
+                if pnl_tail > 0.0:
+                    tail_wins += 1
+            tail_win_rate = (tail_wins / tail_n * 100.0) if tail_n else 0.0
+            tail_avg_pnl = (sum(tail_pnls) / tail_n) if tail_n else 0.0
+
             adaptive_conf = float(_AI_MIN_CONFIDENCE)
             reasons: list[str] = []
 
@@ -865,6 +909,30 @@ class DerivAnalyst:
                 adaptive_conf -= 0.03
 
             adaptive_conf = max(_AI_MIN_CONFIDENCE, min(adaptive_conf, _AI_ADAPTIVE_MAX_CONFIDENCE))
+
+            quality_veto = False
+            veto_reasons: list[str] = []
+            if _AI_QUALITY_VETO_ENABLED:
+                if (
+                    decisions_n >= _AI_QUALITY_VETO_MIN_DECISIONS
+                    and approval_rate >= _AI_QUALITY_VETO_APPROVAL_RATE
+                    and trades_n >= _AI_QUALITY_VETO_MIN_TRADES
+                    and (win_rate <= _AI_QUALITY_VETO_WIN_RATE or avg_pnl <= _AI_QUALITY_VETO_AVG_PNL)
+                ):
+                    quality_veto = True
+                    veto_reasons.append(
+                        f"macro_veto:approval={approval_rate:.1f}% wr={win_rate:.1f}% avg={avg_pnl:.4f}"
+                    )
+                if (
+                    tail_n >= 4
+                    and tail_win_rate <= _AI_QUALITY_VETO_TAIL_WIN_RATE
+                    and tail_avg_pnl <= _AI_QUALITY_VETO_TAIL_AVG_PNL
+                ):
+                    quality_veto = True
+                    veto_reasons.append(
+                        f"tail_veto:n={tail_n} wr={tail_win_rate:.1f}% avg={tail_avg_pnl:.4f}"
+                    )
+
             out[sym] = {
                 "ai_min_confidence": adaptive_conf,
                 "quality_note": "adaptive:" + (", ".join(reasons) if reasons else "baseline"),
@@ -873,6 +941,11 @@ class DerivAnalyst:
                 "avg_pnl": avg_pnl,
                 "trades_n": trades_n,
                 "decisions_n": decisions_n,
+                "tail_n": tail_n,
+                "tail_win_rate": tail_win_rate,
+                "tail_avg_pnl": tail_avg_pnl,
+                "quality_veto": quality_veto,
+                "quality_veto_note": "; ".join(veto_reasons),
             }
 
         self._ai_quality_cache = out
@@ -888,6 +961,18 @@ class DerivAnalyst:
         return float(row.get("ai_min_confidence", _AI_MIN_CONFIDENCE)), str(
             row.get("quality_note", "adaptive:baseline")
         )
+
+    def _quality_veto_for_symbol(self, symbol: str) -> tuple[bool, str]:
+        if not _AI_QUALITY_VETO_ENABLED:
+            return False, "quality_veto:disabled"
+        self._refresh_ai_quality_cache()
+        row = self._ai_quality_cache.get(str(symbol or "").upper())
+        if not row:
+            return False, "quality_veto:none"
+        if bool(row.get("quality_veto")):
+            note = str(row.get("quality_veto_note") or "quality_veto")
+            return True, note
+        return False, "quality_veto:none"
 
     # ─────────────────────────────────────────────────────────────────────────
     # Core analysis method
@@ -960,6 +1045,7 @@ class DerivAnalyst:
         )
         _hard_score_floor = max(_AI_HARD_SCORE_FLOOR, float(_ai_threshold))
         _symbol_min_conf, _quality_note = self._dynamic_ai_min_confidence(symbol)
+        _quality_veto, _quality_veto_note = self._quality_veto_for_symbol(symbol)
 
         current_snapshot = _build_cache_snapshot(score, hurst, side, score_breakdown)
 
@@ -972,6 +1058,7 @@ class DerivAnalyst:
                 _cached_approved
                 and _cached_conf >= _symbol_min_conf
                 and score >= _hard_score_floor
+                and not _quality_veto
             )
             analysis.ai_confidence = _cached_conf
             _cached_reason = str(cached_ai.get("reason", ""))
@@ -979,6 +1066,8 @@ class DerivAnalyst:
                 _cached_reason = f"{_cached_reason} | conf_floor:{_cached_conf:.2f}<{_symbol_min_conf:.2f}"
             if _cached_approved and not analysis.ai_approved and score < _hard_score_floor:
                 _cached_reason = f"{_cached_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
+            if _cached_approved and not analysis.ai_approved and _quality_veto:
+                _cached_reason = f"{_cached_reason} | {_quality_veto_note}"
             analysis.ai_reason = f"{_cached_reason} | {_quality_note} [cached]"
             analysis.ai_model      = str(cached_ai.get("model", ""))
             return analysis
@@ -1060,6 +1149,7 @@ class DerivAnalyst:
                 _model_approved
                 and _ai_conf >= _symbol_min_conf
                 and score >= _hard_score_floor
+                and not _quality_veto
             )
             analysis.ai_confidence = _ai_conf
             analysis.ai_reason = str(ai_result.get("reason", ""))
@@ -1071,6 +1161,8 @@ class DerivAnalyst:
                 analysis.ai_reason = (
                     f"{analysis.ai_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
                 )
+            if _model_approved and not analysis.ai_approved and _quality_veto:
+                analysis.ai_reason = f"{analysis.ai_reason} | {_quality_veto_note}"
             analysis.ai_reason = f"{analysis.ai_reason} | {_quality_note}"
             analysis.ai_model      = str(ai_result.get("model", ""))
             await self._ai_cache_set(

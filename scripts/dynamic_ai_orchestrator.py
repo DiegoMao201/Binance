@@ -95,6 +95,10 @@ SPIKE_PREFILTER_MAX_STEP_TICKS = max(
     20,
     int(os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_MAX_STEP_TICKS", "180") or 180),
 )
+SPIKE_PREFILTER_MAX_CYCLE_RATIO = max(
+    0.30,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_PREFILTER_MAX_CYCLE_RATIO", "0.60") or 0.60), 0.95),
+)
 TICK_WINDOW_MIN_SAMPLES = max(
     2,
     int(os.getenv("DYNAMIC_AI_TICK_WINDOW_MIN_SAMPLES", "4") or 4),
@@ -203,6 +207,18 @@ def _symbol_score_floor(symbol: str) -> float:
     sym = str(symbol or "").upper()
     base = float(SYMBOL_SCORE_FLOOR_MAP.get(sym, SCORE_MIN_GUARDRAIL))
     return max(SCORE_MIN_GUARDRAIL, min(base, SCORE_MAX_GUARDRAIL))
+
+
+def _symbol_cycle_ticks(symbol: str) -> int | None:
+    sym = str(symbol or "").upper()
+    match = re.search(r"(\d+)$", sym)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except Exception:
+        return None
+    return value if value > 0 else None
 
 
 QUARANTINE_MEMORY: dict[str, bool] = {}
@@ -1030,6 +1046,16 @@ def _apply_tick_window_policy(
             delta = target - current_target
             if abs(delta) > SPIKE_PREFILTER_MAX_STEP_TICKS:
                 target = current_target + (SPIKE_PREFILTER_MAX_STEP_TICKS if delta > 0 else -SPIKE_PREFILTER_MAX_STEP_TICKS)
+
+        # Safety cap: never allow prefilter target to consume most of the
+        # spike cycle; otherwise symbols can starve (no viable entry window).
+        cycle_ticks = _symbol_cycle_ticks(sym)
+        if cycle_ticks and cycle_ticks > 0:
+            cycle_cap = max(
+                SPIKE_PREFILTER_MIN_TICKS,
+                min(int(round(float(cycle_ticks) * SPIKE_PREFILTER_MAX_CYCLE_RATIO)), SPIKE_PREFILTER_MAX_TICKS),
+            )
+            target = min(target, cycle_cap)
 
         wr_recent = float(t.get("win_rate_2h") or 0.0)
         ev_recent = float(t.get("ev_per_trade_2h") or 0.0)

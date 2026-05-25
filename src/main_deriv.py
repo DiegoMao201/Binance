@@ -375,9 +375,24 @@ class DerivDaemon:
             except (TypeError, ValueError):
                 continue
 
-        # In tick-only mode we intentionally ignore legacy *_SEC maps/vars to
-        # avoid interpreting stale seconds values as ticks.
+        # Backward compatibility: in tick-only mode, accept legacy *_SEC
+        # overrides as tick values when no explicit *_TICKS override exists.
+        # This prevents silent starvation when production only defines *_SEC.
         if self._entry_tick_only:
+            sec_map = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", ""))
+            for sym, val in sec_map.items():
+                out.setdefault(sym, val)
+            for key, value in os.environ.items():
+                prefix = "DERIV_POST_SPIKE_CHASE_BLOCK_SEC_"
+                if not key.startswith(prefix):
+                    continue
+                symbol = key[len(prefix):].strip().upper()
+                if not symbol or symbol in out:
+                    continue
+                try:
+                    out[symbol] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    continue
             return out
 
         out.update(self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_SEC_MAP", "")))
@@ -415,7 +430,18 @@ class DerivDaemon:
         if resolved <= 0 and dyn_active:
             dyn_ticks = float(dyn_cfg.get("spike_pre_filter_target") or 0.0)
             if dyn_ticks > 0:
-                resolved = dyn_ticks
+                # Safety cap: anti-chase window must never consume most of the
+                # symbol cycle, otherwise the bot starves (no viable entry time).
+                cycle_ticks = float((profile or {}).get("spike_interval_ticks") or 0.0)
+                if cycle_ticks > 0 and is_spike_market(sym):
+                    chase_cap_ratio = max(
+                        0.20,
+                        min(float(os.getenv("DERIV_POST_SPIKE_CHASE_MAX_CYCLE_RATIO", "0.60") or 0.60), 0.95),
+                    )
+                    chase_cap_ticks = max(self._post_spike_chase_min_ticks, cycle_ticks * chase_cap_ratio)
+                    resolved = min(dyn_ticks, chase_cap_ticks)
+                else:
+                    resolved = dyn_ticks
 
         # Profile fallback: symbol-specific post-spike delay.
         prf = profile or {}
