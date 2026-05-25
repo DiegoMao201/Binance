@@ -33,3 +33,5 @@ logs/recovery_status.json
 web/node_modules/
 web/.next/
 .coolify_creds
+ai_handoff.md
+muestra_01.md

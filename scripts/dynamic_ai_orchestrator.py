@@ -267,6 +267,41 @@ MIN_STATE_LIFETIME_SEC = max(
     480,
     min(int(os.getenv("DYNAMIC_AI_MIN_STATE_LIFETIME_SEC", "600") or 600), 720),
 )
+SCORE_HYSTERESIS_DEADBAND = max(
+    0.05,
+    min(float(os.getenv("DYNAMIC_AI_SCORE_HYSTERESIS_DEADBAND", "0.20") or 0.20), 0.80),
+)
+SCORE_HYSTERESIS_FORCE_DELTA = max(
+    SCORE_HYSTERESIS_DEADBAND,
+    min(float(os.getenv("DYNAMIC_AI_SCORE_HYSTERESIS_FORCE_DELTA", "0.65") or 0.65), 1.50),
+)
+SCORE_MAX_STEP_PER_CYCLE = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_SCORE_MAX_STEP_PER_CYCLE", "0.40") or 0.40), 1.20),
+)
+SCORE_MIN_LIFETIME_SEC = max(
+    120,
+    int(os.getenv("DYNAMIC_AI_SCORE_MIN_LIFETIME_SEC", "420") or 420),
+)
+PREFILTER_HYSTERESIS_DEADBAND_TICKS = max(
+    5,
+    int(os.getenv("DYNAMIC_AI_PREFILTER_HYSTERESIS_DEADBAND_TICKS", "25") or 25),
+)
+PREFILTER_HYSTERESIS_FORCE_DELTA_TICKS = max(
+    PREFILTER_HYSTERESIS_DEADBAND_TICKS,
+    int(os.getenv("DYNAMIC_AI_PREFILTER_HYSTERESIS_FORCE_DELTA_TICKS", "90") or 90),
+)
+PREFILTER_MAX_STEP_PER_CYCLE_TICKS = max(
+    5,
+    min(
+        int(os.getenv("DYNAMIC_AI_PREFILTER_MAX_STEP_PER_CYCLE_TICKS", "70") or 70),
+        SPIKE_PREFILTER_MAX_STEP_TICKS,
+    ),
+)
+PREFILTER_MIN_LIFETIME_SEC = max(
+    120,
+    int(os.getenv("DYNAMIC_AI_PREFILTER_MIN_LIFETIME_SEC", "420") or 420),
+)
 PATTERN_MEMORY_ENABLED = os.getenv("DYNAMIC_AI_PATTERN_MEMORY_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -403,6 +438,8 @@ def _seed_state_memory(current_cfg: dict[str, SymbolCfg]) -> None:
                 "regime": cfg.regime,
                 "config": cfg,
                 "last_changed": now_ts,
+                "last_score_changed": now_ts,
+                "last_spf_changed": now_ts,
             },
         )
 
@@ -472,6 +509,8 @@ def apply_temporal_smoothing(symbol: str, new_config: SymbolCfg) -> tuple[Symbol
             "regime": new_config.regime,
             "config": new_config,
             "last_changed": now_ts,
+            "last_score_changed": now_ts,
+            "last_spf_changed": now_ts,
         }
         return new_config, True
 
@@ -483,21 +522,127 @@ def apply_temporal_smoothing(symbol: str, new_config: SymbolCfg) -> tuple[Symbol
     previous_regime = str(mem.get("regime") or previous_cfg.regime or "NORMAL").upper()
     next_regime = str(new_config.regime or previous_regime).upper()
     time_since_last_change = now_ts - float(mem.get("last_changed") or now_ts)
+    last_score_changed = float(mem.get("last_score_changed") or mem.get("last_changed") or now_ts)
+    last_spf_changed = float(mem.get("last_spf_changed") or mem.get("last_changed") or now_ts)
+
+    adjusted_score = float(new_config.score_min_override)
+    score_delta = adjusted_score - float(previous_cfg.score_min_override)
+    if abs(score_delta) < SCORE_HYSTERESIS_DEADBAND:
+        adjusted_score = float(previous_cfg.score_min_override)
+    elif (now_ts - last_score_changed) < SCORE_MIN_LIFETIME_SEC and abs(score_delta) < SCORE_HYSTERESIS_FORCE_DELTA:
+        LOG.info(
+            "[dynamic-ai][HYSTERESIS] %s score hold %.2f -> %.2f (age=%ss force=%.2f)",
+            sym,
+            float(previous_cfg.score_min_override),
+            float(new_config.score_min_override),
+            int(now_ts - last_score_changed),
+            SCORE_HYSTERESIS_FORCE_DELTA,
+        )
+        adjusted_score = float(previous_cfg.score_min_override)
+    else:
+        if abs(score_delta) > SCORE_MAX_STEP_PER_CYCLE:
+            adjusted_score = float(previous_cfg.score_min_override) + (
+                SCORE_MAX_STEP_PER_CYCLE if score_delta > 0 else -SCORE_MAX_STEP_PER_CYCLE
+            )
+
+    adjusted_spf = int(new_config.spike_pre_filter_target)
+    spf_delta = adjusted_spf - int(previous_cfg.spike_pre_filter_target)
+    if abs(spf_delta) < PREFILTER_HYSTERESIS_DEADBAND_TICKS:
+        adjusted_spf = int(previous_cfg.spike_pre_filter_target)
+    elif (now_ts - last_spf_changed) < PREFILTER_MIN_LIFETIME_SEC and abs(spf_delta) < PREFILTER_HYSTERESIS_FORCE_DELTA_TICKS:
+        LOG.info(
+            "[dynamic-ai][HYSTERESIS] %s prefilter hold %d -> %d (age=%ss force=%dt)",
+            sym,
+            int(previous_cfg.spike_pre_filter_target),
+            int(new_config.spike_pre_filter_target),
+            int(now_ts - last_spf_changed),
+            PREFILTER_HYSTERESIS_FORCE_DELTA_TICKS,
+        )
+        adjusted_spf = int(previous_cfg.spike_pre_filter_target)
+    else:
+        if abs(spf_delta) > PREFILTER_MAX_STEP_PER_CYCLE_TICKS:
+            adjusted_spf = int(previous_cfg.spike_pre_filter_target) + (
+                PREFILTER_MAX_STEP_PER_CYCLE_TICKS if spf_delta > 0 else -PREFILTER_MAX_STEP_PER_CYCLE_TICKS
+            )
+
+    candidate_cfg = _clamp_cfg(
+        sym,
+        SymbolCfg(
+            regime=next_regime,
+            spike_pre_filter_target=adjusted_spf,
+            zero_peak_grace_sec=new_config.zero_peak_grace_sec,
+            score_min_override=adjusted_score,
+            is_active=new_config.is_active,
+        ),
+    )
 
     if next_regime == previous_regime:
-        mem["config"] = new_config
-        return new_config, True
+        mem["config"] = candidate_cfg
+        if abs(candidate_cfg.score_min_override - float(previous_cfg.score_min_override)) >= 1e-9:
+            mem["last_score_changed"] = now_ts
+        if int(candidate_cfg.spike_pre_filter_target) != int(previous_cfg.spike_pre_filter_target):
+            mem["last_spf_changed"] = now_ts
+        return candidate_cfg, True
 
-    emergency_change = (not bool(new_config.is_active)) or next_regime == "DORMANT"
+    emergency_change = (not bool(candidate_cfg.is_active)) or next_regime == "DORMANT"
     if time_since_last_change < MIN_STATE_LIFETIME_SEC and not emergency_change:
-        return previous_cfg, False
+        fallback = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=previous_regime,
+                spike_pre_filter_target=candidate_cfg.spike_pre_filter_target,
+                zero_peak_grace_sec=candidate_cfg.zero_peak_grace_sec,
+                score_min_override=candidate_cfg.score_min_override,
+                is_active=candidate_cfg.is_active,
+            ),
+        )
+        mem["config"] = fallback
+        if abs(fallback.score_min_override - float(previous_cfg.score_min_override)) >= 1e-9:
+            mem["last_score_changed"] = now_ts
+        if int(fallback.spike_pre_filter_target) != int(previous_cfg.spike_pre_filter_target):
+            mem["last_spf_changed"] = now_ts
+        return fallback, False
 
     STATE_MEMORY[sym] = {
         "regime": next_regime,
-        "config": new_config,
+        "config": candidate_cfg,
         "last_changed": now_ts,
+        "last_score_changed": (
+            now_ts
+            if abs(candidate_cfg.score_min_override - float(previous_cfg.score_min_override)) >= 1e-9
+            else last_score_changed
+        ),
+        "last_spf_changed": (
+            now_ts
+            if int(candidate_cfg.spike_pre_filter_target) != int(previous_cfg.spike_pre_filter_target)
+            else last_spf_changed
+        ),
     }
-    return new_config, True
+    return candidate_cfg, True
+
+
+def _hour_bucket(ts: float | None) -> str:
+    if not isinstance(ts, (int, float)):
+        return "UNKNOWN"
+    hour = datetime.fromtimestamp(float(ts), tz=timezone.utc).hour
+    if 0 <= hour < 6:
+        return "NIGHT"
+    if 6 <= hour < 12:
+        return "MORNING"
+    if 12 <= hour < 18:
+        return "ACTIVE"
+    return "SLOW"
+
+
+def _summary_from_pnls(pnls: list[float]) -> dict[str, float | int]:
+    n = len(pnls)
+    wins = sum(1 for x in pnls if x > 0)
+    ev = (sum(pnls) / n) if n else 0.0
+    return {
+        "n": n,
+        "win_rate": pct(wins, n),
+        "ev": ev,
+    }
 
 
 def _apply_smoothing_all(candidate_cfg: dict[str, SymbolCfg]) -> tuple[dict[str, SymbolCfg], int]:
@@ -755,6 +900,32 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             if pnl_recent > 0.0:
                 wins_recent += 1
 
+        # Regime/time segmentation for all-weather calibration.
+        time_bucket_pnls: dict[str, list[float]] = defaultdict(list)
+        regime_bucket_pnls: dict[str, list[float]] = defaultdict(list)
+        now_bucket = _hour_bucket(now_ts)
+        for c in close_rows:
+            t_close = _safe_ts(c.get("closed_at_ts") or c.get("closed_at") or c.get("opened_at_ts") or c.get("opened_at"))
+            try:
+                pnl_bucket = float(c.get("realized_pnl_usdt") or 0.0)
+            except Exception:
+                pnl_bucket = 0.0
+            time_bucket_pnls[_hour_bucket(t_close)].append(pnl_bucket)
+            sb = c.get("score_breakdown") if isinstance(c.get("score_breakdown"), dict) else {}
+            regime_key = str(sb.get("market_regime") or sb.get("regime") or "UNKNOWN").upper()
+            if regime_key not in {"FAST", "NORMAL", "SLOW"}:
+                regime_key = "UNKNOWN"
+            regime_bucket_pnls[regime_key].append(pnl_bucket)
+
+        time_bucket_stats = {
+            bucket: _summary_from_pnls(vals)
+            for bucket, vals in time_bucket_pnls.items()
+        }
+        regime_bucket_stats = {
+            bucket: _summary_from_pnls(vals)
+            for bucket, vals in regime_bucket_pnls.items()
+        }
+
         lookback_hours = round(float(lookback_sec) / 3600.0, 2)
 
         telemetry[sym] = {
@@ -791,6 +962,9 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "contracts_6h": contracts_n,
             "win_rate_6h": pct(wins, contracts_n),
             "ev_per_trade_6h": (sum(pnl_values) / contracts_n) if contracts_n else 0.0,
+            "current_hour_bucket": now_bucket,
+            "time_bucket_stats": time_bucket_stats,
+            "regime_bucket_stats": regime_bucket_stats,
             "ai_decisions_6h": ai_n,
             "ai_approval_rate_6h": pct(ai_approvals, ai_n),
             "tick_intervals_15m": len(tick_intervals_15m),
@@ -884,6 +1058,9 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         ai_approval_rate = float(t.get("ai_approval_rate_6h") or t.get("ai_approval_rate_15m") or 0.0)
         contracts_n = int(t.get("contracts_6h") or t.get("contracts_15m") or 0)
         ai_n = int(t.get("ai_decisions_6h") or t.get("ai_decisions_15m") or 0)
+        hour_bucket = str(t.get("current_hour_bucket") or "UNKNOWN").upper()
+        time_bucket_stats = t.get("time_bucket_stats") if isinstance(t.get("time_bucket_stats"), dict) else {}
+        regime_bucket_stats = t.get("regime_bucket_stats") if isinstance(t.get("regime_bucket_stats"), dict) else {}
 
         risk_points = 0
         recovery_points = 0
@@ -924,6 +1101,27 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         if contracts_n >= 6 and risk_points >= 4 and ev_per_trade < -0.05:
             score = score + 0.40
             regime = "SLOW"
+
+        # Session-aware calibration: NIGHT/MORNING/ACTIVE/SLOW have different edge quality.
+        bucket_row = time_bucket_stats.get(hour_bucket) if isinstance(time_bucket_stats.get(hour_bucket), dict) else {}
+        bucket_n = int(bucket_row.get("n") or 0)
+        bucket_wr = float(bucket_row.get("win_rate") or 0.0)
+        bucket_ev = float(bucket_row.get("ev") or 0.0)
+        if bucket_n >= 3 and (bucket_ev < -0.02 or bucket_wr < 35.0):
+            risk_points += 1
+            score = score + 0.35
+        elif bucket_n >= 4 and bucket_ev > 0.03 and bucket_wr >= 55.0:
+            recovery_points += 1
+            score = score - 0.20
+
+        regime_key = str(regime or "NORMAL").upper()
+        regime_row = regime_bucket_stats.get(regime_key) if isinstance(regime_bucket_stats.get(regime_key), dict) else {}
+        regime_n = int(regime_row.get("n") or 0)
+        regime_ev = float(regime_row.get("ev") or 0.0)
+        if regime_n >= 3 and regime_ev < -0.02:
+            score = score + 0.25
+        elif regime_n >= 4 and regime_ev > 0.02:
+            score = score - 0.10
 
         # Recovery mode: when symbol improves, gradually relax strictness.
         if contracts_n >= 6 and win_rate >= 58.0:

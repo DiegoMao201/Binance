@@ -145,6 +145,40 @@ _AI_QUALITY_VETO_TAIL_WIN_RATE = max(
     min(float(os.getenv("DERIV_AI_QUALITY_VETO_TAIL_WIN_RATE", "25") or 25), 100.0),
 )
 _AI_QUALITY_VETO_TAIL_AVG_PNL = float(os.getenv("DERIV_AI_QUALITY_VETO_TAIL_AVG_PNL", "-0.03") or -0.03)
+_AI_QUALITY_RECOVERY_ENABLED = os.getenv(
+    "DERIV_AI_QUALITY_RECOVERY_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+_AI_QUALITY_RECOVERY_LOOKBACK_SEC = max(
+    1800,
+    int(os.getenv("DERIV_AI_QUALITY_RECOVERY_LOOKBACK_SEC", "7200") or 7200),
+)
+_AI_QUALITY_RECOVERY_MIN_SPIKES = max(
+    2,
+    int(os.getenv("DERIV_AI_QUALITY_RECOVERY_MIN_SPIKES", "4") or 4),
+)
+_AI_QUALITY_RECOVERY_MIN_ENTRY_RATE = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_RECOVERY_MIN_ENTRY_RATE", "25") or 25), 100.0),
+)
+_AI_QUALITY_RECOVERY_MIN_DECISIONS = max(
+    2,
+    int(os.getenv("DERIV_AI_QUALITY_RECOVERY_MIN_DECISIONS", "5") or 5),
+)
+_AI_QUALITY_RECOVERY_MIN_AI_APPROVAL = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_RECOVERY_MIN_AI_APPROVAL", "68") or 68), 100.0),
+)
+_AI_QUALITY_RECOVERY_MIN_RECENT_TRADES = max(
+    2,
+    int(os.getenv("DERIV_AI_QUALITY_RECOVERY_MIN_RECENT_TRADES", "3") or 3),
+)
+_AI_QUALITY_RECOVERY_RECENT_WIN_RATE = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_QUALITY_RECOVERY_RECENT_WIN_RATE", "45") or 45), 100.0),
+)
+_AI_QUALITY_RECOVERY_RECENT_AVG_PNL = float(
+    os.getenv("DERIV_AI_QUALITY_RECOVERY_RECENT_AVG_PNL", "-0.005") or -0.005
+)
 
 # ── Smart cache invalidation thresholds ─────────────────────────────────────
 _CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5"))   # |Δscore| > 0.5
@@ -627,6 +661,7 @@ class DerivAnalyst:
         # Path to the AI decision log JSON (last N entries, rolling).
         self._ai_log_path: Path = settings.logs_dir / "deriv_ai_decisions.json"
         self._closed_log_path: Path = settings.logs_dir / "deriv_closed_contracts.json"
+        self._spike_log_path: Path = settings.logs_dir / "deriv_spike_events.json"
         self._ai_quality_cache_ts: float = 0.0
         self._ai_quality_cache: dict[str, dict[str, Any]] = {}
 
@@ -821,6 +856,8 @@ class DerivAnalyst:
 
         decisions = self._load_json_list(self._ai_log_path)
         closed_rows = self._load_json_list(self._closed_log_path)
+        spike_rows = self._load_json_list(self._spike_log_path)
+        recovery_cutoff = now - _AI_QUALITY_RECOVERY_LOOKBACK_SEC
 
         by_symbol_decisions: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in decisions:
@@ -836,11 +873,34 @@ class DerivAnalyst:
                 continue
             by_symbol_closed[sym].append(row)
 
+        by_symbol_spikes_recent: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in spike_rows:
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            ts = _safe_ts(row.get("ts") or row.get("timestamp") or row.get("iso"))
+            if ts is None or ts < recovery_cutoff:
+                continue
+            by_symbol_spikes_recent[sym].append(row)
+
         out: dict[str, dict[str, Any]] = {}
         symbols = set(self._settings.symbols) | set(by_symbol_decisions.keys()) | set(by_symbol_closed.keys())
         for sym in symbols:
             dec_rows = by_symbol_decisions.get(sym, [])[-_AI_ADAPTIVE_DECISIONS_LOOKBACK:]
             close_rows_sym = by_symbol_closed.get(sym, [])[-_AI_ADAPTIVE_TRADES_LOOKBACK:]
+            spike_rows_recent = by_symbol_spikes_recent.get(sym, [])
+
+            dec_rows_recent = []
+            for r in by_symbol_decisions.get(sym, []):
+                r_ts = _safe_ts(r.get("ts") or r.get("timestamp") or r.get("iso"))
+                if r_ts is not None and r_ts >= recovery_cutoff:
+                    dec_rows_recent.append(r)
+
+            close_rows_recent: list[dict[str, Any]] = []
+            for c in by_symbol_closed.get(sym, []):
+                c_ts = _safe_ts(c.get("closed_at_ts") or c.get("closed_at") or c.get("opened_at_ts") or c.get("opened_at"))
+                if c_ts is not None and c_ts >= recovery_cutoff:
+                    close_rows_recent.append(c)
 
             approvals = sum(1 for r in dec_rows if bool(r.get("approved")))
             decisions_n = len(dec_rows)
@@ -881,6 +941,32 @@ class DerivAnalyst:
                     tail_wins += 1
             tail_win_rate = (tail_wins / tail_n * 100.0) if tail_n else 0.0
             tail_avg_pnl = (sum(tail_pnls) / tail_n) if tail_n else 0.0
+
+            spikes_recent_n = len(spike_rows_recent)
+            spikes_recent_entered = sum(1 for s in spike_rows_recent if bool(s.get("bot_entered")))
+            spikes_recent_entry_rate = (
+                spikes_recent_entered / spikes_recent_n * 100.0
+            ) if spikes_recent_n else 0.0
+
+            decisions_recent_n = len(dec_rows_recent)
+            approvals_recent = sum(1 for r in dec_rows_recent if bool(r.get("approved")))
+            approval_rate_recent = (
+                approvals_recent / decisions_recent_n * 100.0
+            ) if decisions_recent_n else 0.0
+
+            recent_trades_n = len(close_rows_recent)
+            recent_wins = 0
+            recent_pnl_values: list[float] = []
+            for c in close_rows_recent:
+                try:
+                    recent_pnl = float(c.get("realized_pnl_usdt") or 0.0)
+                except Exception:
+                    recent_pnl = 0.0
+                recent_pnl_values.append(recent_pnl)
+                if recent_pnl > 0.0:
+                    recent_wins += 1
+            recent_win_rate = (recent_wins / recent_trades_n * 100.0) if recent_trades_n else 0.0
+            recent_avg_pnl = (sum(recent_pnl_values) / recent_trades_n) if recent_trades_n else 0.0
 
             adaptive_conf = float(_AI_MIN_CONFIDENCE)
             reasons: list[str] = []
@@ -933,6 +1019,35 @@ class DerivAnalyst:
                         f"tail_veto:n={tail_n} wr={tail_win_rate:.1f}% avg={tail_avg_pnl:.4f}"
                     )
 
+                if quality_veto and _AI_QUALITY_RECOVERY_ENABLED:
+                    market_activity_ok = (
+                        spikes_recent_n >= _AI_QUALITY_RECOVERY_MIN_SPIKES
+                        and spikes_recent_entry_rate >= _AI_QUALITY_RECOVERY_MIN_ENTRY_RATE
+                    )
+                    ai_flow_ok = (
+                        decisions_recent_n >= _AI_QUALITY_RECOVERY_MIN_DECISIONS
+                        and approval_rate_recent >= _AI_QUALITY_RECOVERY_MIN_AI_APPROVAL
+                    )
+                    recent_trade_quality_ok = (
+                        recent_trades_n == 0
+                        or (
+                            recent_trades_n >= _AI_QUALITY_RECOVERY_MIN_RECENT_TRADES
+                            and (
+                                recent_win_rate >= _AI_QUALITY_RECOVERY_RECENT_WIN_RATE
+                                or recent_avg_pnl >= _AI_QUALITY_RECOVERY_RECENT_AVG_PNL
+                            )
+                        )
+                    )
+
+                    if market_activity_ok and ai_flow_ok and recent_trade_quality_ok:
+                        quality_veto = False
+                        veto_reasons.append(
+                            "recovery_override:"
+                            f"spikes={spikes_recent_n} entry={spikes_recent_entry_rate:.1f}% "
+                            f"ai={approval_rate_recent:.1f}% recent_n={recent_trades_n} "
+                            f"recent_wr={recent_win_rate:.1f}% recent_avg={recent_avg_pnl:.4f}"
+                        )
+
             out[sym] = {
                 "ai_min_confidence": adaptive_conf,
                 "quality_note": "adaptive:" + (", ".join(reasons) if reasons else "baseline"),
@@ -944,6 +1059,13 @@ class DerivAnalyst:
                 "tail_n": tail_n,
                 "tail_win_rate": tail_win_rate,
                 "tail_avg_pnl": tail_avg_pnl,
+                "spikes_recent_n": spikes_recent_n,
+                "spikes_recent_entry_rate": spikes_recent_entry_rate,
+                "decisions_recent_n": decisions_recent_n,
+                "approval_rate_recent": approval_rate_recent,
+                "recent_trades_n": recent_trades_n,
+                "recent_win_rate": recent_win_rate,
+                "recent_avg_pnl": recent_avg_pnl,
                 "quality_veto": quality_veto,
                 "quality_veto_note": "; ".join(veto_reasons),
             }

@@ -85,6 +85,13 @@ _ATR_HOLD_EXTENSION_THRESHOLD: float = float(os.getenv("DERIV_ATR_HOLD_EXT_THRES
 _ATR_HOLD_EXTENSION_MULTIPLIER: float = float(os.getenv("DERIV_ATR_HOLD_EXT_MULT", "0.15"))
 _ATR_HOLD_EXTENSION_MAX_SEC: float = float(os.getenv("DERIV_ATR_HOLD_EXT_MAX", "150"))
 
+# ─── Edge-quality adaptive sizing ───────────────────────────────────────────
+# Stake multiplier based on score margin, AI confidence and regime quality.
+_EDGE_SIZE_MIN_MULT: float = float(os.getenv("DERIV_EDGE_SIZE_MIN_MULT", "0.55"))
+_EDGE_SIZE_MAX_MULT: float = float(os.getenv("DERIV_EDGE_SIZE_MAX_MULT", "1.30"))
+_EDGE_SIZE_LOW_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_LOW_CONF", "0.74"))
+_EDGE_SIZE_HIGH_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_HIGH_CONF", "0.90"))
+
 
 def _compute_atr_hold_extension(
     symbol: str,
@@ -171,6 +178,10 @@ class DerivDaemon:
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
         self._entry_tick_only = _entry_tick_only_raw in {"1", "true", "yes", "on"}
+        # Static per-symbol chase maps can conflict with dynamic windows.
+        # In tick-only mode we default to dynamic-only unless explicitly enabled.
+        _use_static_chase_map_raw = os.getenv("DERIV_POST_SPIKE_CHASE_USE_STATIC_MAP", "false").strip().lower()
+        self._post_spike_chase_use_static_map = _use_static_chase_map_raw in {"1", "true", "yes", "on"}
         # Tick-only anti-chase guard (fallback default): never enter right
         # after a materialized spike. Per-symbol values may override this.
         self._post_spike_chase_min_ticks = max(
@@ -361,6 +372,11 @@ class DerivDaemon:
 
     def _load_post_spike_chase_block_map(self) -> dict[str, float]:
         """Load per-symbol anti-chase overrides from env once at startup."""
+        # Dynamic-first policy: when tick-only is enabled, static per-symbol
+        # maps stay disabled unless explicitly opted in.
+        if self._entry_tick_only and not self._post_spike_chase_use_static_map:
+            return {}
+
         out = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_CHASE_BLOCK_TICKS_MAP", ""))
 
         for key, value in os.environ.items():
@@ -881,6 +897,99 @@ class DerivDaemon:
             f"{bd['geo_gate']:+.1f}" if "geo_gate" in bd else "n/a",
             f"{bd['geo_channel_pos']:.3f}" if bd.get("geo_channel_pos") is not None else "—",
         )
+
+    def _apply_edge_quality_sizing(
+        self,
+        symbol: str,
+        snap: Any,
+        *,
+        analysis: Any | None,
+        dynamic_cfg: dict[str, Any],
+        dynamic_active: bool,
+        profile_min_score: float,
+        profile_stake_cap: float,
+    ) -> float:
+        """Apply conservative adaptive sizing by edge quality.
+
+        The objective is asymmetric:
+        - scale down aggressively when edge is uncertain,
+        - scale up only when score/AI/regime confirm robust edge.
+        """
+        base_stake = float(getattr(snap, "suggested_stake_usdt", 0.0) or 0.0)
+        if base_stake <= 0:
+            return base_stake
+
+        mult = 1.0
+        reasons: list[str] = []
+
+        score_margin = float(getattr(snap, "score", 0.0) or 0.0) - float(profile_min_score)
+        if score_margin < 0.25:
+            mult *= 0.75
+            reasons.append("score_margin_low")
+        elif score_margin < 0.75:
+            mult *= 0.90
+            reasons.append("score_margin_mid")
+        elif score_margin >= 1.80:
+            mult *= 1.14
+            reasons.append("score_margin_high")
+        elif score_margin >= 1.20:
+            mult *= 1.08
+            reasons.append("score_margin_ok")
+
+        ai_conf = None
+        if analysis is not None and not bool(getattr(analysis, "ai_skipped", False)):
+            try:
+                ai_conf = float(getattr(analysis, "ai_confidence", 0.0) or 0.0)
+            except Exception:
+                ai_conf = None
+        if isinstance(ai_conf, float):
+            if ai_conf < _EDGE_SIZE_LOW_CONF:
+                mult *= 0.90
+                reasons.append("ai_conf_low")
+            elif ai_conf >= _EDGE_SIZE_HIGH_CONF:
+                mult *= 1.06
+                reasons.append("ai_conf_high")
+
+        regime = str(
+            (dynamic_cfg.get("market_regime") if dynamic_active else getattr(snap, "regime", "NORMAL"))
+            or "NORMAL"
+        ).upper()
+        if regime == "SLOW":
+            mult *= 0.80
+            reasons.append("regime_slow")
+        elif regime == "FAST":
+            mult *= 0.92
+            reasons.append("regime_fast")
+
+        sb = getattr(snap, "score_breakdown", {}) or {}
+        if bool(sb.get("mean_rev_mode")):
+            mult *= 0.88
+            reasons.append("mean_rev_risk")
+        if float(sb.get("geo_gate") or 0.0) < 0.0:
+            mult *= 0.85
+            reasons.append("geo_penalty")
+        if float(sb.get("smc_bonus") or 0.0) >= 1.5 and score_margin > 0.8:
+            mult *= 1.06
+            reasons.append("smc_confirmed")
+        if float(sb.get("hd_bonus") or 0.0) >= 1.0 and score_margin > 1.0:
+            mult *= 1.04
+            reasons.append("hd_confirmed")
+
+        mult = max(_EDGE_SIZE_MIN_MULT, min(mult, _EDGE_SIZE_MAX_MULT))
+        adjusted = round(max(1.0, base_stake * mult), 2)
+        if profile_stake_cap > 0:
+            adjusted = min(adjusted, round(profile_stake_cap, 2))
+
+        if abs(adjusted - base_stake) >= 0.01:
+            sb["edge_size_base_stake"] = round(base_stake, 2)
+            sb["edge_size_mult"] = round(mult, 4)
+            sb["edge_size_reasons"] = reasons
+            sb["edge_size_score_margin"] = round(score_margin, 4)
+            sb["edge_size_regime"] = regime
+            if isinstance(ai_conf, float):
+                sb["edge_size_ai_conf"] = round(ai_conf, 4)
+
+        return adjusted
 
     # ─────────────────────────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -1905,6 +2014,15 @@ class DerivDaemon:
 
             _is_mean_rev_ov = bool(snap.score_breakdown.get("mean_rev_mode"))
             _is_boom_crash_ov = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+            snap.suggested_stake_usdt = self._apply_edge_quality_sizing(
+                tick.symbol,
+                snap,
+                analysis=None,
+                dynamic_cfg=_dyn_cfg,
+                dynamic_active=_dyn_active,
+                profile_min_score=_profile_min_score,
+                profile_stake_cap=_profile_stake_max,
+            )
             # BOOM/CRASH spike-hunter: use a wide structural SL so the position
             # survives the accumulation window before the spike hits.
             _sl_pct_ov = (
@@ -2090,6 +2208,15 @@ class DerivDaemon:
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
         _is_spike_entry = bool(snap.score_breakdown.get("spike_entry"))
         _is_boom_crash = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        snap.suggested_stake_usdt = self._apply_edge_quality_sizing(
+            tick.symbol,
+            snap,
+            analysis=analysis,
+            dynamic_cfg=_dyn_cfg,
+            dynamic_active=_dyn_active,
+            profile_min_score=_profile_min_score,
+            profile_stake_cap=_profile_stake_max,
+        )
         # BOOM/CRASH spike-hunter: wide structural SL (same logic as override path)
         _sl_pct = (
             _BOOM_CRASH_SL_PCT if _is_boom_crash
