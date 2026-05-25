@@ -418,11 +418,13 @@ class DerivDaemon:
     ) -> float:
         """Resolve anti-chase window per symbol with safe fallbacks."""
         sym = str(symbol or "").upper()
+        explicit_override = False
 
         # Highest priority: explicit per-symbol env overrides.
         by_symbol = self._post_spike_chase_block_sec_map.get(sym)
         if by_symbol is not None:
             resolved = by_symbol
+            explicit_override = True
         else:
             resolved = 0.0
 
@@ -459,9 +461,12 @@ class DerivDaemon:
         if resolved <= 0:
             resolved = self._post_spike_chase_block_ticks_default
 
-        # Sniper safety floor for spike markets: never allow very-short
-        # anti-chase windows that lead to late pursuit entries.
+        # Sniper safety floor for spike markets.
+        # Important: explicit per-symbol overrides MUST bypass this floor,
+        # otherwise tuned maps (e.g. BOOM500:15) are silently ignored.
         if is_spike_market(sym):
+            if explicit_override:
+                return max(0.0, resolved)
             return max(self._post_spike_chase_min_ticks, resolved)
 
         return resolved
