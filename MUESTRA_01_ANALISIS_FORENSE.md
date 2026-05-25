@@ -11,6 +11,18 @@
 - EL RESET REAL DE MUESTRA DEBE SER ATÓMICO: JSON + DB + MARKER + VERIFICACIÓN HEALTHY.
 - SI APARECEN SPIKES DESPUÉS DEL MARKER FINAL, SON DATOS NUEVOS, NO CONTAMINACIÓN.
 
+## ACTUALIZACION LIVE (25-05-2026 UTC) — CALIBRACION DE TECHOS DINAMICOS
+
+- Ajuste aplicado en codigo para separar techos por regimen y evitar que `calm` y `trending`
+  compartan el mismo techo efectivo.
+- Nueva calibracion:
+  - `trending`: ceiling `6.5`
+  - `FAST` (regimen IA): ceiling `6.5`
+  - `calm`: ceiling `7.5`
+  - `SLOW` (regimen IA): ceiling `7.5`
+- Se mantiene intacto `post_spike_chase_guard` y el resto de guardrails de seguridad.
+- Este documento sigue siendo historico; el estado operativo vigente se valida en logs live.
+
 ---
 
 ## METADATOS DE LA MUESTRA

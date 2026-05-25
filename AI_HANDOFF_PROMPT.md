@@ -4,6 +4,32 @@ Usa este documento como contexto base para continuar el desarrollo de este proye
 
 ---
 
+## ACTUALIZACION LIVE (25-05-2026 UTC) — TECHO DINAMICO POR REGIMEN
+
+Problema corregido:
+- `calm` y `trending` estaban convergiendo al mismo techo efectivo (`7.6`) por clamp global,
+  reduciendo conversion de entradas incluso en estructura de tendencia valida.
+
+Cambio aplicado en `src/main_deriv.py` (sin tocar `post_spike_chase_guard`):
+- `trending` ceiling: **6.5**
+- `FAST` (regimen IA) ceiling: **6.5**
+- `calm` ceiling: **7.5**
+- `SLOW` (regimen IA) ceiling: **7.5**
+
+Detalle de implementacion:
+- Se mantiene `DERIV_DYNAMIC_GATE_SCORE_CEILING` como fallback neutral.
+- Se agregan env vars tunables nuevas:
+  - `DERIV_DYNAMIC_GATE_TRENDING_CEILING` (default `6.5`)
+  - `DERIV_DYNAMIC_GATE_FAST_CEILING` (default `6.5`)
+  - `DERIV_DYNAMIC_GATE_CALM_CEILING` (default `7.5`)
+  - `DERIV_DYNAMIC_GATE_SLOW_CEILING` (default `7.5`)
+- `DERIV_DYNAMIC_GATE_FAST_FLOOR` sigue activo y anclado a ceiling FAST.
+- Telemetria ampliada en `score_breakdown` con ceiling seleccionado y su fuente.
+
+Objetivo operativo:
+- Alinear lenguaje entre Risk Engine y sidecar IA.
+- Evitar sobrebloqueo en tendencia sin aflojar calidad en `calm/slow`.
+
 ## ACTUALIZACION MUESTRA 07 (24-05-2026 UTC)
 
 Estado live mas reciente:

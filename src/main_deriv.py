@@ -93,10 +93,14 @@ _EDGE_SIZE_LOW_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_LOW_CONF", "0.74")
 _EDGE_SIZE_HIGH_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_HIGH_CONF", "0.90"))
 
 # ─── Dynamic score-gate shaping (sniper mode) ──────────────────────────────
-# Keep the dynamic regime gate strict but avoid over-hard lockouts:
-# - global dynamic gate ceiling: 7.6
-# - FAST regime minimum gate: 6.5
+# Risk-engine and AI sidecar must speak the same score language:
+# - trending / FAST: lower ceiling to improve conversion when structure confirms.
+# - calm / SLOW: keep a stricter ceiling to avoid low-quality drifts.
 _DYNAMIC_GATE_SCORE_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_SCORE_CEILING", "7.6"))
+_DYNAMIC_GATE_TRENDING_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_TRENDING_CEILING", "6.5"))
+_DYNAMIC_GATE_FAST_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_FAST_CEILING", "6.5"))
+_DYNAMIC_GATE_CALM_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_CALM_CEILING", "7.5"))
+_DYNAMIC_GATE_SLOW_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_SLOW_CEILING", "7.5"))
 _DYNAMIC_GATE_FAST_FLOOR: float = float(os.getenv("DERIV_DYNAMIC_GATE_FAST_FLOOR", "6.5"))
 
 
@@ -182,13 +186,30 @@ class DerivDaemon:
             self._dynamic_score_min_guardrail,
             min(float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2), 12.0),
         )
-        self._dynamic_gate_score_ceiling = max(
+        self._dynamic_gate_score_ceiling_base = max(
             self._dynamic_score_min_guardrail,
             min(_DYNAMIC_GATE_SCORE_CEILING, self._dynamic_score_max_guardrail),
         )
+        self._dynamic_gate_trending_ceiling = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_TRENDING_CEILING, self._dynamic_score_max_guardrail),
+        )
+        self._dynamic_gate_fast_ceiling = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_FAST_CEILING, self._dynamic_score_max_guardrail),
+        )
+        self._dynamic_gate_calm_ceiling = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_CALM_CEILING, self._dynamic_score_max_guardrail),
+        )
+        self._dynamic_gate_slow_ceiling = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_SLOW_CEILING, self._dynamic_score_max_guardrail),
+        )
+        self._dynamic_gate_neutral_ceiling = self._dynamic_gate_score_ceiling_base
         self._dynamic_gate_fast_floor = max(
             self._dynamic_score_min_guardrail,
-            min(_DYNAMIC_GATE_FAST_FLOOR, self._dynamic_gate_score_ceiling),
+            min(_DYNAMIC_GATE_FAST_FLOOR, self._dynamic_gate_fast_ceiling),
         )
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
@@ -1720,13 +1741,34 @@ class DerivDaemon:
             ),
         )
         _dyn_cfg_regime = str(_dyn_cfg.get("market_regime") or snap.regime or "NORMAL").upper()
-        _dyn_score_min = min(_dyn_score_min_raw, self._dynamic_gate_score_ceiling)
+        _risk_regime = str(snap.regime or "").strip().lower()
+        _dyn_score_ceiling = self._dynamic_gate_neutral_ceiling
+        _dyn_score_ceiling_source = "default"
+        if _dyn_cfg_regime == "FAST":
+            _dyn_score_ceiling = self._dynamic_gate_fast_ceiling
+            _dyn_score_ceiling_source = "cfg:FAST"
+        elif _dyn_cfg_regime == "SLOW":
+            _dyn_score_ceiling = self._dynamic_gate_slow_ceiling
+            _dyn_score_ceiling_source = "cfg:SLOW"
+        elif _risk_regime == "trending":
+            _dyn_score_ceiling = self._dynamic_gate_trending_ceiling
+            _dyn_score_ceiling_source = "risk:trending"
+        elif _risk_regime == "calm":
+            _dyn_score_ceiling = self._dynamic_gate_calm_ceiling
+            _dyn_score_ceiling_source = "risk:calm"
+
+        _dyn_score_min = min(_dyn_score_min_raw, _dyn_score_ceiling)
         if _dyn_cfg_regime == "FAST":
             _dyn_score_min = max(_dyn_score_min, self._dynamic_gate_fast_floor)
 
         snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
         snap.score_breakdown["dynamic_score_raw"] = round(_dyn_score_min_raw, 3)
-        snap.score_breakdown["dynamic_score_ceiling"] = round(self._dynamic_gate_score_ceiling, 3)
+        snap.score_breakdown["dynamic_score_ceiling"] = round(_dyn_score_ceiling, 3)
+        snap.score_breakdown["dynamic_score_ceiling_source"] = _dyn_score_ceiling_source
+        snap.score_breakdown["dynamic_score_ceiling_trending"] = round(self._dynamic_gate_trending_ceiling, 3)
+        snap.score_breakdown["dynamic_score_ceiling_fast"] = round(self._dynamic_gate_fast_ceiling, 3)
+        snap.score_breakdown["dynamic_score_ceiling_calm"] = round(self._dynamic_gate_calm_ceiling, 3)
+        snap.score_breakdown["dynamic_score_ceiling_slow"] = round(self._dynamic_gate_slow_ceiling, 3)
         snap.score_breakdown["dynamic_fast_floor"] = round(self._dynamic_gate_fast_floor, 3)
         snap.score_breakdown["dynamic_cfg_regime"] = _dyn_cfg_regime
         snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)
