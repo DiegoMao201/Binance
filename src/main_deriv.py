@@ -37,6 +37,7 @@ from typing import Any
 from src.analysis.deriv_analyst import DerivAnalyst
 from src.analysis.tick_velocity import TickVelocityAnalyzer
 from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
+from src.execution.deriv_mirror_client import DerivMirrorClient
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator, MacroHDCalibrator
@@ -161,7 +162,8 @@ class _CooldownGate:
 class DerivDaemon:
     def __init__(self, settings: DerivSettings) -> None:
         self._settings = settings
-        self._client = DerivClient(settings)
+        _base_client = DerivClient(settings)
+        self._client = DerivMirrorClient.from_settings(_base_client, settings)
         self._telemetry = self._build_telemetry()
         self._risk = DerivRiskManager(settings)
         self._executor = DerivTradeExecutor(settings, self._client, self._telemetry, risk_manager=self._risk)
@@ -2578,6 +2580,11 @@ class DerivDaemon:
                     "last_refresh": self._dynamic_last_refresh,
                     "symbols_loaded": sorted(_export_cfg.keys()),
                     "configs": _export_cfg,
+                },
+                "multi_account": {
+                    "mirror_enabled": bool(getattr(self._client, "mirror_enabled", False)),
+                    "mirror_count": int(getattr(self._client, "mirror_count", 0)),
+                    "mode": "principal_tracking_mirror_execution",
                 },
             }
             tmp = path.with_suffix(".tmp")

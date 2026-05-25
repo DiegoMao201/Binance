@@ -765,6 +765,26 @@ class DerivTradeExecutor:
             return {"status": "dry_run", "contract_id": contract_id}
         return await self._client.sell(contract_id)
 
+    async def _notify_mirror_settlement(self, contract_id: int, reason: str) -> None:
+        """Best-effort mirror-close hook when principal settles without explicit sell path.
+
+        Explicit principal sell() calls already trigger mirror closes in the
+        DerivMirrorClient wrapper. This hook covers broker-driven settlements
+        (TP/SL/forced close) that bypass local sell().
+        """
+        hook = getattr(self._client, "notify_principal_settled", None)
+        if hook is None:
+            return
+        try:
+            await hook(int(contract_id), reason=reason)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "[deriv-trader] mirror settlement notify failed contract=%s reason=%s: %s",
+                contract_id,
+                reason,
+                exc,
+            )
+
     async def reap_closed(self) -> list[dict[str, Any]]:
         """
         Poll every open contract; if any has been closed by Deriv (SL/TP hit),
@@ -1006,6 +1026,8 @@ class DerivTradeExecutor:
                 self._persist_open()
             if oc is None:
                 continue
+
+            await self._notify_mirror_settlement(cid, "reaper_settled")
 
             _dpm_stats = self._dpm.get_close_stats(cid, realized)
             self._dpm.unregister(cid)
@@ -1604,6 +1626,8 @@ class DerivTradeExecutor:
             self._spike_buffer.pop(cid, None)  # Phase 37: clear buffer on close
             self._persist_open()
 
+        await self._notify_mirror_settlement(cid, "ws_settled")
+
         realized   = float(poc.get("profit") or 0)
         exit_price = float(
             poc.get("sell_spot")
@@ -1750,6 +1774,8 @@ class DerivTradeExecutor:
                             continue  # already settled by WS callback or reaper
                         self._spike_buffer.pop(cid, None)  # Phase 37: clear buffer
                         self._persist_open()
+
+                    await self._notify_mirror_settlement(cid, "heartbeat_settled")
 
                     realized = float(poc.get("profit") or 0)
                     exit_price = float(
@@ -2057,6 +2083,8 @@ class DerivTradeExecutor:
 
             if oc is None:
                 continue
+
+            await self._notify_mirror_settlement(cid, "reconcile_ghost")
 
             age_min = (now - oc.opened_at_ts) / 60
             _LOGGER.warning(

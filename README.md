@@ -103,6 +103,37 @@ Si quieres incluir validacion de guardrails en PostgreSQL (requiere `DATABASE_UR
 python scripts/validate_deriv_runtime.py --logs-dir /data/deriv-logs --check-db
 ```
 
+## Multicuenta Deriv (aislado de la logica operativa)
+
+El bot actual sigue operando con una sola cuenta activa (`DERIV_API_TOKEN`,
+`DERIV_ACCOUNT_ID`, `DERIV_USER_ID`).
+
+Para dejar lista la expansion a multicuentas sin tocar la logica de trading,
+usa un JSON de credenciales por cuenta + mapeo a `user_id` del portal:
+
+1. Define en Coolify la variable `DERIV_MULTI_ACCOUNTS_FILE`.
+2. Ruta recomendada en produccion: `/data/logs/deriv_multi_accounts.json`.
+3. Usa `config/deriv_multi_accounts.template.json` como plantilla base.
+
+Comandos utiles:
+
+```bash
+# upsert de una cuenta (crea o actualiza por alias/account_id)
+python scripts/upsert_deriv_multi_account.py \
+  --file /data/logs/deriv_multi_accounts.json \
+  --alias principal \
+  --account-id DOTXXXXXXX \
+  --api-token pat_xxx \
+  --user-id 00000000-0000-0000-0000-000000000000
+
+# validacion estructural (+ link a users en DB si pasas --check-db)
+python scripts/validate_deriv_multi_accounts.py \
+  --file /data/logs/deriv_multi_accounts.json --check-db
+```
+
+Este mapeo deja listo el enlace bot Deriv -> login/panel (atribucion por
+`user_id`), manteniendo la operativa actual intacta.
+
 ### Watchdog activo (cron cada 5 minutos)
 
 Instala en el servidor un monitor que ejecuta el validador cada 5 minutos y dispara alerta critica cuando pasa de `PASS` a `FAIL` (o cambia la firma del fallo):

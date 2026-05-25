@@ -1,0 +1,20 @@
+{
+  "accounts": [
+    {
+      "alias": "principal",
+      "account_id": "DOTXXXXXXXX",
+      "api_token": "pat_replace_me",
+      "user_id": "00000000-0000-0000-0000-000000000000",
+      "app_id": "1089",
+      "enabled": true
+    },
+    {
+      "alias": "esposa",
+      "account_id": "DOTYYYYYYYY",
+      "api_token": "pat_replace_me",
+      "user_id": "11111111-1111-1111-1111-111111111111",
+      "app_id": "1089",
+      "enabled": true
+    }
+  ]
+}
