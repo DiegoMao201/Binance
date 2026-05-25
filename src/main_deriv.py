@@ -92,6 +92,13 @@ _EDGE_SIZE_MAX_MULT: float = float(os.getenv("DERIV_EDGE_SIZE_MAX_MULT", "1.30")
 _EDGE_SIZE_LOW_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_LOW_CONF", "0.74"))
 _EDGE_SIZE_HIGH_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_HIGH_CONF", "0.90"))
 
+# ─── Dynamic score-gate shaping (sniper mode) ──────────────────────────────
+# Keep the dynamic regime gate strict but avoid over-hard lockouts:
+# - global dynamic gate ceiling: 7.6
+# - FAST regime minimum gate: 6.5
+_DYNAMIC_GATE_SCORE_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_SCORE_CEILING", "7.6"))
+_DYNAMIC_GATE_FAST_FLOOR: float = float(os.getenv("DERIV_DYNAMIC_GATE_FAST_FLOOR", "6.5"))
+
 
 def _compute_atr_hold_extension(
     symbol: str,
@@ -174,6 +181,14 @@ class DerivDaemon:
         self._dynamic_score_max_guardrail = max(
             self._dynamic_score_min_guardrail,
             min(float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2), 12.0),
+        )
+        self._dynamic_gate_score_ceiling = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_SCORE_CEILING, self._dynamic_score_max_guardrail),
+        )
+        self._dynamic_gate_fast_floor = max(
+            self._dynamic_score_min_guardrail,
+            min(_DYNAMIC_GATE_FAST_FLOOR, self._dynamic_gate_score_ceiling),
         )
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Entry decisions must be tick-driven; spike history is telemetry/tuning only.
@@ -1697,14 +1712,23 @@ class DerivDaemon:
         # by DerivRiskManager (applies calm-floor 5.80, DERIV_CALM_STRUCTURAL_MIN_SCORE,
         # spike-market overrides, etc.).  We must NOT shadow it with a second call
         # to min_score_for_regime() which returns a stale hardcoded 7.50.
-        _dyn_score_min = max(
+        _dyn_score_min_raw = max(
             self._dynamic_score_min_guardrail,
             min(
                 self._dynamic_score_max_guardrail,
                 float(_dyn_cfg.get("score_min_override") or min_score_for(tick.symbol)),
             ),
         )
+        _dyn_cfg_regime = str(_dyn_cfg.get("market_regime") or snap.regime or "NORMAL").upper()
+        _dyn_score_min = min(_dyn_score_min_raw, self._dynamic_gate_score_ceiling)
+        if _dyn_cfg_regime == "FAST":
+            _dyn_score_min = max(_dyn_score_min, self._dynamic_gate_fast_floor)
+
         snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
+        snap.score_breakdown["dynamic_score_raw"] = round(_dyn_score_min_raw, 3)
+        snap.score_breakdown["dynamic_score_ceiling"] = round(self._dynamic_gate_score_ceiling, 3)
+        snap.score_breakdown["dynamic_fast_floor"] = round(self._dynamic_gate_fast_floor, 3)
+        snap.score_breakdown["dynamic_cfg_regime"] = _dyn_cfg_regime
         snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)
         _regime_min = _dyn_score_min if _dyn_active else snap.effective_min_score
 
