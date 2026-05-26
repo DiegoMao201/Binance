@@ -34,6 +34,26 @@ import requests
 
 LOG = logging.getLogger("dynamic_ai_orchestrator")
 
+
+def _sanitize_env_quotes() -> None:
+    """Strip a single pair of wrapping single/double quotes from env values.
+
+    Coolify's ``is_literal`` mode wraps numeric env values like ``6.8`` as
+    ``'6.8'``, which breaks ``float(os.getenv(...))`` calls. We normalise once
+    at import time so the rest of the module can read raw numerics safely.
+    """
+    for key, value in list(os.environ.items()):
+        if not isinstance(value, str) or len(value) < 2:
+            continue
+        first, last = value[0], value[-1]
+        if first == last and first in ("'", '"'):
+            stripped = value[1:-1]
+            if first not in stripped:
+                os.environ[key] = stripped
+
+
+_sanitize_env_quotes()
+
 SYMBOLS = [
     "BOOM1000", "BOOM900", "BOOM600", "BOOM500",
     "CRASH1000", "CRASH900", "CRASH600", "CRASH500",
