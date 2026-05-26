@@ -1,5 +1,9 @@
 .env
 .coolify_secrets
+.coolify_creds
+
+# Todo markdown y reportes quedan solo locales
+*.md
 # Contexto local — NO se pushea al repo
 DERIV_BOT_CONTEXT.md
 .venv/
@@ -32,6 +36,5 @@ logs/recovery_status.json
 /pre_flight.json
 web/node_modules/
 web/.next/
-.coolify_creds
 ai_handoff.md
 muestra_01.md
