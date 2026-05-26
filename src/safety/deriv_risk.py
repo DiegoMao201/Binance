@@ -639,6 +639,7 @@ class DerivRiskManager:
                         )
             if not self._symbol_recent_pnls:
                 self._bootstrap_symbol_guard_from_closed_history()
+            self._recompute_symbol_guard_state()
         except Exception as _hyd_exc:  # noqa: BLE001
             _LOGGER.warning("[risk] state hydration failed: %s — starting fresh", _hyd_exc)
 
@@ -755,6 +756,27 @@ class DerivRiskManager:
                 )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("[risk] bootstrap symbol guard failed: %s", exc)
+
+    def _recompute_symbol_guard_state(self) -> None:
+        """Normalize guardrail maps from persisted rolling symbol windows."""
+        if not self._symbol_recent_pnls:
+            return
+        for sym, vals in list(self._symbol_recent_pnls.items()):
+            clean_vals = vals[-self._symbol_pnl_lookback_trades :]
+            if not clean_vals:
+                self._symbol_recent_pnls.pop(sym, None)
+                self._symbol_pnl_window.pop(sym, None)
+                self._symbol_score_bonus.pop(sym, None)
+                continue
+            pnl_window = float(sum(clean_vals))
+            self._symbol_pnl_window[sym] = round(pnl_window, 4)
+            if self._symbol_negative_max <= 0.0 or pnl_window > self._symbol_negative_threshold:
+                self._symbol_score_bonus.pop(sym, None)
+                continue
+            prev_bonus = float(self._symbol_score_bonus.get(sym, 0.0))
+            # Keep at least one step active while the symbol remains red.
+            bonus = max(self._symbol_negative_step, prev_bonus)
+            self._symbol_score_bonus[sym] = round(min(self._symbol_negative_max, bonus), 3)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router
