@@ -589,6 +589,13 @@ function OpenContractCard({ c }) {
   // Note: the JSON key is "trail_sl_locked" (from _persist_open), not "trail_sl".
   // DpmTierPanel handles both names via c.trail_sl ?? c.trail_sl_locked fallback.
   const hasDpmData = c.stake_usdt != null;
+  const scoreBreakdown = c.score_breakdown || {};
+  const scoreVal = c.score ?? scoreBreakdown.score_raw ?? null;
+  const hurstVal = c.hurst ?? scoreBreakdown.hurst ?? null;
+  const regimeVal = c.regime ?? scoreBreakdown.regime ?? scoreBreakdown.regime_class ?? null;
+  const aiApproved = c.ai_approved ?? scoreBreakdown.ai_approved ?? null;
+  const aiConfidence = c.ai_confidence ?? scoreBreakdown.ai_confidence ?? null;
+  const aiModel = c.ai_model ?? scoreBreakdown.ai_model ?? null;
   return (
     <div style={{
       background: T.panel2, borderRadius: 10,
@@ -638,27 +645,27 @@ function OpenContractCard({ c }) {
           </div>
         </div>
       )}
-      {(c.score != null || c.regime != null) && (
+      {(scoreVal != null || regimeVal != null) && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
           <MicroStat
             lbl={<>SCORE <TooltipHint tip="Puntuación compuesta de la señal (0–10). Mayor score = entrada de mayor calidad." /></>}
-            val={c.score != null ? n(c.score, 2) : "–"}
-            color={c.score >= 7 ? T.green : c.score >= 5 ? T.amber : T.red}
+            val={scoreVal != null ? n(scoreVal, 2) : "–"}
+            color={scoreVal >= 7 ? T.green : scoreVal >= 5 ? T.amber : T.red}
           />
           <MicroStat
             lbl={<>HURST <TooltipHint tip="Exponente Hurst: >0.55 = tendencia persistente, <0.45 = mean-reversion." /></>}
-            val={c.hurst != null ? n(c.hurst, 3) : "–"}
+            val={hurstVal != null ? n(hurstVal, 3) : "–"}
             color={T.violet}
           />
-          <MicroStat lbl="REGIME" val={c.regime || "–"} color={REGIME_COLORS[c.regime] || T.cyan} />
+          <MicroStat lbl="REGIME" val={regimeVal || "–"} color={REGIME_COLORS[regimeVal] || T.cyan} />
         </div>
       )}
-      {c.ai_approved != null && (
+      {aiApproved != null && (
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <Pill color={c.ai_approved ? T.green : T.red} size="sm">
-            {c.ai_approved ? "IA ✓" : "IA ✗"}{c.ai_confidence != null ? ` ${pct(c.ai_confidence, 0)}` : ""}
+          <Pill color={aiApproved ? T.green : T.red} size="sm">
+            {aiApproved ? "IA ✓" : "IA ✗"}{aiConfidence != null ? ` ${pct(aiConfidence, 0)}` : ""}
           </Pill>
-          {c.ai_model && <span style={{ fontSize: 9, color: T.mute }}>{c.ai_model}</span>}
+          {aiModel && <span style={{ fontSize: 9, color: T.mute }}>{aiModel}</span>}
         </div>
       )}
       {hasDpmData && <DpmTierPanel c={c} />}
@@ -670,9 +677,275 @@ function OpenContractCard({ c }) {
   );
 }
 
+function EvalStateBadge({ evalData, prefix = "" }) {
+  const hasEval = evalData && Object.keys(evalData).length > 0;
+  const shouldClose = Boolean(evalData?.should_close);
+  const shadow = Boolean(evalData?.shadow);
+
+  let label = "N/A";
+  let color = T.mute;
+  if (shouldClose) {
+    label = "CLOSE";
+    color = T.red;
+  } else if (shadow) {
+    label = "SHADOW";
+    color = T.amber;
+  } else if (hasEval) {
+    label = "TRACK";
+    color = T.green;
+  }
+
+  return <Pill color={color} size="sm">{prefix ? `${prefix}:${label}` : label}</Pill>;
+}
+
+function buildAuditNarrative({ c, dep, prob, lastDecision }) {
+  const pnl = Number(c.floating_pnl ?? c.pnl ?? 0);
+  const peak = Number(c.peak_profit ?? 0);
+  const gaveBack = Number.isFinite(peak) ? Math.max(0, peak - pnl) : 0;
+  const depClose = Boolean(dep?.should_close);
+  const probClose = Boolean(prob?.should_close);
+  const forcedClose = depClose || probClose || Boolean(c.pending_close_reason);
+  const probRaw = Number(prob?.probability);
+  const probVal = Number.isFinite(probRaw) ? probRaw : null;
+  const blocked = lastDecision?.allowed === false;
+
+  const usd = (v) => `${Number(v) >= 0 ? "+" : ""}$${n(v, 2)}`;
+
+  if (forcedClose && pnl <= 0) {
+    return {
+      title: "SALIMOS DEL DESASTRE",
+      badge: "DEFENSIVO",
+      color: T.red,
+      message: `Perdida live ${usd(pnl)}. Se activa salida para cortar dano antes de ampliar drawdown.`,
+    };
+  }
+
+  if (forcedClose && pnl > 0) {
+    return {
+      title: "ASEGURAMOS GANANCIA",
+      badge: "PROTECCION",
+      color: T.amber,
+      message: `Vamos en verde ${usd(pnl)} y el motor sugiere cobrar para no devolver beneficio.`,
+    };
+  }
+
+  if (probVal != null && probVal >= 0.70 && pnl >= 0) {
+    return {
+      title: "PINTA A GANAR",
+      badge: "BULLISH",
+      color: T.green,
+      message: `Probabilidad fuerte (${pct(probVal, 0)}). Seguimos bien mientras no se deteriore DEP.`,
+    };
+  }
+
+  if (pnl >= 0.10 && (probVal == null || probVal >= 0.45)) {
+    return {
+      title: "SEGUIMOS BIEN",
+      badge: "SALUDABLE",
+      color: T.green,
+      message: gaveBack > 0.05
+        ? `Ganando ${usd(pnl)} pero ya cedio $${n(gaveBack, 2)} desde el pico; vigilar sin panico.`
+        : `Ganando ${usd(pnl)} con estructura estable; de momento mantenemos posicion.`,
+    };
+  }
+
+  if (pnl <= -0.10 && !forcedClose) {
+    return {
+      title: "ESTAMOS EN RIESGO",
+      badge: "AGUANTAMOS",
+      color: T.red,
+      message: blocked
+        ? `Va en rojo ${usd(pnl)} y la ultima decision estuvo bloqueada. Aun aguantamos, alta vigilancia.`
+        : `Va en rojo ${usd(pnl)}. Aun aguantamos porque no hay cierre forzado, pero la zona es fragil.`,
+    };
+  }
+
+  if (blocked) {
+    return {
+      title: "EN OBSERVACION",
+      badge: "BLOQUEADA",
+      color: T.amber,
+      message: `La ultima decision fue BLOCK. Esperando mejor ventana antes de escalar riesgo.`,
+    };
+  }
+
+  return {
+    title: "SEGUIMIENTO ACTIVO",
+    badge: "NEUTRO",
+    color: T.cyan,
+    message: `Sin alerta critica ahora. Monitoreando DEP, probabilidad y contexto de ticks en vivo.`,
+  };
+}
+
+function OpenOrderAuditCard({ c, lastDecision }) {
+  const dep = c.dep_last_eval || {};
+  const prob = c.prob_last_eval || {};
+  const sym = c.symbol || c.underlying || "–";
+  const pendingReason = c.pending_close_reason || dep.reason || prob.reason || "";
+
+  const lastAllowed = lastDecision?.allowed;
+  const lastStateLabel = lastAllowed == null ? "NO DEC" : (lastAllowed ? "GO" : "BLOCK");
+  const lastStateColor = lastAllowed == null ? T.mute : (lastAllowed ? T.green : T.red);
+
+  const decisionScoreRaw = Number(lastDecision?.score ?? lastDecision?.score_breakdown?.score_raw);
+  const decisionScore = Number.isFinite(decisionScoreRaw) ? decisionScoreRaw : null;
+  const decisionRegime = lastDecision?.regime || lastDecision?.score_breakdown?.regime || "–";
+  const decisionTs = lastDecision?.ts || lastDecision?.at || lastDecision?.timestamp || null;
+
+  const ticksSince = Number.isFinite(Number(c.ticks_since_last_spike_now))
+    ? Math.round(Number(c.ticks_since_last_spike_now))
+    : null;
+  const targetTicks = Number.isFinite(Number(c.spike_pre_filter_target_live))
+    ? Math.round(Number(c.spike_pre_filter_target_live))
+    : null;
+  const ticksToTarget = Number.isFinite(Number(c.ticks_to_prefilter_target))
+    ? Math.round(Number(c.ticks_to_prefilter_target))
+    : null;
+  const pnlLive = Number(c.floating_pnl ?? c.pnl ?? 0);
+  const peakPnl = Number(c.peak_profit ?? 0);
+  const gaveBack = Number.isFinite(peakPnl) ? Math.max(0, peakPnl - pnlLive) : 0;
+  const probVal = Number.isFinite(Number(prob.probability)) ? Number(prob.probability) : null;
+  const hero = buildAuditNarrative({ c, dep, prob, lastDecision });
+  const heroGlow = `${hero.color}22`;
+  const heroBg = `linear-gradient(130deg, ${hero.color}2f, rgba(8,10,16,0.72) 55%, rgba(8,10,16,0.95))`;
+
+  return (
+    <div style={{
+      background: T.panel2,
+      border: `1px solid ${hero.color}55`,
+      borderRadius: 10,
+      padding: "10px 12px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      boxShadow: `0 0 0 1px ${heroGlow} inset, 0 8px 24px rgba(0,0,0,0.28)`,
+    }}>
+      <div style={{
+        border: `1px solid ${hero.color}66`,
+        borderRadius: 8,
+        background: heroBg,
+        padding: "9px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <span style={{
+            fontSize: 14,
+            fontWeight: 800,
+            color: hero.color,
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+          }}>{hero.title}</span>
+          <Pill color={hero.color} size="sm">{hero.badge}</Pill>
+        </div>
+        <div style={{ fontSize: 10, color: T.textD, lineHeight: 1.45 }}>
+          {hero.message}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+          <MicroStat lbl="PNL LIVE" val={`${pnlLive >= 0 ? "+" : ""}$${n(pnlLive, 2)}`} color={tone(pnlLive)} />
+          <MicroStat lbl="PERDIDO PICO" val={`$${n(gaveBack, 2)}`} color={gaveBack > 0.05 ? T.amber : T.textD} />
+          <MicroStat lbl="PROB HOY" val={probVal != null ? pct(probVal, 0) : "–"} color={probVal != null ? (probVal >= 0.65 ? T.green : probVal <= 0.35 ? T.red : T.amber) : T.mute} />
+          <MicroStat lbl="ULTIMA" val={lastStateLabel} color={lastStateColor} />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{sym}</span>
+          <SideBadge side={c.side} />
+          <span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>#{String(c.contract_id || "–").slice(-8)}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <EvalStateBadge evalData={dep} prefix="DEP" />
+          <EvalStateBadge evalData={prob} prefix="PROB" />
+          <Pill color={lastStateColor} size="sm">{lastStateLabel}</Pill>
+        </div>
+      </div>
+
+      {pendingReason && (
+        <div style={{
+          fontSize: 9,
+          color: T.red,
+          background: "rgba(255,93,108,0.08)",
+          border: `1px solid ${T.red}44`,
+          borderRadius: 5,
+          padding: "5px 7px",
+        }}>
+          pending: {pendingReason}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 7px", display: "flex", flexDirection: "column", gap: 5 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 9, color: T.textD, letterSpacing: "0.09em" }}>DEP</span>
+            <span style={{ fontSize: 9, color: T.cyan, fontFamily: FONT_MONO }}>{String(dep.policy || "PASSIVE").toUpperCase()}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 5 }}>
+            <MicroStat lbl="ATR RATIO" val={dep.atr_ratio != null ? n(dep.atr_ratio, 3) : "–"} color={T.cyan} />
+            <MicroStat lbl="THR" val={dep.decay_threshold != null ? n(dep.decay_threshold, 3) : "–"} color={T.amber} />
+            <MicroStat lbl="PNL" val={dep.current_pnl != null ? n(dep.current_pnl, 3) : "–"} color={tone(dep.current_pnl)} />
+            <MicroStat lbl="FLOOR" val={dep.loss_floor_usdt != null ? n(dep.loss_floor_usdt, 3) : "–"} color={T.redD} />
+          </div>
+        </div>
+
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 7px", display: "flex", flexDirection: "column", gap: 5 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 9, color: T.textD, letterSpacing: "0.09em" }}>OPEN PROB</span>
+            <span style={{ fontSize: 9, color: T.cyan, fontFamily: FONT_MONO }}>{prob.probability != null ? pct(prob.probability, 0) : "–"}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 5 }}>
+            <MicroStat lbl="THR" val={prob.close_threshold != null ? pct(prob.close_threshold, 0) : "–"} color={T.amber} />
+            <MicroStat lbl="CYCLE" val={prob.cycle_progress != null ? n(prob.cycle_progress, 2) : "–"} color={T.violet} />
+            <MicroStat lbl="ATR RATIO" val={prob.atr_ratio != null ? n(prob.atr_ratio, 3) : "–"} color={T.cyan} />
+            <MicroStat lbl="PNL CEIL" val={prob.close_pnl_ceil != null ? n(prob.close_pnl_ceil, 3) : "–"} color={T.redD} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+        <MicroStat lbl="TICKS" val={ticksSince != null ? nC(ticksSince, 0) : "–"} color={T.amber} />
+        <MicroStat lbl="TARGET" val={targetTicks != null ? nC(targetTicks, 0) : "–"} color={T.cyan} />
+        <MicroStat lbl="A TARGET" val={ticksToTarget != null ? nC(ticksToTarget, 0) : "–"} color={T.textD} />
+        <MicroStat lbl="ACCEL 2H/6H" val={c.tick_acceleration_ratio_2h_vs_6h != null ? n(c.tick_acceleration_ratio_2h_vs_6h, 2) : "–"} color={T.blue} />
+      </div>
+
+      <div style={{
+        borderTop: `1px solid ${T.border}`,
+        paddingTop: 6,
+        display: "grid",
+        gridTemplateColumns: "repeat(4, 1fr)",
+        gap: 6,
+      }}>
+        <MicroStat lbl="LAST SCORE" val={decisionScore != null ? n(decisionScore, 2) : "–"} color={decisionScore != null ? (decisionScore >= 7 ? T.green : decisionScore >= 5 ? T.amber : T.red) : T.mute} />
+        <MicroStat lbl="LAST REGIME" val={decisionRegime} color={REGIME_COLORS[decisionRegime] || T.cyan} />
+        <MicroStat lbl="LAST DEC" val={lastStateLabel} color={lastStateColor} />
+        <MicroStat lbl="EVAL TS" val={fmtT(decisionTs)} color={T.textD} />
+      </div>
+
+      {lastDecision?.reason && (
+        <div style={{
+          fontSize: 9,
+          color: lastAllowed ? T.textD : T.redD,
+          background: lastAllowed ? "rgba(255,255,255,0.03)" : "rgba(255,93,108,0.06)",
+          border: `1px solid ${lastAllowed ? T.border : T.red + "33"}`,
+          borderRadius: 5,
+          padding: "5px 7px",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}>
+          {lastDecision.reason}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OperacionesTab({ data }) {
   const open   = data.open_contracts   || [];
   const closed = data.closed_contracts || [];
+  const decisionBySymbol = data?.decisions?.last_by_symbol || {};
 
   const [symFilter,    setSymFilter]    = useState("all");
   const [sideFilter,   setSideFilter]   = useState("all");
@@ -687,6 +960,14 @@ function OperacionesTab({ data }) {
     () => [...new Set(closed.map(c => c.symbol || c.underlying || "–"))].sort(),
     [closed]
   );
+
+  const openAuditRows = useMemo(() => {
+    return open.map(c => {
+      const key = String(c.symbol || c.underlying || "").toUpperCase();
+      const dec = decisionBySymbol[key] || decisionBySymbol[c.symbol] || null;
+      return { c, dec };
+    });
+  }, [open, decisionBySymbol]);
 
   const filteredClosed = useMemo(() => {
     const rows = closed.filter(c => {
@@ -768,6 +1049,19 @@ function OperacionesTab({ data }) {
             </div>
         }
       </Panel>
+
+      {open.length > 0 && (
+        <Panel
+          title={`auditoria live de ordenes abiertas · ${open.length}`}
+          right={<span style={{ color: T.cyan, fontWeight: 700, fontSize: 10 }}>DEP + OPEN_PROB + LAST_DECISION</span>}
+        >
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 10 }}>
+            {openAuditRows.map(({ c, dec }, i) => (
+              <OpenOrderAuditCard key={`${c.contract_id || i}-audit`} c={c} lastDecision={dec} />
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {/* ── KPI STRIP ── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>

@@ -237,6 +237,9 @@ class DerivOpenContract:
     dep_shadow_last_log_ts: float = field(default=0.0)
     # Probability-exit shadow telemetry throttle (epoch seconds).
     prob_shadow_last_log_ts: float = field(default=0.0)
+    # Live audit snapshots for frontend visual forensics.
+    dep_last_eval: dict[str, Any] = field(default_factory=dict)
+    prob_last_eval: dict[str, Any] = field(default_factory=dict)
 
 
 class DerivTradeExecutor:
@@ -340,6 +343,8 @@ class DerivTradeExecutor:
                         broker_be_locked=bool(_r.get("broker_be_locked", False)),
                         floating_pnl=float(_r.get("floating_pnl", 0.0)),
                         dep_peak_atr=float(_r.get("dep_peak_atr", 0.0)),
+                        dep_last_eval=dict(_r.get("dep_last_eval") or {}),
+                        prob_last_eval=dict(_r.get("prob_last_eval") or {}),
                     )
                 if self._open:
                     _LOGGER.info(
@@ -1197,6 +1202,13 @@ class DerivTradeExecutor:
                     _held_sec,
                     _current_profit,
                 )
+                oc_check.dep_last_eval = {
+                    "ts": round(time.time(), 3),
+                    "should_close": bool(_dep_close),
+                    "shadow": bool(_dep_shadow),
+                    "reason": _dep_reason or "",
+                    **(_dep_details or {}),
+                }
                 if _dep_shadow:
                     _shadow_every = max(
                         15.0,
@@ -1245,6 +1257,13 @@ class DerivTradeExecutor:
                     _current_profit,
                     _current_price,
                 )
+                oc_check.prob_last_eval = {
+                    "ts": round(time.time(), 3),
+                    "should_close": bool(_prob_close),
+                    "shadow": bool(_prob_shadow),
+                    "reason": _prob_reason or "",
+                    **(_prob_details or {}),
+                }
                 if _prob_shadow:
                     _now = time.time()
                     if (_now - float(oc_check.prob_shadow_last_log_ts or 0.0)) >= _OPEN_PROB_SHADOW_LOG_EVERY_SEC:
@@ -1512,6 +1531,13 @@ class DerivTradeExecutor:
                 "trail_sl": round(oc.trail_sl_locked, 4),
                 "duration_sec": round(_now - oc.opened_at_ts, 1),
                 "broker_be_locked": oc.broker_be_locked,
+                "max_hold_seconds": round(float(oc.max_hold_seconds or 0.0), 2),
+                "entry_tick_count": int(oc.entry_tick_count or 0),
+                "dep_peak_atr": round(float(oc.dep_peak_atr or 0.0), 6),
+                "pending_close_reason": oc.pending_close_reason,
+                "score_breakdown": oc.score_breakdown or {},
+                "dep_last_eval": oc.dep_last_eval or {},
+                "prob_last_eval": oc.prob_last_eval or {},
             }
             for oc in self._open.values()
         ]
@@ -1544,6 +1570,8 @@ class DerivTradeExecutor:
                 # the SL=$0.01 without waiting for Phase 2 to fire again.
                 "broker_be_locked": oc.broker_be_locked,
                 "dep_peak_atr": round(oc.dep_peak_atr, 6),
+                "dep_last_eval": oc.dep_last_eval or {},
+                "prob_last_eval": oc.prob_last_eval or {},
             }
             for oc in self._open.values()
         ]
@@ -2049,6 +2077,13 @@ class DerivTradeExecutor:
                 current_profit,
                 current_price,
             )
+            oc_check.prob_last_eval = {
+                "ts": round(time.time(), 3),
+                "should_close": bool(_prob_close),
+                "shadow": bool(_prob_shadow),
+                "reason": _prob_reason or "",
+                **(_prob_details or {}),
+            }
             if _prob_shadow:
                 _now = time.time()
                 if (_now - float(oc_check.prob_shadow_last_log_ts or 0.0)) >= _OPEN_PROB_SHADOW_LOG_EVERY_SEC:
