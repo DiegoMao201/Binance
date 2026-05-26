@@ -116,7 +116,8 @@ export default async function ClientDashboardPage() {
 
   const readSharedStateArray = async (candidates: string[]): Promise<unknown[]> => {
     try {
-      const logsDir = process.env.BOT_STATE_DIR
+      const logsDir = process.env.DERIV_STATE_DIR
+        ?? process.env.BOT_STATE_DIR
         ?? path.join(process.cwd(), "..", "logs");
       for (const fileName of candidates) {
         try {
