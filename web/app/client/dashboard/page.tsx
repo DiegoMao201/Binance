@@ -44,6 +44,16 @@ type TradeQueryRow = {
   broker:                string | null;
 };
 
+type ClosedContractFileRow = {
+  contract_id?: number | string;
+  user_id?: string;
+  symbol?: string;
+  side?: string;
+  opened_at_ts?: number | string;
+  closed_at_ts?: number | string;
+  realized_pnl_usdt?: number | string;
+};
+
 // ─── Colour tokens (Server-side layout) ──────────────────────────────────────
 const BG    = "#04070c";
 const CARD  = "rgba(10,15,22,0.72)";
@@ -104,8 +114,29 @@ export default async function ClientDashboardPage() {
 
   const userId = payload.sub; // Zero-Trust: always from the signed JWT.
 
+  const readSharedStateArray = async (candidates: string[]): Promise<unknown[]> => {
+    try {
+      const logsDir = process.env.BOT_STATE_DIR
+        ?? path.join(process.cwd(), "..", "logs");
+      for (const fileName of candidates) {
+        try {
+          const raw = await fs.readFile(path.join(logsDir, fileName), "utf8");
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            return parsed as unknown[];
+          }
+        } catch {
+          // Try next candidate file.
+        }
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  };
+
   // ── 2. Parallel data fetching ───────────────────────────────────────────────
-  const [userProfile, grossDepositResult, rawTrades, openPositions] =
+  const [userProfile, grossDepositResult, rawTrades, openPositions, closedContracts] =
     await Promise.all([
       // A. User profile: balance + fee schedule
       prisma.user.findUnique({
@@ -149,28 +180,10 @@ export default async function ClientDashboardPage() {
       `.catch(() => [] as TradeQueryRow[]),
 
       // D. Bot active: check Deriv open contracts on the shared volume.
-      //    Returns [] on any read/parse error (safe fallback).
-      (async () => {
-        const candidates = ["deriv_open_contracts.json", "open_positions.json"];
-        try {
-          const logsDir = process.env.BOT_STATE_DIR
-            ?? path.join(process.cwd(), "..", "logs");
-          for (const fileName of candidates) {
-            try {
-              const raw = await fs.readFile(path.join(logsDir, fileName), "utf8");
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) {
-                return parsed as unknown[];
-              }
-            } catch {
-              // try next candidate file
-            }
-          }
-          return [] as unknown[];
-        } catch {
-          return [] as unknown[];
-        }
-      })(),
+      readSharedStateArray(["deriv_open_contracts.json", "open_positions.json"]),
+
+      // E. Live closed contracts fallback while webhook allocations catch up.
+      readSharedStateArray(["deriv_closed_contracts.json"]),
     ]);
 
   // ── 3. Guard: user must exist and be active ─────────────────────────────────
@@ -181,7 +194,8 @@ export default async function ClientDashboardPage() {
   // ── 4. Decimal serialisation ────────────────────────────────────────────────
   const balance      = new Prisma.Decimal(userProfile.balanceUsdt);
   const grossDeposit = new Prisma.Decimal(grossDepositResult._sum.amountUsdt ?? 0);
-  const netDeposited = grossDeposit.mul("0.98"); // entry fee already deducted
+  const entryFeePct  = new Prisma.Decimal(userProfile.entryFeePct ?? 0);
+  const netDeposited = grossDeposit.mul(new Prisma.Decimal(1).sub(entryFeePct));
   const perfFeePct   = new Prisma.Decimal(userProfile.performanceFeePct);
 
   // Net ROI: ((balance - netDeposited) / netDeposited) × 100
@@ -201,7 +215,7 @@ export default async function ClientDashboardPage() {
   // ── 6. Trade rows for the table ─────────────────────────────────────────────
   // bot already computes user_net_pnl_usdt correctly (asymmetric fee).
   // We expose the breakdown transparently: gross, fee, net.
-  const trades: TradeRow[] = rawTrades.map((row) => ({
+  const tradesFromAllocations: TradeRow[] = rawTrades.map((row) => ({
     id:          row.alloc_id.toString(),
     symbol:      row.symbol,
     side:        row.side,
@@ -219,6 +233,52 @@ export default async function ClientDashboardPage() {
     netPnl:      new Prisma.Decimal(row.user_net_pnl_usdt).toFixed(2),
     broker:      (row.broker ?? "deriv").toLowerCase(),
   }));
+
+  const parsedClosedContracts = Array.isArray(closedContracts)
+    ? (closedContracts as ClosedContractFileRow[])
+    : [];
+  const hasScopedRows = parsedClosedContracts.some((row) => typeof row.user_id === "string");
+  const scopedClosedContracts = hasScopedRows
+    ? parsedClosedContracts.filter((row) => row.user_id === userId)
+    : parsedClosedContracts;
+
+  const fallbackLiveTrades: TradeRow[] = scopedClosedContracts
+    .map((row, idx) => {
+      const symbol = typeof row.symbol === "string" && row.symbol.trim()
+        ? row.symbol
+        : "DERIV";
+      const closedAt = toIsoDateString(row.closed_at_ts) ?? new Date().toISOString();
+      const openedAt = toIsoDateString(row.opened_at_ts) ?? closedAt;
+
+      let pnl = new Prisma.Decimal(0);
+      try {
+        pnl = new Prisma.Decimal(String(row.realized_pnl_usdt ?? 0));
+      } catch {
+        pnl = new Prisma.Decimal(0);
+      }
+
+      const sideRaw = String(row.side ?? "").toLowerCase();
+      const side = sideRaw === "multup" || sideRaw === "buy" ? "buy" : "sell";
+      const contractId = String(row.contract_id ?? idx);
+
+      return {
+        id: `live-deriv-${contractId}-${idx}`,
+        symbol,
+        side,
+        openedAt,
+        closedAt,
+        allocatedAt: closedAt,
+        grossPnl: pnl.toFixed(2),
+        adminFee: "0.00",
+        netPnl: pnl.toFixed(2),
+        broker: "deriv",
+      };
+    })
+    .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
+    .slice(0, 500);
+
+  const usingLiveFallback = tradesFromAllocations.length === 0 && fallbackLiveTrades.length > 0;
+  const trades: TradeRow[] = usingLiveFallback ? fallbackLiveTrades : tradesFromAllocations;
 
   // ── 7. Equity curve: running balance from oldest trade to newest ─────────────
   // Reverse to get ASC order for accumulation.
@@ -419,6 +479,7 @@ export default async function ClientDashboardPage() {
                 </p>
                 <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
                   Deriv cerradas · Abiertas ahora: {openContractsCount}
+                  {usingLiveFallback ? " · modo reconciliacion en vivo" : ""}
                 </p>
               </div>
 
@@ -525,6 +586,11 @@ export default async function ClientDashboardPage() {
               <p style={{ color: MUTE, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20, fontFamily: "ui-monospace, Menlo, monospace" }}>
                 Historial de Operaciones
               </p>
+              {usingLiveFallback && (
+                <p style={{ color: "#fbbf24", fontSize: 11, marginTop: -8, marginBottom: 14 }}>
+                  Mostrando cierres Deriv en vivo mientras finaliza la conciliacion por usuario.
+                </p>
+              )}
               <TradeHistoryTable trades={trades} />
             </div>
           </MotionCard>

@@ -22,7 +22,7 @@ export type InvestorRow = {
   email: string;
   /** Gross amount the client wired in (before entry fee). */
   grossDeposit: string;
-  /** Net capital that entered trading (grossDeposit × 0.98). */
+  /** Net capital that entered trading (grossDeposit × (1 - entryFeePct)). */
   netDeposited: string;
   /** Current balance_usdt from the users table. */
   balance: string;
@@ -35,7 +35,7 @@ export type AdminStats = {
   aum: string;
   /** Sum of all ENTRY_FEE ledger rows. */
   entryFeeRevenue: string;
-  /** 5% of every positive net_pnl_usdt allocation, per user's fee schedule. */
+  /** Sum of stored performance-fee allocations from user_trade_allocations. */
   performanceFeeRevenue: string;
   /** entryFeeRevenue + performanceFeeRevenue. */
   totalRevenue: string;
@@ -52,6 +52,7 @@ type InvestorQueryRow = {
   email: string;
   balance_usdt: Prisma.Decimal;
   gross_deposit: Prisma.Decimal;
+  entry_fee_pct: Prisma.Decimal;
 };
 
 // ─── Main function ────────────────────────────────────────────────────────────
@@ -101,6 +102,7 @@ export async function getAdminStats(): Promise<AdminStats> {
       u.display_name AS name,
       u.email,
       u.balance_usdt,
+      u.entry_fee_pct,
       COALESCE(
         SUM(lt.amount_usdt) FILTER (WHERE lt.type = 'DEPOSIT'),
         0
@@ -108,7 +110,7 @@ export async function getAdminStats(): Promise<AdminStats> {
     FROM users u
     LEFT JOIN ledger_transactions lt ON lt.user_id = u.id
     WHERE u.role = 'client'
-    GROUP BY u.id, u.display_name, u.email, u.balance_usdt
+    GROUP BY u.id, u.display_name, u.email, u.balance_usdt, u.entry_fee_pct
     ORDER BY u.created_at DESC
   `.catch(() => [] as InvestorQueryRow[]);
 
@@ -120,8 +122,9 @@ export async function getAdminStats(): Promise<AdminStats> {
   const investors: InvestorRow[] = investorRows.map((row) => {
     const balance      = new Prisma.Decimal(row.balance_usdt);
     const gross        = new Prisma.Decimal(row.gross_deposit);
-    // Net invested = what actually went into the trading account (98% of gross)
-    const netDeposited = gross.mul("0.98");
+    const entryFeePct  = new Prisma.Decimal(row.entry_fee_pct ?? 0);
+    // Net invested uses the active fee schedule per investor row.
+    const netDeposited = gross.mul(new Prisma.Decimal(1).sub(entryFeePct));
     // ROI relative to net invested capital; 0 when no deposit yet
     const roi = netDeposited.gt(0)
       ? balance.sub(netDeposited).div(netDeposited).mul(100)
