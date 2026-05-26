@@ -36,11 +36,25 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_spike_symbol(symbol: str) -> bool:
+    sym = str(symbol or "").upper()
+    return "BOOM" in sym or "CRASH" in sym
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    raw = os.getenv(name, default)
+    val = str(raw).strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"}:
+        val = val[1:-1].strip()
+    return val.lower() in {"1", "true", "yes", "on"}
 
 # ─── Per-symbol ratchet parameters ───────────────────────────────────────────
 # All pct values are fractions of stake_usdt (not price %).
@@ -302,6 +316,11 @@ class DynamicPositionManager:
 
     def __init__(self) -> None:
         self._states: dict[int, _PositionState] = {}
+        self._disable_spike_timeout = _env_flag("DERIV_DISABLE_SPIKE_TIMEOUT", "false")
+        if self._disable_spike_timeout:
+            _LOGGER.info(
+                "[DPM] spike timeout disabled for BOOM/CRASH (DERIV_DISABLE_SPIKE_TIMEOUT=true)"
+            )
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
     def register(
@@ -412,13 +431,14 @@ class DynamicPositionManager:
         # ── Phase 3: Hard time cap (checked first, always active) ────────────
         elapsed = now - state.entry_ts
         if elapsed > params["max_duration_seg"]:
-            self._log_tick(state, float_pnl, now, close_reason="timeout_max")
-            _LOGGER.info(
-                "[DPM] timeout_max contract_id=%s symbol=%s "
-                "elapsed=%.0fs > max=%ds pnl=%.4f",
-                contract_id, state.symbol, elapsed, params["max_duration_seg"], float_pnl,
-            )
-            return "timeout_max"
+            if not (self._disable_spike_timeout and _is_spike_symbol(state.symbol)):
+                self._log_tick(state, float_pnl, now, close_reason="timeout_max")
+                _LOGGER.info(
+                    "[DPM] timeout_max contract_id=%s symbol=%s "
+                    "elapsed=%.0fs > max=%ds pnl=%.4f",
+                    contract_id, state.symbol, elapsed, params["max_duration_seg"], float_pnl,
+                )
+                return "timeout_max"
 
         # ── Early exit: no momentum at checkpoint (Phase 28) ─────────────────
         # If after early_exit_seconds the trade has never been green (peak < $0.05)

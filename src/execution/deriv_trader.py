@@ -38,6 +38,17 @@ from src.utils.telegram_telemetry import TelegramTelemetry
 _LOGGER = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: str = "false") -> bool:
+    raw = os.getenv(name, default)
+    val = str(raw).strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"}:
+        val = val[1:-1].strip()
+    return val.lower() in {"1", "true", "yes", "on"}
+
+
+_DISABLE_SPIKE_TIMEOUT = _env_flag("DERIV_DISABLE_SPIKE_TIMEOUT", "false")
+
+
 def _symbol_from_shortcode(shortcode: str) -> str:
     """Extract the underlying symbol from a Deriv contract shortcode.
 
@@ -243,6 +254,7 @@ class DerivTradeExecutor:
         # DynamicPositionManager — replaces static tiered trailing stop.
         # Manages ratchet SL + momentum-based exit for every open contract.
         self._dpm = DynamicPositionManager()
+        self._disable_spike_timeout = _DISABLE_SPIKE_TIMEOUT
         # Phase 37+: multispike buffer state (tick-domain ratchet).
         # dict[contract_id, {peak_pnl, entry_pnl, start_tick, buffer_ticks,
         #                    retention_pct, min_floor_usdt, drift_ticks, regime}]
@@ -264,6 +276,10 @@ class DerivTradeExecutor:
         _LOGGER.info(
             "[deriv-trader] zero_peak_exit_enabled=%s (Phase5D)",
             self._zero_peak_exit_enabled,
+        )
+        _LOGGER.info(
+            "[deriv-trader] disable_spike_timeout=%s (DERIV_DISABLE_SPIKE_TIMEOUT)",
+            self._disable_spike_timeout,
         )
 
         # ── Restore open contracts from previous session (disk → memory) ─────
@@ -634,25 +650,33 @@ class DerivTradeExecutor:
         # profile value baked into ASSET_INTEL_PROFILES.
         _profile_mh = float(get_asset_profile(order.symbol).get("max_hold_seconds", 0.0))
         if is_spike_market(order.symbol) and _profile_mh > 0:
-            if order.max_hold_seconds != _profile_mh:
-                _LOGGER.info(
-                    "[deriv-trader] max_hold_seconds enforced from profile: %.0fs → %.0fs (%s)",
-                    order.max_hold_seconds, _profile_mh, order.symbol,
-                )
-            # Apply ATR dynamic extension stored in score_breakdown
-            _atr_ext = float((order.score_breakdown or {}).get("atr_hold_extension", 0.0))
-            _hold_bonus = self._spike_hold_bonus_sec(order.symbol)
-            order.max_hold_seconds = _profile_mh + _atr_ext + _hold_bonus
-            if _atr_ext > 0:
-                _LOGGER.info(
-                    "[deriv-trader] ATR_HOLD_EXT %s +%.0fs → total=%.0fs",
-                    order.symbol, _atr_ext, order.max_hold_seconds,
-                )
-            if _hold_bonus > 0:
-                _LOGGER.info(
-                    "[deriv-trader] SPIKE_HOLD_BONUS %s +%.0fs → total=%.0fs",
-                    order.symbol, _hold_bonus, order.max_hold_seconds,
-                )
+            if self._disable_spike_timeout:
+                if order.max_hold_seconds > 0:
+                    _LOGGER.info(
+                        "[deriv-trader] spike_timeout disabled: forcing max_hold_seconds=0 for %s",
+                        order.symbol,
+                    )
+                order.max_hold_seconds = 0.0
+            else:
+                if order.max_hold_seconds != _profile_mh:
+                    _LOGGER.info(
+                        "[deriv-trader] max_hold_seconds enforced from profile: %.0fs → %.0fs (%s)",
+                        order.max_hold_seconds, _profile_mh, order.symbol,
+                    )
+                # Apply ATR dynamic extension stored in score_breakdown
+                _atr_ext = float((order.score_breakdown or {}).get("atr_hold_extension", 0.0))
+                _hold_bonus = self._spike_hold_bonus_sec(order.symbol)
+                order.max_hold_seconds = _profile_mh + _atr_ext + _hold_bonus
+                if _atr_ext > 0:
+                    _LOGGER.info(
+                        "[deriv-trader] ATR_HOLD_EXT %s +%.0fs → total=%.0fs",
+                        order.symbol, _atr_ext, order.max_hold_seconds,
+                    )
+                if _hold_bonus > 0:
+                    _LOGGER.info(
+                        "[deriv-trader] SPIKE_HOLD_BONUS %s +%.0fs → total=%.0fs",
+                        order.symbol, _hold_bonus, order.max_hold_seconds,
+                    )
         result = await self._client.buy(
             symbol=order.symbol,
             contract_type=order.side,
@@ -807,6 +831,11 @@ class DerivTradeExecutor:
             async with self._lock:
                 oc_check = self._open.get(cid)
             if oc_check is not None and oc_check.max_hold_seconds > 0:
+                _timeout_enabled = not (
+                    self._disable_spike_timeout and is_spike_market(oc_check.symbol)
+                )
+                if not _timeout_enabled:
+                    continue
                 held = time.time() - oc_check.opened_at_ts
                 _base_zero_peak_sec = float(os.getenv("DERIV_ZERO_PEAK_BASE_SEC", "150"))
                 _dyn_zero_peak_grace = self._dynamic_zero_peak_grace_sec(oc_check.symbol)
@@ -1002,7 +1031,13 @@ class DerivTradeExecutor:
                 and oc_check.trail_sl_locked > _TRAIL_INIT_SL   # DPM Phase 2 activated
                 and realized <= oc_check.trail_sl_locked + 0.01  # hit the floor
             )
-            if oc_check is not None and oc_check.max_hold_seconds > 0:
+            if (
+                oc_check is not None
+                and oc_check.max_hold_seconds > 0
+                and not (
+                    self._disable_spike_timeout and is_spike_market(oc_check.symbol)
+                )
+            ):
                 held = time.time() - oc_check.opened_at_ts
                 if held >= oc_check.max_hold_seconds:
                     exit_reason = "spike_timeout"
@@ -1743,7 +1778,11 @@ class DerivTradeExecutor:
             oc.trail_sl_locked > _TRAIL_INIT_SL
             and realized <= oc.trail_sl_locked + 0.01
         )
-        if oc.max_hold_seconds > 0 and held >= oc.max_hold_seconds:
+        if (
+            oc.max_hold_seconds > 0
+            and held >= oc.max_hold_seconds
+            and not (self._disable_spike_timeout and is_spike_market(oc.symbol))
+        ):
             exit_reason = "spike_timeout"
         elif oc.pending_close_reason:
             exit_reason = oc.pending_close_reason
@@ -1956,6 +1995,8 @@ class DerivTradeExecutor:
                         if oc.max_hold_seconds > 0
                     ]
                 for cid, oc in candidates:
+                    if self._disable_spike_timeout and is_spike_market(oc.symbol):
+                        continue
                     held = time.time() - oc.opened_at_ts
                     if held >= oc.max_hold_seconds:
                         _LOGGER.info(
@@ -1993,6 +2034,9 @@ class DerivTradeExecutor:
                     candidates = [
                         (cid, oc) for cid, oc in self._open.items()
                         if oc.max_hold_seconds > 0
+                        and not (
+                            self._disable_spike_timeout and is_spike_market(oc.symbol)
+                        )
                         and (now_ts - oc.opened_at_ts) > (oc.max_hold_seconds + _GRACE_SEC)
                     ]
                 for cid, oc in candidates:
@@ -2366,7 +2410,10 @@ class DerivTradeExecutor:
             _oc_profile = get_asset_profile(symbol)
             _max_hold_recovered = float(_oc_profile.get("max_hold_seconds", 0.0))
             if is_spike_market(symbol) and _max_hold_recovered > 0:
-                _max_hold_recovered += self._spike_hold_bonus_sec(symbol)
+                if self._disable_spike_timeout:
+                    _max_hold_recovered = 0.0
+                else:
+                    _max_hold_recovered += self._spike_hold_bonus_sec(symbol)
 
             oc = DerivOpenContract(
                 contract_id=cid,
