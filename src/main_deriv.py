@@ -1819,6 +1819,19 @@ class DerivDaemon:
         snap.score_breakdown["dynamic_score_min"] = round(_dyn_score_min, 3)
         _regime_min = _dyn_score_min if _dyn_active else snap.effective_min_score
 
+        # ── Per-symbol PnL-driven score escalator ─────────────────────────
+        # When a symbol is bleeding (rolling realized PnL ≤ threshold), the
+        # risk engine raises a per-symbol score floor bonus that we add on
+        # top of the regime gate so future entries on that symbol must be
+        # noticeably stronger (≥ 7.5–8.0 depending on escalation steps).
+        _sym_bleed_bonus = float(self._risk.symbol_score_floor_bonus(tick.symbol))
+        if _sym_bleed_bonus > 0.0:
+            _regime_min = min(10.0, _regime_min + _sym_bleed_bonus)
+            snap.score_breakdown["symbol_bleed_bonus"] = round(_sym_bleed_bonus, 3)
+            snap.score_breakdown["symbol_bleed_pnl_window"] = round(
+                self._risk.symbol_pnl_window(tick.symbol), 3
+            )
+
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
         # AND the macro Higher-Direction is aligned (+1.5 hd_bonus already in score),
@@ -1876,6 +1889,8 @@ class DerivDaemon:
 
         # Per-symbol minimum score gate (ASSET_INTEL_PROFILES)
         _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
+        if _sym_bleed_bonus > 0.0:
+            _profile_min_score = min(10.0, _profile_min_score + _sym_bleed_bonus)
         _asset_profile = get_asset_profile(tick.symbol)
         if snap.allowed and snap.score < _profile_min_score:
             self._log_entry_block(

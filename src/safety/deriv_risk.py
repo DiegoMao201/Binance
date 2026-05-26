@@ -478,6 +478,35 @@ class DerivRiskManager:
         # Per-symbol trade timestamp for independent cooldown_bonus tracking.
         # Prevents R_50/R_75 active trading from stealing BOOM/CRASH cooldown bonus.
         self._last_trade_ts_per_symbol: dict[str, float] = {}
+        # ── Per-symbol PnL-driven score escalator (Prueba 8 hardening) ───
+        # If a symbol's rolling realized PnL falls to or below the configured
+        # negative threshold (default -2.0 USDT), future entries on that symbol
+        # must clear a higher score floor (added on top of effective_min). A
+        # significant winning trade normalises the symbol (bonus + window
+        # cleared). A losing trade while the symbol is already negative
+        # escalates the bonus by DERIV_SYMBOL_NEGATIVE_STEP (cap at
+        # DERIV_SYMBOL_NEGATIVE_MAX). The goal is to protect winning symbols
+        # from being dragged down by symbols stuck in bleed mode.
+        self._symbol_pnl_window: dict[str, float] = {}
+        self._symbol_score_bonus: dict[str, float] = {}
+        try:
+            self._symbol_negative_threshold = float(
+                os.getenv("DERIV_SYMBOL_NEGATIVE_THRESHOLD", "-2.0")
+            )
+        except (TypeError, ValueError):
+            self._symbol_negative_threshold = -2.0
+        try:
+            self._symbol_negative_step = max(
+                0.0, float(os.getenv("DERIV_SYMBOL_NEGATIVE_STEP", "0.5"))
+            )
+        except (TypeError, ValueError):
+            self._symbol_negative_step = 0.5
+        try:
+            self._symbol_negative_max = max(
+                0.0, float(os.getenv("DERIV_SYMBOL_NEGATIVE_MAX", "1.5"))
+            )
+        except (TypeError, ValueError):
+            self._symbol_negative_max = 1.5
         # ── FVG credit cache ───────────────────────────────────────────────
         # When a BOOM/CRASH symbol detects an active FVG with score >= threshold,
         # we store a credit for N cycles so that if ATR passes within that window
@@ -564,6 +593,28 @@ class DerivRiskManager:
                         _LOGGER.info(
                             "[risk] persisted bankroll=%.2f differs from config=%.2f (using config)",
                             _bk, settings.bankroll_usdt,
+                        )
+                    _sym_pnl_raw = _raw.get("symbol_pnl_window")
+                    if isinstance(_sym_pnl_raw, dict):
+                        for _k, _v in _sym_pnl_raw.items():
+                            try:
+                                self._symbol_pnl_window[str(_k).upper()] = float(_v)
+                            except (TypeError, ValueError):
+                                continue
+                    _sym_bonus_raw = _raw.get("symbol_score_bonus")
+                    if isinstance(_sym_bonus_raw, dict):
+                        for _k, _v in _sym_bonus_raw.items():
+                            try:
+                                self._symbol_score_bonus[str(_k).upper()] = max(
+                                    0.0,
+                                    min(self._symbol_negative_max, float(_v)),
+                                )
+                            except (TypeError, ValueError):
+                                continue
+                    if self._symbol_score_bonus:
+                        _LOGGER.info(
+                            "[risk] hydrated symbol_score_bonus=%s",
+                            {k: round(v, 2) for k, v in self._symbol_score_bonus.items()},
                         )
         except Exception as _hyd_exc:  # noqa: BLE001
             _LOGGER.warning("[risk] state hydration failed: %s — starting fresh", _hyd_exc)
@@ -2286,6 +2337,51 @@ class DerivRiskManager:
                 self._loss_streak = 0
                 self._clear_lockout("two_consecutive_wins")
 
+        # ── Per-symbol PnL-driven score escalator update ───────────────────
+        # Run regardless of lockout state so symbols stuck in bleed mode get
+        # progressively harder to enter while symbols that win normalise.
+        _sym_key = symbol.upper().strip() if symbol else ""
+        if _sym_key:
+            _prev_pnl = float(self._symbol_pnl_window.get(_sym_key, 0.0))
+            _new_pnl = _prev_pnl + float(realized_pnl_usdt)
+            _prev_bonus = float(self._symbol_score_bonus.get(_sym_key, 0.0))
+            _new_bonus = _prev_bonus
+            _negative_trigger = (
+                self._symbol_negative_max > 0.0
+                and _new_pnl <= self._symbol_negative_threshold
+            )
+            if realized_pnl_usdt > win_significant_threshold:
+                # Significant win → normalise this symbol.
+                _new_pnl = 0.0
+                _new_bonus = 0.0
+            elif realized_pnl_usdt < 0 and _negative_trigger:
+                # Loss while symbol is in bleed mode → escalate the gate.
+                _new_bonus = min(
+                    self._symbol_negative_max,
+                    _prev_bonus + self._symbol_negative_step,
+                )
+            elif _negative_trigger and _prev_bonus <= 0.0:
+                # Crossed the negative threshold for the first time → arm gate.
+                _new_bonus = min(
+                    self._symbol_negative_max,
+                    max(_prev_bonus, self._symbol_negative_step),
+                )
+            self._symbol_pnl_window[_sym_key] = round(_new_pnl, 4)
+            if _new_bonus > 0.0:
+                self._symbol_score_bonus[_sym_key] = round(_new_bonus, 3)
+            else:
+                self._symbol_score_bonus.pop(_sym_key, None)
+            if abs(_new_bonus - _prev_bonus) >= 0.01 or _negative_trigger:
+                _LOGGER.warning(
+                    "[risk][SYMBOL_GUARD] %s pnl_window=%.3f bonus=%.2f→%.2f "
+                    "(thr=%.2f step=%.2f max=%.2f trigger=%s)",
+                    _sym_key, _new_pnl, _prev_bonus, _new_bonus,
+                    self._symbol_negative_threshold,
+                    self._symbol_negative_step,
+                    self._symbol_negative_max,
+                    _negative_trigger,
+                )
+
         # ── State serialization (persistence across restarts) ─────────────
         try:
             lf = self._settings.lockout_file
@@ -2303,6 +2399,12 @@ class DerivRiskManager:
                 "bankroll": float(self._settings.bankroll_usdt),
                 "daily_realized_pnl": round(self._daily_realized_pnl, 4),
                 "last_trade_ts": self._last_trade_ts,
+                "symbol_pnl_window": {
+                    k: round(v, 4) for k, v in self._symbol_pnl_window.items()
+                },
+                "symbol_score_bonus": {
+                    k: round(v, 3) for k, v in self._symbol_score_bonus.items()
+                },
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             tmp = lf.with_suffix(lf.suffix + ".tmp")
@@ -2310,6 +2412,38 @@ class DerivRiskManager:
             tmp.replace(lf)
         except Exception as _ser_exc:  # noqa: BLE001
             _LOGGER.warning("[risk] state serialization failed: %s", _ser_exc)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Per-symbol PnL-driven score escalator (read API for entry gate)
+    # ─────────────────────────────────────────────────────────────────────────
+    def symbol_score_floor_bonus(self, symbol: str) -> float:
+        """Extra score floor required for ``symbol`` because it is bleeding.
+
+        Returns 0.0 when the symbol is healthy. When the symbol's rolling
+        realized PnL has fallen to or below DERIV_SYMBOL_NEGATIVE_THRESHOLD,
+        returns a positive bonus (capped at DERIV_SYMBOL_NEGATIVE_MAX) that
+        callers MUST add to the effective minimum score for entries on this
+        symbol. The bonus is normalised by a significant winning trade.
+        """
+        if not symbol:
+            return 0.0
+        return float(self._symbol_score_bonus.get(symbol.upper().strip(), 0.0))
+
+    def symbol_pnl_window(self, symbol: str) -> float:
+        """Rolling realized PnL for ``symbol`` since last normalisation."""
+        if not symbol:
+            return 0.0
+        return float(self._symbol_pnl_window.get(symbol.upper().strip(), 0.0))
+
+    def symbol_guardrail_snapshot(self) -> dict[str, dict[str, float]]:
+        """Diagnostic snapshot of the per-symbol bleed gate (for telemetry)."""
+        return {
+            sym: {
+                "pnl_window": round(self._symbol_pnl_window.get(sym, 0.0), 3),
+                "score_bonus": round(bonus, 3),
+            }
+            for sym, bonus in self._symbol_score_bonus.items()
+        }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Internal scoring helpers — v2 (smarter math)
