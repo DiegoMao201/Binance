@@ -50,16 +50,16 @@ BEFORE UPDATE ON dynamic_symbol_config
 FOR EACH ROW
 EXECUTE FUNCTION touch_dynamic_symbol_config_updated_at();
 
-INSERT INTO dynamic_symbol_config (symbol, score_min_override)
+INSERT INTO dynamic_symbol_config (symbol, zero_peak_grace_sec, score_min_override)
 VALUES
-    ('BOOM1000', 6.5),
-    ('BOOM900', 6.5),
-    ('BOOM600', 6.5),
-    ('BOOM500', 6.5),
-    ('CRASH1000', 6.5),
-    ('CRASH900', 6.5),
-    ('CRASH600', 6.5),
-    ('CRASH500', 6.5)
+    ('BOOM1000', 0, 6.5),
+    ('BOOM900', 0, 6.5),
+    ('BOOM600', 0, 6.5),
+    ('BOOM500', 60, 6.5),
+    ('CRASH1000', 0, 6.5),
+    ('CRASH900', 0, 6.5),
+    ('CRASH600', 60, 6.5),
+    ('CRASH500', 60, 6.5)
 ON CONFLICT (symbol) DO NOTHING;
 
 DO $$
