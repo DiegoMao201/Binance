@@ -600,6 +600,7 @@ def _build_ai_prompt(
     n_ticks: int,
     ai_threshold: float = 7.5,
     ai_min_confidence: float | None = None,
+    symbol_guard_threshold: float | None = None,
 ) -> str:
     # Spike markets (BOOM/CRASH) don't require trending Hurst — spikes are stochastic.
     # Use the hurst_min_spike value (0.43) for those; trend requirement only for R_*.
@@ -617,6 +618,19 @@ def _build_ai_prompt(
             f"AND autocorr aligned with side AND regime not 'volatile'."
         )
     _min_conf = max(0.65, float(ai_min_confidence if ai_min_confidence is not None else _AI_MIN_CONFIDENCE))
+    _bleed_bonus = float((breakdown or {}).get("symbol_bleed_bonus") or 0.0)
+    _bleed_pnl_window = float((breakdown or {}).get("symbol_bleed_pnl_window") or 0.0)
+    _bleed_threshold = float(
+        symbol_guard_threshold
+        if symbol_guard_threshold is not None
+        else (breakdown or {}).get("symbol_bleed_threshold")
+        or -2.0
+    )
+    _effective_floor = max(float(ai_threshold), float(ai_threshold) + _bleed_bonus)
+    _bleed_rule = (
+        f"If symbol_bleed_bonus>0, only approve when score>={_effective_floor:.2f} "
+        f"and confidence>={max(_min_conf, 0.75):.2f}."
+    )
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -624,6 +638,11 @@ PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
 Score breakdown: {json.dumps(breakdown)}
+
+SYMBOL_GUARDRAIL:
+- symbol_bleed_bonus: {_bleed_bonus:.2f}
+- symbol_bleed_pnl_window: {_bleed_pnl_window:.3f}
+- symbol_bleed_threshold: {_bleed_threshold:.2f}
 
 STATISTICAL ANALYSIS ({n_ticks} ticks):
 - Hurst exponent: {hurst:.4f} (>0.5=trending, 0.5=random, <0.5=mean-reverting)
@@ -640,6 +659,7 @@ Respond ONLY with a JSON object:
 {{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
 
 {_approve_cond}
+{_bleed_rule}
 Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict."""
 
 
@@ -1165,7 +1185,12 @@ class DerivAnalyst:
             if _is_boom_crash
             else self._settings.r_indices_ai_min_score
         )
+        _symbol_bleed_bonus = float(score_breakdown.get("symbol_bleed_bonus") or 0.0)
         _hard_score_floor = max(_AI_HARD_SCORE_FLOOR, float(_ai_threshold))
+        _symbol_hard_score_floor = max(
+            _hard_score_floor,
+            float(_ai_threshold) + max(0.0, _symbol_bleed_bonus),
+        )
         _symbol_min_conf, _quality_note = self._dynamic_ai_min_confidence(symbol)
         _quality_veto, _quality_veto_note = self._quality_veto_for_symbol(symbol)
 
@@ -1179,15 +1204,17 @@ class DerivAnalyst:
             analysis.ai_approved = (
                 _cached_approved
                 and _cached_conf >= _symbol_min_conf
-                and score >= _hard_score_floor
+                and score >= _symbol_hard_score_floor
                 and not _quality_veto
             )
             analysis.ai_confidence = _cached_conf
             _cached_reason = str(cached_ai.get("reason", ""))
             if _cached_approved and not analysis.ai_approved and _cached_conf < _symbol_min_conf:
                 _cached_reason = f"{_cached_reason} | conf_floor:{_cached_conf:.2f}<{_symbol_min_conf:.2f}"
-            if _cached_approved and not analysis.ai_approved and score < _hard_score_floor:
-                _cached_reason = f"{_cached_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
+            if _cached_approved and not analysis.ai_approved and score < _symbol_hard_score_floor:
+                _cached_reason = (
+                    f"{_cached_reason} | score_floor:{score:.2f}<{_symbol_hard_score_floor:.2f}"
+                )
             if _cached_approved and not analysis.ai_approved and _quality_veto:
                 _cached_reason = f"{_cached_reason} | {_quality_veto_note}"
             analysis.ai_reason = f"{_cached_reason} | {_quality_note} [cached]"
@@ -1215,6 +1242,7 @@ class DerivAnalyst:
             n_ticks=len(prices_list),
             ai_threshold=_ai_threshold,
             ai_min_confidence=_symbol_min_conf,
+            symbol_guard_threshold=float(score_breakdown.get("symbol_bleed_threshold") or -2.0),
         )
 
         try:
@@ -1270,7 +1298,7 @@ class DerivAnalyst:
             analysis.ai_approved = (
                 _model_approved
                 and _ai_conf >= _symbol_min_conf
-                and score >= _hard_score_floor
+                and score >= _symbol_hard_score_floor
                 and not _quality_veto
             )
             analysis.ai_confidence = _ai_conf
@@ -1279,9 +1307,9 @@ class DerivAnalyst:
                 analysis.ai_reason = (
                     f"{analysis.ai_reason} | conf_floor:{_ai_conf:.2f}<{_symbol_min_conf:.2f}"
                 )
-            if _model_approved and not analysis.ai_approved and score < _hard_score_floor:
+            if _model_approved and not analysis.ai_approved and score < _symbol_hard_score_floor:
                 analysis.ai_reason = (
-                    f"{analysis.ai_reason} | score_floor:{score:.2f}<{_hard_score_floor:.2f}"
+                    f"{analysis.ai_reason} | score_floor:{score:.2f}<{_symbol_hard_score_floor:.2f}"
                 )
             if _model_approved and not analysis.ai_approved and _quality_veto:
                 analysis.ai_reason = f"{analysis.ai_reason} | {_quality_veto_note}"

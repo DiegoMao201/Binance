@@ -489,6 +489,7 @@ class DerivRiskManager:
         # from being dragged down by symbols stuck in bleed mode.
         self._symbol_pnl_window: dict[str, float] = {}
         self._symbol_score_bonus: dict[str, float] = {}
+        self._symbol_recent_pnls: dict[str, list[float]] = {}
         try:
             self._symbol_negative_threshold = float(
                 os.getenv("DERIV_SYMBOL_NEGATIVE_THRESHOLD", "-2.0")
@@ -507,6 +508,13 @@ class DerivRiskManager:
             )
         except (TypeError, ValueError):
             self._symbol_negative_max = 1.5
+        try:
+            self._symbol_pnl_lookback_trades = max(
+                5,
+                int(os.getenv("DERIV_SYMBOL_PNL_LOOKBACK_TRADES", "30") or 30),
+            )
+        except (TypeError, ValueError):
+            self._symbol_pnl_lookback_trades = 30
         # ── FVG credit cache ───────────────────────────────────────────────
         # When a BOOM/CRASH symbol detects an active FVG with score >= threshold,
         # we store a credit for N cycles so that if ATR passes within that window
@@ -611,11 +619,26 @@ class DerivRiskManager:
                                 )
                             except (TypeError, ValueError):
                                 continue
+                    _sym_recent_raw = _raw.get("symbol_recent_pnls")
+                    if isinstance(_sym_recent_raw, dict):
+                        for _k, _vals in _sym_recent_raw.items():
+                            if not isinstance(_vals, list):
+                                continue
+                            _norm_vals: list[float] = []
+                            for _item in _vals[-self._symbol_pnl_lookback_trades:]:
+                                try:
+                                    _norm_vals.append(float(_item))
+                                except (TypeError, ValueError):
+                                    continue
+                            if _norm_vals:
+                                self._symbol_recent_pnls[str(_k).upper()] = _norm_vals
                     if self._symbol_score_bonus:
                         _LOGGER.info(
                             "[risk] hydrated symbol_score_bonus=%s",
                             {k: round(v, 2) for k, v in self._symbol_score_bonus.items()},
                         )
+            if not self._symbol_recent_pnls:
+                self._bootstrap_symbol_guard_from_closed_history()
         except Exception as _hyd_exc:  # noqa: BLE001
             _LOGGER.warning("[risk] state hydration failed: %s — starting fresh", _hyd_exc)
 
@@ -670,6 +693,70 @@ class DerivRiskManager:
             f" until={datetime.fromtimestamp(_lockout_on_start.until_ts, timezone.utc):%Y-%m-%dT%H:%MZ} reason={_lockout_on_start.reason!r}"
             if _lockout_on_start.locked else "",
         )
+
+    def _bootstrap_symbol_guard_from_closed_history(self) -> None:
+        """Warm per-symbol guardrail state from closed contracts history.
+
+        Used when lockout JSON has no symbol snapshot (typical after deploys).
+        """
+        try:
+            fpath = self._settings.closed_contracts_file
+            if not fpath.exists():
+                return
+            raw = json.loads(fpath.read_text())
+            if not isinstance(raw, list) or not raw:
+                return
+
+            per_symbol: dict[str, list[float]] = {}
+            for row in reversed(raw):
+                if not isinstance(row, dict):
+                    continue
+                sym = str(row.get("symbol") or "").upper().strip()
+                if not sym:
+                    continue
+                try:
+                    pnl = float(row.get("realized_pnl_usdt") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                bucket = per_symbol.setdefault(sym, [])
+                if len(bucket) < self._symbol_pnl_lookback_trades:
+                    bucket.append(pnl)
+
+            for sym, rev_vals in per_symbol.items():
+                vals = list(reversed(rev_vals))[-self._symbol_pnl_lookback_trades :]
+                if not vals:
+                    continue
+                pnl_window = float(sum(vals))
+                last_pnl = float(vals[-1])
+                bonus = 0.0
+                if (
+                    self._symbol_negative_max > 0.0
+                    and pnl_window <= self._symbol_negative_threshold
+                    and last_pnl < 0.0
+                ):
+                    tail_losses = 0
+                    for v in reversed(vals):
+                        if v < 0.0:
+                            tail_losses += 1
+                        elif v > 0.0:
+                            break
+                    bonus = min(
+                        self._symbol_negative_max,
+                        max(self._symbol_negative_step, self._symbol_negative_step * max(1, tail_losses)),
+                    )
+                self._symbol_recent_pnls[sym] = [round(v, 4) for v in vals]
+                self._symbol_pnl_window[sym] = round(pnl_window, 4)
+                if bonus > 0.0:
+                    self._symbol_score_bonus[sym] = round(bonus, 3)
+
+            if self._symbol_recent_pnls:
+                _LOGGER.info(
+                    "[risk] bootstrap symbol guard: lookback=%d symbols=%d",
+                    self._symbol_pnl_lookback_trades,
+                    len(self._symbol_recent_pnls),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[risk] bootstrap symbol guard failed: %s", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public surface called by the daemon / trader / order router
@@ -2342,30 +2429,39 @@ class DerivRiskManager:
         # progressively harder to enter while symbols that win normalise.
         _sym_key = symbol.upper().strip() if symbol else ""
         if _sym_key:
-            _prev_pnl = float(self._symbol_pnl_window.get(_sym_key, 0.0))
-            _new_pnl = _prev_pnl + float(realized_pnl_usdt)
+            _buf = list(self._symbol_recent_pnls.get(_sym_key, []))
+            _buf.append(float(realized_pnl_usdt))
+            if len(_buf) > self._symbol_pnl_lookback_trades:
+                _buf = _buf[-self._symbol_pnl_lookback_trades :]
+            self._symbol_recent_pnls[_sym_key] = [round(v, 4) for v in _buf]
+
+            _new_pnl = float(sum(_buf))
             _prev_bonus = float(self._symbol_score_bonus.get(_sym_key, 0.0))
             _new_bonus = _prev_bonus
             _negative_trigger = (
                 self._symbol_negative_max > 0.0
                 and _new_pnl <= self._symbol_negative_threshold
             )
-            if realized_pnl_usdt > win_significant_threshold:
-                # Significant win → normalise this symbol.
-                _new_pnl = 0.0
+            if realized_pnl_usdt > 0.0:
+                # Any winning close normalises punitive bonus for this symbol.
                 _new_bonus = 0.0
             elif realized_pnl_usdt < 0 and _negative_trigger:
                 # Loss while symbol is in bleed mode → escalate the gate.
                 _new_bonus = min(
                     self._symbol_negative_max,
-                    _prev_bonus + self._symbol_negative_step,
+                    max(self._symbol_negative_step, _prev_bonus + self._symbol_negative_step),
                 )
-            elif _negative_trigger and _prev_bonus <= 0.0:
-                # Crossed the negative threshold for the first time → arm gate.
+            elif _negative_trigger and _prev_bonus > 0.0:
+                # Keep bonus active while symbol remains in negative mode.
+                _new_bonus = _prev_bonus
+            elif _negative_trigger:
+                # First crossing below threshold without a fresh loss event.
                 _new_bonus = min(
                     self._symbol_negative_max,
-                    max(_prev_bonus, self._symbol_negative_step),
+                    self._symbol_negative_step,
                 )
+            else:
+                _new_bonus = 0.0
             self._symbol_pnl_window[_sym_key] = round(_new_pnl, 4)
             if _new_bonus > 0.0:
                 self._symbol_score_bonus[_sym_key] = round(_new_bonus, 3)
@@ -2374,12 +2470,14 @@ class DerivRiskManager:
             if abs(_new_bonus - _prev_bonus) >= 0.01 or _negative_trigger:
                 _LOGGER.warning(
                     "[risk][SYMBOL_GUARD] %s pnl_window=%.3f bonus=%.2f→%.2f "
-                    "(thr=%.2f step=%.2f max=%.2f trigger=%s)",
+                    "(thr=%.2f step=%.2f max=%.2f trigger=%s n=%d last=%.3f)",
                     _sym_key, _new_pnl, _prev_bonus, _new_bonus,
                     self._symbol_negative_threshold,
                     self._symbol_negative_step,
                     self._symbol_negative_max,
                     _negative_trigger,
+                    len(_buf),
+                    float(realized_pnl_usdt),
                 )
 
         # ── State serialization (persistence across restarts) ─────────────
@@ -2404,6 +2502,11 @@ class DerivRiskManager:
                 },
                 "symbol_score_bonus": {
                     k: round(v, 3) for k, v in self._symbol_score_bonus.items()
+                },
+                "symbol_recent_pnls": {
+                    k: [round(v, 4) for v in vals[-self._symbol_pnl_lookback_trades :]]
+                    for k, vals in self._symbol_recent_pnls.items()
+                    if vals
                 },
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
@@ -2435,12 +2538,17 @@ class DerivRiskManager:
             return 0.0
         return float(self._symbol_pnl_window.get(symbol.upper().strip(), 0.0))
 
+    def symbol_negative_threshold(self) -> float:
+        """Configured PnL threshold that arms the per-symbol guardrail."""
+        return float(self._symbol_negative_threshold)
+
     def symbol_guardrail_snapshot(self) -> dict[str, dict[str, float]]:
         """Diagnostic snapshot of the per-symbol bleed gate (for telemetry)."""
         return {
             sym: {
                 "pnl_window": round(self._symbol_pnl_window.get(sym, 0.0), 3),
                 "score_bonus": round(bonus, 3),
+                "recent_n": int(len(self._symbol_recent_pnls.get(sym, []))),
             }
             for sym, bonus in self._symbol_score_bonus.items()
         }

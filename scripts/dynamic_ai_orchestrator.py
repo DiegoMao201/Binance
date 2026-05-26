@@ -159,6 +159,7 @@ SCORE_RECOVERY_STEP_STABLE = max(
     0.10,
     min(float(os.getenv("DYNAMIC_AI_SCORE_RECOVERY_STEP_STABLE", "0.80") or 0.80), 1.20),
 )
+SYMBOL_NEGATIVE_THRESHOLD = float(os.getenv("DERIV_SYMBOL_NEGATIVE_THRESHOLD", "-2.0") or -2.0)
 MULTISPIKE_BUFFER_TICKS_DEFAULT = max(
     5,
     int(os.getenv("DERIV_MULTISPIKE_BUFFER_TICKS_DEFAULT", "45") or 45),
@@ -699,6 +700,19 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
     ai_decisions = _load_json(logs_dir / "deriv_ai_decisions.json")
     market_ctx = _load_json(logs_dir / "deriv_market_context.json")
+    lockout_raw: dict[str, Any] = {}
+    lockout_path = logs_dir / "deriv_lockout.json"
+    if lockout_path.exists():
+        try:
+            data = json.loads(lockout_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                lockout_raw = data
+        except Exception:
+            lockout_raw = {}
+
+    lockout_sym_pnl = lockout_raw.get("symbol_pnl_window") if isinstance(lockout_raw.get("symbol_pnl_window"), dict) else {}
+    lockout_sym_bonus = lockout_raw.get("symbol_score_bonus") if isinstance(lockout_raw.get("symbol_score_bonus"), dict) else {}
+    lockout_sym_recent = lockout_raw.get("symbol_recent_pnls") if isinstance(lockout_raw.get("symbol_recent_pnls"), dict) else {}
 
     now_ts = time.time()
     min_ts = now_ts - lookback_sec
@@ -947,6 +961,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
         }
 
         lookback_hours = round(float(lookback_sec) / 3600.0, 2)
+        guard_pnl_window = float(lockout_sym_pnl.get(sym) or 0.0)
+        guard_bonus = float(lockout_sym_bonus.get(sym) or 0.0)
+        guard_recent_n = 0
+        if isinstance(lockout_sym_recent.get(sym), list):
+            guard_recent_n = len(lockout_sym_recent.get(sym) or [])
 
         telemetry[sym] = {
             "lookback_sec": lookback_sec,
@@ -1018,6 +1037,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "spike_rate_prev10m": rate_prev10,
             "spike_rate_last5m": rate_last5,
             "market_regime_estimate": regime,
+            "symbol_guard_threshold": SYMBOL_NEGATIVE_THRESHOLD,
+            "symbol_guard_pnl_window": guard_pnl_window,
+            "symbol_guard_bonus": guard_bonus,
+            "symbol_guard_recent_n": guard_recent_n,
+            "symbol_guard_active": bool(guard_bonus > 0.0 or guard_pnl_window <= SYMBOL_NEGATIVE_THRESHOLD),
             "as_of": _now_iso(),
         }
     return telemetry
@@ -1157,6 +1181,25 @@ def _heuristic_from_telemetry(current_cfg: dict[str, SymbolCfg], telemetry: dict
         if recovery_points >= 3 and risk_points == 0:
             score = score - 0.25
 
+        # Per-symbol guardrail coming from runtime risk state.
+        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
+        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
+        guard_active = bool(
+            t.get("symbol_guard_active")
+            or guard_bonus > 0.0
+            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
+        )
+        if guard_active:
+            risk_points += 1
+            # Baseline in bleed mode: 7.5. If bonus has escalated above first
+            # step, push floor proportionally (e.g. 1.0 -> 8.0, 1.5 -> 8.5).
+            guard_floor = 7.5 + max(0.0, guard_bonus - 0.5)
+            score = max(score, guard_floor)
+            if guard_bonus >= 1.0 and regime == "FAST":
+                regime = "NORMAL"
+            if guard_bonus >= 1.5:
+                regime = "SLOW"
+
         score = max(score, quarantine_floor)
 
         in_quarantine = bool(contracts_n >= 4 and risk_points >= 2)
@@ -1294,6 +1337,19 @@ def _apply_tick_window_policy(
             if score > recovery_floor:
                 step = min(SCORE_RECOVERY_STEP_STABLE, score - recovery_floor)
                 score = max(recovery_floor, score - step)
+
+        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
+        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
+        guard_active = bool(
+            t.get("symbol_guard_active")
+            or guard_bonus > 0.0
+            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
+        )
+        if guard_active:
+            guard_floor = 7.5 + max(0.0, guard_bonus - 0.5)
+            score = max(score, guard_floor)
+            if guard_bonus >= 1.5:
+                regime = "SLOW"
 
         adjusted = _clamp_cfg(
             sym,
@@ -1446,6 +1502,19 @@ def _apply_activity_policy(
             )
             final_score = max(final_score, strict_floor)
 
+        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
+        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
+        guard_active = bool(
+            t.get("symbol_guard_active")
+            or guard_bonus > 0.0
+            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
+        )
+        if guard_active:
+            guard_floor = 7.5 + max(0.0, guard_bonus - 0.5)
+            final_score = max(final_score, guard_floor)
+            if guard_bonus >= 1.0:
+                final_regime = "SLOW"
+
         out[sym] = _clamp_cfg(
             sym,
             SymbolCfg(
@@ -1474,12 +1543,14 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
         "6. Regla de Recuperacion (Regimen Estable): Si 0.8 <= Ratio <= 1.2 (el mercado esta a un ritmo normal y estable), tu obligacion es RELAJAR la cuarentena. Debes bajar gradualmente el score_min_override acercandolo de nuevo al valor base de 6.80 (ejemplo: si estaba en 8.00, bajalo a 7.20; si estaba en 7.20, bajalo a 6.80). No mantengas los scores en 8.00 si el ratio de aceleracion es normal, o asfixiaras la estrategia.\n"
         "7. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override inmediatamente.\n"
-        f"8. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
-        "9. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
-        "10. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
-        "11. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
-        "12. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
-        "13. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
+        "8. Si symbol_guard_active=true (o symbol_guard_pnl_window <= -2.0), imponer piso dinamico estricto: score_min_override >= 7.5 + max(0, symbol_guard_bonus-0.5).\n"
+        "9. Si symbol_guard_bonus >= 1.0, preferir regime=SLOW para ese simbolo hasta que mejore.\n"
+        f"10. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
+        "11. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
+        "12. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
+        "13. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
+        "14. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
+        "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"

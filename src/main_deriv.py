@@ -1825,12 +1825,14 @@ class DerivDaemon:
         # top of the regime gate so future entries on that symbol must be
         # noticeably stronger (≥ 7.5–8.0 depending on escalation steps).
         _sym_bleed_bonus = float(self._risk.symbol_score_floor_bonus(tick.symbol))
+        _sym_bleed_pnl_window = float(self._risk.symbol_pnl_window(tick.symbol))
+        snap.score_breakdown["symbol_bleed_bonus"] = round(_sym_bleed_bonus, 3)
+        snap.score_breakdown["symbol_bleed_pnl_window"] = round(_sym_bleed_pnl_window, 3)
+        snap.score_breakdown["symbol_bleed_threshold"] = round(
+            float(self._risk.symbol_negative_threshold()), 3
+        )
         if _sym_bleed_bonus > 0.0:
             _regime_min = min(10.0, _regime_min + _sym_bleed_bonus)
-            snap.score_breakdown["symbol_bleed_bonus"] = round(_sym_bleed_bonus, 3)
-            snap.score_breakdown["symbol_bleed_pnl_window"] = round(
-                self._risk.symbol_pnl_window(tick.symbol), 3
-            )
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
