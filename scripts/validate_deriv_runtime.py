@@ -100,6 +100,18 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
             WHERE symbol IN ('BOOM500', 'CRASH500', 'CRASH600')
               AND zero_peak_grace_sec < 60
         )::int AS bad_sensitive_grace
+        ,COUNT(*) FILTER (
+            WHERE dep_exit_policy NOT IN ('PASSIVE', 'SHADOW', 'ACTIVE_DECAY')
+        )::int AS bad_dep_policy
+        ,COUNT(*) FILTER (
+            WHERE dep_min_hold_sec < 30 OR dep_min_hold_sec > 900
+        )::int AS bad_dep_hold
+        ,COUNT(*) FILTER (
+            WHERE dep_atr_decay_ratio < 0.30 OR dep_atr_decay_ratio > 0.95
+        )::int AS bad_dep_ratio
+        ,COUNT(*) FILTER (
+            WHERE dep_loss_floor_usdt < -5.0 OR dep_loss_floor_usdt > 0.0
+        )::int AS bad_dep_loss_floor
     FROM dynamic_symbol_config
     """
 
@@ -127,6 +139,10 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
     bad_spf = int(row["bad_spf"])
     bad_grace = int(row["bad_grace"])
     bad_sensitive_grace = int(row["bad_sensitive_grace"])
+    bad_dep_policy = int(row["bad_dep_policy"])
+    bad_dep_hold = int(row["bad_dep_hold"])
+    bad_dep_ratio = int(row["bad_dep_ratio"])
+    bad_dep_loss_floor = int(row["bad_dep_loss_floor"])
 
     ok = (
         total_rows >= min_symbols
@@ -134,12 +150,18 @@ async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResu
         and bad_spf == 0
         and bad_grace == 0
         and bad_sensitive_grace == 0
+        and bad_dep_policy == 0
+        and bad_dep_hold == 0
+        and bad_dep_ratio == 0
+        and bad_dep_loss_floor == 0
     )
 
     detail = (
         f"rows={total_rows}, bad_score={bad_score} [range={score_min_guardrail:.2f}..{score_max_guardrail:.2f}], "
         f"bad_spf={bad_spf} [range={spf_min_guardrail}..{spf_max_guardrail}], "
-        f"bad_grace={bad_grace}, bad_sensitive_grace={bad_sensitive_grace}"
+        f"bad_grace={bad_grace}, bad_sensitive_grace={bad_sensitive_grace}, "
+        f"bad_dep_policy={bad_dep_policy}, bad_dep_hold={bad_dep_hold}, "
+        f"bad_dep_ratio={bad_dep_ratio}, bad_dep_loss_floor={bad_dep_loss_floor}"
     )
     return CheckResult(name="db_guardrails", ok=ok, detail=detail)
 

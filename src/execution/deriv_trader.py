@@ -214,6 +214,10 @@ class DerivOpenContract:
     # Telemetry: ATR snapshots sampled every 30s during the trade lifetime.
     # Format: list of (elapsed_seconds, atr_value) rounded to 5 dp.
     atr_samples: list = field(default_factory=list)
+    # DEP telemetry: rolling peak ATR seen during this contract lifetime.
+    dep_peak_atr: float = field(default=0.0)
+    # DEP shadow telemetry throttle (epoch seconds).
+    dep_shadow_last_log_ts: float = field(default=0.0)
 
 
 class DerivTradeExecutor:
@@ -309,6 +313,7 @@ class DerivTradeExecutor:
                         # Phase 15 fix: restore broker BE and floating PnL state
                         broker_be_locked=bool(_r.get("broker_be_locked", False)),
                         floating_pnl=float(_r.get("floating_pnl", 0.0)),
+                        dep_peak_atr=float(_r.get("dep_peak_atr", 0.0)),
                     )
                 if self._open:
                     _LOGGER.info(
@@ -541,6 +546,121 @@ class DerivTradeExecutor:
         _cycle_wait = float(int(_cycle * _wait_frac))
         return max(float(base_limit_sec), _cycle_wait)
 
+    def _dep_config(self, symbol: str) -> dict[str, Any]:
+        """Resolve DEP config for a symbol from dynamic settings."""
+        default_policy = str(os.getenv("DERIV_DEP_DEFAULT_POLICY", "PASSIVE") or "PASSIVE").upper()
+        default_hold = int(float(os.getenv("DERIV_DEP_DEFAULT_MIN_HOLD_SEC", "120") or 120))
+        default_ratio = float(os.getenv("DERIV_DEP_DEFAULT_ATR_DECAY_RATIO", "0.70") or 0.70)
+        default_loss_floor = float(os.getenv("DERIV_DEP_DEFAULT_LOSS_FLOOR_USDT", "-0.05") or -0.05)
+
+        cfg: dict[str, Any] = {}
+        if self._dynamic_config_provider is not None:
+            try:
+                cfg = self._dynamic_config_provider(symbol) or {}
+            except Exception:  # noqa: BLE001
+                cfg = {}
+
+        policy = str(cfg.get("dep_exit_policy") or default_policy).strip().upper()
+        if policy not in {"PASSIVE", "SHADOW", "ACTIVE_DECAY"}:
+            policy = "PASSIVE"
+
+        allow_active = str(os.getenv("DERIV_DEP_ALLOW_ACTIVE_DECAY", "false") or "false").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if policy == "ACTIVE_DECAY" and not allow_active:
+            policy = "SHADOW"
+
+        try:
+            min_hold = int(cfg.get("dep_min_hold_sec") or default_hold)
+        except Exception:  # noqa: BLE001
+            min_hold = default_hold
+        min_hold = max(30, min(min_hold, 900))
+
+        try:
+            decay_ratio = float(cfg.get("dep_atr_decay_ratio") or default_ratio)
+        except Exception:  # noqa: BLE001
+            decay_ratio = default_ratio
+        decay_ratio = max(0.30, min(decay_ratio, 0.95))
+
+        try:
+            loss_floor = float(cfg.get("dep_loss_floor_usdt") or default_loss_floor)
+        except Exception:  # noqa: BLE001
+            loss_floor = default_loss_floor
+        loss_floor = max(-5.0, min(loss_floor, 0.0))
+
+        return {
+            "policy": policy,
+            "min_hold_sec": min_hold,
+            "atr_decay_ratio": decay_ratio,
+            "loss_floor_usdt": loss_floor,
+        }
+
+    def _dep_decay_signal(
+        self,
+        oc: DerivOpenContract,
+        held_s: float,
+        current_profit: float,
+    ) -> tuple[bool, bool, str, dict[str, Any]]:
+        """Evaluate DEP decay trigger.
+
+        Returns (should_close, should_shadow_log, reason, details).
+        """
+        if self._risk is None or not is_spike_market(oc.symbol):
+            return False, False, "", {}
+
+        dep = self._dep_config(oc.symbol)
+        policy = str(dep.get("policy") or "PASSIVE").upper()
+        if policy == "PASSIVE":
+            return False, False, "", {}
+
+        min_hold_sec = float(dep.get("min_hold_sec") or 120.0)
+        if held_s < min_hold_sec:
+            return False, False, "", {}
+
+        atr_now = self._risk.get_current_atr(oc.symbol)
+        if atr_now is None or atr_now <= 0:
+            return False, False, "", {}
+
+        oc.dep_peak_atr = max(float(oc.dep_peak_atr or 0.0), float(atr_now))
+        peak_atr = float(oc.dep_peak_atr or 0.0)
+        if peak_atr <= 0:
+            return False, False, "", {}
+
+        atr_ratio = float(atr_now) / peak_atr
+        decay_threshold = float(dep.get("atr_decay_ratio") or 0.70)
+        loss_floor = float(dep.get("loss_floor_usdt") or -0.05)
+        hit = atr_ratio <= decay_threshold and current_profit <= loss_floor
+        if not hit:
+            return False, False, "", {
+                "policy": policy,
+                "atr_now": round(float(atr_now), 6),
+                "atr_peak": round(float(peak_atr), 6),
+                "atr_ratio": round(float(atr_ratio), 4),
+                "decay_threshold": round(float(decay_threshold), 4),
+                "loss_floor_usdt": round(float(loss_floor), 4),
+            }
+
+        reason = (
+            "dep_decay_exit:"
+            f"atr_ratio={atr_ratio:.3f}<={decay_threshold:.3f}|"
+            f"pnl={current_profit:.4f}<={loss_floor:.4f}"
+        )
+        details = {
+            "policy": policy,
+            "atr_now": round(float(atr_now), 6),
+            "atr_peak": round(float(peak_atr), 6),
+            "atr_ratio": round(float(atr_ratio), 4),
+            "decay_threshold": round(float(decay_threshold), 4),
+            "loss_floor_usdt": round(float(loss_floor), 4),
+            "held_sec": round(float(held_s), 1),
+            "current_pnl": round(float(current_profit), 4),
+        }
+        if policy == "SHADOW":
+            return False, True, reason, details
+        if policy == "ACTIVE_DECAY":
+            return True, False, reason, details
+        return False, False, "", details
+
     def _should_defer_zero_peak_exit(self, symbol: str, held_s: float) -> tuple[bool, str]:
         """Return True when the trade is close to expected spike timing.
 
@@ -732,6 +852,17 @@ class DerivTradeExecutor:
             max_hold_seconds=order.max_hold_seconds,
             entry_tick_count=int((order.score_breakdown or {}).get("entry_tick_count", 0)),
         )
+        _entry_atr = 0.0
+        if self._risk is not None:
+            _atr_now = self._risk.get_current_atr(order.symbol)
+            if _atr_now is not None and _atr_now > 0:
+                _entry_atr = float(_atr_now)
+        if _entry_atr <= 0:
+            try:
+                _entry_atr = float((order.score_breakdown or {}).get("atr_abs") or 0.0)
+            except Exception:  # noqa: BLE001
+                _entry_atr = 0.0
+        oc.dep_peak_atr = max(0.0, _entry_atr)
         async with self._lock:
             self._open[contract_id] = oc
             self._persist_open()
@@ -940,9 +1071,57 @@ class DerivTradeExecutor:
                 _current_price  = float(poc.get("current_spot") or 0)
                 # BUG-B fix: update floating PnL on poll path (safety-net for WS gaps)
                 oc_check.floating_pnl = _current_profit
+                _held_sec = time.time() - oc_check.opened_at_ts
+
+                _dep_close, _dep_shadow, _dep_reason, _dep_details = self._dep_decay_signal(
+                    oc_check,
+                    _held_sec,
+                    _current_profit,
+                )
+                if _dep_shadow:
+                    _shadow_every = max(
+                        15.0,
+                        float(os.getenv("DERIV_DEP_SHADOW_LOG_EVERY_SEC", "60") or 60.0),
+                    )
+                    _now = time.time()
+                    if (_now - float(oc_check.dep_shadow_last_log_ts or 0.0)) >= _shadow_every:
+                        oc_check.dep_shadow_last_log_ts = _now
+                        _LOGGER.info(
+                            "[DEP-SHADOW] cid=%s sym=%s held=%.1fs pnl=%.4f atr_now=%.6f atr_peak=%.6f "
+                            "ratio=%.3f thr=%.3f floor=%.4f",
+                            cid,
+                            oc_check.symbol,
+                            _dep_details.get("held_sec", _held_sec),
+                            _dep_details.get("current_pnl", _current_profit),
+                            _dep_details.get("atr_now", 0.0),
+                            _dep_details.get("atr_peak", 0.0),
+                            _dep_details.get("atr_ratio", 0.0),
+                            _dep_details.get("decay_threshold", 0.0),
+                            _dep_details.get("loss_floor_usdt", 0.0),
+                        )
+
+                if _dep_close and cid not in self._closing:
+                    self._closing.add(cid)
+                    oc_check.pending_close_reason = _dep_reason
+                    _LOGGER.info(
+                        "[DEP-ACTIVE] %s closing symbol=%s reason=%s",
+                        cid,
+                        oc_check.symbol,
+                        _dep_reason,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[DEP-ACTIVE] sell failed for %s: %s",
+                            cid,
+                            exc,
+                        )
+                        self._closing.discard(cid)
+                        oc_check.pending_close_reason = None
+
                 # Telemetry: sample ATR every ~30s to build atr_trajectory
                 if self._risk is not None:
-                    _held_sec = time.time() - oc_check.opened_at_ts
                     _sample_interval = 30.0
                     _expected_samples = int(_held_sec / _sample_interval)
                     if _expected_samples > len(oc_check.atr_samples):
@@ -1202,6 +1381,7 @@ class DerivTradeExecutor:
                 # Phase 15 fix: persist broker_be_locked so restarts can re-apply
                 # the SL=$0.01 without waiting for Phase 2 to fire again.
                 "broker_be_locked": oc.broker_be_locked,
+                "dep_peak_atr": round(oc.dep_peak_atr, 6),
             }
             for oc in self._open.values()
         ]

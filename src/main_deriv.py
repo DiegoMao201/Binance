@@ -390,6 +390,30 @@ class DerivDaemon:
         return _spf, _grace, _score
 
     @staticmethod
+    def _clamp_dep_values(
+        dep_exit_policy: str,
+        dep_min_hold_sec: int,
+        dep_atr_decay_ratio: float,
+        dep_loss_floor_usdt: float,
+    ) -> tuple[str, int, float, float]:
+        """Clamp DEP fields and enforce safe rollout defaults."""
+        _policy = str(dep_exit_policy or "PASSIVE").strip().upper()
+        if _policy not in {"PASSIVE", "SHADOW", "ACTIVE_DECAY"}:
+            _policy = "PASSIVE"
+
+        _allow_active_decay = str(
+            os.getenv("DERIV_DEP_ALLOW_ACTIVE_DECAY", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if _policy == "ACTIVE_DECAY" and not _allow_active_decay:
+            # Safety-first rollout: explicit env opt-in is required for live closes.
+            _policy = "SHADOW"
+
+        _min_hold = max(30, min(int(dep_min_hold_sec), 900))
+        _decay_ratio = max(0.30, min(float(dep_atr_decay_ratio), 0.95))
+        _loss_floor = max(-5.0, min(float(dep_loss_floor_usdt), 0.0))
+        return _policy, _min_hold, _decay_ratio, _loss_floor
+
+    @staticmethod
     def _parse_post_spike_map(raw: str) -> dict[str, float]:
         """Parse DERIV_POST_SPIKE_CHASE_BLOCK_*_MAP='SYM:ticks,SYM:ticks'."""
         out: dict[str, float] = {}
@@ -731,12 +755,22 @@ class DerivDaemon:
         _sym = symbol.upper()
         _profile = profile or get_asset_profile(_sym)
         _default_policy = self._multispike_policy_for_regime("NORMAL")
+        _dep_policy, _dep_min_hold, _dep_decay_ratio, _dep_loss_floor = self._clamp_dep_values(
+            os.getenv("DERIV_DEP_DEFAULT_POLICY", "PASSIVE"),
+            int(float(os.getenv("DERIV_DEP_DEFAULT_MIN_HOLD_SEC", "120") or 120)),
+            float(os.getenv("DERIV_DEP_DEFAULT_ATR_DECAY_RATIO", "0.70") or 0.70),
+            float(os.getenv("DERIV_DEP_DEFAULT_LOSS_FLOOR_USDT", "-0.05") or -0.05),
+        )
         _default = {
             "symbol": _sym,
             "market_regime": "NORMAL",
             "spike_pre_filter_target": int(_profile.get("spike_min_post_sec", 0) or 0),
             "zero_peak_grace_sec": 0,
             "score_min_override": float(min_score_for(_sym)),
+            "dep_exit_policy": _dep_policy,
+            "dep_min_hold_sec": _dep_min_hold,
+            "dep_atr_decay_ratio": _dep_decay_ratio,
+            "dep_loss_floor_usdt": _dep_loss_floor,
             "is_active": False,
             **_default_policy,
             "source": "default",
@@ -751,6 +785,12 @@ class DerivDaemon:
             int(_db_cfg.get("zero_peak_grace_sec") or 0),
             float(_db_cfg.get("score_min_override") or _default["score_min_override"]),
         )
+        _dep_policy, _dep_min_hold, _dep_decay_ratio, _dep_loss_floor = self._clamp_dep_values(
+            str(_db_cfg.get("dep_exit_policy") or _default["dep_exit_policy"]),
+            int(_db_cfg.get("dep_min_hold_sec") or _default["dep_min_hold_sec"]),
+            float(_db_cfg.get("dep_atr_decay_ratio") or _default["dep_atr_decay_ratio"]),
+            float(_db_cfg.get("dep_loss_floor_usdt") or _default["dep_loss_floor_usdt"]),
+        )
         _regime = str(_db_cfg.get("market_regime") or "NORMAL").upper()
         _policy = self._multispike_policy_for_regime(_regime)
 
@@ -760,6 +800,10 @@ class DerivDaemon:
             "spike_pre_filter_target": _spf,
             "zero_peak_grace_sec": _grace,
             "score_min_override": _score,
+            "dep_exit_policy": _dep_policy,
+            "dep_min_hold_sec": _dep_min_hold,
+            "dep_atr_decay_ratio": _dep_decay_ratio,
+            "dep_loss_floor_usdt": _dep_loss_floor,
             "is_active": bool(_db_cfg.get("is_active", True)),
             **_policy,
             "source": "dynamic_db",
@@ -779,14 +823,39 @@ class DerivDaemon:
 
         conn = await asyncio.wait_for(asyncpg.connect(self._dynamic_db_url), timeout=8.0)
         try:
-            rows = await conn.fetch(
-                """
+            _query_with_dep = """
+                SELECT symbol, market_regime, spike_pre_filter_target,
+                       zero_peak_grace_sec, score_min_override,
+                       dep_exit_policy, dep_min_hold_sec,
+                       dep_atr_decay_ratio, dep_loss_floor_usdt,
+                       is_active, last_updated
+                FROM dynamic_symbol_config
+            """
+            _query_legacy = """
                 SELECT symbol, market_regime, spike_pre_filter_target,
                        zero_peak_grace_sec, score_min_override,
                        is_active, last_updated
                 FROM dynamic_symbol_config
-                """
-            )
+            """
+            _dep_columns_available = True
+            try:
+                rows = await conn.fetch(_query_with_dep)
+            except Exception as exc:  # noqa: BLE001
+                _msg = str(exc).lower()
+                _dep_hint = (
+                    "dep_exit_policy" in _msg
+                    or "dep_min_hold_sec" in _msg
+                    or "dep_atr_decay_ratio" in _msg
+                    or "dep_loss_floor_usdt" in _msg
+                    or "undefined column" in _msg
+                )
+                if not _dep_hint:
+                    raise
+                _dep_columns_available = False
+                rows = await conn.fetch(_query_legacy)
+                _LOGGER.warning(
+                    "[dynamic-config] DEP columns unavailable (migration pending) — using PASSIVE defaults"
+                )
         finally:
             await conn.close()
 
@@ -801,11 +870,21 @@ class DerivDaemon:
                 int(row["zero_peak_grace_sec"] or 0),
                 float(row["score_min_override"] or 6.0),
             )
+            _dep_policy, _dep_min_hold, _dep_decay_ratio, _dep_loss_floor = self._clamp_dep_values(
+                str(row["dep_exit_policy"] if _dep_columns_available else "PASSIVE"),
+                int(row["dep_min_hold_sec"] if _dep_columns_available else 120),
+                float(row["dep_atr_decay_ratio"] if _dep_columns_available else 0.70),
+                float(row["dep_loss_floor_usdt"] if _dep_columns_available else -0.05),
+            )
             _new[_sym] = {
                 "market_regime": str(row["market_regime"] or "NORMAL").upper(),
                 "spike_pre_filter_target": _spf,
                 "zero_peak_grace_sec": _grace,
                 "score_min_override": _score,
+                "dep_exit_policy": _dep_policy,
+                "dep_min_hold_sec": _dep_min_hold,
+                "dep_atr_decay_ratio": _dep_decay_ratio,
+                "dep_loss_floor_usdt": _dep_loss_floor,
                 "is_active": bool(row["is_active"]),
                 "last_updated": (
                     row["last_updated"].isoformat()

@@ -42,6 +42,7 @@ _MIGRATIONS = [
     "010_dynamic_guardrails_hardening.sql",
     "011_ai_pattern_memory_and_score_guardrail.sql",
     "013_dynamic_spike_prefilter_tick_range.sql",
+    "014_dynamic_exit_policy_dep.sql",
 ]
 
 
