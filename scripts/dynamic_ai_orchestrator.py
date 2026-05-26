@@ -192,7 +192,7 @@ def _parse_symbol_set(raw: str) -> set[str]:
 
 
 SYMBOL_SCORE_FLOOR_MAP: dict[str, float] = {
-    "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "8.0") or 8.0),
+    "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "6.8") or 6.8),
     "BOOM600": float(os.getenv("DYNAMIC_AI_BOOM600_SCORE_FLOOR", "5.8") or 5.8),
     "BOOM900": float(os.getenv("DYNAMIC_AI_BOOM900_SCORE_FLOOR", "5.8") or 5.8),
     "CRASH600": float(os.getenv("DYNAMIC_AI_CRASH600_SCORE_FLOOR", "5.8") or 5.8),
