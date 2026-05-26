@@ -727,12 +727,10 @@ class DerivRiskManager:
                 if not vals:
                     continue
                 pnl_window = float(sum(vals))
-                last_pnl = float(vals[-1])
                 bonus = 0.0
                 if (
                     self._symbol_negative_max > 0.0
                     and pnl_window <= self._symbol_negative_threshold
-                    and last_pnl < 0.0
                 ):
                     tail_losses = 0
                     for v in reversed(vals):
@@ -2443,8 +2441,12 @@ class DerivRiskManager:
                 and _new_pnl <= self._symbol_negative_threshold
             )
             if realized_pnl_usdt > 0.0:
-                # Any winning close normalises punitive bonus for this symbol.
-                _new_bonus = 0.0
+                # Win de-escalates guardrail. Full normalisation only when the
+                # rolling symbol window has recovered above the negative threshold.
+                if _new_pnl > self._symbol_negative_threshold:
+                    _new_bonus = 0.0
+                else:
+                    _new_bonus = max(0.0, _prev_bonus - self._symbol_negative_step)
             elif realized_pnl_usdt < 0 and _negative_trigger:
                 # Loss while symbol is in bleed mode → escalate the gate.
                 _new_bonus = min(
