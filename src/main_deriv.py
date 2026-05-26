@@ -1893,6 +1893,21 @@ class DerivDaemon:
         _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
         if _sym_bleed_bonus > 0.0:
             _profile_min_score = min(10.0, _profile_min_score + _sym_bleed_bonus)
+
+        # Keep a single authoritative effective_min for every downstream gate/log.
+        # This removes visual drift where AI_VETO/ENTRY_ALLOWED showed the base
+        # floor while dynamic/profile/symbol hardening was already active.
+        _effective_pipeline_min = max(
+            float(snap.effective_min_score or 0.0),
+            float(_regime_min),
+            float(_profile_min_score),
+        )
+        snap.effective_min_score = round(_effective_pipeline_min, 3)
+        snap.score_breakdown["effective_min_base"] = round(float(snap.score_breakdown.get("effective_min") or 0.0), 3)
+        snap.score_breakdown["effective_min_regime"] = round(float(_regime_min), 3)
+        snap.score_breakdown["effective_min_profile"] = round(float(_profile_min_score), 3)
+        snap.score_breakdown["effective_min_pipeline"] = round(float(_effective_pipeline_min), 3)
+
         _asset_profile = get_asset_profile(tick.symbol)
         if snap.allowed and snap.score < _profile_min_score:
             self._log_entry_block(
