@@ -44,6 +44,10 @@ type TradeQueryRow = {
   broker:                string | null;
 };
 
+type TradeCountRow = {
+  total: bigint;
+};
+
 type ClosedContractFileRow = {
   contract_id?: number | string;
   user_id?: string;
@@ -137,7 +141,7 @@ export default async function ClientDashboardPage() {
   };
 
   // ── 2. Parallel data fetching ───────────────────────────────────────────────
-  const [userProfile, grossDepositResult, rawTrades, openPositions, closedContracts] =
+  const [userProfile, grossDepositResult, rawTrades, rawTradeCountRows, openPositions, closedContracts] =
     await Promise.all([
       // A. User profile: balance + fee schedule
       prisma.user.findUnique({
@@ -194,6 +198,14 @@ export default async function ClientDashboardPage() {
         LIMIT 500
       `.catch(() => [] as TradeQueryRow[]),
 
+      // C2. Canonical count (independent from LIMIT 500 table window).
+      prisma.$queryRaw<TradeCountRow[]>`
+        SELECT COUNT(*)::bigint AS total
+        FROM user_trade_allocations uta
+        WHERE uta.user_id = ${userId}::uuid
+          AND COALESCE(NULLIF(to_jsonb(uta)->>'broker', ''), 'binance') = 'deriv'
+      `.catch(() => [] as TradeCountRow[]),
+
       // D. Bot active: check Deriv open contracts on the shared volume.
       readSharedStateArray(["deriv_open_contracts.json", "open_positions.json"]),
 
@@ -219,10 +231,18 @@ export default async function ClientDashboardPage() {
     : new Prisma.Decimal(0);
 
   // ── 5. Bot status ────────────────────────────────────────────────────────────
-  const openContractsCount = Array.isArray(openPositions) ? openPositions.length : 0;
+  const parsedOpenContracts = Array.isArray(openPositions)
+    ? (openPositions as Record<string, unknown>[])
+    : [];
+  const hasScopedOpenRows = parsedOpenContracts.some((row) => typeof row.user_id === "string");
+  const scopedOpenContracts = hasScopedOpenRows
+    ? parsedOpenContracts.filter((row) => row.user_id === userId)
+    : parsedOpenContracts;
+  const openContractsCount = scopedOpenContracts.length;
+  const isOpenCountGlobal = !hasScopedOpenRows;
   const isBotActive = openContractsCount > 0;
   const firstPosition = isBotActive
-    ? (openPositions[0] as Record<string, unknown>)
+    ? scopedOpenContracts[0]
     : null;
   const liveSymbol  = typeof firstPosition?.symbol  === "string" ? firstPosition.symbol  : undefined;
   const liveOpenedAt = toIsoDateString(firstPosition?.opened_at ?? firstPosition?.opened_at_ts);
@@ -255,9 +275,10 @@ export default async function ClientDashboardPage() {
     ? (closedContracts as ClosedContractFileRow[])
     : [];
   const hasScopedRows = parsedClosedContracts.some((row) => typeof row.user_id === "string");
+  // Coherence rule: never mix global fallback rows into a specific client view.
   const scopedClosedContracts = hasScopedRows
     ? parsedClosedContracts.filter((row) => row.user_id === userId)
-    : parsedClosedContracts;
+    : [];
 
   const fallbackLiveTrades: TradeRow[] = scopedClosedContracts
     .map((row, idx) => {
@@ -297,6 +318,7 @@ export default async function ClientDashboardPage() {
   const hasAllocationHistory = tradesFromAllocations.length > 0;
   const usingLiveFallback = !hasAllocationHistory && fallbackLiveTrades.length > 0;
   const tradesForTable: TradeRow[] = hasAllocationHistory ? tradesFromAllocations : fallbackLiveTrades;
+  const closedTradesTotal = Number(rawTradeCountRows[0]?.total ?? BigInt(tradesFromAllocations.length));
 
   // KPI and equity should come from canonical per-user allocations whenever
   // available; fallback rows are for temporary UI continuity only.
@@ -356,6 +378,8 @@ export default async function ClientDashboardPage() {
   const netResultPositive = netResult.gte(0);
   const kpiTotalFees   = fmtUSDT(totalFeesPaid.toFixed(2));
   const closedTradesCount = tradesForAccounting.length;
+  const closedTradesDisplay = hasAllocationHistory ? closedTradesTotal : closedTradesCount;
+  const tableIsCapped = hasAllocationHistory && closedTradesTotal > tradesForTable.length;
 
   return (
     <div
@@ -499,10 +523,13 @@ export default async function ClientDashboardPage() {
                   Operaciones Cerradas
                 </p>
                 <p style={{ position: "relative", color: "#c084fc", fontSize: 32, fontWeight: 800, fontFamily: "ui-monospace, Menlo, monospace", letterSpacing: "-0.03em", marginBottom: 4, textShadow: "0 0 14px rgba(192,132,252,0.5)", lineHeight: 1.05 }}>
-                  {closedTradesCount}
+                  {closedTradesDisplay}
                 </p>
                 <p style={{ position: "relative", color: MUTE, fontSize: 12 }}>
-                  Deriv cerradas · Abiertas del bot ahora: {openContractsCount}
+                  {hasAllocationHistory
+                    ? `Deriv cerradas del cliente${tableIsCapped ? ` · tabla muestra últimas ${tradesForTable.length}` : ""}`
+                    : "Deriv cerradas en vivo (fallback temporal)"}
+                  {` · Abiertas del bot ahora${isOpenCountGlobal ? " (global)" : ""}: ${openContractsCount}`}
                   {usingLiveFallback ? " · modo reconciliacion en vivo" : ""}
                 </p>
               </div>
