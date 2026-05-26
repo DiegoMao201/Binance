@@ -2543,6 +2543,38 @@ class DerivRiskManager:
     # ─────────────────────────────────────────────────────────────────────────
     # Per-symbol PnL-driven score escalator (read API for entry gate)
     # ─────────────────────────────────────────────────────────────────────────
+    def _symbol_guard_bonus_from_state(self, symbol: str) -> float:
+        """Derive current guard bonus from in-memory state with self-healing."""
+        sym = symbol.upper().strip() if symbol else ""
+        if not sym:
+            return 0.0
+
+        recent_vals = self._symbol_recent_pnls.get(sym, [])
+        if recent_vals:
+            pnl_window = float(sum(recent_vals[-self._symbol_pnl_lookback_trades :]))
+            self._symbol_pnl_window[sym] = round(pnl_window, 4)
+        else:
+            pnl_window = float(self._symbol_pnl_window.get(sym, 0.0))
+
+        current_bonus = float(self._symbol_score_bonus.get(sym, 0.0))
+        if self._symbol_negative_max <= 0.0:
+            if current_bonus > 0.0:
+                self._symbol_score_bonus.pop(sym, None)
+            return 0.0
+
+        if pnl_window <= self._symbol_negative_threshold:
+            healed_bonus = min(
+                self._symbol_negative_max,
+                max(self._symbol_negative_step, current_bonus),
+            )
+            if abs(healed_bonus - current_bonus) >= 0.01:
+                self._symbol_score_bonus[sym] = round(healed_bonus, 3)
+            return round(healed_bonus, 3)
+
+        if current_bonus > 0.0:
+            self._symbol_score_bonus.pop(sym, None)
+        return 0.0
+
     def symbol_score_floor_bonus(self, symbol: str) -> float:
         """Extra score floor required for ``symbol`` because it is bleeding.
 
@@ -2552,15 +2584,19 @@ class DerivRiskManager:
         callers MUST add to the effective minimum score for entries on this
         symbol. The bonus is normalised by a significant winning trade.
         """
-        if not symbol:
-            return 0.0
-        return float(self._symbol_score_bonus.get(symbol.upper().strip(), 0.0))
+        return float(self._symbol_guard_bonus_from_state(symbol))
 
     def symbol_pnl_window(self, symbol: str) -> float:
         """Rolling realized PnL for ``symbol`` since last normalisation."""
-        if not symbol:
+        sym = symbol.upper().strip() if symbol else ""
+        if not sym:
             return 0.0
-        return float(self._symbol_pnl_window.get(symbol.upper().strip(), 0.0))
+        recent_vals = self._symbol_recent_pnls.get(sym, [])
+        if recent_vals:
+            pnl_window = float(sum(recent_vals[-self._symbol_pnl_lookback_trades :]))
+            self._symbol_pnl_window[sym] = round(pnl_window, 4)
+            return pnl_window
+        return float(self._symbol_pnl_window.get(sym, 0.0))
 
     def symbol_negative_threshold(self) -> float:
         """Configured PnL threshold that arms the per-symbol guardrail."""
@@ -2568,14 +2604,20 @@ class DerivRiskManager:
 
     def symbol_guardrail_snapshot(self) -> dict[str, dict[str, float]]:
         """Diagnostic snapshot of the per-symbol bleed gate (for telemetry)."""
-        return {
-            sym: {
-                "pnl_window": round(self._symbol_pnl_window.get(sym, 0.0), 3),
+        snapshot: dict[str, dict[str, float]] = {}
+        symbols = set(self._symbol_score_bonus.keys()) | set(self._symbol_pnl_window.keys()) | set(
+            self._symbol_recent_pnls.keys()
+        )
+        for sym in symbols:
+            bonus = float(self._symbol_guard_bonus_from_state(sym))
+            if bonus <= 0.0:
+                continue
+            snapshot[sym] = {
+                "pnl_window": round(float(self.symbol_pnl_window(sym)), 3),
                 "score_bonus": round(bonus, 3),
                 "recent_n": int(len(self._symbol_recent_pnls.get(sym, []))),
             }
-            for sym, bonus in self._symbol_score_bonus.items()
-        }
+        return snapshot
 
     # ─────────────────────────────────────────────────────────────────────────
     # Internal scoring helpers — v2 (smarter math)
