@@ -47,6 +47,23 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 _DISABLE_SPIKE_TIMEOUT = _env_flag("DERIV_DISABLE_SPIKE_TIMEOUT", "false")
+_OPEN_PROB_EXIT_ENABLED = _env_flag("DERIV_OPEN_PROB_EXIT_ENABLED", "true")
+_OPEN_PROB_MIN_HOLD_SEC = max(
+    30.0,
+    min(float(os.getenv("DERIV_OPEN_PROB_MIN_HOLD_SEC", "150") or 150.0), 1200.0),
+)
+_OPEN_PROB_CLOSE_THRESHOLD = max(
+    0.05,
+    min(float(os.getenv("DERIV_OPEN_PROB_CLOSE_THRESHOLD", "0.22") or 0.22), 0.90),
+)
+_OPEN_PROB_CLOSE_PNL_CEIL_USDT = max(
+    -2.0,
+    min(float(os.getenv("DERIV_OPEN_PROB_CLOSE_PNL_CEIL_USDT", "0.02") or 0.02), 2.0),
+)
+_OPEN_PROB_SHADOW_LOG_EVERY_SEC = max(
+    10.0,
+    min(float(os.getenv("DERIV_OPEN_PROB_SHADOW_LOG_EVERY_SEC", "45") or 45.0), 300.0),
+)
 
 
 def _symbol_from_shortcode(shortcode: str) -> str:
@@ -218,6 +235,8 @@ class DerivOpenContract:
     dep_peak_atr: float = field(default=0.0)
     # DEP shadow telemetry throttle (epoch seconds).
     dep_shadow_last_log_ts: float = field(default=0.0)
+    # Probability-exit shadow telemetry throttle (epoch seconds).
+    prob_shadow_last_log_ts: float = field(default=0.0)
 
 
 class DerivTradeExecutor:
@@ -284,6 +303,13 @@ class DerivTradeExecutor:
         _LOGGER.info(
             "[deriv-trader] disable_spike_timeout=%s (DERIV_DISABLE_SPIKE_TIMEOUT)",
             self._disable_spike_timeout,
+        )
+        _LOGGER.info(
+            "[deriv-trader] open_prob_exit_enabled=%s min_hold=%.0fs threshold=%.2f pnl_ceil=%.2f",
+            _OPEN_PROB_EXIT_ENABLED,
+            _OPEN_PROB_MIN_HOLD_SEC,
+            _OPEN_PROB_CLOSE_THRESHOLD,
+            _OPEN_PROB_CLOSE_PNL_CEIL_USDT,
         )
 
         # ── Restore open contracts from previous session (disk → memory) ─────
@@ -660,6 +686,99 @@ class DerivTradeExecutor:
         if policy == "ACTIVE_DECAY":
             return True, False, reason, details
         return False, False, "", details
+
+    def _open_probability_signal(
+        self,
+        oc: DerivOpenContract,
+        held_s: float,
+        current_profit: float,
+        current_price: float,
+    ) -> tuple[bool, bool, str, dict[str, Any]]:
+        """Evaluate open-trade spike probability and trigger proactive close.
+
+        Returns (should_close, should_shadow_log, reason, details).
+        """
+        if not _OPEN_PROB_EXIT_ENABLED:
+            return False, False, "", {}
+        if self._risk is None or not is_spike_market(oc.symbol):
+            return False, False, "", {}
+        if held_s < _OPEN_PROB_MIN_HOLD_SEC:
+            return False, False, "", {}
+
+        atr_now = self._risk.get_current_atr(oc.symbol)
+        if atr_now is None or atr_now <= 0:
+            return False, False, "", {}
+
+        oc.dep_peak_atr = max(float(oc.dep_peak_atr or 0.0), float(atr_now))
+        peak_atr = float(oc.dep_peak_atr or 0.0)
+        if peak_atr <= 0:
+            return False, False, "", {}
+
+        atr_ratio = float(atr_now) / peak_atr
+        profile = get_asset_profile(oc.symbol)
+        cycle_ticks = int(profile.get("spike_interval_ticks", 0) or 0)
+        ticks_since_spike = self._ticks_since_last_spike(oc.symbol, int(oc.entry_tick_count or 0))
+
+        if cycle_ticks > 0:
+            cycle_progress = min(2.0, ticks_since_spike / max(1.0, float(cycle_ticks)))
+        else:
+            cycle_progress = min(2.0, held_s / 300.0)
+
+        if cycle_progress <= 0.55:
+            time_health = 1.0
+        elif cycle_progress <= 1.05:
+            time_health = max(0.35, 1.0 - ((cycle_progress - 0.55) / 0.50) * 0.65)
+        else:
+            time_health = max(0.0, 0.35 - ((cycle_progress - 1.05) / 0.35) * 0.35)
+
+        atr_health = max(0.0, min((atr_ratio - 0.35) / 0.65, 1.0))
+        pnl_ratio = float(current_profit) / max(float(oc.stake_usdt or 0.0), 0.01)
+        pnl_health = max(0.0, min((pnl_ratio + 0.20) / 0.80, 1.0))
+
+        direction_health = 0.5
+        if oc.entry_price > 0 and current_price > 0:
+            signed_move = (float(current_price) - float(oc.entry_price)) / float(oc.entry_price)
+            if str(oc.side).upper() == "MULTDOWN":
+                signed_move *= -1.0
+            direction_health = max(0.0, min(1.0, 0.5 + signed_move * 250.0))
+
+        probability = (
+            0.50 * atr_health
+            + 0.30 * time_health
+            + 0.15 * pnl_health
+            + 0.05 * direction_health
+        )
+
+        details = {
+            "held_sec": round(float(held_s), 1),
+            "current_pnl": round(float(current_profit), 4),
+            "atr_now": round(float(atr_now), 6),
+            "atr_peak": round(float(peak_atr), 6),
+            "atr_ratio": round(float(atr_ratio), 4),
+            "time_health": round(float(time_health), 4),
+            "pnl_health": round(float(pnl_health), 4),
+            "dir_health": round(float(direction_health), 4),
+            "cycle_progress": round(float(cycle_progress), 4),
+            "ticks_since_spike": int(ticks_since_spike),
+            "probability": round(float(probability), 4),
+            "close_threshold": round(float(_OPEN_PROB_CLOSE_THRESHOLD), 4),
+            "close_pnl_ceil": round(float(_OPEN_PROB_CLOSE_PNL_CEIL_USDT), 4),
+        }
+
+        should_close = (
+            probability <= _OPEN_PROB_CLOSE_THRESHOLD
+            and current_profit <= _OPEN_PROB_CLOSE_PNL_CEIL_USDT
+        )
+        if not should_close:
+            return False, True, "", details
+
+        reason = (
+            "open_prob_exit:"
+            f"prob={probability:.3f}<={_OPEN_PROB_CLOSE_THRESHOLD:.3f}|"
+            f"pnl={current_profit:.4f}<={_OPEN_PROB_CLOSE_PNL_CEIL_USDT:.4f}|"
+            f"atr_ratio={atr_ratio:.3f}|cycle={cycle_progress:.2f}"
+        )
+        return True, False, reason, details
 
     def _should_defer_zero_peak_exit(self, symbol: str, held_s: float) -> tuple[bool, str]:
         """Return True when the trade is close to expected spike timing.
@@ -1114,6 +1233,49 @@ class DerivTradeExecutor:
                     except DerivClientError as exc:
                         _LOGGER.warning(
                             "[DEP-ACTIVE] sell failed for %s: %s",
+                            cid,
+                            exc,
+                        )
+                        self._closing.discard(cid)
+                        oc_check.pending_close_reason = None
+
+                _prob_close, _prob_shadow, _prob_reason, _prob_details = self._open_probability_signal(
+                    oc_check,
+                    _held_sec,
+                    _current_profit,
+                    _current_price,
+                )
+                if _prob_shadow:
+                    _now = time.time()
+                    if (_now - float(oc_check.prob_shadow_last_log_ts or 0.0)) >= _OPEN_PROB_SHADOW_LOG_EVERY_SEC:
+                        oc_check.prob_shadow_last_log_ts = _now
+                        _LOGGER.info(
+                            "[OPEN-PROB-SHADOW] cid=%s sym=%s held=%.1fs pnl=%.4f prob=%.1f%% thr=%.1f%% "
+                            "atr_ratio=%.3f cycle=%.2f",
+                            cid,
+                            oc_check.symbol,
+                            _prob_details.get("held_sec", _held_sec),
+                            _prob_details.get("current_pnl", _current_profit),
+                            100.0 * float(_prob_details.get("probability", 0.0)),
+                            100.0 * float(_prob_details.get("close_threshold", _OPEN_PROB_CLOSE_THRESHOLD)),
+                            float(_prob_details.get("atr_ratio", 0.0)),
+                            float(_prob_details.get("cycle_progress", 0.0)),
+                        )
+
+                if _prob_close and cid not in self._closing:
+                    self._closing.add(cid)
+                    oc_check.pending_close_reason = _prob_reason
+                    _LOGGER.info(
+                        "[OPEN-PROB-ACTIVE] %s closing symbol=%s reason=%s",
+                        cid,
+                        oc_check.symbol,
+                        _prob_reason,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[OPEN-PROB-ACTIVE] sell failed for %s: %s",
                             cid,
                             exc,
                         )
@@ -1879,6 +2041,51 @@ class DerivTradeExecutor:
                     return  # Don't close yet — buffer will decide
             oc_check.last_profit = current_profit
             # ─────────────────────────────────────────────────────────────────
+
+            _held_sec = time.time() - oc_check.opened_at_ts
+            _prob_close, _prob_shadow, _prob_reason, _prob_details = self._open_probability_signal(
+                oc_check,
+                _held_sec,
+                current_profit,
+                current_price,
+            )
+            if _prob_shadow:
+                _now = time.time()
+                if (_now - float(oc_check.prob_shadow_last_log_ts or 0.0)) >= _OPEN_PROB_SHADOW_LOG_EVERY_SEC:
+                    oc_check.prob_shadow_last_log_ts = _now
+                    _LOGGER.info(
+                        "[OPEN-PROB-SHADOW] cid=%s sym=%s held=%.1fs pnl=%.4f prob=%.1f%% thr=%.1f%% "
+                        "atr_ratio=%.3f cycle=%.2f (ws)",
+                        cid,
+                        oc_check.symbol,
+                        _prob_details.get("held_sec", _held_sec),
+                        _prob_details.get("current_pnl", current_profit),
+                        100.0 * float(_prob_details.get("probability", 0.0)),
+                        100.0 * float(_prob_details.get("close_threshold", _OPEN_PROB_CLOSE_THRESHOLD)),
+                        float(_prob_details.get("atr_ratio", 0.0)),
+                        float(_prob_details.get("cycle_progress", 0.0)),
+                    )
+            if _prob_close:
+                if cid in self._closing:
+                    _LOGGER.debug(
+                        "[OPEN-PROB-WS] cid=%s already closing — skipped duplicate sell", cid)
+                    return
+                self._closing.add(cid)
+                oc_check.pending_close_reason = _prob_reason
+                _LOGGER.info(
+                    "[OPEN-PROB-WS] %s closing symbol=%s reason=%s pnl=%.4f",
+                    cid,
+                    oc_check.symbol,
+                    _prob_reason,
+                    current_profit,
+                )
+                try:
+                    await self._client.sell(cid)
+                except DerivClientError as exc:
+                    _LOGGER.warning("[OPEN-PROB-WS] sell failed for %s: %s", cid, exc)
+                    self._closing.discard(cid)
+                    oc_check.pending_close_reason = None
+                return
 
             close_reason   = self._dpm.on_tick(cid, current_profit, current_price)
             # Sync DPM state to oc for dashboard visibility

@@ -59,6 +59,22 @@ from src.utils.telegram_telemetry import TelegramTelemetry
 
 _LOGGER = logging.getLogger("deriv.daemon")
 
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    raw = os.getenv(name, default)
+    val = str(raw).strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"}:
+        val = val[1:-1].strip()
+    return val.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_symbol_set(name: str, default: str = "") -> set[str]:
+    raw = os.getenv(name, default)
+    txt = str(raw or "").strip()
+    if len(txt) >= 2 and txt[0] == txt[-1] and txt[0] in {'"', "'"}:
+        txt = txt[1:-1].strip()
+    return {item.strip().upper() for item in txt.split(",") if item.strip()}
+
 # ─── BOOM/CRASH structural stop-loss / take-profit ───────────────────────────
 # Spike hunter trades use a wider initial SL so the contract survives the
 # Structural SL/TP for BOOM/CRASH spike-hunter trades (stake-relative, not price-%).
@@ -92,6 +108,32 @@ _EDGE_SIZE_MIN_MULT: float = float(os.getenv("DERIV_EDGE_SIZE_MIN_MULT", "0.55")
 _EDGE_SIZE_MAX_MULT: float = float(os.getenv("DERIV_EDGE_SIZE_MAX_MULT", "1.30"))
 _EDGE_SIZE_LOW_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_LOW_CONF", "0.74"))
 _EDGE_SIZE_HIGH_CONF: float = float(os.getenv("DERIV_EDGE_SIZE_HIGH_CONF", "0.90"))
+
+# ─── Streak-aware fixed-base sizing (operator request: base=2, x1.3/x0.8) ───
+_STREAK_SIZE_ENABLED: bool = _env_flag("DERIV_STREAK_SIZE_ENABLED", "true")
+_STREAK_SIZE_FORCE_BASE: bool = _env_flag("DERIV_STREAK_SIZE_FORCE_BASE", "true")
+_STREAK_SIZE_BASE_STAKE_USDT: float = float(os.getenv("DERIV_STREAK_BASE_STAKE_USDT", "2.0"))
+_STREAK_SIZE_GOOD_MULT: float = float(os.getenv("DERIV_STREAK_GOOD_MULT", "1.30"))
+_STREAK_SIZE_BAD_MULT: float = float(os.getenv("DERIV_STREAK_BAD_MULT", "0.80"))
+_STREAK_SIZE_GOOD_PNL_WINDOW: float = float(os.getenv("DERIV_STREAK_GOOD_PNL_WINDOW", "0.20"))
+_STREAK_SIZE_BAD_PNL_WINDOW: float = float(os.getenv("DERIV_STREAK_BAD_PNL_WINDOW", "-0.20"))
+_STREAK_SIZE_BAD_GUARD_BONUS: float = float(os.getenv("DERIV_STREAK_BAD_GUARD_BONUS", "0.50"))
+
+# ─── AI-veto recovery probe ───────────────────────────────────────────────
+_AI_VETO_RECOVERY_PROBE_ENABLED: bool = _env_flag("DERIV_AI_VETO_RECOVERY_PROBE_ENABLED", "true")
+_AI_VETO_RECOVERY_MARGIN_MIN: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MARGIN_MIN", "1.00"))
+_AI_VETO_RECOVERY_MIN_CONF: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_CONF", "0.25"))
+_AI_VETO_RECOVERY_MIN_MOMENTUM: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_MOMENTUM", "0.85"))
+_AI_VETO_RECOVERY_MIN_ATR_SCORE: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_ATR_SCORE", "0.90"))
+_AI_VETO_RECOVERY_MAX_GUARD_BONUS: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MAX_GUARD_BONUS", "0.75"))
+_AI_VETO_RECOVERY_MIN_PNL_WINDOW: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_PNL_WINDOW", "-0.60"))
+
+# ─── Hard symbol disable list ─────────────────────────────────────────────
+# Runtime-safe kill switch. Defaults align with current operator request.
+_FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
+    "DERIV_FORCE_DISABLED_SYMBOLS",
+    "BOOM1000,CRASH1000",
+)
 
 # ─── Dynamic score-gate shaping (sniper mode) ──────────────────────────────
 # Risk-engine and AI sidecar must speak the same score language:
@@ -1075,9 +1117,54 @@ class DerivDaemon:
         - scale down aggressively when edge is uncertain,
         - scale up only when score/AI/regime confirm robust edge.
         """
-        base_stake = float(getattr(snap, "suggested_stake_usdt", 0.0) or 0.0)
+        _engine_stake = float(getattr(snap, "suggested_stake_usdt", 0.0) or 0.0)
+        base_stake = (
+            float(_STREAK_SIZE_BASE_STAKE_USDT)
+            if _STREAK_SIZE_FORCE_BASE
+            else _engine_stake
+        )
+        if base_stake <= 0:
+            base_stake = _engine_stake
         if base_stake <= 0:
             return base_stake
+
+        sb = getattr(snap, "score_breakdown", {}) or {}
+        if _STREAK_SIZE_ENABLED:
+            _sym_pnl_window = 0.0
+            _sym_guard_bonus = 0.0
+            try:
+                _sym_pnl_window = float(self._risk.symbol_pnl_window(symbol))
+                _sym_guard_bonus = float(self._risk.symbol_score_floor_bonus(symbol))
+            except Exception:  # noqa: BLE001
+                pass
+
+            _streak_mult = 1.0
+            _streak_state = "neutral"
+            if (
+                _sym_guard_bonus >= _STREAK_SIZE_BAD_GUARD_BONUS
+                or _sym_pnl_window <= _STREAK_SIZE_BAD_PNL_WINDOW
+            ):
+                _streak_mult = _STREAK_SIZE_BAD_MULT
+                _streak_state = "bad"
+            elif (
+                _sym_guard_bonus <= 0.0
+                and _sym_pnl_window >= _STREAK_SIZE_GOOD_PNL_WINDOW
+            ):
+                _streak_mult = _STREAK_SIZE_GOOD_MULT
+                _streak_state = "good"
+
+            adjusted = round(max(1.0, base_stake * _streak_mult), 2)
+            if profile_stake_cap > 0:
+                adjusted = min(adjusted, round(profile_stake_cap, 2))
+
+            sb["streak_size_enabled"] = True
+            sb["streak_size_base_stake"] = round(base_stake, 2)
+            sb["streak_size_mult"] = round(float(_streak_mult), 4)
+            sb["streak_size_state"] = _streak_state
+            sb["streak_size_symbol_pnl_window"] = round(float(_sym_pnl_window), 4)
+            sb["streak_size_symbol_guard_bonus"] = round(float(_sym_guard_bonus), 4)
+            sb["streak_size_adjusted_stake"] = round(float(adjusted), 2)
+            return adjusted
 
         mult = 1.0
         reasons: list[str] = []
@@ -1121,7 +1208,6 @@ class DerivDaemon:
             mult *= 0.92
             reasons.append("regime_fast")
 
-        sb = getattr(snap, "score_breakdown", {}) or {}
         if bool(sb.get("mean_rev_mode")):
             mult *= 0.88
             reasons.append("mean_rev_risk")
@@ -1151,11 +1237,67 @@ class DerivDaemon:
 
         return adjusted
 
+    def _allow_ai_veto_recovery_probe(
+        self,
+        symbol: str,
+        snap: Any,
+        analysis: Any,
+    ) -> tuple[bool, str]:
+        """Allow a controlled probe when AI vetoes but math quality is strong."""
+        if not _AI_VETO_RECOVERY_PROBE_ENABLED:
+            return False, "probe_disabled"
+        if analysis is None or bool(getattr(analysis, "ai_skipped", False)):
+            return False, "no_ai_veto_context"
+        if not is_spike_market(symbol):
+            return False, "non_spike_symbol"
+
+        try:
+            ai_conf = float(getattr(analysis, "ai_confidence", 0.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            ai_conf = 0.0
+
+        sb = getattr(snap, "score_breakdown", {}) or {}
+        score_margin = float(getattr(snap, "score", 0.0) or 0.0) - float(
+            getattr(snap, "effective_min_score", 0.0) or 0.0
+        )
+        momentum_score = float(sb.get("momentum") or 0.0)
+        atr_score = float(sb.get("atr") or 0.0)
+        guard_bonus = float(self._risk.symbol_score_floor_bonus(symbol))
+        pnl_window = float(self._risk.symbol_pnl_window(symbol))
+
+        if ai_conf < _AI_VETO_RECOVERY_MIN_CONF:
+            return False, f"ai_conf_low:{ai_conf:.2f}"
+        if score_margin < _AI_VETO_RECOVERY_MARGIN_MIN:
+            return False, f"score_margin_low:{score_margin:.2f}"
+        if momentum_score < _AI_VETO_RECOVERY_MIN_MOMENTUM:
+            return False, f"momentum_low:{momentum_score:.2f}"
+        if atr_score < _AI_VETO_RECOVERY_MIN_ATR_SCORE:
+            return False, f"atr_score_low:{atr_score:.2f}"
+        if guard_bonus > _AI_VETO_RECOVERY_MAX_GUARD_BONUS:
+            return False, f"guard_bonus_high:{guard_bonus:.2f}"
+        if pnl_window < _AI_VETO_RECOVERY_MIN_PNL_WINDOW:
+            return False, f"pnl_window_low:{pnl_window:.2f}"
+
+        return (
+            True,
+            "recovery_probe"
+            f":margin={score_margin:.2f}"
+            f"|conf={ai_conf:.2f}"
+            f"|mom={momentum_score:.2f}"
+            f"|atr={atr_score:.2f}"
+            f"|guard={guard_bonus:.2f}"
+            f"|pnlw={pnl_window:.2f}",
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     async def run(self) -> None:
         _LOGGER.info(
             "[deriv-daemon] starting | symbols=%s dry_run=%s bankroll=%.2f",
             self._settings.symbols, self._settings.dry_run, self._settings.bankroll_usdt,
+        )
+        _LOGGER.info(
+            "[deriv-daemon] forced_disabled_symbols=%s",
+            sorted(_FORCED_DISABLED_SYMBOLS),
         )
 
         # One-shot history reset: if DERIV_CLEAR_HISTORY_ON_START=true, truncate
@@ -1443,6 +1585,10 @@ class DerivDaemon:
         _dyn_cfg = self.get_dynamic_config(tick.symbol, _early_profile)
         _dyn_active = bool(_dyn_cfg.get("is_active", False))
         _dyn_source = str(_dyn_cfg.get("source") or "")
+        if tick.symbol.upper() in _FORCED_DISABLED_SYMBOLS:
+            _LOGGER.info("[PIPELINE] SYMBOL_FORCED_DISABLED %s — skipping", tick.symbol)
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_forced_disabled")
+            return
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
@@ -2394,37 +2540,56 @@ class DerivDaemon:
             analysis = None
 
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
-            reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
-            self._log_entry_block(
-                tick.symbol, "AI_VETO",
-                score=snap.score, effective_min_score=snap.effective_min_score,
-                side=snap.side, regime=snap.regime,
-                hurst=analysis.hurst if analysis else _eval_hurst,
-                ai_veto=True, ai_confidence=analysis.ai_confidence,
-                ai_reason=analysis.ai_reason,
-                score_breakdown=snap.score_breakdown,
+            _probe_ok, _probe_reason = self._allow_ai_veto_recovery_probe(
+                tick.symbol,
+                snap,
+                analysis,
             )
-            _LOGGER.warning(
-                "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
-                tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
+            if not _probe_ok:
+                reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+                self._log_entry_block(
+                    tick.symbol, "AI_VETO",
+                    score=snap.score, effective_min_score=snap.effective_min_score,
+                    side=snap.side, regime=snap.regime,
+                    hurst=analysis.hurst if analysis else _eval_hurst,
+                    ai_veto=True, ai_confidence=analysis.ai_confidence,
+                    ai_reason=analysis.ai_reason,
+                    score_breakdown=snap.score_breakdown,
+                )
+                _LOGGER.warning(
+                    "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
+                    tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=reason,
+                    extra={
+                        **decision_extra,
+                        "hurst": analysis.hurst,
+                        "autocorr": analysis.autocorr_lag1,
+                        "vol_regime": analysis.vol_regime,
+                        "ai_model": analysis.ai_model,
+                    },
+                )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason=f"AI_VETO: {analysis.ai_reason}",
+                    score=snap.score,
+                )
+                return
+
+            snap.score_breakdown["ai_veto_recovery_probe"] = True
+            snap.score_breakdown["ai_veto_recovery_reason"] = _probe_reason
+            snap.score_breakdown["ai_veto_reason"] = str(analysis.ai_reason or "")
+            snap.score_breakdown["ai_veto_confidence"] = round(
+                float(analysis.ai_confidence or 0.0),
+                4,
             )
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=snap.side,
-                score=snap.score, reason=reason,
-                extra={
-                    **decision_extra,
-                    "hurst": analysis.hurst,
-                    "autocorr": analysis.autocorr_lag1,
-                    "vol_regime": analysis.vol_regime,
-                    "ai_model": analysis.ai_model,
-                },
+            _LOGGER.info(
+                "[AI-RECOVERY-PROBE] %s bypassing AI veto (%s)",
+                tick.symbol,
+                _probe_reason,
             )
-            self._spike_enrich(
-                tick.symbol, bot_entered=False,
-                block_reason=f"AI_VETO: {analysis.ai_reason}",
-                score=snap.score,
-            )
-            return
 
         # ── Build order payload (AI-approved path) ─────────────────────────
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))
