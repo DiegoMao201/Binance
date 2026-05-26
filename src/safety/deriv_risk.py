@@ -470,6 +470,10 @@ class DerivRiskManager:
     def __init__(self, settings: DerivSettings) -> None:
         self._settings = settings
         self._loss_streak = 0
+        # PATCH 2026-05-25: consecutive_wins enables auto-unlock when the bot
+        # recovers (any winning trade after being locked clears the lockout
+        # immediately; N consecutive wins also forces a hard reset).
+        self._consecutive_wins = 0
         self._last_trade_ts = 0.0
         # Per-symbol trade timestamp for independent cooldown_bonus tracking.
         # Prevents R_50/R_75 active trading from stealing BOOM/CRASH cooldown bonus.
@@ -2243,14 +2247,25 @@ class DerivRiskManager:
         )
         win_significant_threshold = max(0.0, sl_typical * 0.30)
 
+        # PATCH 2026-05-25: auto-unlock on first win after lockout to break the
+        # 12 h purgatory cycle. We trust the loss-streak engine as the primary
+        # capital safety; if the bot recovers a trade, the lockout is no longer
+        # needed. Daily-DD lockouts are separate and remain in force.
+        _was_locked = self._read_lockout().locked
+        _is_loss_streak_lockout = _was_locked and self._loss_streak > 0
+
         if realized_pnl_usdt > win_significant_threshold:
             if self._loss_streak > 0:
-                _LOGGER.info(
+                _LOGGER.warning(
                     "[risk] significant win pnl=%.3f > thr=%.3f — streak reset (was %d)",
                     realized_pnl_usdt, win_significant_threshold, self._loss_streak,
                 )
             self._loss_streak = 0
+            self._consecutive_wins += 1
+            if _is_loss_streak_lockout:
+                self._clear_lockout("win_after_lockout")
         elif realized_pnl_usdt < 0:
+            self._consecutive_wins = 0
             self._loss_streak += 1
             cap = self._settings.loss_streak_lockout
             if cap > 0 and self._loss_streak >= cap:
@@ -2258,11 +2273,18 @@ class DerivRiskManager:
                     f"{self._loss_streak} consecutive losses"
                 )
         else:
-            # 0 ≤ pnl ≤ threshold — micro-win, preserve counter
+            # 0 ≤ pnl ≤ threshold — micro-win
+            # Counts towards consecutive_wins so 2 micro-wins also unlock.
+            self._consecutive_wins += 1
             _LOGGER.info(
-                "[risk] micro_win pnl=%.3f ≤ thr=%.3f — streak preserved (%d)",
+                "[risk] micro_win pnl=%.3f ≤ thr=%.3f — streak preserved (%d) wins=%d",
                 realized_pnl_usdt, win_significant_threshold, self._loss_streak,
+                self._consecutive_wins,
             )
+            # Two consecutive wins (of any kind) also clear a stuck lockout.
+            if _is_loss_streak_lockout and self._consecutive_wins >= 2:
+                self._loss_streak = 0
+                self._clear_lockout("two_consecutive_wins")
 
         # ── State serialization (persistence across restarts) ─────────────
         try:
@@ -2646,6 +2668,27 @@ class DerivRiskManager:
         _LOGGER.error(
             "[deriv-risk] LOCKOUT engaged for %.1f h | reason=%s",
             self._settings.lockout_hours, reason,
+        )
+
+    def _clear_lockout(self, reason: str) -> None:
+        """Force-clear an active lockout (auto-unlock after winning trade).
+
+        Daily-DD lockouts are NOT cleared here \u2014 only loss-streak lockouts.
+        We detect daily-DD by checking the persisted reason; if it starts with
+        'daily_dd' we keep the lockout intact (capital protection wins).
+        """
+        existing = self._read_lockout()
+        if existing.locked and existing.reason.startswith("daily_dd"):
+            _LOGGER.warning(
+                "[LOCKOUT_STATUS] skip auto-clear: daily_dd lockout retained \u2014 trigger=%s",
+                reason,
+            )
+            return
+        empty = _LockoutState.empty()
+        self._write_lockout(empty)
+        _LOGGER.warning(
+            "[LOCKOUT_STATUS] AUTO-UNLOCK trigger=%s previous_reason=%r consecutive_wins=%d",
+            reason, existing.reason, self._consecutive_wins,
         )
 
     def _read_lockout(self) -> _LockoutState:

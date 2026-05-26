@@ -629,6 +629,49 @@ class DerivDaemon:
         if _strong_enough:
             return True, ""
 
+        # ── Starvation override (2026-05-25) ──────────────────────────────
+        # If this symbol has not entered a trade in N hours, allow ONE probe
+        # entry so the bot can learn whether the gate is too strict. Capital
+        # safety relies on stake caps and daily-DD lockout downstream.
+        _starv_hours = float(os.getenv("DERIV_STARVATION_OVERRIDE_HOURS", "6") or 0.0)
+        if _starv_hours > 0 and not _dir_conflict:
+            _last_fire = self._cooldown._last.get(symbol)
+            if _last_fire is None:
+                _starv_ok = True
+                _starv_ticks = float("inf")
+            else:
+                _now_tick = self._risk.get_tick_count(symbol)
+                _starv_ticks = max(0.0, float(_now_tick - _last_fire))
+                _starv_threshold = _starv_hours * 3600.0  # ~1 tick/sec
+                _starv_ok = _starv_ticks >= _starv_threshold
+            if _starv_ok:
+                _LOGGER.warning(
+                    "[POST_SPIKE_STARVATION_OVERRIDE] %s allowed probe entry | "
+                    "ticks_since_last_fire=%s signals=%d/%d margin=%.2f mom=%.2f "
+                    "vel=%.2f atr=%.2f hd=%.2f score=%.2f",
+                    symbol,
+                    f"{_starv_ticks:.0f}" if _starv_ticks != float("inf") else "never",
+                    len(_signals), _required_signals,
+                    _score_margin, _momentum, _velocity_score, _atr_score, _hd_bonus,
+                    float(snap.score or 0.0),
+                )
+                _sb["post_spike_strength_starvation_override"] = True
+                return True, ""
+
+        # ── Rejection telemetry (consumed by AI orchestrator) ─────────────
+        # Structured single-line JSON-like log so the orchestrator can grep and
+        # learn which gate thresholds are too tight for current market regime.
+        _LOGGER.warning(
+            "[POST_SPIKE_REJECT_TELEMETRY] symbol=%s elapsed=%.0ft window=%.0ft "
+            "signals=%d/%d score=%.2f margin=%.2f momentum=%.2f velocity=%.2f "
+            "atr=%.2f hd=%.2f dir_conflict=%s side=%s vel_dir=%s regime=%s",
+            symbol, _elapsed, _strength_window,
+            len(_signals), _required_signals,
+            float(snap.score or 0.0), _score_margin, _momentum, _velocity_score,
+            _atr_score, _hd_bonus, _dir_conflict, snap.side, _velocity_dir,
+            snap.regime,
+        )
+
         _reason = (
             "post_spike_strength_veto:"
             f"{_elapsed:.0f}t<{_strength_window:.0f}t "
