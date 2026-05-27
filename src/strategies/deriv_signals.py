@@ -533,36 +533,36 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 18,
-        # Prueba4-restart: zero_peak=62% with bc_escape_env entries — require FVG like CRASH symbols.
-        # fvg_mitigated = price returned to bullish FVG zone = proper accumulation entry.
-        # max_hold 600→480: reduce damage when timing is off.
-        # spike_min_post 300→270: off-by-one fix (7 spikes blocked at exactly 299t<300t).
-        "max_hold_seconds": 480,
+        # 2026-05-27 quality-overhaul:
+        # - max_hold 480→820s: cycle≈900 ticks ⇒ ~750-820s is the natural spike window.
+        # - min_score 6.00→7.20: prefer high-conviction entries (drops noise ~50%).
+        # - cooldown 120→240s: avoid burst-entering on weak signals.
+        # - require fvg_mitigated (was detected): only enter on confirmed accumulation.
+        "max_hold_seconds": 820,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,
+        "min_score": 7.20,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 120,            # Prueba4-restart: 240→120
+        "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
-        "geo_entry_max": 0.35,          # Prueba4-restart: 0.50→0.35 — tighter geo reduces wrong-phase entries
-        "stake_max_usdt": 1.50,         # Prueba4-restart: 2.00→1.50 — conservative until WR improves
+        "geo_entry_max": 0.30,
+        "stake_max_usdt": 1.50,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_detected",   # Prueba4-stage4: widen capture window; keep bc_escape_env blocked
-        "block_bc_escape_env": True,    # Prueba4-restart: 62% zero_peak on bc_escape_env — hard veto
+        "fvg_tier_minimo": "fvg_mitigated",
+        "block_bc_escape_env": True,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # off-by-one fix: 7 spikes blocked at 299t<300t → lowered to 270
         "spike_min_post_sec": 270,
     },
     "CRASH900": {
@@ -570,42 +570,35 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        # Muestra02: DPM was cutting at 351s (DPM max_duration_seg=350 firing before profile 500s).
-        # 3 missed spikes arrived at 526-576s from entry (175-225s after 351s close).
-        # Extending max_hold to 600s + DPM to 630s → captures those missed spikes.
-        "max_hold_seconds": 600,
+        # 2026-05-27 quality-overhaul:
+        # - min_score 4.5→6.80 (profile-level true gate, not just risk-engine).
+        # - cooldown unified at 240s.
+        # - max_hold 600→820s to give late CRASH900 spikes (526-576s observed) room.
+        "max_hold_seconds": 820,
         "ema_distance_pct": 0.04,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 4.5,              # Phase 32: 6.0→4.5 — align profile gate below effective_min=3.50
+        "min_score": 6.80,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 300,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
-        # Muestra05+: CRASH900 estabilizado con hold extendido (841-843s observed).
-        # Restore canonical sizing to recover symbol contribution when setup is valid.
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 2.00,
+        "stake_max_usdt": 1.50,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_detected",
-        # Prueba03: ALL 8 CRASH900 trades were bc_escape_env → 25% WR, -$0.49 total.
-        # Confirmed: no FVG structures forming for CRASH900. bc_escape_env = timeout loop.
-        "block_bc_escape_env": True,    # Prueba04: hard veto — wait for real FVG structure
-        "cooldown_sec": 120,            # Prueba4-restart: 300→120
-        "cooldown_sec": 120,            # Prueba4-restart: 300→120
+        "fvg_tier_minimo": "fvg_mitigated",
+        "block_bc_escape_env": True,
+        "cooldown_sec": 240,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Stage 4: avoid CRASH900 late-chase entries (~135s after spike in live sample).
-        # cycle=900s, hold=600s → min_post=300 keeps entries in middle/late accumulation.
         "spike_min_post_sec": 300,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
@@ -614,36 +607,37 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        # Prueba4-restart: zero_peak=60% with bc_escape_env entries — block bc_escape_env.
-        # fvg_mitigated: price back to bullish FVG zone = confirmed accumulation entry.
-        # spike_min_post 250→200: earlier window once FVG is valid.
-        # max_hold 350→280: limit damage on bad-timing entries.
-        "max_hold_seconds": 280,
+        # 2026-05-27 quality-overhaul:
+        # - max_hold extended 280→600s: spike-cycle ≈600 ticks; 280s was killing
+        #   trades right before the spike (root cause of "sale antes del spike").
+        # - min_score 6.00→7.20: less garbage entries, ~50% fewer signals expected.
+        # - cooldown 120→240s: prevents over-entering on noise (target 100-200 trades/day).
+        # - bc_escape_env still hard-vetoed (was 60% zero_peak source).
+        "max_hold_seconds": 600,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,
+        "min_score": 7.20,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 120,            # Prueba4-restart: 240→120
+        "cooldown_sec": 240,
         "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
-        "geo_entry_max": 0.35,          # Prueba4-restart: 0.50→0.35 — tighter geo vs wrong-phase entries
-        "stake_max_usdt": 1.50,         # Prueba4-restart: 2.00→1.50 — conservative until WR improves
+        "geo_entry_max": 0.30,          # tighter geo for higher-quality entries
+        "stake_max_usdt": 1.50,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_mitigated",  # Tighten quality: require mitigated FVG to cut timeout loops
-        "block_bc_escape_env": True,    # Prueba4-restart: 60% zero_peak on bc_escape_env — hard veto
+        "fvg_tier_minimo": "fvg_mitigated",
+        "block_bc_escape_env": True,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Prueba4-restart: 250→200 — earlier entry once FVG structure is active
         "spike_min_post_sec": 200,
     },
     "CRASH600": {
@@ -651,36 +645,32 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 15,
-        "max_hold_seconds": 600,
-        "ema_distance_pct": 600,
+        # 2026-05-27 quality-overhaul: hold extended to 620s, score raised to 7.20,
+        # cooldown raised to 240s. Bug fixed: duplicate cooldown_sec keys + bad
+        # ema_distance_pct typo (600). Single source of truth per field now.
+        "max_hold_seconds": 620,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.00,
+        "min_score": 7.20,
         "min_hurst": 0.0,
         "atr_min": 0.0,
-        "cooldown_sec": 120,            # Prueba4-restart: 300→120,
+        "sl_multiplier": 3.0,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "hurst_min_spike": 0.43,        # T5: aligned with CRASH1000 (was 0.42)
-        "geo_entry_min": -999,           # no upper floor — use geo_max only
-        # FIX-5: geo_entry_max relaxed -0.20→0.30 (aligned with CRASH500/900/1000)
-        # and disabled removed — 178 spikes wasted in 7.5h session with 0 entries.
+        "hurst_min_spike": 0.43,
+        "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 2.00,
+        "stake_max_usdt": 1.50,
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        # Prueba03: bc_escape_env 17% WR (6t, all timeout) vs fvg_mitigated 75% WR (4t).
-        # fvg_tier_minimo alone doesn't block bc_escape_env (different code branch).
-        # block_bc_escape_env=True is the correct enforcement.
         "fvg_tier_minimo": "fvg_mitigated",
-        "block_bc_escape_env": True,    # Prueba04: hard veto — bc_escape_env has 0 edge for CRASH600
-        "cooldown_sec": 120,            # Prueba4-restart: 300→120
-        "cooldown_sec": 120,            # Prueba4-restart: 300→120
+        "block_bc_escape_env": True,
+        "cooldown_sec": 240,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
         "spike_min_post_sec": 110,

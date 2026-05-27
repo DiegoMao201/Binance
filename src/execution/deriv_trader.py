@@ -46,8 +46,12 @@ def _env_flag(name: str, default: str = "false") -> bool:
     return val.lower() in {"1", "true", "yes", "on"}
 
 
-_DISABLE_SPIKE_TIMEOUT = _env_flag("DERIV_DISABLE_SPIKE_TIMEOUT", "false")
-_OPEN_PROB_EXIT_ENABLED = _env_flag("DERIV_OPEN_PROB_EXIT_ENABLED", "true")
+# 2026-05-27 overhaul "quality>quantity": all early-exit paths are now OFF by default.
+# Premature closes (spike_timeout, zero_peak_exit, open_prob_exit, DEP-ACTIVE) were
+# cutting BOOM/CRASH positions seconds before the spike arrived. Only the broker
+# native SL/TP and the DPM trailing ratchet remain in charge of exiting trades.
+_DISABLE_SPIKE_TIMEOUT = _env_flag("DERIV_DISABLE_SPIKE_TIMEOUT", "true")
+_OPEN_PROB_EXIT_ENABLED = _env_flag("DERIV_OPEN_PROB_EXIT_ENABLED", "false")
 _OPEN_PROB_MIN_HOLD_SEC = max(
     30.0,
     min(float(os.getenv("DERIV_OPEN_PROB_MIN_HOLD_SEC", "150") or 150.0), 1200.0),
