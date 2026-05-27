@@ -308,6 +308,11 @@ class DerivDaemon:
         # entra (o no entra) el bot. Se serializa junto al status cada 10s.
         self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
         self._last_decisions: list[dict[str, Any]] = []
+        self._dynamic_inactive_last_emit_ts: dict[str, float] = {}
+        self._dynamic_inactive_decision_interval_sec = max(
+            10,
+            int(os.getenv("DERIV_DYNAMIC_INACTIVE_DECISION_INTERVAL_SEC", "45") or 45),
+        )
         self._counters: dict[str, int] = {
             "ticks_total": 0,
             "decisions_total": 0,
@@ -1607,6 +1612,30 @@ class DerivDaemon:
             return
         if _dyn_source == "dynamic_db" and not _dyn_active:
             _LOGGER.info("[PIPELINE] SYMBOL_DYNAMIC_INACTIVE %s — skipping", tick.symbol)
+            _inactive_now = time.time()
+            _inactive_last = float(self._dynamic_inactive_last_emit_ts.get(tick.symbol) or 0.0)
+            if (_inactive_now - _inactive_last) >= float(self._dynamic_inactive_decision_interval_sec):
+                self._dynamic_inactive_last_emit_ts[tick.symbol] = _inactive_now
+                _dyn_score_min = float(_dyn_cfg.get("score_min_override") or 0.0)
+                _dyn_regime = str(_dyn_cfg.get("market_regime") or "NORMAL")
+                _dyn_spf = int(_dyn_cfg.get("spike_pre_filter_target") or 0)
+                self._record_decision(
+                    symbol=tick.symbol,
+                    allowed=False,
+                    side=None,
+                    score=_dyn_score_min,
+                    reason=(
+                        f"DYNAMIC_INACTIVE: regime={_dyn_regime} "
+                        f"score_min={_dyn_score_min:.2f} spf={_dyn_spf}"
+                    ),
+                    extra={
+                        "dynamic_inactive": True,
+                        "dynamic_cfg_source": _dyn_source,
+                        "dynamic_cfg_regime": _dyn_regime,
+                        "dynamic_cfg_score_min": round(_dyn_score_min, 3),
+                        "dynamic_cfg_spike_pre_filter": _dyn_spf,
+                    },
+                )
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="dynamic_symbol_inactive")
             return
 

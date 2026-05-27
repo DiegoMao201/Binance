@@ -304,15 +304,91 @@ ACTIVITY_REENABLE_MIN_INACTIVE_SEC = max(
 )
 ACTIVITY_REENABLE_REGIMES = {
     val
-    for val in _parse_symbol_set(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_REGIMES", "FAST,NORMAL"))
+    for val in _parse_symbol_set(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_REGIMES", "FAST,NORMAL,SLOW"))
     if val in {"FAST", "NORMAL", "SLOW"}
 }
 if not ACTIVITY_REENABLE_REGIMES:
-    ACTIVITY_REENABLE_REGIMES = {"FAST", "NORMAL"}
+    ACTIVITY_REENABLE_REGIMES = {"FAST", "NORMAL", "SLOW"}
 ACTIVITY_REENABLE_BLOCK_ON_GUARD = os.getenv(
     "DYNAMIC_AI_ACTIVITY_REENABLE_BLOCK_ON_GUARD",
-    "true",
+    "false",
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+ACTIVITY_REENABLE_MIN_SPIKE_RATE_1H = max(
+    0.20,
+    float(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_SPIKE_RATE_1H", "2.00") or 2.00),
+)
+ACTIVITY_REENABLE_MIN_SPIKES_3H = max(
+    1,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_SPIKES_3H", "6") or 6),
+)
+ACTIVITY_REENABLE_MIN_SPIKE_RATE_RATIO_1H_3H = max(
+    0.10,
+    min(
+        float(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_SPIKE_RATE_RATIO_1H_3H", "0.80") or 0.80),
+        2.50,
+    ),
+)
+
+ACTIVITY_DISABLE_MAX_SPIKE_RATE_1H = max(
+    0.10,
+    float(os.getenv("DYNAMIC_AI_ACTIVITY_DISABLE_MAX_SPIKE_RATE_1H", "1.00") or 1.00),
+)
+ACTIVITY_DISABLE_MAX_SPIKES_3H = max(
+    0,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_DISABLE_MAX_SPIKES_3H", "3") or 3),
+)
+ACTIVITY_DISABLE_REQUIRES_GUARD = os.getenv(
+    "DYNAMIC_AI_ACTIVITY_DISABLE_REQUIRES_GUARD",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+
+SPIKE_CADENCE_FAST_MIN_PER_HOUR = max(
+    0.20,
+    float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_FAST_MIN_PER_HOUR", "3.50") or 3.50),
+)
+SPIKE_CADENCE_SLOW_MAX_PER_HOUR = max(
+    0.05,
+    min(
+        float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SLOW_MAX_PER_HOUR", "1.60") or 1.60),
+        SPIKE_CADENCE_FAST_MIN_PER_HOUR - 0.05,
+    ),
+)
+SPIKE_CADENCE_ACCEL_MIN_RATIO_1H_3H = max(
+    0.10,
+    min(
+        float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_ACCEL_MIN_RATIO_1H_3H", "1.10") or 1.10),
+        3.00,
+    ),
+)
+SPIKE_CADENCE_DECEL_MAX_RATIO_1H_3H = max(
+    0.10,
+    min(
+        float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_DECEL_MAX_RATIO_1H_3H", "0.70") or 0.70),
+        1.50,
+    ),
+)
+SPIKE_CADENCE_SCORE_RELAX_FAST = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCORE_RELAX_FAST", "0.25") or 0.25), 0.80),
+)
+SPIKE_CADENCE_SCORE_RELAX_FAST_MAX = max(
+    SPIKE_CADENCE_SCORE_RELAX_FAST,
+    min(
+        float(
+            os.getenv(
+                "DYNAMIC_AI_SPIKE_CADENCE_SCORE_RELAX_FAST_MAX",
+                str(SPIKE_CADENCE_SCORE_RELAX_FAST + 0.15),
+            )
+            or (SPIKE_CADENCE_SCORE_RELAX_FAST + 0.15)
+        ),
+        1.00,
+    ),
+)
+SPIKE_CADENCE_SCORE_HARDEN_SLOW = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCORE_HARDEN_SLOW", "0.30") or 0.30), 1.00),
+)
 
 ACTIVITY_POLICY_MEMORY: dict[str, dict[str, Any]] = {}
 
@@ -805,6 +881,8 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
     recent_min_ts = now_ts - recent_window_sec
     micro_window_sec = min(lookback_sec, TELEMETRY_MICRO_WINDOW_SEC)
     micro_min_ts = now_ts - micro_window_sec
+    one_hour_min_ts = now_ts - 3600
+    three_hours_min_ts = now_ts - (3 * 3600)
 
     spikes_by: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
     for s in spikes:
@@ -861,6 +939,12 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
         recent_micro = [(t, s) for t, s in arr if t >= micro_min_ts]
         entered_micro = [s for _, s in recent_micro if bool(s.get("bot_entered"))]
         blocked_micro = [s for _, s in recent_micro if not bool(s.get("bot_entered"))]
+        recent_1h = [(t, s) for t, s in arr if t >= one_hour_min_ts]
+        entered_1h = [s for _, s in recent_1h if bool(s.get("bot_entered"))]
+        blocked_1h = [s for _, s in recent_1h if not bool(s.get("bot_entered"))]
+        recent_3h = [(t, s) for t, s in arr if t >= three_hours_min_ts]
+        entered_3h = [s for _, s in recent_3h if bool(s.get("bot_entered"))]
+        blocked_3h = [s for _, s in recent_3h if not bool(s.get("bot_entered"))]
 
         # Pace split: last 5 min vs previous 10 min
         split_5m = now_ts - 300
@@ -874,6 +958,35 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             regime = "FAST"
         elif rate_prev10 > 0 and rate_last5 <= rate_prev10 * 0.75:
             regime = "SLOW"
+
+        spike_rate_1h = float(len(recent_1h))
+        spike_rate_3h = float(len(recent_3h)) / 3.0
+        spike_rate_6h = (
+            float(len(recent_macro)) / max(float(lookback_sec) / 3600.0, 1.0)
+        )
+        spike_rate_ratio_1h_vs_3h = None
+        if spike_rate_3h > 0.0:
+            spike_rate_ratio_1h_vs_3h = spike_rate_1h / spike_rate_3h
+
+        spike_cadence_regime = "NORMAL"
+        cadence_fast = (
+            spike_rate_1h >= SPIKE_CADENCE_FAST_MIN_PER_HOUR
+            and (
+                (isinstance(spike_rate_ratio_1h_vs_3h, float) and spike_rate_ratio_1h_vs_3h >= SPIKE_CADENCE_ACCEL_MIN_RATIO_1H_3H)
+                or spike_rate_3h >= (SPIKE_CADENCE_FAST_MIN_PER_HOUR * 0.80)
+            )
+        )
+        cadence_slow = (
+            spike_rate_1h <= SPIKE_CADENCE_SLOW_MAX_PER_HOUR
+            and (
+                spike_rate_ratio_1h_vs_3h is None
+                or spike_rate_ratio_1h_vs_3h <= SPIKE_CADENCE_DECEL_MAX_RATIO_1H_3H
+            )
+        )
+        if cadence_fast:
+            spike_cadence_regime = "FAST"
+        elif cadence_slow:
+            spike_cadence_regime = "SLOW"
 
         # Entry lag from closed contracts vs previous spike
         lags: list[float] = []
@@ -1060,10 +1173,23 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "entered_spikes_15m": len(entered_micro),
             "blocked_spikes_15m": len(blocked_micro),
             "entry_rate_pct": (len(entered_micro) / len(recent_micro) * 100.0) if recent_micro else 0.0,
+            "spikes_1h": len(recent_1h),
+            "entered_spikes_1h": len(entered_1h),
+            "blocked_spikes_1h": len(blocked_1h),
+            "entry_rate_pct_1h": (len(entered_1h) / len(recent_1h) * 100.0) if recent_1h else 0.0,
+            "spikes_3h": len(recent_3h),
+            "entered_spikes_3h": len(entered_3h),
+            "blocked_spikes_3h": len(blocked_3h),
+            "entry_rate_pct_3h": (len(entered_3h) / len(recent_3h) * 100.0) if recent_3h else 0.0,
             "spikes_6h": len(recent_macro),
             "entered_spikes_6h": len(entered_macro),
             "blocked_spikes_6h": len(blocked_macro),
             "entry_rate_pct_6h": (len(entered_macro) / len(recent_macro) * 100.0) if recent_macro else 0.0,
+            "spike_rate_per_hour_1h": spike_rate_1h,
+            "spike_rate_per_hour_3h": spike_rate_3h,
+            "spike_rate_per_hour_6h": spike_rate_6h,
+            "spike_rate_ratio_1h_vs_3h": spike_rate_ratio_1h_vs_3h,
+            "spike_cadence_regime": spike_cadence_regime,
             "top_block_reasons": block_reasons.most_common(5),
             "top_block_reasons_15m": block_reasons_micro.most_common(5),
             "contracts_15m": contracts_n_micro,
@@ -1458,6 +1584,99 @@ def _apply_tick_window_policy(
     return out, updates
 
 
+def _apply_spike_cadence_policy(
+    current_cfg: dict[str, SymbolCfg],
+    candidate_cfg: dict[str, SymbolCfg],
+    telemetry: dict[str, Any],
+) -> tuple[dict[str, SymbolCfg], int]:
+    out: dict[str, SymbolCfg] = {}
+    updates = 0
+    for sym in SYMBOLS:
+        current = current_cfg[sym]
+        candidate = candidate_cfg[sym]
+        t = telemetry.get(sym, {})
+
+        spikes_3h = int(t.get("spikes_3h") or 0)
+        spike_rate_1h = float(t.get("spike_rate_per_hour_1h") or 0.0)
+        spike_rate_3h = float(t.get("spike_rate_per_hour_3h") or 0.0)
+        spike_ratio_raw = t.get("spike_rate_ratio_1h_vs_3h")
+        spike_ratio_1h_3h = (
+            float(spike_ratio_raw)
+            if isinstance(spike_ratio_raw, (int, float))
+            else None
+        )
+        cadence_regime = str(t.get("spike_cadence_regime") or "NORMAL").upper()
+
+        score = float(candidate.score_min_override)
+        regime = str(candidate.regime or "NORMAL").upper()
+        grace = int(candidate.zero_peak_grace_sec)
+
+        if (
+            cadence_regime == "FAST"
+            and spike_rate_1h >= SPIKE_CADENCE_FAST_MIN_PER_HOUR
+            and spikes_3h >= ACTIVITY_REENABLE_MIN_SPIKES_3H
+        ):
+            relax = SPIKE_CADENCE_SCORE_RELAX_FAST
+            if (
+                spike_ratio_1h_3h is not None
+                and spike_ratio_1h_3h >= SPIKE_CADENCE_ACCEL_MIN_RATIO_1H_3H
+            ):
+                relax = min(SPIKE_CADENCE_SCORE_RELAX_FAST_MAX, relax + 0.10)
+            score = max(_symbol_score_floor(sym), score - relax)
+            if regime == "SLOW":
+                regime = "NORMAL"
+        elif (
+            cadence_regime == "SLOW"
+            and spike_rate_1h <= SPIKE_CADENCE_SLOW_MAX_PER_HOUR
+        ):
+            score = min(SCORE_MAX_GUARDRAIL, score + SPIKE_CADENCE_SCORE_HARDEN_SLOW)
+            regime = "SLOW"
+            grace = max(grace, ACTIVITY_STABILIZATION_GRACE_FLOOR)
+
+        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
+        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
+        guard_active = bool(
+            t.get("symbol_guard_active")
+            or guard_bonus > 0.0
+            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
+        )
+        if guard_active:
+            guard_floor = 7.5 + max(0.0, guard_bonus - 0.5)
+            score = max(score, guard_floor)
+            if guard_bonus >= 1.5:
+                regime = "SLOW"
+
+        adjusted = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=regime,
+                spike_pre_filter_target=candidate.spike_pre_filter_target,
+                zero_peak_grace_sec=grace,
+                score_min_override=score,
+                is_active=candidate.is_active,
+            ),
+        )
+        out[sym] = adjusted
+
+        if _cfg_changed(candidate, adjusted):
+            updates += 1
+            LOG.info(
+                "[dynamic-ai][SPIKE_CADENCE] %s cadence=%s spikes3h=%d rate1h=%.2f/h rate3h=%.2f/h ratio1h3h=%s score %.2f->%.2f regime %s->%s",
+                sym,
+                cadence_regime,
+                spikes_3h,
+                spike_rate_1h,
+                spike_rate_3h,
+                f"{spike_ratio_1h_3h:.2f}" if spike_ratio_1h_3h is not None else "n/a",
+                float(current.score_min_override),
+                float(adjusted.score_min_override),
+                current.regime,
+                adjusted.regime,
+            )
+
+    return out, updates
+
+
 def _apply_activity_policy(
     current_cfg: dict[str, SymbolCfg],
     candidate_cfg: dict[str, SymbolCfg],
@@ -1477,7 +1696,18 @@ def _apply_activity_policy(
         lag_med = t.get("entry_lag_sec_median")
         lag_med_val = float(lag_med) if isinstance(lag_med, (int, float)) else None
         spikes_15m = int(t.get("spikes_15m") or 0)
+        spikes_1h = int(t.get("spikes_1h") or 0)
+        spikes_3h = int(t.get("spikes_3h") or 0)
         spikes_6h = int(t.get("spikes_6h") or 0)
+        spike_rate_1h = float(t.get("spike_rate_per_hour_1h") or 0.0)
+        spike_rate_3h = float(t.get("spike_rate_per_hour_3h") or 0.0)
+        spike_rate_ratio_1h_3h_raw = t.get("spike_rate_ratio_1h_vs_3h")
+        spike_rate_ratio_1h_3h = (
+            float(spike_rate_ratio_1h_3h_raw)
+            if isinstance(spike_rate_ratio_1h_3h_raw, (int, float))
+            else None
+        )
+        spike_cadence_regime = str(t.get("spike_cadence_regime") or "NORMAL").upper()
         market_regime_est = str(t.get("market_regime_estimate") or "NORMAL").upper()
         ticks_since_last_spike = t.get("ticks_since_last_spike_now")
         ticks_since_last_spike_val = (
@@ -1496,15 +1726,35 @@ def _apply_activity_policy(
 
         severe_disable = False
         recovery_enable = False
+        disable_reasons: list[str] = []
 
         if contracts_n >= 4:
-            severe_disable = (
+            severe_from_quality = (
                 (win_rate <= 25.0 and ev_per_trade < 0.0)
                 or (contracts_n >= 6 and win_rate < 35.0 and ev_per_trade <= -0.05)
                 or (late120 >= 45.0 and lag_med_val is not None and lag_med_val >= 180.0)
             )
+            severe_disable = severe_disable or severe_from_quality
+            if severe_from_quality:
+                disable_reasons.append("contracts_quality")
         if sym in STRICT_DISABLE_SYMBOLS and contracts_n >= STRICT_DISABLE_MIN_CONTRACTS:
-            severe_disable = severe_disable or (win_rate < 45.0 or ev_per_trade < 0.0)
+            strict_disable = (win_rate < 45.0 or ev_per_trade < 0.0)
+            severe_disable = severe_disable or strict_disable
+            if strict_disable:
+                disable_reasons.append("strict_symbol")
+
+        slow_market_disable = (
+            contracts_n <= 1
+            and spikes_15m == 0
+            and spikes_3h <= ACTIVITY_DISABLE_MAX_SPIKES_3H
+            and spike_rate_1h <= ACTIVITY_DISABLE_MAX_SPIKE_RATE_1H
+            and (ticks_since_last_spike_val is None or ticks_since_last_spike_val >= ACTIVITY_REENABLE_MAX_TICKS_SINCE_SPIKE)
+        )
+        if ACTIVITY_DISABLE_REQUIRES_GUARD:
+            slow_market_disable = slow_market_disable and guard_active
+        if slow_market_disable:
+            severe_disable = True
+            disable_reasons.append("slow_market")
 
         if contracts_n >= 6:
             recovery_enable = (
@@ -1524,6 +1774,20 @@ def _apply_activity_policy(
         next_active = current.is_active
         if severe_disable:
             next_active = False
+            if current.is_active:
+                LOG.info(
+                    "[dynamic-ai][ACTIVITY_DISABLE] %s reasons=%s contracts=%d spikes15m=%d spikes1h=%d spikes3h=%d rate1h=%.2f/h ratio1h3h=%s cadence=%s guard=%s",
+                    sym,
+                    ",".join(disable_reasons) if disable_reasons else "unknown",
+                    contracts_n,
+                    spikes_15m,
+                    spikes_1h,
+                    spikes_3h,
+                    spike_rate_1h,
+                    f"{spike_rate_ratio_1h_3h:.2f}" if spike_rate_ratio_1h_3h is not None else "n/a",
+                    spike_cadence_regime,
+                    guard_active,
+                )
             if inactive_since_before <= 0.0:
                 state["inactive_since_ts"] = now_ts
             if streak_before > 0:
@@ -1555,12 +1819,23 @@ def _apply_activity_policy(
                 state["inactive_since_ts"] = now_ts
                 inactive_since_before = now_ts
             inactive_elapsed = max(0.0, now_ts - float(state.get("inactive_since_ts") or now_ts))
+            legacy_spike_recovery_enable = (
+                spikes_15m >= ACTIVITY_REENABLE_MIN_SPIKES_15M
+                and spikes_6h >= ACTIVITY_REENABLE_MIN_SPIKES_6H
+                and market_regime_est in ACTIVITY_REENABLE_REGIMES
+            )
+            cadence_spike_recovery_enable = (
+                spike_rate_1h >= ACTIVITY_REENABLE_MIN_SPIKE_RATE_1H
+                and spikes_3h >= ACTIVITY_REENABLE_MIN_SPIKES_3H
+                and (
+                    spike_rate_ratio_1h_3h is None
+                    or spike_rate_ratio_1h_3h >= ACTIVITY_REENABLE_MIN_SPIKE_RATE_RATIO_1H_3H
+                )
+            )
             spike_recovery_enable = (
                 inactive_elapsed >= ACTIVITY_REENABLE_MIN_INACTIVE_SEC
-                and spikes_15m >= ACTIVITY_REENABLE_MIN_SPIKES_15M
-                and spikes_6h >= ACTIVITY_REENABLE_MIN_SPIKES_6H
+                and (legacy_spike_recovery_enable or cadence_spike_recovery_enable)
                 and (ticks_since_last_spike_val is None or ticks_since_last_spike_val <= ACTIVITY_REENABLE_MAX_TICKS_SINCE_SPIKE)
-                and market_regime_est in ACTIVITY_REENABLE_REGIMES
                 and (not ACTIVITY_REENABLE_BLOCK_ON_GUARD or not guard_active)
             )
 
@@ -1593,22 +1868,36 @@ def _apply_activity_policy(
                 state["spike_recovery_streak"] = next_spike_streak
                 if next_spike_streak == 1 or next_spike_streak == ACTIVITY_REENABLE_RECHECK_CYCLES:
                     LOG.info(
-                        "[dynamic-ai][SPIKE_RECOVERY_PROGRESS] %s streak=%d/%d | spikes15m=%d spikes6h=%d regime=%s ticks_since_spike=%s inactive_for=%.0fs",
+                        "[dynamic-ai][SPIKE_RECOVERY_PROGRESS] %s streak=%d/%d | spikes15m=%d spikes1h=%d spikes3h=%d spikes6h=%d rate1h=%.2f/h rate3h=%.2f/h ratio1h3h=%s cadence=%s regime=%s ticks_since_spike=%s inactive_for=%.0fs mode=%s",
                         sym,
                         next_spike_streak,
                         ACTIVITY_REENABLE_RECHECK_CYCLES,
                         spikes_15m,
+                        spikes_1h,
+                        spikes_3h,
                         spikes_6h,
+                        spike_rate_1h,
+                        spike_rate_3h,
+                        f"{spike_rate_ratio_1h_3h:.2f}" if spike_rate_ratio_1h_3h is not None else "n/a",
+                        spike_cadence_regime,
                         market_regime_est,
                         f"{ticks_since_last_spike_val:.0f}" if ticks_since_last_spike_val is not None else "n/a",
                         inactive_elapsed,
+                        "cadence" if cadence_spike_recovery_enable and not legacy_spike_recovery_enable else "legacy+cadence" if cadence_spike_recovery_enable and legacy_spike_recovery_enable else "legacy",
                     )
             else:
                 if spike_streak_before > 0:
                     LOG.info(
-                        "[dynamic-ai][SPIKE_RECOVERY_RESET] %s streak %d -> 0",
+                        "[dynamic-ai][SPIKE_RECOVERY_RESET] %s streak %d -> 0 | spikes15m=%d spikes3h=%d rate1h=%.2f/h ratio1h3h=%s cadence=%s regime=%s guard=%s",
                         sym,
                         spike_streak_before,
+                        spikes_15m,
+                        spikes_3h,
+                        spike_rate_1h,
+                        f"{spike_rate_ratio_1h_3h:.2f}" if spike_rate_ratio_1h_3h is not None else "n/a",
+                        spike_cadence_regime,
+                        market_regime_est,
+                        guard_active,
                     )
                 state["spike_recovery_streak"] = 0
 
@@ -1631,7 +1920,7 @@ def _apply_activity_policy(
 
         if next_active != current.is_active:
             LOG.info(
-                "[dynamic-ai][ACTIVITY_POLICY] %s is_active %s -> %s | contracts=%d wr=%.1f ev=%.3f late120=%.1f lag_med=%s",
+                "[dynamic-ai][ACTIVITY_POLICY] %s is_active %s -> %s | contracts=%d wr=%.1f ev=%.3f late120=%.1f lag_med=%s spikes15m=%d spikes3h=%d rate1h=%.2f/h cadence=%s",
                 sym,
                 current.is_active,
                 next_active,
@@ -1640,6 +1929,10 @@ def _apply_activity_policy(
                 ev_per_trade,
                 late120,
                 f"{lag_med_val:.1f}" if lag_med_val is not None else "n/a",
+                spikes_15m,
+                spikes_3h,
+                spike_rate_1h,
+                spike_cadence_regime,
             )
 
         final_regime = candidate.regime
@@ -1980,6 +2273,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n"
         "16. Cada simbolo trae un objeto market_phase con: phase (ACCEL/NORMAL/CAUTION/DECEL/DEAD), ratio (recent/baseline spikes-per-min para la hora UTC actual), baseline_rate y samples_baseline. Es una capa estructural ABOVE intra-session signals: si phase=DECEL o DEAD, ese simbolo esta produciendo MENOS spikes de los que historicamente produce en esta franja horaria — endurecer fuerte (regime=SLOW, score_min_override >= 7.4). Si phase=CAUTION, endurecer leve (+0.4). Si phase=ACCEL, NO relajar mas alla del piso del simbolo. Si market_phase no esta presente o samples_baseline < 5, ignorar.\n"
         "17. Cuando phase in {DECEL, DEAD} y el LLM responde, NUNCA bajar score_min_override por debajo del valor actual del simbolo — el sidecar aplicara su propio piso despues.\n\n"
+        "18. Considera cadence de spikes: spike_rate_per_hour_1h, spike_rate_per_hour_3h y spike_rate_ratio_1h_vs_3h. Si 1h acelera vs 3h, puedes relajar levemente score_min_override; si 1h desacelera de forma sostenida, endurece score_min_override y evita FAST.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
@@ -2394,7 +2688,7 @@ async def run_loop() -> None:
     import asyncpg  # noqa: PLC0415
 
     LOG.info(
-        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s force_active=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d spike_reenable_cycles=%d spike_reenable_min_spikes(15m=%d,6h=%d) spike_reenable_min_inactive=%ss feedback24h_enabled=%s feedback24h_interval=%ss",
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s force_active=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d spike_reenable_cycles=%d spike_reenable_min_spikes(15m=%d,3h=%d,6h=%d) spike_reenable_min_rate_1h=%.2f/h spike_reenable_min_ratio_1h3h=%.2f spike_reenable_min_inactive=%ss disable_slow_market(rate1h<=%.2f/h spikes3h<=%d require_guard=%s) cadence_fast>=%.2f/h cadence_slow<=%.2f/h feedback24h_enabled=%s feedback24h_interval=%ss",
         loop_sec,
         logs_dir,
         lookback_sec,
@@ -2405,8 +2699,16 @@ async def run_loop() -> None:
         ACTIVITY_STABILIZATION_CYCLES,
         ACTIVITY_REENABLE_RECHECK_CYCLES,
         ACTIVITY_REENABLE_MIN_SPIKES_15M,
+        ACTIVITY_REENABLE_MIN_SPIKES_3H,
         ACTIVITY_REENABLE_MIN_SPIKES_6H,
+        ACTIVITY_REENABLE_MIN_SPIKE_RATE_1H,
+        ACTIVITY_REENABLE_MIN_SPIKE_RATE_RATIO_1H_3H,
         ACTIVITY_REENABLE_MIN_INACTIVE_SEC,
+        ACTIVITY_DISABLE_MAX_SPIKE_RATE_1H,
+        ACTIVITY_DISABLE_MAX_SPIKES_3H,
+        ACTIVITY_DISABLE_REQUIRES_GUARD,
+        SPIKE_CADENCE_FAST_MIN_PER_HOUR,
+        SPIKE_CADENCE_SLOW_MAX_PER_HOUR,
         FB24.FEEDBACK_ENABLED,
         FB24.FEEDBACK_INTERVAL_SEC,
     )
@@ -2461,6 +2763,7 @@ async def run_loop() -> None:
 
             new_cfg = _apply_activity_policy(current_cfg, new_cfg, telemetry)
             new_cfg, tick_updates = _apply_tick_window_policy(current_cfg, new_cfg, telemetry)
+            new_cfg, cadence_updates = _apply_spike_cadence_policy(current_cfg, new_cfg, telemetry)
             new_cfg, phase_report = _apply_market_phase_policy(
                 current_cfg, new_cfg, telemetry, session_baseline
             )
@@ -2525,6 +2828,36 @@ async def run_loop() -> None:
                     },
                 },
             )
+            LOG.info(
+                "[dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=%d sample=%s",
+                cadence_updates,
+                {
+                    "BOOM500": {
+                        "rate_1h": telemetry.get("BOOM500", {}).get("spike_rate_per_hour_1h"),
+                        "rate_3h": telemetry.get("BOOM500", {}).get("spike_rate_per_hour_3h"),
+                        "ratio_1h_3h": telemetry.get("BOOM500", {}).get("spike_rate_ratio_1h_vs_3h"),
+                        "cadence": telemetry.get("BOOM500", {}).get("spike_cadence_regime"),
+                    },
+                    "BOOM600": {
+                        "rate_1h": telemetry.get("BOOM600", {}).get("spike_rate_per_hour_1h"),
+                        "rate_3h": telemetry.get("BOOM600", {}).get("spike_rate_per_hour_3h"),
+                        "ratio_1h_3h": telemetry.get("BOOM600", {}).get("spike_rate_ratio_1h_vs_3h"),
+                        "cadence": telemetry.get("BOOM600", {}).get("spike_cadence_regime"),
+                    },
+                    "CRASH600": {
+                        "rate_1h": telemetry.get("CRASH600", {}).get("spike_rate_per_hour_1h"),
+                        "rate_3h": telemetry.get("CRASH600", {}).get("spike_rate_per_hour_3h"),
+                        "ratio_1h_3h": telemetry.get("CRASH600", {}).get("spike_rate_ratio_1h_vs_3h"),
+                        "cadence": telemetry.get("CRASH600", {}).get("spike_cadence_regime"),
+                    },
+                    "CRASH900": {
+                        "rate_1h": telemetry.get("CRASH900", {}).get("spike_rate_per_hour_1h"),
+                        "rate_3h": telemetry.get("CRASH900", {}).get("spike_rate_per_hour_3h"),
+                        "ratio_1h_3h": telemetry.get("CRASH900", {}).get("spike_rate_ratio_1h_vs_3h"),
+                        "cadence": telemetry.get("CRASH900", {}).get("spike_cadence_regime"),
+                    },
+                },
+            )
             # Always write a heartbeat entry so diff_log mtime stays fresh
             # even when hysteresis blocks all config changes.
             _append_diff_jsonl(
@@ -2536,6 +2869,7 @@ async def run_loop() -> None:
                     "db_updates": updates,
                     "blocked_flips": blocked_regime_flips,
                     "tick_window_updates": tick_updates,
+                    "spike_cadence_updates": cadence_updates,
                     "feedback_24h": {
                         "enabled": FB24.FEEDBACK_ENABLED,
                         "state_path": str(feedback_state_path),
