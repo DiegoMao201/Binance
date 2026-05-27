@@ -331,6 +331,40 @@ PATTERN_MEMORY_LOOKBACK = max(
     int(os.getenv("DYNAMIC_AI_PATTERN_MEMORY_LOOKBACK", "500") or 500),
 )
 
+# --- Market Phase intelligence (per symbol × UTC hour) ---------------------
+# Adds a third layer on top of activity policy + tick-window acceleration: a
+# session baseline learned across days that tells the sidecar when a symbol is
+# performing *below* its own historical norm for the current hour-of-day and
+# should be put into CAUTION/DECEL/DEAD even if intra-session ratios look OK.
+from scripts import market_phase as MP  # noqa: E402
+
+MARKET_PHASE_ENABLED = os.getenv("MARKET_PHASE_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+MARKET_PHASE_CAUTION_SCORE_BUMP = max(
+    0.0,
+    min(float(os.getenv("MARKET_PHASE_CAUTION_SCORE_BUMP", "0.45") or 0.45), 1.50),
+)
+MARKET_PHASE_DECEL_SCORE_BUMP = max(
+    MARKET_PHASE_CAUTION_SCORE_BUMP,
+    min(float(os.getenv("MARKET_PHASE_DECEL_SCORE_BUMP", "0.85") or 0.85), 2.00),
+)
+MARKET_PHASE_DEAD_SCORE_BUMP = max(
+    MARKET_PHASE_DECEL_SCORE_BUMP,
+    min(float(os.getenv("MARKET_PHASE_DEAD_SCORE_BUMP", "1.30") or 1.30), 2.50),
+)
+MARKET_PHASE_ACCEL_SCORE_RELAX = max(
+    0.0,
+    min(float(os.getenv("MARKET_PHASE_ACCEL_SCORE_RELAX", "0.20") or 0.20), 0.50),
+)
+MARKET_PHASE_DEAD_DISABLES = os.getenv("MARKET_PHASE_DEAD_DISABLES", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+MARKET_PHASE_DECEL_GRACE_BUMP = max(
+    0,
+    min(int(os.getenv("MARKET_PHASE_DECEL_GRACE_BUMP", "30") or 30), 120),
+)
+
 
 @dataclass
 class SymbolCfg:
@@ -1042,6 +1076,13 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "symbol_guard_bonus": guard_bonus,
             "symbol_guard_recent_n": guard_recent_n,
             "symbol_guard_active": bool(guard_bonus > 0.0 or guard_pnl_window <= SYMBOL_NEGATIVE_THRESHOLD),
+            # Raw spike timestamps used by the market-phase layer (kept under
+            # an underscore-prefixed key so the LLM prompt strips them — they
+            # are noisy and would bloat the request without adding signal).
+            "_spike_ts_recent": [
+                t for t, _ in arr
+                if t >= (now_ts - MP.RECENT_WINDOW_SEC)
+            ],
             "as_of": _now_iso(),
         }
     return telemetry
@@ -1528,6 +1569,148 @@ def _apply_activity_policy(
     return out
 
 
+def _apply_market_phase_policy(
+    current_cfg: dict[str, SymbolCfg],
+    candidate_cfg: dict[str, SymbolCfg],
+    telemetry: dict[str, Any],
+    baseline: "MP.SessionBaseline | None",
+) -> tuple[dict[str, SymbolCfg], dict[str, dict[str, Any]]]:
+    """Apply the per-symbol session-phase guard *after* every other policy.
+
+    Returns ``(adjusted_cfg, phase_report)`` where ``phase_report`` maps each
+    symbol to the public market-phase dict (also injected into
+    ``telemetry[sym]["market_phase"]`` for downstream observability).
+    """
+    if not MARKET_PHASE_ENABLED or baseline is None:
+        return candidate_cfg, {}
+
+    report: dict[str, dict[str, Any]] = {}
+    out: dict[str, SymbolCfg] = {}
+    for sym in SYMBOLS:
+        candidate = candidate_cfg[sym]
+        t = telemetry.get(sym, {}) or {}
+        spike_ts = t.get("_spike_ts_recent") or []
+        try:
+            phase = MP.evaluate_symbol(sym, spike_ts, baseline)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("[market-phase] %s evaluation failed: %s", sym, exc)
+            out[sym] = candidate
+            continue
+
+        phase_payload = MP.phase_to_dict(phase)
+        # Make the phase visible to the dashboard / diff log.
+        if isinstance(telemetry.get(sym), dict):
+            telemetry[sym]["market_phase"] = phase_payload
+        report[sym] = phase_payload
+
+        # NORMAL / warm-up: no adjustment.
+        if phase.phase == MP.PHASE_NORMAL:
+            out[sym] = candidate
+            continue
+
+        regime = candidate.regime
+        score = float(candidate.score_min_override)
+        grace = int(candidate.zero_peak_grace_sec)
+        is_active = bool(candidate.is_active)
+
+        if phase.phase == MP.PHASE_ACCEL:
+            # Symbol is hotter than its own historical norm: relax score a hair
+            # but never drop below per-symbol floor. Keep regime as-is.
+            score = max(_symbol_score_floor(sym), score - MARKET_PHASE_ACCEL_SCORE_RELAX)
+
+        elif phase.phase == MP.PHASE_CAUTION:
+            # Mild deceleration: harden score and prefer NORMAL/SLOW regime.
+            score = score + MARKET_PHASE_CAUTION_SCORE_BUMP
+            if regime == "FAST":
+                regime = "NORMAL"
+
+        elif phase.phase == MP.PHASE_DECEL:
+            # Strong deceleration: force SLOW + tighter grace + score bump.
+            score = score + MARKET_PHASE_DECEL_SCORE_BUMP
+            regime = "SLOW"
+            grace = min(120, grace + MARKET_PHASE_DECEL_GRACE_BUMP)
+
+        elif phase.phase == MP.PHASE_DEAD:
+            # The symbol is essentially silent vs its baseline. Force SLOW,
+            # max grace, and optionally deactivate (it will be re-enabled by
+            # the activity policy once it recovers).
+            score = score + MARKET_PHASE_DEAD_SCORE_BUMP
+            regime = "SLOW"
+            grace = min(120, grace + MARKET_PHASE_DECEL_GRACE_BUMP)
+            if MARKET_PHASE_DEAD_DISABLES:
+                is_active = False
+
+        out[sym] = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=regime,
+                spike_pre_filter_target=candidate.spike_pre_filter_target,
+                zero_peak_grace_sec=grace,
+                score_min_override=score,
+                is_active=is_active,
+            ),
+        )
+
+        prev = current_cfg.get(sym)
+        if prev is None or out[sym] != prev:
+            LOG.info(
+                "[market-phase] %s phase=%s ratio=%s recent=%.3f base=%s samples=%d streak=%d -> regime=%s score=%.2f grace=%d active=%s",
+                sym,
+                phase.phase,
+                f"{phase.ratio:.2f}" if isinstance(phase.ratio, (int, float)) else "n/a",
+                phase.recent_rate,
+                f"{phase.baseline_rate:.3f}" if isinstance(phase.baseline_rate, (int, float)) else "n/a",
+                phase.samples_baseline,
+                phase.streak,
+                out[sym].regime,
+                out[sym].score_min_override,
+                out[sym].zero_peak_grace_sec,
+                out[sym].is_active,
+            )
+
+    return out, report
+
+
+def _update_market_phase_baseline(
+    telemetry: dict[str, Any],
+    baseline: "MP.SessionBaseline | None",
+) -> None:
+    """After deciding the new config, feed the current recent rate back into
+    the per-(symbol, hour) EMA so the baseline drifts slowly with reality.
+    """
+    if not MARKET_PHASE_ENABLED or baseline is None:
+        return
+    now_ts = time.time()
+    hour = MP.hour_bucket_of(now_ts)
+    for sym in SYMBOLS:
+        t = telemetry.get(sym, {}) or {}
+        spike_ts = t.get("_spike_ts_recent") or []
+        rate, _n = MP.spikes_per_min(spike_ts, MP.RECENT_WINDOW_SEC, now_ts)
+        try:
+            baseline.update(sym, hour, rate, now_ts)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("[market-phase] %s baseline update failed: %s", sym, exc)
+    try:
+        baseline.save()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[market-phase] baseline save failed: %s", exc)
+
+
+def _scrub_telemetry_for_prompt(telemetry: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of telemetry suitable for the LLM prompt.
+
+    We drop the underscore-prefixed internals (raw timestamp lists, etc.) to
+    keep the request small and the model focused on aggregated features.
+    """
+    scrubbed: dict[str, Any] = {}
+    for sym, payload in telemetry.items():
+        if not isinstance(payload, dict):
+            scrubbed[sym] = payload
+            continue
+        scrubbed[sym] = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    return scrubbed
+
+
 def _build_prompt(telemetry_json: dict[str, Any]) -> str:
     score_max = f"{SCORE_MAX_GUARDRAIL:.1f}"
     return (
@@ -1550,7 +1733,9 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "12. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
         "13. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
         "14. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
-        "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n\n"
+        "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n"
+        "16. Cada simbolo trae un objeto market_phase con: phase (ACCEL/NORMAL/CAUTION/DECEL/DEAD), ratio (recent/baseline spikes-per-min para la hora UTC actual), baseline_rate y samples_baseline. Es una capa estructural ABOVE intra-session signals: si phase=DECEL o DEAD, ese simbolo esta produciendo MENOS spikes de los que historicamente produce en esta franja horaria — endurecer fuerte (regime=SLOW, score_min_override >= 7.4). Si phase=CAUTION, endurecer leve (+0.4). Si phase=ACCEL, NO relajar mas alla del piso del simbolo. Si market_phase no esta presente o samples_baseline < 5, ignorar.\n"
+        "17. Cuando phase in {DECEL, DEAD} y el LLM responde, NUNCA bajar score_min_override por debajo del valor actual del simbolo — el sidecar aplicara su propio piso despues.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
@@ -1927,8 +2112,32 @@ async def run_loop() -> None:
         os.getenv("DYNAMIC_AI_ACTIVITY_STATE_PATH")
         or str(logs_dir / "dynamic_ai_activity_state.json")
     ).expanduser()
+    session_baseline_path = Path(
+        os.getenv("MARKET_PHASE_BASELINE_PATH")
+        or str(logs_dir / "deriv_session_baseline.json")
+    ).expanduser()
 
     _load_activity_memory(activity_state_path)
+
+    session_baseline: "MP.SessionBaseline | None" = None
+    if MARKET_PHASE_ENABLED:
+        try:
+            session_baseline = MP.SessionBaseline(session_baseline_path)
+            LOG.info(
+                "[market-phase] baseline loaded path=%s window=%ss alpha=%.2f thresholds(accel=%.2f caution=%.2f decel=%.2f dead=%.2f) confirm(decel=%d dead=%d)",
+                session_baseline_path,
+                MP.RECENT_WINDOW_SEC,
+                MP.EMA_ALPHA,
+                MP.ACCEL_RATIO,
+                MP.CAUTION_RATIO,
+                MP.DECEL_RATIO,
+                MP.DEAD_RATIO,
+                MP.CONFIRM_CYCLES_DECEL,
+                MP.CONFIRM_CYCLES_DEAD,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("[market-phase] disabled (baseline load failed): %s", exc)
+            session_baseline = None
 
     import asyncpg  # noqa: PLC0415
 
@@ -1957,7 +2166,7 @@ async def run_loop() -> None:
                     await _update_pattern_memory(conn, logs_dir)
                 except Exception as memory_exc:  # noqa: BLE001
                     LOG.warning("[dynamic-ai] pattern memory skipped: %s", memory_exc)
-            prompt = _build_prompt(telemetry)
+            prompt = _build_prompt(_scrub_telemetry_for_prompt(telemetry))
 
             try:
                 llm_raw = _call_llm(prompt)
@@ -1970,6 +2179,9 @@ async def run_loop() -> None:
 
             new_cfg = _apply_activity_policy(current_cfg, new_cfg, telemetry)
             new_cfg, tick_updates = _apply_tick_window_policy(current_cfg, new_cfg, telemetry)
+            new_cfg, phase_report = _apply_market_phase_policy(
+                current_cfg, new_cfg, telemetry, session_baseline
+            )
 
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
@@ -2027,9 +2239,19 @@ async def run_loop() -> None:
                     "db_updates": updates,
                     "blocked_flips": blocked_regime_flips,
                     "tick_window_updates": tick_updates,
+                    "market_phase": {
+                        sym: {
+                            "phase": payload.get("phase"),
+                            "ratio": payload.get("ratio"),
+                            "samples": payload.get("samples_baseline"),
+                            "streak": payload.get("streak"),
+                        }
+                        for sym, payload in (phase_report or {}).items()
+                    },
                 },
             )
             _save_activity_memory(activity_state_path)
+            _update_market_phase_baseline(telemetry, session_baseline)
         except Exception as exc:  # noqa: BLE001
             LOG.exception("[dynamic-ai] loop failure: %s", exc)
             _save_activity_memory(activity_state_path)
