@@ -255,6 +255,9 @@ STRICT_DISABLE_MIN_CONTRACTS = max(
     1,
     int(os.getenv("DYNAMIC_AI_STRICT_DISABLE_MIN_CONTRACTS", "4") or 4),
 )
+FORCE_ACTIVE_SYMBOLS = _parse_symbol_set(
+    os.getenv("DYNAMIC_AI_FORCE_ACTIVE_SYMBOLS", "")
+) & set(SYMBOLS)
 
 # Activity re-enable policy:
 # - Re-enable only after sustained recovery across N sidecar cycles.
@@ -279,6 +282,37 @@ ACTIVITY_STABILIZATION_GRACE_FLOOR = max(
     0,
     min(int(os.getenv("DYNAMIC_AI_ACTIVITY_STABILIZATION_GRACE_FLOOR", "90") or 90), 120),
 )
+ACTIVITY_REENABLE_RECHECK_CYCLES = max(
+    1,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_RECHECK_CYCLES", "3") or 3),
+)
+ACTIVITY_REENABLE_MIN_SPIKES_15M = max(
+    1,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_SPIKES_15M", "2") or 2),
+)
+ACTIVITY_REENABLE_MIN_SPIKES_6H = max(
+    ACTIVITY_REENABLE_MIN_SPIKES_15M,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_SPIKES_6H", "8") or 8),
+)
+ACTIVITY_REENABLE_MAX_TICKS_SINCE_SPIKE = max(
+    60,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MAX_TICKS_SINCE_SPIKE", "900") or 900),
+)
+ACTIVITY_REENABLE_MIN_INACTIVE_SEC = max(
+    60,
+    int(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_MIN_INACTIVE_SEC", "300") or 300),
+)
+ACTIVITY_REENABLE_REGIMES = {
+    val
+    for val in _parse_symbol_set(os.getenv("DYNAMIC_AI_ACTIVITY_REENABLE_REGIMES", "FAST,NORMAL"))
+    if val in {"FAST", "NORMAL", "SLOW"}
+}
+if not ACTIVITY_REENABLE_REGIMES:
+    ACTIVITY_REENABLE_REGIMES = {"FAST", "NORMAL"}
+ACTIVITY_REENABLE_BLOCK_ON_GUARD = os.getenv(
+    "DYNAMIC_AI_ACTIVITY_REENABLE_BLOCK_ON_GUARD",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 ACTIVITY_POLICY_MEMORY: dict[str, dict[str, Any]] = {}
 
@@ -503,21 +537,31 @@ def _seed_state_memory(current_cfg: dict[str, SymbolCfg]) -> None:
 def _default_activity_state() -> dict[str, Any]:
     return {
         "recovery_streak": 0,
+        "spike_recovery_streak": 0,
         "stabilization_left": 0,
         "strict_bonus": 0.0,
+        "inactive_since_ts": 0.0,
     }
 
 
 def _seed_activity_memory(current_cfg: dict[str, SymbolCfg]) -> None:
+    now_ts = time.time()
     for sym, cfg in current_cfg.items():
         state = ACTIVITY_POLICY_MEMORY.setdefault(sym, _default_activity_state())
         state["recovery_streak"] = int(state.get("recovery_streak") or 0)
+        state["spike_recovery_streak"] = int(state.get("spike_recovery_streak") or 0)
         state["stabilization_left"] = int(state.get("stabilization_left") or 0)
         state["strict_bonus"] = float(state.get("strict_bonus") or 0.0)
+        state["inactive_since_ts"] = float(state.get("inactive_since_ts") or 0.0)
         if not cfg.is_active:
             # Inactive symbols should not carry stale post-reactivation state.
             state["stabilization_left"] = 0
             state["strict_bonus"] = 0.0
+            if float(state.get("inactive_since_ts") or 0.0) <= 0.0:
+                state["inactive_since_ts"] = now_ts
+        else:
+            state["inactive_since_ts"] = 0.0
+            state["spike_recovery_streak"] = 0
 
 
 def _load_activity_memory(path: Path) -> None:
@@ -533,8 +577,10 @@ def _load_activity_memory(path: Path) -> None:
                 continue
             ACTIVITY_POLICY_MEMORY[sym_u] = {
                 "recovery_streak": max(0, int(raw_state.get("recovery_streak") or 0)),
+                "spike_recovery_streak": max(0, int(raw_state.get("spike_recovery_streak") or 0)),
                 "stabilization_left": max(0, int(raw_state.get("stabilization_left") or 0)),
                 "strict_bonus": max(0.0, float(raw_state.get("strict_bonus") or 0.0)),
+                "inactive_since_ts": max(0.0, float(raw_state.get("inactive_since_ts") or 0.0)),
             }
     except Exception as exc:  # noqa: BLE001
         LOG.warning("[dynamic-ai] could not load activity memory: %s", exc)
@@ -547,8 +593,10 @@ def _save_activity_memory(path: Path) -> None:
             state = ACTIVITY_POLICY_MEMORY.get(sym) or _default_activity_state()
             payload[sym] = {
                 "recovery_streak": max(0, int(state.get("recovery_streak") or 0)),
+                "spike_recovery_streak": max(0, int(state.get("spike_recovery_streak") or 0)),
                 "stabilization_left": max(0, int(state.get("stabilization_left") or 0)),
                 "strict_bonus": round(max(0.0, float(state.get("strict_bonus") or 0.0)), 4),
+                "inactive_since_ts": round(max(0.0, float(state.get("inactive_since_ts") or 0.0)), 3),
             }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -1416,6 +1464,7 @@ def _apply_activity_policy(
     telemetry: dict[str, Any],
 ) -> dict[str, SymbolCfg]:
     out: dict[str, SymbolCfg] = {}
+    now_ts = time.time()
     for sym in SYMBOLS:
         current = current_cfg[sym]
         candidate = candidate_cfg[sym]
@@ -1427,6 +1476,23 @@ def _apply_activity_policy(
         late120 = float(t.get("late_entry_ge120_pct") or 0.0)
         lag_med = t.get("entry_lag_sec_median")
         lag_med_val = float(lag_med) if isinstance(lag_med, (int, float)) else None
+        spikes_15m = int(t.get("spikes_15m") or 0)
+        spikes_6h = int(t.get("spikes_6h") or 0)
+        market_regime_est = str(t.get("market_regime_estimate") or "NORMAL").upper()
+        ticks_since_last_spike = t.get("ticks_since_last_spike_now")
+        ticks_since_last_spike_val = (
+            float(ticks_since_last_spike)
+            if isinstance(ticks_since_last_spike, (int, float))
+            else None
+        )
+
+        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
+        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
+        guard_active = bool(
+            t.get("symbol_guard_active")
+            or guard_bonus > 0.0
+            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
+        )
 
         severe_disable = False
         recovery_enable = False
@@ -1450,12 +1516,16 @@ def _apply_activity_policy(
 
         state = ACTIVITY_POLICY_MEMORY.setdefault(sym, _default_activity_state())
         streak_before = int(state.get("recovery_streak") or 0)
+        spike_streak_before = int(state.get("spike_recovery_streak") or 0)
         stabilization_before = int(state.get("stabilization_left") or 0)
         strict_bonus = max(0.0, float(state.get("strict_bonus") or 0.0))
+        inactive_since_before = float(state.get("inactive_since_ts") or 0.0)
 
         next_active = current.is_active
         if severe_disable:
             next_active = False
+            if inactive_since_before <= 0.0:
+                state["inactive_since_ts"] = now_ts
             if streak_before > 0:
                 LOG.info(
                     "[dynamic-ai][RECOVERY_RESET] %s streak %d -> 0 (severe_disable)",
@@ -1463,10 +1533,13 @@ def _apply_activity_policy(
                     streak_before,
                 )
             state["recovery_streak"] = 0
+            state["spike_recovery_streak"] = 0
             state["stabilization_left"] = 0
             state["strict_bonus"] = 0.0
         elif current.is_active:
             state["recovery_streak"] = 0
+            state["spike_recovery_streak"] = 0
+            state["inactive_since_ts"] = 0.0
             if stabilization_before > 0:
                 if recovery_enable:
                     state["stabilization_left"] = stabilization_before - 1
@@ -1478,6 +1551,19 @@ def _apply_activity_policy(
                 state["stabilization_left"] = 0
                 state["strict_bonus"] = 0.0
         else:
+            if inactive_since_before <= 0.0:
+                state["inactive_since_ts"] = now_ts
+                inactive_since_before = now_ts
+            inactive_elapsed = max(0.0, now_ts - float(state.get("inactive_since_ts") or now_ts))
+            spike_recovery_enable = (
+                inactive_elapsed >= ACTIVITY_REENABLE_MIN_INACTIVE_SEC
+                and spikes_15m >= ACTIVITY_REENABLE_MIN_SPIKES_15M
+                and spikes_6h >= ACTIVITY_REENABLE_MIN_SPIKES_6H
+                and (ticks_since_last_spike_val is None or ticks_since_last_spike_val <= ACTIVITY_REENABLE_MAX_TICKS_SINCE_SPIKE)
+                and market_regime_est in ACTIVITY_REENABLE_REGIMES
+                and (not ACTIVITY_REENABLE_BLOCK_ON_GUARD or not guard_active)
+            )
+
             if recovery_enable:
                 next_streak = streak_before + 1
                 state["recovery_streak"] = next_streak
@@ -1502,15 +1588,43 @@ def _apply_activity_policy(
                     )
                 state["recovery_streak"] = 0
 
-            if int(state.get("recovery_streak") or 0) >= ACTIVITY_RECOVERY_CYCLES:
+            if spike_recovery_enable:
+                next_spike_streak = spike_streak_before + 1
+                state["spike_recovery_streak"] = next_spike_streak
+                if next_spike_streak == 1 or next_spike_streak == ACTIVITY_REENABLE_RECHECK_CYCLES:
+                    LOG.info(
+                        "[dynamic-ai][SPIKE_RECOVERY_PROGRESS] %s streak=%d/%d | spikes15m=%d spikes6h=%d regime=%s ticks_since_spike=%s inactive_for=%.0fs",
+                        sym,
+                        next_spike_streak,
+                        ACTIVITY_REENABLE_RECHECK_CYCLES,
+                        spikes_15m,
+                        spikes_6h,
+                        market_regime_est,
+                        f"{ticks_since_last_spike_val:.0f}" if ticks_since_last_spike_val is not None else "n/a",
+                        inactive_elapsed,
+                    )
+            else:
+                if spike_streak_before > 0:
+                    LOG.info(
+                        "[dynamic-ai][SPIKE_RECOVERY_RESET] %s streak %d -> 0",
+                        sym,
+                        spike_streak_before,
+                    )
+                state["spike_recovery_streak"] = 0
+
+            contract_recovered = int(state.get("recovery_streak") or 0) >= ACTIVITY_RECOVERY_CYCLES
+            spike_recovered = int(state.get("spike_recovery_streak") or 0) >= ACTIVITY_REENABLE_RECHECK_CYCLES
+            if contract_recovered or spike_recovered:
                 next_active = True
                 state["recovery_streak"] = 0
+                state["spike_recovery_streak"] = 0
                 state["stabilization_left"] = ACTIVITY_STABILIZATION_CYCLES
                 state["strict_bonus"] = ACTIVITY_STABILIZATION_SCORE_BONUS
+                state["inactive_since_ts"] = 0.0
                 LOG.info(
-                    "[dynamic-ai][ACTIVITY_RECOVERY] %s re-enabled after %d cycles | stabilize_cycles=%d strict_bonus=%.2f",
+                    "[dynamic-ai][ACTIVITY_RECOVERY] %s re-enabled via %s | stabilize_cycles=%d strict_bonus=%.2f",
                     sym,
-                    ACTIVITY_RECOVERY_CYCLES,
+                    "contracts" if contract_recovered else "spikes",
                     ACTIVITY_STABILIZATION_CYCLES,
                     ACTIVITY_STABILIZATION_SCORE_BONUS,
                 )
@@ -1544,13 +1658,6 @@ def _apply_activity_policy(
             )
             final_score = max(final_score, strict_floor)
 
-        guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
-        guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
-        guard_active = bool(
-            t.get("symbol_guard_active")
-            or guard_bonus > 0.0
-            or guard_pnl_window <= float(t.get("symbol_guard_threshold") or SYMBOL_NEGATIVE_THRESHOLD)
-        )
         if guard_active:
             guard_floor = 7.5 + max(0.0, guard_bonus - 0.5)
             final_score = max(final_score, guard_floor)
@@ -1670,6 +1777,47 @@ def _apply_market_phase_policy(
             )
 
     return out, report
+
+
+def _apply_force_active_policy(
+    current_cfg: dict[str, SymbolCfg],
+    candidate_cfg: dict[str, SymbolCfg],
+) -> dict[str, SymbolCfg]:
+    """Force selected symbols to remain active without disabling dynamic tuning.
+
+    This is a safety-valve for symbols that should keep receiving evaluation
+    even when another policy layer proposes a temporary disable.
+    """
+    if not FORCE_ACTIVE_SYMBOLS:
+        return candidate_cfg
+
+    out: dict[str, SymbolCfg] = {}
+    for sym in SYMBOLS:
+        candidate = candidate_cfg[sym]
+        if sym not in FORCE_ACTIVE_SYMBOLS or candidate.is_active:
+            out[sym] = candidate
+            continue
+
+        forced = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=candidate.regime,
+                spike_pre_filter_target=candidate.spike_pre_filter_target,
+                zero_peak_grace_sec=candidate.zero_peak_grace_sec,
+                score_min_override=candidate.score_min_override,
+                is_active=True,
+            ),
+        )
+        out[sym] = forced
+        prev = current_cfg.get(sym)
+        LOG.warning(
+            "[dynamic-ai][FORCE_ACTIVE] %s is_active %s -> %s",
+            sym,
+            prev.is_active if prev is not None else candidate.is_active,
+            forced.is_active,
+        )
+
+    return out
 
 
 def _write_market_phase_hints(
@@ -2246,14 +2394,19 @@ async def run_loop() -> None:
     import asyncpg  # noqa: PLC0415
 
     LOG.info(
-        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d feedback24h_enabled=%s feedback24h_interval=%ss",
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s force_active=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d spike_reenable_cycles=%d spike_reenable_min_spikes(15m=%d,6h=%d) spike_reenable_min_inactive=%ss feedback24h_enabled=%s feedback24h_interval=%ss",
         loop_sec,
         logs_dir,
         lookback_sec,
         sorted(STRICT_DISABLE_SYMBOLS),
+        sorted(FORCE_ACTIVE_SYMBOLS),
         STRICT_DISABLE_MIN_CONTRACTS,
         ACTIVITY_RECOVERY_CYCLES,
         ACTIVITY_STABILIZATION_CYCLES,
+        ACTIVITY_REENABLE_RECHECK_CYCLES,
+        ACTIVITY_REENABLE_MIN_SPIKES_15M,
+        ACTIVITY_REENABLE_MIN_SPIKES_6H,
+        ACTIVITY_REENABLE_MIN_INACTIVE_SEC,
         FB24.FEEDBACK_ENABLED,
         FB24.FEEDBACK_INTERVAL_SEC,
     )
@@ -2321,6 +2474,8 @@ async def run_loop() -> None:
                     len(feedback_applied),
                     feedback_applied,
                 )
+
+            new_cfg = _apply_force_active_policy(current_cfg, new_cfg)
 
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
