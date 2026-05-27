@@ -106,6 +106,30 @@ MIN_BASELINE_RATE: float = max(0.01, _f("MARKET_PHASE_MIN_BASELINE_RATE", 0.05))
 CONFIRM_CYCLES_DECEL: int = max(1, _i("MARKET_PHASE_CONFIRM_CYCLES_DECEL", 2))
 CONFIRM_CYCLES_DEAD: int = max(1, _i("MARKET_PHASE_CONFIRM_CYCLES_DEAD", 3))
 
+# Slope guard: compares a *fast* window (default 5min) vs a *slow* window
+# (default 30min). When the fast rate drops by more than SLOPE_DROP_PCT
+# relative to the slow rate we bypass the streak confirmation and escalate
+# directly to CAUTION/DECEL on the same cycle. Symmetric for ACCEL.
+SLOPE_FAST_SEC: int = max(120, _i("MARKET_PHASE_SLOPE_FAST_SEC", 300))
+SLOPE_SLOW_SEC: int = max(SLOPE_FAST_SEC + 60, _i("MARKET_PHASE_SLOPE_SLOW_SEC", 1800))
+SLOPE_DROP_PCT: float = max(0.10, min(0.90, _f("MARKET_PHASE_SLOPE_DROP_PCT", 0.40)))
+SLOPE_DROP_HARD_PCT: float = max(SLOPE_DROP_PCT + 0.05, min(0.95, _f("MARKET_PHASE_SLOPE_DROP_HARD_PCT", 0.65)))
+SLOPE_RISE_PCT: float = max(0.10, min(2.00, _f("MARKET_PHASE_SLOPE_RISE_PCT", 0.40)))
+SLOPE_MIN_SLOW_RATE: float = max(0.02, _f("MARKET_PHASE_SLOPE_MIN_SLOW_RATE", 0.10))
+
+# Multi-window trend vector (per-symbol behaviour over the last 6h).
+# We compute rates at four nested windows and label each as up/down/flat
+# vs the next-larger window. 2-of-3 sub-windows down forces at least CAUTION.
+TREND_WINDOWS_SEC: tuple[int, ...] = (
+    max(120, _i("MARKET_PHASE_TREND_W1_SEC", 300)),     # 5 min
+    max(900, _i("MARKET_PHASE_TREND_W2_SEC", 1800)),    # 30 min
+    max(3600, _i("MARKET_PHASE_TREND_W3_SEC", 7200)),   # 2 h
+    max(10800, _i("MARKET_PHASE_TREND_W4_SEC", 21600)), # 6 h
+)
+TREND_LABELS: tuple[str, ...] = ("w5m", "w30m", "w2h", "w6h")
+TREND_FLAT_BAND: float = max(0.05, min(0.40, _f("MARKET_PHASE_TREND_FLAT_BAND", 0.15)))
+TREND_DOWN_MIN_RATE: float = max(0.02, _f("MARKET_PHASE_TREND_MIN_RATE", 0.05))
+
 # Phases vocabulary (kept as plain strings to be JSON-safe).
 PHASE_ACCEL = "ACCEL"
 PHASE_NORMAL = "NORMAL"
@@ -132,6 +156,13 @@ class MarketPhase:
     hour_bucket: int
     streak: int  # consecutive cycles in this phase (after confirmation)
     reason: str
+    # New (multi-window + slope) signals — optional for backward compat.
+    windows: dict[str, float] | None = None
+    slope_signal: str | None = None        # "DECEL_FAST" / "ACCEL_FAST" / None
+    slope_drop_pct: float | None = None
+    trend_down_count: int = 0
+    trend_up_count: int = 0
+    bypass_streak: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +373,84 @@ def classify(
 
 
 # ---------------------------------------------------------------------------
+# Multi-window + slope helpers (new).
+# ---------------------------------------------------------------------------
+
+def compute_windows(
+    spike_timestamps: Iterable[float],
+    now_ts: float | None = None,
+) -> dict[str, float]:
+    """Return spikes-per-minute at each of the configured TREND_WINDOWS_SEC.
+
+    The iterable is materialised once so callers that pass a generator do not
+    run out on the second pass.
+    """
+    ts_list = [float(x) for x in spike_timestamps if isinstance(x, (int, float))]
+    out: dict[str, float] = {}
+    for label, win in zip(TREND_LABELS, TREND_WINDOWS_SEC):
+        rate, _n = spikes_per_min(ts_list, win, now_ts)
+        out[label] = round(rate, 4)
+    return out
+
+
+def slope_signal_from(
+    windows: dict[str, float],
+    spike_timestamps: Iterable[float] | None = None,
+    now_ts: float | None = None,
+) -> tuple[str | None, float | None]:
+    """Detect a fast acceleration/deceleration vs the slow window.
+
+    Returns ``(signal, drop_pct)``. signal is one of:
+        * "DECEL_FAST_HARD" — fast window dropped >= SLOPE_DROP_HARD_PCT
+        * "DECEL_FAST"      — fast window dropped >= SLOPE_DROP_PCT
+        * "ACCEL_FAST"      — fast window rose    >= SLOPE_RISE_PCT
+        * None              — within the band or slow-window too quiet
+    """
+    if spike_timestamps is not None:
+        ts_list = [float(x) for x in spike_timestamps if isinstance(x, (int, float))]
+        fast_rate, _ = spikes_per_min(ts_list, SLOPE_FAST_SEC, now_ts)
+        slow_rate, _ = spikes_per_min(ts_list, SLOPE_SLOW_SEC, now_ts)
+    else:
+        # Map slope windows back onto the TREND vector when possible.
+        fast_rate = float(windows.get("w5m", 0.0)) if SLOPE_FAST_SEC <= 600 else 0.0
+        slow_rate = float(windows.get("w30m", 0.0)) if SLOPE_SLOW_SEC <= 2400 else 0.0
+
+    if slow_rate < SLOPE_MIN_SLOW_RATE:
+        return (None, None)
+    delta = (fast_rate - slow_rate) / slow_rate
+    if delta <= -SLOPE_DROP_HARD_PCT:
+        return ("DECEL_FAST_HARD", round(-delta, 3))
+    if delta <= -SLOPE_DROP_PCT:
+        return ("DECEL_FAST", round(-delta, 3))
+    if delta >= SLOPE_RISE_PCT:
+        return ("ACCEL_FAST", round(delta, 3))
+    return (None, None)
+
+
+def trend_counts(windows: dict[str, float]) -> tuple[int, int]:
+    """Return (down_count, up_count) across the 3 pair-wise window comparisons.
+
+    Pairs compared: (w5m vs w30m), (w30m vs w2h), (w2h vs w6h).
+    A pair is "down" when the shorter window's rate is < (1-band) * longer.
+    A pair is "up" when it is > (1+band) * longer. The slower window must
+    exceed TREND_DOWN_MIN_RATE for the comparison to count.
+    """
+    pairs = (("w5m", "w30m"), ("w30m", "w2h"), ("w2h", "w6h"))
+    down = up = 0
+    for short, long_ in pairs:
+        s = float(windows.get(short, 0.0))
+        l = float(windows.get(long_, 0.0))
+        if l < TREND_DOWN_MIN_RATE:
+            continue
+        rel = s / l
+        if rel <= (1.0 - TREND_FLAT_BAND):
+            down += 1
+        elif rel >= (1.0 + TREND_FLAT_BAND):
+            up += 1
+    return (down, up)
+
+
+# ---------------------------------------------------------------------------
 # High-level entry points used by the sidecar.
 # ---------------------------------------------------------------------------
 
@@ -358,10 +467,45 @@ def evaluate_symbol(
     """
     t_now = float(now_ts if now_ts is not None else time.time())
     hour = hour_bucket_of(t_now)
-    recent_rate, samples_recent = spikes_per_min(spike_timestamps, RECENT_WINDOW_SEC, t_now)
+    # Materialise once for both the legacy window and the new multi-window pass.
+    ts_list = [float(x) for x in spike_timestamps if isinstance(x, (int, float))]
+    recent_rate, samples_recent = spikes_per_min(ts_list, RECENT_WINDOW_SEC, t_now)
     base_rate, base_samples = baseline.baseline_rate(symbol, hour)
     raw_phase, ratio, reason = classify(recent_rate, base_rate if base_samples > 0 else None, base_samples)
-    effective = baseline.confirm(symbol, raw_phase)
+
+    # Multi-window vector (last 5min / 30min / 2h / 6h).
+    windows = compute_windows(ts_list, t_now)
+    slope_sig, slope_drop = slope_signal_from(windows, spike_timestamps=ts_list, now_ts=t_now)
+    down_count, up_count = trend_counts(windows)
+
+    # Phase escalation rules — applied BEFORE confirmation streak so a sharp
+    # intra-window drop reacts on the same cycle (bypass streak).
+    bypass = False
+    if slope_sig == "DECEL_FAST_HARD":
+        raw_phase = PHASE_DECEL
+        reason = f"slope_hard drop={slope_drop}"
+        bypass = True
+    elif slope_sig == "DECEL_FAST" and raw_phase in (PHASE_NORMAL, PHASE_ACCEL):
+        raw_phase = PHASE_CAUTION
+        reason = f"slope drop={slope_drop}"
+        bypass = True
+    elif slope_sig == "ACCEL_FAST" and raw_phase == PHASE_NORMAL:
+        raw_phase = PHASE_ACCEL
+        reason = f"slope rise={slope_drop}"
+        bypass = True
+
+    # Multi-window 2-of-3 down rule: harden NORMAL to CAUTION.
+    if down_count >= 2 and raw_phase == PHASE_NORMAL:
+        raw_phase = PHASE_CAUTION
+        reason = f"trend_down={down_count}/3"
+        # No bypass here: this is a slow rule, let it confirm naturally.
+
+    if bypass:
+        # Reset streak and act immediately.
+        baseline._streaks[str(symbol or "").upper()] = {"phase": raw_phase, "count": CONFIRM_CYCLES_DEAD}
+        effective = raw_phase
+    else:
+        effective = baseline.confirm(symbol, raw_phase)
     streak_phase, streak_count = baseline.streak_for(symbol)
     return MarketPhase(
         symbol=str(symbol or "").upper(),
@@ -374,6 +518,12 @@ def evaluate_symbol(
         hour_bucket=hour,
         streak=streak_count if streak_phase == effective else 1,
         reason=reason,
+        windows=windows,
+        slope_signal=slope_sig,
+        slope_drop_pct=slope_drop,
+        trend_down_count=down_count,
+        trend_up_count=up_count,
+        bypass_streak=bypass,
     )
 
 
@@ -389,6 +539,9 @@ __all__ = [
     "phase_to_dict",
     "spikes_per_min",
     "classify",
+    "compute_windows",
+    "slope_signal_from",
+    "trend_counts",
     "hour_bucket_of",
     "PHASE_ACCEL",
     "PHASE_NORMAL",
@@ -406,4 +559,12 @@ __all__ = [
     "MIN_BASELINE_RATE",
     "CONFIRM_CYCLES_DECEL",
     "CONFIRM_CYCLES_DEAD",
+    "SLOPE_FAST_SEC",
+    "SLOPE_SLOW_SEC",
+    "SLOPE_DROP_PCT",
+    "SLOPE_DROP_HARD_PCT",
+    "SLOPE_RISE_PCT",
+    "TREND_WINDOWS_SEC",
+    "TREND_LABELS",
+    "TREND_FLAT_BAND",
 ]

@@ -2095,8 +2095,8 @@ async def run_loop() -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL is required")
 
-    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "500"
-    loop_sec = max(120, int(loop_raw or 500))
+    loop_raw = os.getenv("DYNAMIC_AI_LOOP_SEC") or os.getenv("DYNAMIC_AI_INTERVAL_SEC") or "180"
+    loop_sec = max(120, int(loop_raw or 180))
     lookback_sec = TELEMETRY_LOOKBACK_SEC_DEFAULT
     logs_dir = Path(
         os.getenv("DYNAMIC_AI_LOGS_DIR")
