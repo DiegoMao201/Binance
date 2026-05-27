@@ -8,6 +8,7 @@ const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 const TICK_RECENT_WINDOW_SEC = Math.max(900, Number(process.env.DERIV_TICK_RECENT_WINDOW_SEC || 7200));
 const TICK_BASELINE_WINDOW_SEC = Math.max(TICK_RECENT_WINDOW_SEC + 1800, Number(process.env.DERIV_TICK_BASELINE_WINDOW_SEC || 21600));
+const UI_DECISION_FEED_MAX = Math.max(50, Number(process.env.DERIV_UI_DECISIONS_MAX || 500));
 
 async function readJson(fileName, fallback, dir = DERIV_LOGS) {
   try {
@@ -410,7 +411,7 @@ export async function GET() {
   };
 
   const rawDec = Array.isArray(status?.last_decisions) ? status.last_decisions : [];
-  const recent = rawDec.slice(-200);
+  const recent = rawDec.slice(-UI_DECISION_FEED_MAX);
   const last_by_symbol = {};
   for (const d of rawDec) { const s = d?.symbol; if (s) last_by_symbol[s] = d; }
   const rejection_count = {};

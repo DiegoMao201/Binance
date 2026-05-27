@@ -291,6 +291,14 @@ class DerivDaemon:
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
+        _status_decisions_env = os.getenv(
+            "DERIV_STATUS_DECISIONS_MAX",
+            os.getenv("DERIV_AI_LOG_MAX", "500"),
+        )
+        self._status_decisions_max = max(30, min(int(_status_decisions_env or 500), 2000))
+        # Keep a slightly wider in-memory ring than what we serialize to status,
+        # so the UI has enough context even when one symbol emits bursts.
+        self._last_decisions_ring_max = max(self._status_decisions_max, 120)
         self._analyst = DerivAnalyst(settings, self._client)
         self._router = OrderRouter(binance_executor=None, deriv_executor=self._executor)
         self._cooldown = _CooldownGate(ticks=max(60, int(settings.contract_duration_sec)), risk=self._risk)
@@ -299,7 +307,7 @@ class DerivDaemon:
         # Telemetría in-memory (anillos) para que el frontend audite por qué
         # entra (o no entra) el bot. Se serializa junto al status cada 10s.
         self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
-        self._last_decisions: list[dict[str, Any]] = []     # ring (max 30)
+        self._last_decisions: list[dict[str, Any]] = []
         self._counters: dict[str, int] = {
             "ticks_total": 0,
             "decisions_total": 0,
@@ -378,8 +386,8 @@ class DerivDaemon:
         if extra:
             rec.update({k: v for k, v in extra.items() if v is not None})
         self._last_decisions.append(rec)
-        if len(self._last_decisions) > 30:
-            self._last_decisions = self._last_decisions[-30:]
+        if len(self._last_decisions) > self._last_decisions_ring_max:
+            self._last_decisions = self._last_decisions[-self._last_decisions_ring_max:]
         self._counters["decisions_total"] += 1
 
     @staticmethod
@@ -2884,7 +2892,7 @@ class DerivDaemon:
                 # ── Telemetría rica para auditoría visual ─────────────────
                 "counters": dict(self._counters),
                 "last_ticks": dict(self._last_ticks),
-                "last_decisions": list(self._last_decisions[-15:]),
+                "last_decisions": list(self._last_decisions[-self._status_decisions_max:]),
                 "per_symbol_stats": per_sym,
                 "symbol_tick_context": symbol_tick_context,
                 "open_contracts_live": open_contracts,
