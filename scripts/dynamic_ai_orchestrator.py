@@ -337,6 +337,7 @@ PATTERN_MEMORY_LOOKBACK = max(
 # performing *below* its own historical norm for the current hour-of-day and
 # should be put into CAUTION/DECEL/DEAD even if intra-session ratios look OK.
 from scripts import market_phase as MP  # noqa: E402
+from scripts import dynamic_ai_feedback_24h as FB24  # noqa: E402
 
 MARKET_PHASE_ENABLED = os.getenv("MARKET_PHASE_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on"
@@ -1710,6 +1711,62 @@ def _write_market_phase_hints(
         LOG.warning("[market-phase] hints write failed path=%s err=%s", path, exc)
 
 
+def _apply_24h_feedback_policy(
+    candidate_cfg: dict[str, SymbolCfg],
+    feedback_state: dict[str, Any],
+) -> tuple[dict[str, SymbolCfg], dict[str, dict[str, Any]]]:
+    """Apply once-per-window micro-adjustments from 24h performance feedback.
+
+    The feedback file is generated from closed contracts + market context and
+    intentionally proposes small deltas (score +/- small step, optional regime
+    bias). We only apply when the feedback state is pending (not yet acked).
+    """
+    if not FB24.FEEDBACK_ENABLED:
+        return candidate_cfg, {}
+    if not FB24.has_pending_apply(feedback_state):
+        return candidate_cfg, {}
+
+    symbols_payload = feedback_state.get("symbols") if isinstance(feedback_state.get("symbols"), dict) else {}
+    if not symbols_payload:
+        return candidate_cfg, {}
+
+    out: dict[str, SymbolCfg] = {}
+    applied: dict[str, dict[str, Any]] = {}
+    for sym in SYMBOLS:
+        base = candidate_cfg[sym]
+        payload = symbols_payload.get(sym) if isinstance(symbols_payload.get(sym), dict) else {}
+        delta = float(payload.get("score_delta") or 0.0)
+        regime_bias = str(payload.get("regime_bias") or "NONE").upper()
+
+        if abs(delta) < 1e-9 and regime_bias == "NONE":
+            out[sym] = base
+            continue
+
+        next_regime = base.regime
+        if regime_bias in {"SLOW", "NORMAL", "FAST"}:
+            next_regime = regime_bias
+
+        candidate = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=next_regime,
+                spike_pre_filter_target=base.spike_pre_filter_target,
+                zero_peak_grace_sec=base.zero_peak_grace_sec,
+                score_min_override=float(base.score_min_override) + float(delta),
+                is_active=base.is_active,
+            ),
+        )
+        out[sym] = candidate
+        if _cfg_changed(base, candidate):
+            applied[sym] = {
+                "score_delta": round(float(candidate.score_min_override) - float(base.score_min_override), 4),
+                "regime": f"{base.regime}->{candidate.regime}" if base.regime != candidate.regime else base.regime,
+                "reasons": payload.get("reasons") if isinstance(payload.get("reasons"), list) else [],
+            }
+
+    return out, applied
+
+
 def _update_market_phase_baseline(
     telemetry: dict[str, Any],
     baseline: "MP.SessionBaseline | None",
@@ -2159,6 +2216,10 @@ async def run_loop() -> None:
         os.getenv("MARKET_PHASE_HINTS_PATH")
         or str(logs_dir / "deriv_market_phase_hints.json")
     ).expanduser()
+    feedback_state_path = Path(
+        os.getenv("DYNAMIC_AI_24H_STATE_PATH")
+        or str(logs_dir / "deriv_24h_feedback_state.json")
+    ).expanduser()
 
     _load_activity_memory(activity_state_path)
 
@@ -2185,7 +2246,7 @@ async def run_loop() -> None:
     import asyncpg  # noqa: PLC0415
 
     LOG.info(
-        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d",
+        "[dynamic-ai] starting loop interval=%ss logs_dir=%s lookback=%ss strict_disable=%s min_contracts=%d recovery_cycles=%d stabilization_cycles=%d feedback24h_enabled=%s feedback24h_interval=%ss",
         loop_sec,
         logs_dir,
         lookback_sec,
@@ -2193,6 +2254,8 @@ async def run_loop() -> None:
         STRICT_DISABLE_MIN_CONTRACTS,
         ACTIVITY_RECOVERY_CYCLES,
         ACTIVITY_STABILIZATION_CYCLES,
+        FB24.FEEDBACK_ENABLED,
+        FB24.FEEDBACK_INTERVAL_SEC,
     )
 
     while True:
@@ -2204,6 +2267,29 @@ async def run_loop() -> None:
             _seed_state_memory(current_cfg)
             _seed_activity_memory(current_cfg)
             telemetry = _build_telemetry_from_logs(logs_dir, lookback_sec=lookback_sec)
+            feedback_state = FB24.load_state(feedback_state_path)
+            feedback_refreshed = False
+            try:
+                if FB24.should_refresh(feedback_state, now_ts=time.time()):
+                    feedback_state = FB24.compute_feedback_state(
+                        logs_dir,
+                        SYMBOLS,
+                        now_ts=time.time(),
+                    )
+                    FB24.save_state(feedback_state_path, feedback_state)
+                    feedback_refreshed = True
+                    totals = feedback_state.get("totals") if isinstance(feedback_state.get("totals"), dict) else {}
+                    LOG.info(
+                        "[dynamic-ai][24H] refreshed window=%s..%s trades=%s win_rate=%s pnl_total=%s pending=%s",
+                        feedback_state.get("window_start"),
+                        feedback_state.get("window_end"),
+                        totals.get("trades"),
+                        totals.get("win_rate"),
+                        totals.get("pnl_total"),
+                        FB24.has_pending_apply(feedback_state),
+                    )
+            except Exception as fb_exc:  # noqa: BLE001
+                LOG.warning("[dynamic-ai][24H] feedback refresh skipped: %s", fb_exc)
             if PATTERN_MEMORY_ENABLED:
                 try:
                     await _update_pattern_memory(conn, logs_dir)
@@ -2227,6 +2313,15 @@ async def run_loop() -> None:
             )
             _write_market_phase_hints(market_phase_hints_path, phase_report)
 
+            feedback_pending_before_apply = FB24.has_pending_apply(feedback_state)
+            new_cfg, feedback_applied = _apply_24h_feedback_policy(new_cfg, feedback_state)
+            if feedback_applied:
+                LOG.info(
+                    "[dynamic-ai][24H] applying adjustments symbols=%d details=%s",
+                    len(feedback_applied),
+                    feedback_applied,
+                )
+
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
                 conn,
@@ -2235,6 +2330,9 @@ async def run_loop() -> None:
                 decision_source,
                 diff_log_path,
             )
+            if feedback_applied:
+                feedback_state = FB24.mark_applied(feedback_state, now_ts=time.time())
+                FB24.save_state(feedback_state_path, feedback_state)
             LOG.info(
                 "[dynamic-ai] applied config source=%s symbols=%d db_updates=%d blocked_flips=%d sample=%s",
                 decision_source,
@@ -2283,6 +2381,14 @@ async def run_loop() -> None:
                     "db_updates": updates,
                     "blocked_flips": blocked_regime_flips,
                     "tick_window_updates": tick_updates,
+                    "feedback_24h": {
+                        "enabled": FB24.FEEDBACK_ENABLED,
+                        "state_path": str(feedback_state_path),
+                        "refreshed": feedback_refreshed,
+                        "pending_before_apply": feedback_pending_before_apply,
+                        "applied_symbols": feedback_applied,
+                        "pending_after_apply": FB24.has_pending_apply(feedback_state),
+                    },
                     "market_phase": {
                         sym: {
                             "phase": payload.get("phase"),
