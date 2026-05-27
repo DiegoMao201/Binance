@@ -1671,6 +1671,45 @@ def _apply_market_phase_policy(
     return out, report
 
 
+def _write_market_phase_hints(
+    path: Path,
+    phase_report: dict[str, dict[str, Any]] | None,
+) -> None:
+    """Persist a compact per-symbol market-phase hint file for the bot/analyst.
+
+    The Deriv analyst reads this file to relax tail-veto/quality gates when the
+    market for a given symbol is in ACCEL phase (so a temporary bleed does not
+    permanently silence symbols that are actually heating up).
+    """
+    if not MARKET_PHASE_ENABLED or not phase_report:
+        return
+    try:
+        symbols_payload: dict[str, dict[str, Any]] = {}
+        for sym, payload in phase_report.items():
+            if not isinstance(payload, dict):
+                continue
+            symbols_payload[sym] = {
+                "phase": payload.get("phase"),
+                "ratio": payload.get("ratio"),
+                "slope_signal": payload.get("slope_signal"),
+                "trend_down_count": payload.get("trend_down_count"),
+                "trend_up_count": payload.get("trend_up_count"),
+                "bypass_streak": payload.get("bypass_streak"),
+                "samples_baseline": payload.get("samples_baseline"),
+                "streak": payload.get("streak"),
+            }
+        body = {
+            "updated_at": time.time(),
+            "symbols": symbols_payload,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[market-phase] hints write failed path=%s err=%s", path, exc)
+
+
 def _update_market_phase_baseline(
     telemetry: dict[str, Any],
     baseline: "MP.SessionBaseline | None",
@@ -2116,6 +2155,10 @@ async def run_loop() -> None:
         os.getenv("MARKET_PHASE_BASELINE_PATH")
         or str(logs_dir / "deriv_session_baseline.json")
     ).expanduser()
+    market_phase_hints_path = Path(
+        os.getenv("MARKET_PHASE_HINTS_PATH")
+        or str(logs_dir / "deriv_market_phase_hints.json")
+    ).expanduser()
 
     _load_activity_memory(activity_state_path)
 
@@ -2182,6 +2225,7 @@ async def run_loop() -> None:
             new_cfg, phase_report = _apply_market_phase_policy(
                 current_cfg, new_cfg, telemetry, session_baseline
             )
+            _write_market_phase_hints(market_phase_hints_path, phase_report)
 
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(

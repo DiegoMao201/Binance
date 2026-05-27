@@ -180,6 +180,67 @@ _AI_QUALITY_RECOVERY_RECENT_AVG_PNL = float(
     os.getenv("DERIV_AI_QUALITY_RECOVERY_RECENT_AVG_PNL", "-0.005") or -0.005
 )
 
+# ── Market-phase aware override (read sidecar hints file) ───────────────────
+# When the per-symbol market-phase guard (computed by the IA sidecar) flags a
+# symbol as ACCEL — i.e. its short-window spike rate is materially above its
+# own historical baseline for the current UTC hour — we relax the AI-quality
+# tail veto and slightly lower the adaptive confidence floor so the symbol can
+# trade through a short bleed once the market is genuinely heating up.
+_AI_MARKET_PHASE_HINTS_PATH = os.getenv(
+    "DERIV_AI_MARKET_PHASE_HINTS_PATH",
+    "/data/deriv-logs/deriv_market_phase_hints.json",
+)
+_AI_MARKET_PHASE_HINTS_TTL_SEC = max(
+    30, int(os.getenv("DERIV_AI_MARKET_PHASE_HINTS_TTL_SEC", "180") or 180)
+)
+_AI_ACCEL_BYPASS_TAIL_VETO = os.getenv(
+    "DERIV_AI_ACCEL_BYPASS_TAIL_VETO", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+_AI_ACCEL_CONF_RELAX = max(
+    0.0,
+    min(float(os.getenv("DERIV_AI_ACCEL_CONF_RELAX", "0.05") or 0.05), 0.20),
+)
+
+_MARKET_PHASE_HINTS_CACHE: dict[str, Any] = {"loaded_at": 0.0, "symbols": {}}
+
+
+def _load_market_phase_hints() -> dict[str, dict[str, Any]]:
+    """Load the per-symbol market-phase hint file written by the IA sidecar.
+
+    Returns ``{symbol: payload}`` (possibly empty). Uses a small TTL cache so
+    the analyst does not hit the disk on every decision.
+    """
+    now = time.time()
+    cached_at = float(_MARKET_PHASE_HINTS_CACHE.get("loaded_at") or 0.0)
+    if (now - cached_at) < _AI_MARKET_PHASE_HINTS_TTL_SEC and _MARKET_PHASE_HINTS_CACHE.get("symbols"):
+        return _MARKET_PHASE_HINTS_CACHE["symbols"]  # type: ignore[return-value]
+    try:
+        path = _AI_MARKET_PHASE_HINTS_PATH
+        if not path:
+            return {}
+        with open(path, "r", encoding="utf-8") as fh:
+            body = json.load(fh)
+        symbols = body.get("symbols") or {}
+        if not isinstance(symbols, dict):
+            symbols = {}
+        _MARKET_PHASE_HINTS_CACHE["symbols"] = symbols
+        _MARKET_PHASE_HINTS_CACHE["loaded_at"] = now
+        return symbols
+    except FileNotFoundError:
+        _MARKET_PHASE_HINTS_CACHE["loaded_at"] = now
+        return {}
+    except Exception:
+        _MARKET_PHASE_HINTS_CACHE["loaded_at"] = now
+        return _MARKET_PHASE_HINTS_CACHE.get("symbols") or {}
+
+
+def _market_phase_for(symbol: str) -> dict[str, Any] | None:
+    hints = _load_market_phase_hints()
+    payload = hints.get(symbol)
+    if isinstance(payload, dict):
+        return payload
+    return None
+
 # ── Smart cache invalidation thresholds ─────────────────────────────────────
 _CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5"))   # |Δscore| > 0.5
 _CACHE_HURST_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_HURST_DRIFT", "0.03"))  # |ΔH| > 0.03
@@ -1067,6 +1128,30 @@ class DerivAnalyst:
                             f"ai={approval_rate_recent:.1f}% recent_n={recent_trades_n} "
                             f"recent_wr={recent_win_rate:.1f}% recent_avg={recent_avg_pnl:.4f}"
                         )
+
+                # Market-phase override: when the IA sidecar marks this symbol
+                # as ACCEL (short-window spike rate well above its own hourly
+                # baseline) we let it trade through a temporary bleed.
+                _phase_payload = _market_phase_for(sym) or {}
+                _phase_label = str(_phase_payload.get("phase") or "").upper()
+                _slope_signal = str(_phase_payload.get("slope_signal") or "").upper()
+                if quality_veto and _AI_ACCEL_BYPASS_TAIL_VETO and (
+                    _phase_label == "ACCEL" or _slope_signal == "ACCEL_FAST"
+                ):
+                    quality_veto = False
+                    veto_reasons.append(
+                        f"market_phase_override:phase={_phase_label or 'n/a'} "
+                        f"slope={_slope_signal or 'n/a'}"
+                    )
+                if _AI_ACCEL_CONF_RELAX > 0.0 and (
+                    _phase_label == "ACCEL" or _slope_signal == "ACCEL_FAST"
+                ):
+                    adaptive_conf = max(
+                        _AI_MIN_CONFIDENCE, adaptive_conf - _AI_ACCEL_CONF_RELAX
+                    )
+                    reasons.append(
+                        f"accel_relax=-{_AI_ACCEL_CONF_RELAX:.2f}"
+                    )
 
             out[sym] = {
                 "ai_min_confidence": adaptive_conf,
