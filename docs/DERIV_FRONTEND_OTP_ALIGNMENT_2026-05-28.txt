@@ -1,0 +1,39 @@
+Deriv Frontend OTP Alignment (2026-05-28)
+
+Resumen
+- Se corrigio una desalineacion entre bot y frontend para lectura de balance Deriv.
+- El bot operaba bien (OTP + app_id por cuenta) y frontend fallaba con:
+  OTP Deriv fallo (401): Invalid or expired token.
+
+Causa raiz
+- Frontend usaba un DERIV_APP_ID global (o fallback 1089).
+- Cuentas Deriv multi-account requieren app_id por cuenta.
+- En produccion no estaba seteado DERIV_APP_ID, por lo que OTP del frontend caia en 401.
+
+Cambios aplicados
+1) Commit 7011d48
+- web/lib/derivBalance.ts: migracion a flujo OTP (sin authorize legacy).
+- web/app/api/client/account-state/route.ts: pasa derivAccountId a fetchDerivBalance.
+- web/app/api/admin/clients/route.ts: pasa derivAccountId a fetchDerivBalance.
+
+2) Commit e9f2de0
+- web/lib/derivBalance.ts: resuelve app_id por account_id leyendo
+  /data/deriv-logs/deriv_multi_accounts.json.
+- Fallback de app IDs para OTP: app_id de cuenta -> env DERIV_APP_ID -> 1089.
+
+Ajuste operativo adicional
+- Se sincronizo en DB el deriv_token/deriv_account_id del cliente Angela
+  (bigotesypaticasdosquebradas@gmail.com) con la cuenta activa DOT92477032
+  del JSON multi-account del bot.
+
+Validacion live
+- Produccion frontend en imagen:
+  m0ks004osk4cw444gsokg8os:e9f2de0576cee4d94c91af1a4b3766c1ab638180
+- GET /api/admin/clients: balanceActual=9999.35, balanceSource=deriv_ws.
+- GET /api/client/account-state: estado.balanceActual=9999.35,
+  balanceMeta.source=deriv_ws.
+
+Leccion
+- Para Deriv multi-account, frontend y bot deben usar exactamente el mismo
+  triplete de identidad de cuenta: account_id + api_token + app_id.
+- No depender de un solo DERIV_APP_ID global cuando hay varias cuentas.
