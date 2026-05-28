@@ -364,8 +364,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 500,
-        "fvg_tier_minimo": "fvg_detected",
-        "block_bc_escape_env": False,   # BOOM500 data confirmed: bc_escape_env works for BOOM
+        "fvg_tier_minimo": "fvg_mitigated",
+        "block_bc_escape_env": True,    # Strict structural quality: BOOM500 must not bypass no-FVG states
         "cooldown_sec": 120,            # Prueba4-restart: 240→120 — reduce signal cooldown blocking
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,

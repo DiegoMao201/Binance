@@ -2151,6 +2151,34 @@ class DerivDaemon:
             )
             return
 
+        # BOOM600 safety override: trending regime needs extra score conviction.
+        if tick.symbol.upper() == "BOOM600" and str(snap.regime or "").lower() == "trending":
+            _boom600_trending_min = 9.0
+            snap.score_breakdown["boom600_trending_min_score"] = _boom600_trending_min
+            if snap.score < _boom600_trending_min:
+                self._log_entry_block(
+                    tick.symbol,
+                    "BOOM600_TRENDING_SCORE_GATE",
+                    score=snap.score,
+                    effective_min_score=_boom600_trending_min,
+                    side=snap.side,
+                    regime=snap.regime,
+                    hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol,
+                    allowed=False,
+                    side=snap.side,
+                    score=snap.score,
+                    reason=(
+                        f"BOOM600_TRENDING_SCORE_GATE: requires>={_boom600_trending_min:.2f} "
+                        f"got={snap.score:.2f}"
+                    ),
+                    extra={"regime": snap.regime},
+                )
+                return
+
         # Per-symbol minimum score gate (ASSET_INTEL_PROFILES)
         _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
         if _sym_bleed_bonus > 0.0:
