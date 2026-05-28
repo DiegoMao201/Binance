@@ -9,7 +9,7 @@
  */
 
 import { cookies } from "next/headers";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import { prisma } from "@/lib/db";
 import sgMail from "@sendgrid/mail";
 import { z } from "zod";
@@ -38,9 +38,9 @@ export async function sendSupportMessage(
 ): Promise<SupportResult> {
   // ── Auth guard ────────────────────────────────────────────────────────────
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-  if (!payload || (payload.role !== "client" && payload.role !== "investor")) {
+  const session = await resolveSessionFromCookies(cookieStore, "client");
+  const payload = session?.payload ?? null;
+  if (!payload) {
     return { success: false, error: "No autorizado" };
   }
 

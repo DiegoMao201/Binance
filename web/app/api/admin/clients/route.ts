@@ -13,7 +13,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import {
   listActiveClients,
   updateBalanceCache,
@@ -27,12 +27,13 @@ export const runtime = "nodejs";
 
 async function requireAdmin(): Promise<boolean> {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-  return payload?.role === "admin";
+  const session = await resolveSessionFromCookies(cookieStore, "admin");
+  return Boolean(session?.payload);
 }
 
-async function resolveLiveBalance(p: ClientCoreProfile): Promise<{ balance: number; source: string; error?: string }> {
+async function resolveLiveBalance(
+  p: ClientCoreProfile,
+): Promise<{ balance: number | null; source: "deriv_ws" | "cache" | "unavailable"; error?: string }> {
   if (p.derivToken) {
     const snap = await fetchDerivBalance(p.derivToken);
     if (snap.ok && typeof snap.balance === "number") {
@@ -42,12 +43,12 @@ async function resolveLiveBalance(p: ClientCoreProfile): Promise<{ balance: numb
     if (p.balanceActualCache != null) {
       return { balance: p.balanceActualCache, source: "cache", error: snap.error };
     }
-    return { balance: p.capitalInicial, source: "fallback", error: snap.error };
+    return { balance: null, source: "unavailable", error: snap.error ?? "Sin lectura Deriv." };
   }
   if (p.balanceActualCache != null) {
     return { balance: p.balanceActualCache, source: "cache" };
   }
-  return { balance: p.capitalInicial, source: "fallback" };
+  return { balance: null, source: "unavailable", error: "Cliente sin token Deriv." };
 }
 
 export async function GET() {
@@ -59,13 +60,15 @@ export async function GET() {
   const enriched = await Promise.all(
     clients.map(async (c) => {
       const live = await resolveLiveBalance(c);
-      const estado = calcularEstadoCuenta(
-        c.capitalInicial,
-        live.balance,
-        c.comisionTotalCobrada,
-      );
+      const estado = live.balance == null
+        ? null
+        : calcularEstadoCuenta(
+          c.capitalInicial,
+          live.balance,
+          c.comisionTotalCobrada,
+        );
       // "Mi 20%" sobre la ganancia que esta por encima del capital_inicial.
-      const gananciaSobreUmbral = Math.max(estado.gananciaNeta, 0);
+      const gananciaSobreUmbral = estado ? Math.max(estado.gananciaNeta, 0) : 0;
       const adminFee20 = gananciaSobreUmbral * 0.20;
 
       return {
@@ -79,11 +82,11 @@ export async function GET() {
         balanceActual: live.balance,
         balanceSource: live.source,
         balanceError: live.error,
-        gananciaNeta: estado.gananciaNeta,
-        rendimientoPct: estado.rendimientoPct,
-        enModoRecuperacion: estado.enModoRecuperacion,
-        mensajeEstado: estado.mensajeEstado,
-        adminFee20,
+        gananciaNeta: estado?.gananciaNeta ?? null,
+        rendimientoPct: estado?.rendimientoPct ?? null,
+        enModoRecuperacion: estado?.enModoRecuperacion ?? null,
+        mensajeEstado: estado?.mensajeEstado ?? "Saldo no disponible.",
+        adminFee20: estado && !estado.enModoRecuperacion ? adminFee20 : 0,
       };
     }),
   );

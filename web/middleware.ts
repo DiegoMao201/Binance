@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies, type SessionScope } from "@/lib/authSession";
 
 // ─── Protected route prefixes ─────────────────────────────────────────────────
 // Add portal routes here as the Fase 2+ modules are built.
-const PROTECTED_PREFIXES = ["/portal", "/admin", "/client", "/api/portfolio", "/api/admin"];
+const PROTECTED_PREFIXES = ["/portal", "/admin", "/client", "/api/portfolio", "/api/admin", "/api/client"];
 
 // ─── Public auth routes (never redirect-loop) ─────────────────────────────────
 const AUTH_PATHS = [
@@ -14,6 +14,12 @@ const AUTH_PATHS = [
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  const scope: SessionScope = pathname.startsWith("/admin") || pathname.startsWith("/api/admin")
+    ? "admin"
+    : pathname.startsWith("/client") || pathname.startsWith("/api/client")
+      ? "client"
+      : "any";
 
   // Skip middleware for static assets and Next.js internals.
   if (
@@ -35,9 +41,10 @@ export async function middleware(request: NextRequest) {
   );
   if (isAuthRoute) return NextResponse.next();
 
-  // ── Verify JWT from cookie ───────────────────────────────────────────────
-  const token = request.cookies.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
+  // ── Verify JWT from role-scoped cookies ──────────────────────────────────
+  // This allows admin and client sessions to coexist in the same browser.
+  const session = await resolveSessionFromCookies(request.cookies, scope);
+  const payload = session?.payload ?? null;
 
   if (!payload) {
     // API routes: return 401 JSON instead of redirecting.
@@ -62,8 +69,31 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // ── Client-only guard (browser routes) ───────────────────────────────────
+  if (
+    pathname.startsWith("/client") &&
+    payload.role !== "client" &&
+    payload.role !== "investor"
+  ) {
+    const loginUrl = request.nextUrl.clone();
+    loginUrl.pathname = "/portal/login";
+    loginUrl.search = `?next=${encodeURIComponent(pathname)}`;
+    return NextResponse.redirect(loginUrl);
+  }
+
   // ── Admin-only guard ──────────────────────────────────────────────────────
   if (pathname.startsWith("/api/admin") && payload.role !== "admin") {
+    return NextResponse.json(
+      { success: false, error: "Acceso denegado." },
+      { status: 403 }
+    );
+  }
+
+  if (
+    pathname.startsWith("/api/client") &&
+    payload.role !== "client" &&
+    payload.role !== "investor"
+  ) {
     return NextResponse.json(
       { success: false, error: "Acceso denegado." },
       { status: 403 }

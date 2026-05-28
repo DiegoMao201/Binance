@@ -5,7 +5,7 @@
 
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import { listOpenContractsFiltered } from "@/lib/clientData";
 
 export const dynamic = "force-dynamic";
@@ -13,9 +13,8 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-  if (payload?.role !== "admin") {
+  const session = await resolveSessionFromCookies(cookieStore, "admin");
+  if (!session?.payload) {
     return NextResponse.json({ ok: false, error: "Acceso denegado." }, { status: 403 });
   }
 

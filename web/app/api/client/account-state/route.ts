@@ -9,7 +9,7 @@
 
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import {
   getClientProfile,
   updateBalanceCache,
@@ -22,8 +22,8 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
+  const session = await resolveSessionFromCookies(cookieStore, "client");
+  const payload = session?.payload ?? null;
   if (!payload) {
     return NextResponse.json({ ok: false, error: "No autenticado." }, { status: 401 });
   }
@@ -39,9 +39,16 @@ export async function GET() {
     }, { status: 409 });
   }
 
-  // Balance en tiempo real desde Deriv si tenemos token.
-  let balanceActual = profile.balanceActualCache ?? profile.capitalInicial;
-  let balanceSource: "deriv_ws" | "cache" | "fallback" = "fallback";
+  // Balance en tiempo real desde Deriv; nunca inventar valores estaticos.
+  if (!profile.derivToken && profile.balanceActualCache == null) {
+    return NextResponse.json({
+      ok: false,
+      error: "Cuenta sin deriv_token ni cache de balance. Contacta al admin.",
+    }, { status: 409 });
+  }
+
+  let balanceActual = profile.balanceActualCache ?? 0;
+  let balanceSource: "deriv_ws" | "cache" = "cache";
   let derivError: string | undefined;
   let currency: string | undefined;
   let loginid: string | undefined;
@@ -57,10 +64,13 @@ export async function GET() {
       try { await updateBalanceCache(profile.id, balanceActual); } catch { /* noop */ }
     } else {
       derivError = snap.error;
-      if (profile.balanceActualCache != null) balanceSource = "cache";
+      if (profile.balanceActualCache == null) {
+        return NextResponse.json({
+          ok: false,
+          error: `No se pudo leer saldo Deriv: ${snap.error ?? "error desconocido"}`,
+        }, { status: 503 });
+      }
     }
-  } else if (profile.balanceActualCache != null) {
-    balanceSource = "cache";
   }
 
   const estado = calcularEstadoCuenta(

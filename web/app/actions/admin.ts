@@ -19,7 +19,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 
 // ─── Zod schema ───────────────────────────────────────────────────────────────
 
@@ -60,9 +60,8 @@ export type AdminMutationResult = {
 
 async function requireAdminRole(): Promise<boolean> {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-  return payload?.role === "admin";
+  const session = await resolveSessionFromCookies(cookieStore, "admin");
+  return Boolean(session?.payload);
 }
 
 // ─── Server Action ────────────────────────────────────────────────────────────

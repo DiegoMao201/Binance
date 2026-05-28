@@ -307,8 +307,12 @@ function ClientStats({ stats }: { stats: StatsState | null }) {
 }
 
 function DailyPnlChart({ points }: { points: Array<{ date: string; pnl: number }> }) {
-  const maxAbs = useMemo(
-    () => points.reduce((m, p) => Math.max(m, Math.abs(p.pnl)), 0.01),
+  const latest = useMemo(
+    () => [...points].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 10),
+    [points],
+  );
+  const neto = useMemo(
+    () => points.reduce((acc, p) => acc + p.pnl, 0),
     [points],
   );
   return (
@@ -316,26 +320,39 @@ function DailyPnlChart({ points }: { points: Array<{ date: string; pnl: number }
       {points.length === 0 ? (
         <p style={{ color: MUTE, fontSize: 13 }}>Sin datos todavia.</p>
       ) : (
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${points.length}, minmax(8px, 1fr))`,
-          gap: 4,
-          alignItems: "end",
-          height: 160,
-          padding: "0 4px",
-        }}>
-          {points.map((p) => {
-            const h = Math.max(2, (Math.abs(p.pnl) / maxAbs) * 140);
-            const color = p.pnl >= 0 ? GREEN : RED;
-            return (
-              <div key={p.date} title={`${p.date}: ${fmtUSD(p.pnl, true)}`} style={{
-                background: color,
-                height: h,
-                borderRadius: 3,
-                opacity: 0.85,
-              }} />
-            );
-          })}
+        <div>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 10,
+            fontSize: 12,
+            color: MUTE,
+          }}>
+            <span>Ultimos {latest.length} dias</span>
+            <span>
+              Neto acumulado: <strong style={{ color: neto >= 0 ? GREEN : RED }}>{fmtUSD(neto, true)}</strong>
+            </span>
+          </div>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            {latest.map((p) => (
+              <div key={p.date} style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                border: `1px solid ${BORD}`,
+                background: "rgba(255,255,255,0.02)",
+                borderRadius: 10,
+                padding: "8px 10px",
+              }}>
+                <span style={{ color: TEXT, fontSize: 12 }}>{new Date(`${p.date}T00:00:00Z`).toLocaleDateString("es-ES")}</span>
+                <span style={{ color: p.pnl >= 0 ? GREEN : RED, fontSize: 13, fontFamily: "ui-monospace, Menlo, monospace" }}>
+                  {fmtUSD(p.pnl, true)}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </Card>

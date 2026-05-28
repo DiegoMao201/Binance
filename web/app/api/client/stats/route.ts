@@ -9,7 +9,7 @@
 
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import {
   getClientProfile,
   listClosedTradesSinceFechaInicio,
@@ -25,8 +25,8 @@ function dayKey(iso: string): string {
 
 export async function GET() {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
+  const session = await resolveSessionFromCookies(cookieStore, "client");
+  const payload = session?.payload ?? null;
   if (!payload) {
     return NextResponse.json({ ok: false, error: "No autenticado." }, { status: 401 });
   }

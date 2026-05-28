@@ -16,7 +16,7 @@ import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 
 // ─── Shared return type ───────────────────────────────────────────────────────
 
@@ -34,9 +34,8 @@ const MAX_AMOUNT    = new Prisma.Decimal("10000000");
 
 async function requireAdmin(): Promise<boolean> {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
-  return payload?.role === "admin";
+  const session = await resolveSessionFromCookies(cookieStore, "admin");
+  return Boolean(session?.payload);
 }
 
 function parseAmount(raw: string): Prisma.Decimal | null {

@@ -43,12 +43,12 @@ type ClientRow = {
   hasDerivToken: boolean;
   fechaInicio: string | null;
   capitalInicial: number;
-  balanceActual: number;
-  balanceSource: string;
+  balanceActual: number | null;
+  balanceSource: "deriv_ws" | "cache" | "unavailable";
   balanceError?: string;
-  gananciaNeta: number;
-  rendimientoPct: number;
-  enModoRecuperacion: boolean;
+  gananciaNeta: number | null;
+  rendimientoPct: number | null;
+  enModoRecuperacion: boolean | null;
   mensajeEstado: string;
   adminFee20: number;
 };
@@ -81,6 +81,11 @@ type SymMetrics = {
 function fmtUSD(n: number, sign = false): string {
   const prefix = n < 0 ? "-" : sign && n > 0 ? "+" : "";
   return `${prefix}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtMaybeUSD(n: number | null, sign = false): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return fmtUSD(n, sign);
 }
 
 export function AdminDashboardView() {
@@ -246,16 +251,21 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
                 <div style={{ display: "flex", flexDirection: "column" }}>
                   <span>{c.displayName || c.email}</span>
                   <span style={{ color: MUTE, fontSize: 10 }}>{c.derivAccountId ?? "sin Deriv"} · {c.balanceSource}</span>
+                  {c.balanceError && <span style={{ color: AMBER, fontSize: 10 }}>{c.balanceError}</span>}
                 </div>
               </Td>
               <Td mono>{fmtUSD(c.capitalInicial)}</Td>
-              <Td mono color={c.balanceSource === "deriv_ws" ? TEXT : MUTE}>{fmtUSD(c.balanceActual)}</Td>
-              <Td mono color={c.gananciaNeta >= 0 ? GREEN : RED}>{fmtUSD(c.gananciaNeta, true)}</Td>
-              <Td mono color={c.enModoRecuperacion ? MUTE : AMBER}>
-                {c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.adminFee20)}
+              <Td mono color={c.balanceSource === "deriv_ws" ? TEXT : c.balanceSource === "cache" ? MUTE : AMBER}>
+                {fmtMaybeUSD(c.balanceActual)}
               </Td>
-              <Td color={c.enModoRecuperacion ? AMBER : GREEN}>
-                {c.enModoRecuperacion ? "⚠ Recuperacion" : "● En ganancia"}
+              <Td mono color={c.gananciaNeta == null ? MUTE : c.gananciaNeta >= 0 ? GREEN : RED}>
+                {fmtMaybeUSD(c.gananciaNeta, true)}
+              </Td>
+              <Td mono color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? MUTE : AMBER}>
+                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.adminFee20)}
+              </Td>
+              <Td color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? AMBER : GREEN}>
+                {c.enModoRecuperacion == null ? "Sin lectura Deriv" : c.enModoRecuperacion ? "⚠ Recuperacion" : "● En ganancia"}
               </Td>
             </tr>
           ))}

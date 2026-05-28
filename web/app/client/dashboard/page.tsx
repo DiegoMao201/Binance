@@ -12,7 +12,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { verifyJWT } from "@/lib/auth";
+import { resolveSessionFromCookies } from "@/lib/authSession";
 import { getClientProfile } from "@/lib/clientData";
 import { ClientDashboardView } from "./_components/ClientDashboardView";
 
@@ -20,16 +20,10 @@ export const dynamic = "force-dynamic";
 
 export default async function ClientDashboardPage() {
   const cookieStore = await cookies();
-  const token = cookieStore.get("auth_token")?.value;
-  const payload = token ? await verifyJWT(token) : null;
+  const session = await resolveSessionFromCookies(cookieStore, "client");
+  const payload = session?.payload ?? null;
 
   if (!payload) {
-    redirect("/portal/login?next=/client/dashboard");
-  }
-  if (payload.role === "admin") {
-    redirect("/admin/dashboard");
-  }
-  if (payload.role !== "client" && payload.role !== "investor") {
     redirect("/portal/login?next=/client/dashboard");
   }
 

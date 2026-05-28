@@ -1,15 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { signJWT, verifyOtp } from "@/lib/auth";
+import { AUTH_COOKIE_LEGACY, roleScopedCookieName } from "@/lib/authSession";
 import { VerifyOtpSchema } from "@/lib/zod";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /** Lock the OTP after this many failed attempts. */
 const MAX_ATTEMPTS = 3;
-
-/** JWT cookie name. */
-const AUTH_COOKIE = "auth_token";
 
 /** JWT lifetime in seconds (matches the 24 h token TTL). */
 const COOKIE_MAX_AGE = 86_400;
@@ -144,14 +142,19 @@ export async function POST(request: NextRequest) {
   }
 
   const response = NextResponse.json({ success: true });
-
-  response.cookies.set(AUTH_COOKIE, token, {
+  const scopedCookie = roleScopedCookieName(user.role);
+  const cookieOptions = {
     httpOnly: true,                                       // not accessible via JS
     secure: process.env.NODE_ENV === "production",        // HTTPS-only in prod
     sameSite: "strict",                                   // CSRF protection
     maxAge: COOKIE_MAX_AGE,
     path: "/",
-  });
+  } as const;
+
+  // Legacy cookie keeps backward compatibility with old routes/actions.
+  response.cookies.set(AUTH_COOKIE_LEGACY, token, cookieOptions);
+  // Scoped cookie prevents admin/client sessions from overriding each other.
+  response.cookies.set(scopedCookie, token, cookieOptions);
 
   return response;
 }
