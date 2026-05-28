@@ -2047,6 +2047,14 @@ class DerivRiskManager:
                 ).split(",")
                 if s.strip()
             }
+            _dyn_relax_block_symbols = {
+                s.strip().upper()
+                for s in os.getenv(
+                    "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS",
+                    "BOOM600,BOOM900",
+                ).split(",")
+                if s.strip()
+            }
             _dyn_relax_score_margin = float(
                 os.getenv("DERIV_DYNAMIC_STRUCTURAL_RELAX_SCORE_MARGIN", "0.40") or 0.40
             )
@@ -2056,12 +2064,16 @@ class DerivRiskManager:
             _dyn_relax_tier1_penalty = float(
                 os.getenv("DERIV_DYNAMIC_STRUCTURAL_TIER1_PENALTY", "0.75") or 0.75
             )
-            _dyn_relax_structural = (
+            _dyn_relax_candidate = (
                 _dyn_relax_enabled
                 and _dyn_is_active
                 and symbol.upper() in _dyn_relax_symbols
                 and _dyn_regime in _dyn_relax_regimes
                 and score >= (effective_min_score + _dyn_relax_score_margin)
+            )
+            _dyn_relax_structural = (
+                _dyn_relax_candidate
+                and symbol.upper() not in _dyn_relax_block_symbols
             )
 
             if not _has_fvg_active and not _has_spike_hunter:
@@ -2105,11 +2117,18 @@ class DerivRiskManager:
                             score,
                         )
                     else:
-                        _block_reason = (
-                            f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
-                            if _profile_blocks_bc else
-                            f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
-                        )
+                        if _dyn_relax_candidate and symbol.upper() in _dyn_relax_block_symbols:
+                            _block_reason = (
+                                f"boom_crash_structural_veto_strict_symbol: {symbol} "
+                                f"dynamic_structural_relax blocked by DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS"
+                            )
+                            snap.score_breakdown["dynamic_structural_relax_blocked"] = True
+                        else:
+                            _block_reason = (
+                                f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
+                                if _profile_blocks_bc else
+                                f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
+                            )
                         snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
                         snap.reasons.append(_block_reason)
                         snap.allowed = False
@@ -2159,10 +2178,17 @@ class DerivRiskManager:
                         )
                     else:
                         snap.score_breakdown["fvg_tier"] = "fvg_detected_insufficient"
-                        snap.reasons.append(
-                            f"boom_crash_structural_veto: {symbol} requires fvg_tier=fvg_mitigated, "
-                            f"only fvg_detected active — awaiting mitigation"
-                        )
+                        if _dyn_relax_candidate and symbol.upper() in _dyn_relax_block_symbols:
+                            snap.score_breakdown["dynamic_structural_relax_blocked"] = True
+                            snap.reasons.append(
+                                f"boom_crash_structural_veto_strict_symbol: {symbol} requires "
+                                f"fvg_tier=fvg_mitigated and dynamic_structural_relax is blocked"
+                            )
+                        else:
+                            snap.reasons.append(
+                                f"boom_crash_structural_veto: {symbol} requires fvg_tier=fvg_mitigated, "
+                                f"only fvg_detected active — awaiting mitigation"
+                            )
                         snap.allowed = False
                         return snap
                 # Tier 1 OK — allow at normal effective_min (no extra SMC bonus).
