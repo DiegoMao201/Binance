@@ -19,6 +19,9 @@
  * Node 22 incluye `WebSocket` global; no requiere `ws` como dependencia.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
+
 export interface DerivBalanceSnapshot {
   ok: boolean;
   balance?: number;
@@ -30,12 +33,37 @@ export interface DerivBalanceSnapshot {
 
 const DERIV_OTP_URL = "https://api.derivws.com/trading/v1/options/accounts";
 const DEFAULT_APP_ID = (process.env.DERIV_APP_ID ?? "1089").trim();
+const DERIV_STATE_DIR = (process.env.DERIV_STATE_DIR ?? "/data/deriv-logs").trim();
+const DERIV_MULTI_ACCOUNTS_PATH = path.join(DERIV_STATE_DIR, "deriv_multi_accounts.json");
 const TIMEOUT_MS = 7_000;
 
 interface DerivMessage {
   msg_type?: string;
   error?: { code?: string; message?: string };
   balance?: { balance?: number | string; currency?: string; loginid?: string };
+}
+
+async function resolveAppIdForAccount(accountId: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(DERIV_MULTI_ACCOUNTS_PATH, "utf8");
+    const parsed = JSON.parse(raw) as { accounts?: Array<{ account_id?: string; app_id?: string | number }> };
+    const accounts = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+    const row = accounts.find((acc) => String(acc.account_id ?? "").trim() === accountId);
+    const appId = String(row?.app_id ?? "").trim();
+    return appId.length > 0 ? appId : null;
+  } catch {
+    return null;
+  }
+}
+
+function uniqueAppIdCandidates(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    const appId = String(value ?? "").trim();
+    if (!appId || out.includes(appId)) continue;
+    out.push(appId);
+  }
+  return out;
 }
 
 /**
@@ -55,52 +83,60 @@ export async function fetchDerivBalance(
     return { ok: false, fetchedAt, error: "Cuenta Deriv invalida o ausente." };
   }
 
-  const otpUrl = `${DERIV_OTP_URL}/${encodeURIComponent(accountId.trim())}/otp`;
+  const normalizedAccountId = accountId.trim();
+  const otpUrl = `${DERIV_OTP_URL}/${encodeURIComponent(normalizedAccountId)}/otp`;
+  const accountAppId = await resolveAppIdForAccount(normalizedAccountId);
+  const appIdCandidates = uniqueAppIdCandidates([accountAppId, DEFAULT_APP_ID, "1089"]);
 
-  let wsUrl: string;
-  try {
-    const otpResp = await fetch(otpUrl, {
-      method: "POST",
-      headers: {
-        "Deriv-App-ID": DEFAULT_APP_ID,
-        Authorization: `Bearer ${token.trim()}`,
-        "Content-Type": "application/json",
-      },
-      cache: "no-store",
-    });
+  let wsUrl = "";
+  let otpError = "OTP Deriv rechazado por todos los app_id candidatos.";
 
-    const raw = await otpResp.text();
-    let parsed: unknown;
+  for (const appId of appIdCandidates) {
     try {
-      parsed = JSON.parse(raw) as unknown;
-    } catch {
-      parsed = null;
-    }
+      const otpResp = await fetch(otpUrl, {
+        method: "POST",
+        headers: {
+          "Deriv-App-ID": appId,
+          Authorization: `Bearer ${token.trim()}`,
+          "Content-Type": "application/json",
+        },
+        cache: "no-store",
+      });
 
-    if (!otpResp.ok) {
-      const msg = (parsed as { error?: { message?: string } } | null)?.error?.message
-        ?? raw.slice(0, 180)
-        ?? "OTP rechazado";
-      return {
-        ok: false,
-        fetchedAt,
-        error: `OTP Deriv fallo (${otpResp.status}): ${msg}`,
-      };
-    }
+      const raw = await otpResp.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw) as unknown;
+      } catch {
+        parsed = null;
+      }
 
-    wsUrl = String((parsed as { data?: { url?: string } } | null)?.data?.url ?? "").trim();
-    if (!wsUrl) {
-      return {
-        ok: false,
-        fetchedAt,
-        error: "OTP Deriv no retorno data.url.",
-      };
+      if (!otpResp.ok) {
+        const msg = (parsed as { error?: { message?: string } } | null)?.error?.message
+          ?? raw.slice(0, 180)
+          ?? "OTP rechazado";
+        otpError = `OTP Deriv fallo [app_id=${appId}] (${otpResp.status}): ${msg}`;
+        continue;
+      }
+
+      const candidateWsUrl = String((parsed as { data?: { url?: string } } | null)?.data?.url ?? "").trim();
+      if (!candidateWsUrl) {
+        otpError = `OTP Deriv [app_id=${appId}] no retorno data.url.`;
+        continue;
+      }
+
+      wsUrl = candidateWsUrl;
+      break;
+    } catch (err) {
+      otpError = `Error solicitando OTP Deriv [app_id=${appId}]: ${(err as Error).message}`;
     }
-  } catch (err) {
+  }
+
+  if (!wsUrl) {
     return {
       ok: false,
       fetchedAt,
-      error: `Error solicitando OTP Deriv: ${(err as Error).message}`,
+      error: otpError,
     };
   }
 
