@@ -54,7 +54,7 @@ export async function GET() {
   let loginid: string | undefined;
 
   if (profile.derivToken) {
-    const snap = await fetchDerivBalance(profile.derivToken);
+    const snap = await fetchDerivBalance(profile.derivToken, profile.derivAccountId);
     if (snap.ok && typeof snap.balance === "number") {
       balanceActual = snap.balance;
       balanceSource = "deriv_ws";

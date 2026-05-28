@@ -35,7 +35,7 @@ async function resolveLiveBalance(
   p: ClientCoreProfile,
 ): Promise<{ balance: number | null; source: "deriv_ws" | "cache" | "unavailable"; error?: string }> {
   if (p.derivToken) {
-    const snap = await fetchDerivBalance(p.derivToken);
+    const snap = await fetchDerivBalance(p.derivToken, p.derivAccountId);
     if (snap.ok && typeof snap.balance === "number") {
       try { await updateBalanceCache(p.id, snap.balance); } catch { /* noop */ }
       return { balance: snap.balance, source: "deriv_ws" };

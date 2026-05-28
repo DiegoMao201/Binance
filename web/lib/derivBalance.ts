@@ -2,15 +2,19 @@
  * lib/derivBalance.ts — Lectura server-side del balance Deriv.
  *
  * SOLO se ejecuta server-side (Next.js API route / Server Component).
- * El token Deriv del cliente NUNCA debe llegar al browser; este modulo
- * lo recibe como argumento explicito y abre una sesion WebSocket
- * efimera contra wss://ws.binaryws.com/websockets/v3.
+ * El token Deriv del cliente NUNCA debe llegar al browser.
+ *
+ * Flujo (alineado al bot Python):
+ *   1) POST OTP: https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp
+ *      Headers: Deriv-App-ID + Authorization Bearer <PAT>
+ *   2) Recibe data.url (WS preautenticado)
+ *   3) WS one-shot -> { balance: 1 } -> close
  *
  * Diseno:
- *  - Una conexion por llamada, vida corta (<3s).
- *  - Authorize -> balance one-shot -> close.
+ *  - Una conexion por llamada, vida corta.
+ *  - Sin authorize legacy (el WS OTP ya viene autenticado).
  *  - Sin "subscribe" persistente: el frontend hace polling cada 5s.
- *  - Timeout estricto de 5s para no bloquear el route handler.
+ *  - Timeout estricto para no bloquear el route handler.
  *
  * Node 22 incluye `WebSocket` global; no requiere `ws` como dependencia.
  */
@@ -24,29 +28,81 @@ export interface DerivBalanceSnapshot {
   error?: string;
 }
 
-const DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3";
-const DEFAULT_APP_ID = process.env.DERIV_APP_ID ?? "1089"; // public dev app
-const TIMEOUT_MS = 5_000;
+const DERIV_OTP_URL = "https://api.derivws.com/trading/v1/options/accounts";
+const DEFAULT_APP_ID = (process.env.DERIV_APP_ID ?? "1089").trim();
+const TIMEOUT_MS = 7_000;
 
 interface DerivMessage {
   msg_type?: string;
   error?: { code?: string; message?: string };
-  authorize?: { loginid?: string };
-  balance?: { balance?: number; currency?: string; loginid?: string };
+  balance?: { balance?: number | string; currency?: string; loginid?: string };
 }
 
 /**
  * Lee el balance actual de la cuenta Deriv asociada al token dado.
  * Nunca lanza; siempre devuelve un snapshot { ok, error? }.
  */
-export async function fetchDerivBalance(token: string): Promise<DerivBalanceSnapshot> {
+export async function fetchDerivBalance(
+  token: string,
+  accountId: string | null | undefined,
+): Promise<DerivBalanceSnapshot> {
   const fetchedAt = new Date().toISOString();
 
   if (!token || typeof token !== "string" || token.length < 8) {
     return { ok: false, fetchedAt, error: "Token Deriv invalido o ausente." };
   }
+  if (!accountId || typeof accountId !== "string" || accountId.trim().length < 3) {
+    return { ok: false, fetchedAt, error: "Cuenta Deriv invalida o ausente." };
+  }
 
-  const url = `${DERIV_WS_URL}?app_id=${encodeURIComponent(DEFAULT_APP_ID)}`;
+  const otpUrl = `${DERIV_OTP_URL}/${encodeURIComponent(accountId.trim())}/otp`;
+
+  let wsUrl: string;
+  try {
+    const otpResp = await fetch(otpUrl, {
+      method: "POST",
+      headers: {
+        "Deriv-App-ID": DEFAULT_APP_ID,
+        Authorization: `Bearer ${token.trim()}`,
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
+
+    const raw = await otpResp.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      parsed = null;
+    }
+
+    if (!otpResp.ok) {
+      const msg = (parsed as { error?: { message?: string } } | null)?.error?.message
+        ?? raw.slice(0, 180)
+        ?? "OTP rechazado";
+      return {
+        ok: false,
+        fetchedAt,
+        error: `OTP Deriv fallo (${otpResp.status}): ${msg}`,
+      };
+    }
+
+    wsUrl = String((parsed as { data?: { url?: string } } | null)?.data?.url ?? "").trim();
+    if (!wsUrl) {
+      return {
+        ok: false,
+        fetchedAt,
+        error: "OTP Deriv no retorno data.url.",
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      fetchedAt,
+      error: `Error solicitando OTP Deriv: ${(err as Error).message}`,
+    };
+  }
 
   return new Promise<DerivBalanceSnapshot>((resolve) => {
     let settled = false;
@@ -64,26 +120,26 @@ export async function fetchDerivBalance(token: string): Promise<DerivBalanceSnap
     }, TIMEOUT_MS);
 
     try {
-      ws = new WebSocket(url);
+      ws = new WebSocket(wsUrl);
     } catch (err) {
       clearTimeout(timer);
       finish({
         ok: false,
         fetchedAt,
-        error: `No se pudo abrir WS Deriv: ${(err as Error).message}`,
+        error: `No se pudo abrir WS OTP Deriv: ${(err as Error).message}`,
       });
       return;
     }
 
     ws.addEventListener("open", () => {
       try {
-        ws?.send(JSON.stringify({ authorize: token }));
+        ws?.send(JSON.stringify({ balance: 1 }));
       } catch (err) {
         clearTimeout(timer);
         finish({
           ok: false,
           fetchedAt,
-          error: `Fallo enviando authorize: ${(err as Error).message}`,
+          error: `Fallo solicitando balance: ${(err as Error).message}`,
         });
       }
     });
@@ -106,28 +162,16 @@ export async function fetchDerivBalance(token: string): Promise<DerivBalanceSnap
         return;
       }
 
-      if (msg.msg_type === "authorize") {
-        try {
-          ws?.send(JSON.stringify({ balance: 1 }));
-        } catch (err) {
-          clearTimeout(timer);
-          finish({
-            ok: false,
-            fetchedAt,
-            error: `Fallo solicitando balance: ${(err as Error).message}`,
-          });
-        }
-        return;
-      }
-
       if (msg.msg_type === "balance" && msg.balance) {
+        const numericBalance =
+          typeof msg.balance.balance === "number"
+            ? msg.balance.balance
+            : Number(msg.balance.balance ?? 0);
         clearTimeout(timer);
         finish({
           ok: true,
           fetchedAt,
-          balance: typeof msg.balance.balance === "number"
-            ? msg.balance.balance
-            : Number(msg.balance.balance ?? 0),
+          balance: Number.isFinite(numericBalance) ? numericBalance : 0,
           currency: msg.balance.currency,
           loginid: msg.balance.loginid,
         });
@@ -136,13 +180,13 @@ export async function fetchDerivBalance(token: string): Promise<DerivBalanceSnap
 
     ws.addEventListener("error", () => {
       clearTimeout(timer);
-      finish({ ok: false, fetchedAt, error: "WebSocket error contra Deriv." });
+      finish({ ok: false, fetchedAt, error: "WebSocket error contra Deriv (OTP)." });
     });
 
     ws.addEventListener("close", () => {
       if (!settled) {
         clearTimeout(timer);
-        finish({ ok: false, fetchedAt, error: "WS Deriv cerrado antes de balance." });
+        finish({ ok: false, fetchedAt, error: "WS OTP Deriv cerrado antes de balance." });
       }
     });
   });
