@@ -2194,6 +2194,77 @@ CRASH900_HURST_LOOKBACK_SEC = max(
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-05-29: per-symbol hour-of-day veto.
+# Env: DERIV_SYMBOL_HOUR_VETO_MAP="CRASH500:21,BOOM600:15,BOOM500:6,BOOM500:7"
+# Format: comma-separated `SYMBOL:HOUR` pairs (HOUR is UTC, 0-23). When the
+# current UTC hour matches a (symbol, hour) pair, the orchestrator forces
+# is_active=False for that symbol on every cycle that falls in that hour.
+# The veto runs AFTER force_active and BEFORE symbol_risk_floor so it cannot
+# be overridden by upstream policies and is the last word on is_active.
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_hour_veto_map(raw: str) -> dict[str, set[int]]:
+    out: dict[str, set[int]] = {}
+    if not raw:
+        return out
+    for token in raw.split(","):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        sym, hr = token.split(":", 1)
+        sym = sym.strip().upper()
+        try:
+            hour = int(hr.strip())
+        except Exception:
+            continue
+        if not sym or not (0 <= hour <= 23):
+            continue
+        out.setdefault(sym, set()).add(hour)
+    return out
+
+
+HOUR_VETO_MAP: dict[str, set[int]] = _parse_hour_veto_map(
+    os.getenv("DERIV_SYMBOL_HOUR_VETO_MAP", "") or ""
+)
+
+
+def _apply_hour_veto_policy(
+    candidate_cfg: dict[str, SymbolCfg],
+    now_utc_hour: int | None = None,
+) -> tuple[dict[str, SymbolCfg], dict[str, dict[str, Any]]]:
+    """Force is_active=False for (symbol, current_utc_hour) pairs in HOUR_VETO_MAP."""
+    report: dict[str, dict[str, Any]] = {}
+    if not HOUR_VETO_MAP:
+        return candidate_cfg, report
+    if now_utc_hour is None:
+        now_utc_hour = datetime.now(tz=timezone.utc).hour
+    out: dict[str, SymbolCfg] = {}
+    for sym, cfg in candidate_cfg.items():
+        veto_hours = HOUR_VETO_MAP.get(sym, set())
+        if veto_hours and now_utc_hour in veto_hours and cfg.is_active:
+            out[sym] = SymbolCfg(
+                regime=cfg.regime,
+                spike_pre_filter_target=cfg.spike_pre_filter_target,
+                zero_peak_grace_sec=cfg.zero_peak_grace_sec,
+                score_min_override=cfg.score_min_override,
+                is_active=False,
+            )
+            report[sym] = {
+                "hour_utc": int(now_utc_hour),
+                "veto_hours": sorted(veto_hours),
+                "forced_inactive": True,
+            }
+        else:
+            out[sym] = cfg
+            if veto_hours:
+                report[sym] = {
+                    "hour_utc": int(now_utc_hour),
+                    "veto_hours": sorted(veto_hours),
+                    "forced_inactive": False,
+                }
+    return out, report
+
+
 def _load_symbol_risk_lockouts(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
@@ -2989,6 +3060,16 @@ async def run_loop() -> None:
                 )
 
             new_cfg = _apply_force_active_policy(current_cfg, new_cfg)
+
+            # 2026-05-29: per-symbol hour-of-day veto (UTC). Runs AFTER
+            # force_active so explicit bans cannot be re-enabled by upstream.
+            new_cfg, hour_veto_report = _apply_hour_veto_policy(new_cfg)
+            if hour_veto_report:
+                LOG.info(
+                    "[dynamic-ai][HOUR_VETO] map=%s active_now=%s",
+                    {k: sorted(v) for k, v in HOUR_VETO_MAP.items()},
+                    {s: r for s, r in hour_veto_report.items() if r.get("forced_inactive")},
+                )
 
             # 2026-05-29: per-symbol short-window risk floor + CRASH900 Hurst clamp.
             # Runs AFTER all LLM/heuristic/policy layers and AFTER force_active,
