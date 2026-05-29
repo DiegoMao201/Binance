@@ -2521,6 +2521,168 @@ def _update_market_phase_baseline(
         LOG.warning("[market-phase] baseline save failed: %s", exc)
 
 
+def _compute_market_pulse_for_telemetry(
+    logs_dir: Path,
+    current_cfg: dict[str, "SymbolCfg"] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Compute per-symbol 'market_pulse': a unified, narrative-friendly view of
+    spike cadence + intensity + capture-efficiency for the LLM.
+
+    Goal: pass ONE coherent block per symbol so the LLM doesn't have to
+    reconcile scattered fields. Numbers are precomputed so it just reasons.
+
+    Output per symbol:
+        {
+          "pulse":                "HOT|WARM|NORMAL|COOL|COLD",
+          "spike_rate_1h":        float (spikes/hour in last 1h),
+          "spike_rate_6h":        float (spikes/hour in last 6h),
+          "rate_ratio_1h_6h":     float (1h vs 6h, 1.0 = mismo ritmo),
+          "mean_inter_spike_sec_1h":  int|None,
+          "last_spike_age_sec":   int|None,
+          "eta_next_spike_p50_sec": int|None,  (max(0, mean_inter_1h - last_age))
+          "bot_capture_rate_1h":  float (fraccion spikes con bot_entered=True),
+          "chase_block_rate_1h":  float (fraccion bloqueados por post_spike_chase_guard),
+          "cluster_density_1h":   float (fraccion spike_cluster=True),
+          "avg_jump_1h":          float, "avg_jump_6h": float,
+          "jump_intensity_1h_vs_6h": float,
+          "avg_ratio_1h":         float, "avg_ratio_6h": float,
+          "spike_pre_filter_target_current": int|None,
+          "zero_peak_grace_sec_current":      int|None,
+          "grace_vs_eta_ratio":   float|None  (grace_current / eta_next_p50),
+        }
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        spikes = _load_json(logs_dir / "deriv_spike_events.json")
+    except Exception:  # noqa: BLE001
+        spikes = []
+    if not spikes:
+        return out
+    now_ts = time.time()
+    win_1h = 3600.0
+    win_6h = 6 * 3600.0
+    cutoff_1h = now_ts - win_1h
+    cutoff_6h = now_ts - win_6h
+
+    # Index per symbol
+    per_sym: dict[str, list[dict[str, Any]]] = {s: [] for s in SYMBOLS}
+    for ev in spikes:
+        try:
+            sym = str(ev.get("symbol") or "").upper()
+            if sym not in per_sym:
+                continue
+            ts = ev.get("ts")
+            if not isinstance(ts, (int, float)):
+                continue
+            if ts < cutoff_6h:
+                continue
+            per_sym[sym].append(ev)
+        except Exception:  # noqa: BLE001
+            continue
+
+    def _safe_mean(xs: list[float]) -> float:
+        return round(sum(xs) / len(xs), 4) if xs else 0.0
+
+    def _classify_pulse(rate_1h: float, ratio: float | None) -> str:
+        # Combine absolute rate (1h) AND momentum (1h/6h ratio).
+        # Thresholds aligned with SPIKE_CADENCE_FAST/SLOW already in code.
+        if rate_1h >= SPIKE_CADENCE_FAST_MIN_PER_HOUR and (ratio is None or ratio >= 1.10):
+            return "HOT"
+        if rate_1h >= SPIKE_CADENCE_FAST_MIN_PER_HOUR * 0.85:
+            return "WARM"
+        if rate_1h <= SPIKE_CADENCE_SLOW_MAX_PER_HOUR * 0.50:
+            return "COLD"
+        if rate_1h <= SPIKE_CADENCE_SLOW_MAX_PER_HOUR:
+            return "COOL"
+        return "NORMAL"
+
+    for sym in SYMBOLS:
+        events = per_sym.get(sym) or []
+        events_1h = [e for e in events if e.get("ts", 0) >= cutoff_1h]
+        events_6h = events  # already filtered to >=cutoff_6h above
+
+        n1 = len(events_1h)
+        n6 = len(events_6h)
+        rate_1h = round(n1 / 1.0, 3) if n1 else 0.0
+        rate_6h = round(n6 / 6.0, 3) if n6 else 0.0
+        ratio = round(rate_1h / rate_6h, 3) if rate_6h > 0 else None
+
+        # inter-spike timing (1h window)
+        ts_sorted = sorted(float(e["ts"]) for e in events_1h)
+        if len(ts_sorted) >= 2:
+            diffs = [ts_sorted[i] - ts_sorted[i - 1] for i in range(1, len(ts_sorted))]
+            mean_inter = int(sum(diffs) / len(diffs))
+            last_age = int(max(0, now_ts - ts_sorted[-1]))
+        elif len(ts_sorted) == 1:
+            mean_inter = None
+            last_age = int(max(0, now_ts - ts_sorted[0]))
+        else:
+            mean_inter = None
+            last_age = None
+
+        eta_next: int | None
+        if mean_inter is not None and last_age is not None:
+            eta_next = int(max(0, mean_inter - last_age))
+        else:
+            eta_next = None
+
+        # capture / chase / cluster (1h)
+        bot_in = sum(1 for e in events_1h if e.get("bot_entered"))
+        chase_blk = sum(
+            1 for e in events_1h
+            if (str(e.get("block_reason") or "")).startswith("post_spike_chase_guard")
+        )
+        cluster_n = sum(1 for e in events_1h if e.get("spike_cluster"))
+        capture_rate_1h = round(bot_in / n1, 3) if n1 else 0.0
+        chase_rate_1h = round(chase_blk / n1, 3) if n1 else 0.0
+        cluster_density_1h = round(cluster_n / n1, 3) if n1 else 0.0
+
+        # jump / ratio intensity
+        jumps_1h = [float(e.get("jump") or 0.0) for e in events_1h if e.get("jump") is not None]
+        jumps_6h = [float(e.get("jump") or 0.0) for e in events_6h if e.get("jump") is not None]
+        ratios_1h = [float(e.get("ratio") or 0.0) for e in events_1h if e.get("ratio") is not None]
+        ratios_6h = [float(e.get("ratio") or 0.0) for e in events_6h if e.get("ratio") is not None]
+        avg_jump_1h = _safe_mean(jumps_1h)
+        avg_jump_6h = _safe_mean(jumps_6h)
+        avg_ratio_1h = _safe_mean(ratios_1h)
+        avg_ratio_6h = _safe_mean(ratios_6h)
+        jump_intensity = (
+            round(avg_jump_1h / avg_jump_6h, 3) if avg_jump_6h > 0 else None
+        )
+
+        # current cfg snapshot (so LLM sees its own knobs vs the math)
+        cfg_now = current_cfg.get(sym) if current_cfg else None
+        pre_filter_now = int(cfg_now.spike_pre_filter_target) if cfg_now else None
+        grace_now = int(cfg_now.zero_peak_grace_sec) if cfg_now else None
+        grace_vs_eta = (
+            round(grace_now / eta_next, 3)
+            if (grace_now is not None and eta_next is not None and eta_next > 0)
+            else None
+        )
+
+        out[sym] = {
+            "pulse": _classify_pulse(rate_1h, ratio),
+            "spike_rate_1h": rate_1h,
+            "spike_rate_6h": rate_6h,
+            "rate_ratio_1h_6h": ratio,
+            "mean_inter_spike_sec_1h": mean_inter,
+            "last_spike_age_sec": last_age,
+            "eta_next_spike_p50_sec": eta_next,
+            "bot_capture_rate_1h": capture_rate_1h,
+            "chase_block_rate_1h": chase_rate_1h,
+            "cluster_density_1h": cluster_density_1h,
+            "avg_jump_1h": avg_jump_1h,
+            "avg_jump_6h": avg_jump_6h,
+            "jump_intensity_1h_vs_6h": jump_intensity,
+            "avg_ratio_1h": avg_ratio_1h,
+            "avg_ratio_6h": avg_ratio_6h,
+            "spike_pre_filter_target_current": pre_filter_now,
+            "zero_peak_grace_sec_current": grace_now,
+            "grace_vs_eta_ratio": grace_vs_eta,
+        }
+    return out
+
+
 def _compute_hour_perf_for_telemetry(
     logs_dir: Path,
     lookback_days: int = 7,
@@ -2612,7 +2774,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "Actua como un motor cuantitativo de alta frecuencia para indices sinteticos Deriv.\n"
         "Tu objetivo es ajustar los parametros de trading en tiempo real para evitar entradas tardias y salidas prematuras.\n\n"
         f"HORA UTC ACTUAL: {now_utc.strftime('%Y-%m-%d %H:%M')} (hora del dia = {now_utc.hour}).\n\n"
-        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo, incluye hour_perf 7d para la hora actual):\n"
+        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo, incluye hour_perf 7d y market_pulse 1h/6h):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "PARAMETROS QUE PUEDES DEVOLVER POR SIMBOLO:\n"
         "- regime: 'FAST' | 'NORMAL' | 'SLOW'\n"
@@ -2643,7 +2805,22 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "17. Cuando phase in {DECEL, DEAD}, NUNCA bajar score_min_override por debajo del valor actual del simbolo.\n"
         "18. Cadence de spikes (rate_1h vs rate_3h): si 1h acelera, relaja score levemente; si 1h desacelera sostenidamente, endurece score y evita FAST.\n"
         "19. PRIORIZA INTELIGENCIA: si un simbolo tiene 0 trades_24h pero hour_perf 7d positivo, baja score_min_override 0.3-0.5 y size_multiplier=0.8 para incentivar muestreo controlado.\n"
-        "20. NO bloquees simbolos historicamente rentables solo por mala racha 6h; usa size_multiplier=0.4 y score+0.3 (sigue evaluando entradas mas selectivas en lugar de apagar).\n\n"
+        "20. NO bloquees simbolos historicamente rentables solo por mala racha 6h; usa size_multiplier=0.4 y score+0.3 (sigue evaluando entradas mas selectivas en lugar de apagar).\n"
+        "\nMARKET_PULSE (Fase H — vision UNIFICADA de cadencia + fuerza + captura por simbolo):\n"
+        "Cada simbolo trae 'market_pulse' con UN bloque coherente. NO razones con campos sueltos: USA market_pulse como vision integrada.\n"
+        "  - pulse: HOT (mercado fuerte y acelerando) | WARM | NORMAL | COOL | COLD (mercado dormido)\n"
+        "  - spike_rate_1h, spike_rate_6h (spikes/hora). rate_ratio_1h_6h: >1.10 = acelera, <0.70 = desacelera.\n"
+        "  - mean_inter_spike_sec_1h: tiempo medio entre spikes. last_spike_age_sec: hace cuanto el ultimo. eta_next_spike_p50_sec: estimacion al proximo.\n"
+        "  - bot_capture_rate_1h: fraccion de spikes con entrada del bot. Si <0.20 con pulse>=WARM, el bot esta perdiendo oportunidades.\n"
+        "  - chase_block_rate_1h: fraccion bloqueada por chase_guard. Si >0.50 con pulse>=WARM, el filtro de chase esta demasiado estricto para esta cadencia (ajustas via score, no toques pre_filter).\n"
+        "  - jump_intensity_1h_vs_6h: >1.20 = spikes mas fuertes que la media 6h. cluster_density_1h: fraccion en cluster.\n"
+        "  - spike_pre_filter_target_current y zero_peak_grace_sec_current: tu config vigente. grace_vs_eta_ratio: grace/eta_next. Ideal ~0.5-1.5.\n"
+        "21. COHERENCIA cadencia + hora: si pulse=HOT y hour_perf positivo (wr>=55, ev>=0), score_min_override hacia el piso del simbolo y size_multiplier 1.1-1.3. Si pulse=HOT y hour_perf negativo, mantener score (no relajar) y size_multiplier=0.6.\n"
+        "22. CAPTURA POBRE: si bot_capture_rate_1h <0.20 y chase_block_rate_1h >0.50 con pulse en {HOT,WARM}, baja score_min_override 0.10-0.20 (no toques spike_pre_filter_target, ya lo ajusta otro proceso). El bot esta perdiendo spikes capturables.\n"
+        "23. ZERO_PEAK_GRACE coherente con ETA: si eta_next_spike_p50_sec esta disponible Y grace_vs_eta_ratio <0.30 con pulse en {COOL,COLD}, sube zero_peak_grace_sec 10-20s (no cerrar antes del siguiente spike). Si grace_vs_eta_ratio >2.50 con pulse=HOT, baja grace 10-20s (spike denso, esperar tanto es overkill). Mantente dentro de [0,120] y respeta minimos por simbolo (regla 11).\n"
+        "24. PULSE COLD + hour_perf neutro/negativo: regime=SLOW, score_min_override +0.3, size_multiplier 0.4-0.6. NO desactivar.\n"
+        "25. PULSE COLD pero hour_perf 7d historicamente positivo (wr>=55 con trades>=3): mantener size_multiplier 0.8 y score cerca del piso (no abandonar simbolos productivos solo porque la hora actual esta calmada).\n"
+        "26. EXCLUSIVO TUYO: regime, score_min_override, zero_peak_grace_sec, size_multiplier. NO TOCAR spike_pre_filter_target (sidecar tick policy) ni is_active (hour_veto + risk_floor). Tu salida sera adicionalmente ajustada por _apply_spike_cadence_policy (que puede mover score +/- segun cadence_regime) y por symbol_risk_floor (que puede vetar is_active si pnl_window<-3 USDT). No anticipes esos ajustes; entrega tu mejor decision basada en market_pulse + hour_perf + datos 6h.\n\n"
         "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma (size_multiplier opcional, default mantiene el actual):\n"
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"size_multiplier\": 1.0}\n"
@@ -3216,6 +3393,32 @@ async def run_loop() -> None:
                     )
             except Exception as hp_exc:  # noqa: BLE001
                 LOG.warning("[dynamic-ai][HOUR_PERF] skip: %s", hp_exc)
+
+            # 2026-05-29 (Fase H): unified market_pulse per symbol — cadence +
+            # intensity + capture efficiency in ONE coherent block so the LLM
+            # doesn't reconcile scattered fields.
+            try:
+                pulse_map = _compute_market_pulse_for_telemetry(logs_dir, current_cfg)
+                if pulse_map:
+                    for sym, mp in pulse_map.items():
+                        if sym in telemetry and isinstance(telemetry[sym], dict):
+                            telemetry[sym]["market_pulse"] = mp
+                    LOG.info(
+                        "[dynamic-ai][MARKET_PULSE] sample=%s",
+                        {
+                            s: {
+                                "pulse": pulse_map[s]["pulse"],
+                                "rate_1h": pulse_map[s]["spike_rate_1h"],
+                                "ratio": pulse_map[s]["rate_ratio_1h_6h"],
+                                "capture": pulse_map[s]["bot_capture_rate_1h"],
+                                "chase_blk": pulse_map[s]["chase_block_rate_1h"],
+                                "eta_next": pulse_map[s]["eta_next_spike_p50_sec"],
+                            }
+                            for s in list(pulse_map)[:3]
+                        },
+                    )
+            except Exception as mp_exc:  # noqa: BLE001
+                LOG.warning("[dynamic-ai][MARKET_PULSE] skip: %s", mp_exc)
 
             prompt = _build_prompt(_scrub_telemetry_for_prompt(telemetry))
 
