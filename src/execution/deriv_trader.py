@@ -323,25 +323,33 @@ class DerivTradeExecutor:
         )
         # Hard-cut variant: even if MFE is borderline, when held far beyond the
         # spike-wait window with severe loss, exit without further deferral.
-        self._spike_wait_hardcut_sec = max(
-            self._spike_wait_timeout_sec,
-            min(
-                float(
-                    os.getenv(
-                        "DERIV_SPIKE_WAIT_HARDCUT_SEC",
-                        str(int(self._spike_wait_timeout_sec + 240.0)),
-                    )
-                    or (self._spike_wait_timeout_sec + 240.0)
-                ),
-                2400.0,
-            ),
-        )
+        # Per-symbol soft T + hardcut_margin (default +240s).
         self._spike_wait_hardcut_loss_frac = max(
             self._spike_wait_timeout_loss_frac,
             min(
                 float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_LOSS_FRAC", "0.50") or 0.50),
                 2.0,
             ),
+        )
+        # Per-symbol soft-timeout overrides (dynamic per-symbol patience window).
+        # Derived from 962-trade audit: win_hold p75 per symbol.
+        # Format: "BOOM500:720,BOOM900:900,CRASH600:540,..."
+        # Falls back to DERIV_SPIKE_WAIT_TIMEOUT_SEC for symbols not in the map.
+        _swt_default_map = (
+            "BOOM300:300,CRASH300:300,"
+            "BOOM500:720,CRASH500:480,"
+            "BOOM600:540,CRASH600:540,"
+            "BOOM900:900,CRASH900:720,"
+            "BOOM1000:900,CRASH1000:720"
+        )
+        self._spike_wait_timeout_sec_map = self._parse_symbol_seconds_map(
+            os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_SEC_MAP", _swt_default_map),
+            max_value=1800.0,
+        )
+        # Hard-cut margin added on top of the per-symbol soft T (default 240s).
+        self._spike_wait_hardcut_margin_sec = max(
+            60.0,
+            min(float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_MARGIN_SEC", "240") or 240), 900.0),
         )
         # Optional operator override map: "BOOM600:90,CRASH900:120".
         self._spike_hold_bonus_map = self._parse_symbol_seconds_map(
@@ -356,13 +364,14 @@ class DerivTradeExecutor:
             self._zero_peak_exit_enabled,
         )
         _LOGGER.info(
-            "[deriv-trader] spike_wait_timeout_enabled=%s T=%.0fs mfe<=stake*%.2f loss>=stake*%.2f hardcut_at=%.0fs hardcut_loss>=stake*%.2f",
+            "[deriv-trader] spike_wait_timeout_enabled=%s default_T=%.0fs mfe<=stake*%.2f loss>=stake*%.2f hardcut_margin=%.0fs hardcut_loss>=stake*%.2f per_sym=%s",
             self._spike_wait_timeout_enabled,
             self._spike_wait_timeout_sec,
             self._spike_wait_timeout_mfe_frac,
             self._spike_wait_timeout_loss_frac,
-            self._spike_wait_hardcut_sec,
+            self._spike_wait_hardcut_margin_sec,
             self._spike_wait_hardcut_loss_frac,
+            self._spike_wait_timeout_sec_map,
         )
         _LOGGER.info(
             "[deriv-trader] disable_spike_timeout=%s (DERIV_DISABLE_SPIKE_TIMEOUT)",
@@ -427,8 +436,12 @@ class DerivTradeExecutor:
         self._dynamic_config_provider = provider
 
     @staticmethod
-    def _parse_symbol_seconds_map(raw: str) -> dict[str, float]:
-        """Parse map strings like 'BOOM600:90,CRASH900:120'."""
+    def _parse_symbol_seconds_map(raw: str, max_value: float = 300.0) -> dict[str, float]:
+        """Parse map strings like 'BOOM600:90,CRASH900:120'.
+
+        max_value caps each parsed value (defaults to 300 for the legacy
+        spike_hold_bonus map). New callers can lift this cap.
+        """
         out: dict[str, float] = {}
         for chunk in str(raw or "").split(","):
             item = chunk.strip()
@@ -442,7 +455,7 @@ class DerivTradeExecutor:
                 sec = max(0.0, float(sec_raw.strip()))
             except ValueError:
                 continue
-            out[sym] = min(sec, 300.0)
+            out[sym] = min(sec, max_value)
         return out
 
     def _spike_hold_bonus_sec(self, symbol: str) -> float:
@@ -1271,16 +1284,26 @@ class DerivTradeExecutor:
                     and cid not in self._closing
                 ):
                     _stake = max(0.0, float(oc_check.stake_usdt))
+                    _sym_u = str(oc_check.symbol or "").upper()
+                    # Per-symbol soft T (derived from real win-hold p75 audit);
+                    # default to env DERIV_SPIKE_WAIT_TIMEOUT_SEC when symbol
+                    # has no explicit override.
+                    _T_soft = float(
+                        self._spike_wait_timeout_sec_map.get(
+                            _sym_u, self._spike_wait_timeout_sec
+                        )
+                    )
+                    _T_hard = _T_soft + self._spike_wait_hardcut_margin_sec
                     _mfe_cap = _stake * self._spike_wait_timeout_mfe_frac
                     _soft_loss_cap = -_stake * self._spike_wait_timeout_loss_frac
                     _hard_loss_cap = -_stake * self._spike_wait_hardcut_loss_frac
                     _soft_hit = (
-                        held >= self._spike_wait_timeout_sec
+                        held >= _T_soft
                         and float(oc_check.peak_profit) <= _mfe_cap
                         and float(oc_check.floating_pnl) <= _soft_loss_cap
                     )
                     _hard_hit = (
-                        held >= self._spike_wait_hardcut_sec
+                        held >= _T_hard
                         and float(oc_check.floating_pnl) <= _hard_loss_cap
                     )
                     if _soft_hit or _hard_hit:
@@ -1299,7 +1322,7 @@ class DerivTradeExecutor:
                                 cid,
                                 oc_check.symbol,
                                 held,
-                                self._spike_wait_timeout_sec,
+                                _T_soft,
                                 oc_check.peak_profit,
                                 oc_check.floating_pnl,
                                 _stake,
@@ -1310,12 +1333,14 @@ class DerivTradeExecutor:
                             oc_check.pending_close_reason = "spike_wait_timeout"
                             _LOGGER.info(
                                 "[deriv-trader] spike_wait_timeout: %s (%s) "
-                                "held=%.1fs T=%.0fs hardcut=%s peak=%.4f<=%.4f "
-                                "floating=%.4f<=%.4f stake=%.2f — closing stagnant trade",
+                                "held=%.1fs T_soft=%.0fs T_hard=%.0fs hardcut=%s "
+                                "peak=%.4f<=%.4f floating=%.4f<=%.4f stake=%.2f "
+                                "— closing stagnant trade",
                                 cid,
                                 oc_check.symbol,
                                 held,
-                                self._spike_wait_timeout_sec,
+                                _T_soft,
+                                _T_hard,
                                 _hard_hit,
                                 oc_check.peak_profit,
                                 _mfe_cap,
