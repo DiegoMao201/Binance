@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 REMOTE_HOST="${REMOTE_HOST:-192.81.216.49}"
 REMOTE_USER="${REMOTE_USER:-root}"
 REMOTE_PORT="${REMOTE_PORT:-22}"
@@ -19,8 +21,10 @@ if [[ -n "${REMOTE_PASSWORD:-}" ]]; then
     exit 2
   fi
   SSH_CMD=(sshpass -p "$REMOTE_PASSWORD" ssh "${SSH_OPTS[@]}")
+  SCP_CMD=(sshpass -p "$REMOTE_PASSWORD" scp -P "$REMOTE_PORT" -o StrictHostKeyChecking=no)
 else
   SSH_CMD=(ssh "${SSH_OPTS[@]}")
+  SCP_CMD=(scp -P "$REMOTE_PORT" -o StrictHostKeyChecking=no)
 fi
 
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
@@ -28,8 +32,10 @@ REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 echo "[install-daily-mail] Preparing remote directories"
 "${SSH_CMD[@]}" "$REMOTE" "mkdir -p '${REMOTE_RUN_DIR}' '$(dirname "$REMOTE_LOG_FILE")'"
 
-echo "[install-daily-mail] Writing remote runner script"
-"${SSH_CMD[@]}" "$REMOTE" "cat > '${REMOTE_RUN_DIR}/run_daily_close_email.sh' <<'SH'
+TMP_RUNNER="$(mktemp)"
+trap 'rm -f "$TMP_RUNNER"' EXIT
+
+cat > "$TMP_RUNNER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -37,10 +43,14 @@ ENV_FILE='${REMOTE_ENV_FILE}'
 FRONTEND_URL='${FRONTEND_URL}'
 
 if [[ -f "\$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "\$ENV_FILE"
-  set +a
+  while IFS= read -r line || [[ -n "\$line" ]]; do
+    [[ -z "\$line" || "\$line" =~ ^[[:space:]]*# ]] && continue
+    key="\${line%%=*}"
+    value="\${line#*=}"
+    key="\$(echo "\$key" | tr -d '[:space:]')"
+    [[ -z "\$key" ]] && continue
+    export "\$key=\$value"
+  done < "\$ENV_FILE"
 fi
 
 SECRET="\${DAILY_CLOSE_EMAIL_SECRET:-\${WEBHOOK_SECRET:-}}"
@@ -49,7 +59,7 @@ if [[ -z "\$SECRET" ]]; then
   exit 1
 fi
 
-TARGET_DAY="$(date -u -d 'yesterday' +%F)"
+TARGET_DAY="\$(date -u -d 'yesterday' +%F)"
 EXTRA_QUERY=""
 if [[ "\${1:-}" == "--dry-run" ]]; then
   EXTRA_QUERY="&dryRun=1"
@@ -59,8 +69,11 @@ curl -fsS -X POST \
   "\${FRONTEND_URL}/api/internal/daily-close-emails?date=\${TARGET_DAY}\${EXTRA_QUERY}" \
   -H "Authorization: Bearer \${SECRET}" \
   -H 'Content-Type: application/json'
-SH
-chmod +x '${REMOTE_RUN_DIR}/run_daily_close_email.sh'"
+EOF
+
+echo "[install-daily-mail] Uploading remote runner script"
+"${SCP_CMD[@]}" "$TMP_RUNNER" "$REMOTE:${REMOTE_RUN_DIR}/run_daily_close_email.sh"
+"${SSH_CMD[@]}" "$REMOTE" "chmod +x '${REMOTE_RUN_DIR}/run_daily_close_email.sh'"
 
 echo "[install-daily-mail] Installing cron schedule (00:05 UTC daily)"
 "${SSH_CMD[@]}" "$REMOTE" "cat > '${CRON_FILE}' <<'CRON'
