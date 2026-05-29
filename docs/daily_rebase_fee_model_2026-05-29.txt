@@ -1,0 +1,42 @@
+Daily Rebase Fee Model - 2026-05-29
+
+Goal
+- Charge only on current UTC day positive realized PnL.
+- Start counting at exact client fecha_inicio timestamp.
+- Rebase next-day operational capital from today's close.
+
+Business Rules
+1) Counting starts at fecha_inicio exactly.
+2) First day can be partial (from onboarding timestamp).
+3) Daily service fee only on current UTC day positive PnL.
+4) Next day capital base = operational capital today + today PnL.
+5) No re-charging on gains from prior days.
+
+Formulas
+- service_due_today = 0.20 * max(today_pnl_utc, 0)
+- client_net_today = today_pnl_utc - service_due_today
+- operational_capital_today = capital_inicial + pnl_before_today_utc
+- projected_next_day_capital = operational_capital_today + today_pnl_utc
+
+Backend Changes
+- web/app/api/client/stats/route.ts
+  - Added: operationalCapitalToday, serviceDueTodayUtc, clientNetTodayUtc,
+    projectedNextDayCapital, firstDayPartial,
+    lastSettledDayKey, lastSettledDayPnl, lastSettledDayService.
+- web/app/api/admin/clients/route.ts
+  - Added same per-client daily rebasing fields for admin table.
+  - adminFee20LatestDay now maps to current-day service due.
+  - Added totals: totalServiceDueTodayUtc, totalProjectedNextDayCapital.
+
+Frontend Changes
+- web/app/client/dashboard/_components/ClientDashboardView.tsx
+  - KPIs now emphasize: operational capital today, today PnL, today fee,
+    client net today, next-day base.
+  - Added explicit first-day-partial messaging and daily formula transparency.
+- web/app/admin/dashboard/_components/AdminDashboardView.tsx
+  - Client table aligned to daily rebasing semantics.
+  - Header KPIs now show today service due and next-day projected capital.
+
+Validation
+- next build completed successfully after these changes.
+- Existing non-blocking warnings remained unchanged (edge/runtime/config).
