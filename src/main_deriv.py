@@ -342,6 +342,8 @@ class DerivDaemon:
         # snapshot.  A snapshot is written when any symbol crosses 60 ticks,
         # so roughly every ~60 seconds under normal feed conditions.
         self._ctx_tick_count: dict[str, int] = {}
+        # 2026-05-29: per-symbol previous write (ts, tick_count) to derive tick_rate.
+        self._ctx_prev_write: dict[str, tuple[float, int]] = {}
         self._ctx_state_dir = Path(
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
@@ -1042,76 +1044,54 @@ class DerivDaemon:
                 1 for oc in getattr(self._executor, "_open", {}).values()
                 if getattr(oc, "symbol", "") == symbol
             )
-            # ── Micro telemetry (2026-05-29) ──────────────────────────────
-            # Cheap rolling features computed from the in-memory tick buffer
-            # so the AI orchestrator can detect regime micro-shifts (low cost
-            # entry quality signals) without re-querying the websocket.
+            # (prices only, no timestamps) plus a previous-write marker so we
+            # can derive tick rate between snapshots.
             _tick_rate_5s: float | None = None
             _range_rolling_pct_60s: float | None = None
             _post_spike_decay_slope: float | None = None
             try:
                 _tick_list = list(_ticks_buf) if _ticks_buf else []
-                # Tick rate per second over last ~5s. _ticks_buf items can be
-                # floats (legacy) or (ts, price) tuples; handle both.
-                def _ts_of(_t: Any) -> float | None:
-                    if isinstance(_t, (list, tuple)) and len(_t) >= 1:
-                        try:
-                            return float(_t[0])
-                        except Exception:
-                            return None
-                    return None
+                # tick_rate_5s is derived from the delta between the previous
+                # snapshot's tick count and the current one, divided by elapsed
+                # seconds and normalized to a 5s window for orchestrator math.
+                _cur_count = self._risk.get_tick_count(symbol)
+                _prev = self._ctx_prev_write.get(symbol)
+                if _prev is not None:
+                    _prev_ts, _prev_count = _prev
+                    _elapsed = max(0.001, _now - float(_prev_ts))
+                    _delta = max(0, int(_cur_count) - int(_prev_count))
+                    if _elapsed > 0:
+                        _tick_rate_5s = round((float(_delta) / _elapsed), 3)
+                self._ctx_prev_write[symbol] = (float(_now), int(_cur_count))
 
-                def _px_of(_t: Any) -> float | None:
-                    if isinstance(_t, (list, tuple)) and len(_t) >= 2:
-                        try:
-                            return float(_t[1])
-                        except Exception:
-                            return None
-                    try:
-                        return float(_t)
-                    except Exception:
-                        return None
+                # range_rolling_pct over last ~60 ticks (proxy for 60s if
+                # broker emits ~1 tick/s, which is typical for synthetic
+                # indices). Always computable from prices alone.
+                _last_60 = _tick_list[-60:] if len(_tick_list) >= 5 else []
+                if len(_last_60) >= 5:
+                    _hi = max(_last_60); _lo = min(_last_60); _mid = _last_60[-1]
+                    if _mid > 0:
+                        _range_rolling_pct_60s = round((_hi - _lo) / _mid * 100.0, 5)
 
-                _has_ts = bool(_tick_list and _ts_of(_tick_list[-1]) is not None)
-                if _has_ts:
-                    _ts_5 = _now - 5.0
-                    _n_5 = sum(1 for t in _tick_list if (_ts_of(t) or 0.0) >= _ts_5)
-                    _tick_rate_5s = round(_n_5 / 5.0, 3)
-                    _ts_60 = _now - 60.0
-                    _px_60 = [_px_of(t) for t in _tick_list if (_ts_of(t) or 0.0) >= _ts_60]
-                    _px_60 = [p for p in _px_60 if p is not None and p > 0]
-                    if len(_px_60) >= 5:
-                        _hi = max(_px_60); _lo = min(_px_60); _mid = _px_60[-1]
-                        if _mid > 0:
-                            _range_rolling_pct_60s = round((_hi - _lo) / _mid * 100.0, 5)
-                else:
-                    # Fallback: tick rate via tick-count delta is not trivially
-                    # available here without persisting state, so leave None.
-                    _last_60_px = [_px_of(t) for t in _tick_list[-60:]]
-                    _last_60_px = [p for p in _last_60_px if p is not None and p > 0]
-                    if len(_last_60_px) >= 5:
-                        _hi = max(_last_60_px); _lo = min(_last_60_px); _mid = _last_60_px[-1]
-                        if _mid > 0:
-                            _range_rolling_pct_60s = round((_hi - _lo) / _mid * 100.0, 5)
-
-                # Post-spike decay slope: average |Δprice| trend after the most
-                # recent spike. Positive = re-expanding, negative = decaying.
-                if _last_spike_ts > 0 and _has_ts:
-                    _post = [(_ts_of(t), _px_of(t)) for t in _tick_list if (_ts_of(t) or 0.0) >= _last_spike_ts]
-                    _post = [(ts, px) for ts, px in _post if ts is not None and px is not None and px > 0]
+                # post_spike_decay_slope: compare avg |Δprice| in first vs
+                # second half of the tick window since the last spike.
+                # Positive => re-expanding; negative => decaying.
+                if _ticks_since_spike and _ticks_since_spike >= 6:
+                    _n_post = min(int(_ticks_since_spike), len(_tick_list))
+                    _post = _tick_list[-_n_post:]
                     if len(_post) >= 6:
                         _half = len(_post) // 2
                         _early = _post[:_half]
                         _late = _post[_half:]
-                        def _avg_abs_delta(seq: list[tuple[float, float]]) -> float:
+                        def _avg_abs_delta(seq: list[float]) -> float:
                             if len(seq) < 2:
                                 return 0.0
-                            return sum(abs(seq[i][1] - seq[i - 1][1]) for i in range(1, len(seq))) / float(len(seq) - 1)
+                            return sum(abs(seq[i] - seq[i - 1]) for i in range(1, len(seq))) / float(len(seq) - 1)
                         _e = _avg_abs_delta(_early)
                         _l = _avg_abs_delta(_late)
-                        # Normalize by current price so it's comparable across symbols.
-                        _ref = _post[-1][1] or 1.0
-                        _post_spike_decay_slope = round((_l - _e) / _ref, 7)
+                        _ref = _post[-1] or 1.0
+                        if _ref > 0:
+                            _post_spike_decay_slope = round((_l - _e) / _ref, 7)
             except Exception:
                 # Telemetry is best-effort; never let it break the tick loop.
                 pass
