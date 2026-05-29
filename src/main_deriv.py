@@ -1231,6 +1231,50 @@ class DerivDaemon:
         sb["dyn_size_adjusted_stake"] = round(float(adjusted), 2)
         return float(adjusted)
 
+    def _enforce_profile_stake_target(
+        self,
+        *,
+        symbol: str,
+        stake: float,
+        profile: dict[str, Any],
+        sb: dict[str, Any],
+    ) -> float:
+        """Apply explicit profile-level final stake target when configured.
+
+        This is intentionally scoped to spike_crash profiles so BOOM and
+        volatility symbols keep their existing adaptive sizing behaviour.
+        """
+        try:
+            target = float(profile.get("stake_target_usdt") or 0.0)
+        except Exception:  # noqa: BLE001
+            target = 0.0
+        if target <= 0:
+            return float(stake)
+
+        if str(profile.get("type", "")).lower() != "spike_crash":
+            return float(stake)
+
+        fixed = round(max(1.0, target), 2)
+        try:
+            profile_cap = float(profile.get("stake_max_usdt") or 0.0)
+        except Exception:  # noqa: BLE001
+            profile_cap = 0.0
+        if profile_cap > 0:
+            fixed = min(fixed, round(profile_cap, 2))
+
+        if abs(fixed - float(stake)) >= 0.01:
+            sb["profile_stake_target_usdt"] = round(float(target), 2)
+            sb["profile_stake_pre_target"] = round(float(stake), 2)
+            sb["profile_stake_final"] = round(float(fixed), 2)
+            _LOGGER.info(
+                "[STAKE_POLICY] %s profile_target=%.2f pre=%.2f final=%.2f",
+                symbol,
+                float(target),
+                float(stake),
+                float(fixed),
+            )
+        return float(fixed)
+
     def _apply_edge_quality_sizing(
         self,
         symbol: str,
@@ -2603,6 +2647,13 @@ class DerivDaemon:
                 profile_min_score=_profile_min_score,
                 profile_stake_cap=_profile_stake_max,
             )
+            _sb_ov = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            snap.suggested_stake_usdt = self._enforce_profile_stake_target(
+                symbol=tick.symbol,
+                stake=snap.suggested_stake_usdt,
+                profile=_asset_profile,
+                sb=_sb_ov,
+            )
             # BOOM/CRASH spike-hunter: use a wide structural SL so the position
             # survives the accumulation window before the spike hits.
             _sl_pct_ov = (
@@ -2815,6 +2866,13 @@ class DerivDaemon:
             dynamic_active=_dyn_active,
             profile_min_score=_profile_min_score,
             profile_stake_cap=_profile_stake_max,
+        )
+        _sb_ai = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+        snap.suggested_stake_usdt = self._enforce_profile_stake_target(
+            symbol=tick.symbol,
+            stake=snap.suggested_stake_usdt,
+            profile=_asset_profile,
+            sb=_sb_ai,
         )
         # BOOM/CRASH spike-hunter: wide structural SL (same logic as override path)
         _sl_pct = (

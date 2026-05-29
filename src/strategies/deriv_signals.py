@@ -438,6 +438,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,        # Phase 31: aligned with other CRASH profiles
         "fvg_tier_minimo": "fvg_detected",  # Phase 31: Tier 1 sufficient — generate data first
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
+        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — CRASH fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 31: align with other CRASH profiles → sl_usd > broker floor
     },
     "CRASH500": {
@@ -470,7 +471,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Empirical WR for these entries is <14%. Hard veto (-2.0) blocks them.
         "geo_extended_veto_min": -0.70,
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        "stake_max_usdt": 2.00,
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         "min_score": 4.5,              # Phase 32: profile gate, let risk engine gate
         # Prueba03: bc_escape_env 20% WR (5t) vs fvg_detected/mitigated mixed.
@@ -491,7 +493,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # spike_min_post_sec=300 ensures entries only happen in the middle/late accumulation phase.
         # cycle=1000s, min_post=300s → entries at t≥300s, next spike in ≤700s → hold=700s covers all.
         # ATR: mean=0.047, median=0.041 (similar to CRASH500). Jump median=5.16.
-        # stake_max=2.00 (conservative vs previous $5.00 that lost $5.14/10 trades).
+        # 2026-05-29: user directive uses stake target $5.00 for CRASH symbols.
         "max_hold_seconds": 700,
         "spike_min_post_sec": 300,
         "ema_distance_pct": 0.05,
@@ -517,7 +519,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
         "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
-        "stake_max_usdt": 2.00,         # Muestra02: was $5 (lost $5.14 in 10 trades), conservative
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
         # Prueba03: ALL 7 CRASH1000 trades bc_escape_env → 14% WR (1 win in 702s). Score doesn't help.
         # Raising min_score 4.5→7.0 + block bc_escape_env. Only enter on strong FVG setups.
@@ -588,7 +591,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 1.50,
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -662,7 +666,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 1.50,
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
