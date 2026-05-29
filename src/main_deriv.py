@@ -829,6 +829,7 @@ class DerivDaemon:
             "dep_atr_decay_ratio": _dep_decay_ratio,
             "dep_loss_floor_usdt": _dep_loss_floor,
             "is_active": False,
+            "size_multiplier": 1.0,
             **_default_policy,
             "source": "default",
             "last_updated": None,
@@ -862,6 +863,7 @@ class DerivDaemon:
             "dep_atr_decay_ratio": _dep_decay_ratio,
             "dep_loss_floor_usdt": _dep_loss_floor,
             "is_active": bool(_db_cfg.get("is_active", True)),
+            "size_multiplier": max(0.10, min(float(_db_cfg.get("size_multiplier") or 1.0), 2.00)),
             **_policy,
             "source": "dynamic_db",
             "last_updated": _db_cfg.get("last_updated"),
@@ -885,16 +887,19 @@ class DerivDaemon:
                        zero_peak_grace_sec, score_min_override,
                        dep_exit_policy, dep_min_hold_sec,
                        dep_atr_decay_ratio, dep_loss_floor_usdt,
-                       is_active, last_updated
+                       is_active, last_updated,
+                       COALESCE(size_multiplier, 1.0) AS size_multiplier
                 FROM dynamic_symbol_config
             """
             _query_legacy = """
                 SELECT symbol, market_regime, spike_pre_filter_target,
                        zero_peak_grace_sec, score_min_override,
-                       is_active, last_updated
+                       is_active, last_updated,
+                       COALESCE(size_multiplier, 1.0) AS size_multiplier
                 FROM dynamic_symbol_config
             """
             _dep_columns_available = True
+            _has_size_mult = True
             try:
                 rows = await conn.fetch(_query_with_dep)
             except Exception as exc:  # noqa: BLE001
@@ -909,7 +914,21 @@ class DerivDaemon:
                 if not _dep_hint:
                     raise
                 _dep_columns_available = False
-                rows = await conn.fetch(_query_legacy)
+                try:
+                    rows = await conn.fetch(_query_legacy)
+                except Exception as exc2:  # noqa: BLE001
+                    if "size_multiplier" in str(exc2).lower():
+                        _has_size_mult = False
+                        rows = await conn.fetch(
+                            """
+                            SELECT symbol, market_regime, spike_pre_filter_target,
+                                   zero_peak_grace_sec, score_min_override,
+                                   is_active, last_updated
+                            FROM dynamic_symbol_config
+                            """
+                        )
+                    else:
+                        raise
                 _LOGGER.warning(
                     "[dynamic-config] DEP columns unavailable (migration pending) — using PASSIVE defaults"
                 )
@@ -933,6 +952,12 @@ class DerivDaemon:
                 float(row["dep_atr_decay_ratio"] if _dep_columns_available else 0.70),
                 float(row["dep_loss_floor_usdt"] if _dep_columns_available else -0.05),
             )
+            try:
+                _sm_raw = row["size_multiplier"] if _has_size_mult else 1.0
+                _size_mult = float(_sm_raw) if _sm_raw is not None else 1.0
+            except Exception:  # noqa: BLE001
+                _size_mult = 1.0
+            _size_mult = max(0.10, min(_size_mult, 2.00))
             _new[_sym] = {
                 "market_regime": str(row["market_regime"] or "NORMAL").upper(),
                 "spike_pre_filter_target": _spf,
@@ -943,6 +968,7 @@ class DerivDaemon:
                 "dep_atr_decay_ratio": _dep_decay_ratio,
                 "dep_loss_floor_usdt": _dep_loss_floor,
                 "is_active": bool(row["is_active"]),
+                "size_multiplier": _size_mult,
                 "last_updated": (
                     row["last_updated"].isoformat()
                     if row["last_updated"] is not None
@@ -1170,6 +1196,41 @@ class DerivDaemon:
             f"{bd['geo_channel_pos']:.3f}" if bd.get("geo_channel_pos") is not None else "—",
         )
 
+    def _apply_dynamic_size_multiplier(
+        self,
+        *,
+        stake: float,
+        dynamic_cfg: dict[str, Any],
+        dynamic_active: bool,
+        profile_stake_cap: float,
+        sb: dict[str, Any],
+    ) -> float:
+        """2026-05-29 (Fase D): apply orchestrator-driven size_multiplier.
+
+        The LLM in scripts/dynamic_ai_orchestrator.py dials this per symbol per
+        cycle in [0.10, 2.00]. 1.0 = neutral. <1.0 = soft quarantine (reduce
+        size without disabling). >1.0 = high conviction (cap by profile).
+        Skipped when dynamic_active=False (treated as 1.0).
+        """
+        if not dynamic_active:
+            return float(stake)
+        try:
+            raw = dynamic_cfg.get("size_multiplier", 1.0)
+            mult = float(raw) if raw is not None else 1.0
+        except Exception:  # noqa: BLE001
+            mult = 1.0
+        mult = max(0.10, min(mult, 2.00))
+        if abs(mult - 1.0) < 1e-6:
+            sb["dyn_size_mult"] = 1.0
+            return float(stake)
+        adjusted = round(max(1.0, float(stake) * mult), 2)
+        if profile_stake_cap > 0:
+            adjusted = min(adjusted, round(profile_stake_cap, 2))
+        sb["dyn_size_mult"] = round(mult, 3)
+        sb["dyn_size_pre_stake"] = round(float(stake), 2)
+        sb["dyn_size_adjusted_stake"] = round(float(adjusted), 2)
+        return float(adjusted)
+
     def _apply_edge_quality_sizing(
         self,
         symbol: str,
@@ -1234,6 +1295,15 @@ class DerivDaemon:
             sb["streak_size_symbol_pnl_window"] = round(float(_sym_pnl_window), 4)
             sb["streak_size_symbol_guard_bonus"] = round(float(_sym_guard_bonus), 4)
             sb["streak_size_adjusted_stake"] = round(float(adjusted), 2)
+            # 2026-05-29 (Fase D): apply orchestrator dynamic size_multiplier as
+            # final, capped factor. Skipped when dynamic_active=False.
+            adjusted = self._apply_dynamic_size_multiplier(
+                stake=adjusted,
+                dynamic_cfg=dynamic_cfg,
+                dynamic_active=dynamic_active,
+                profile_stake_cap=profile_stake_cap,
+                sb=sb,
+            )
             return adjusted
 
         mult = 1.0
@@ -1305,6 +1375,14 @@ class DerivDaemon:
             if isinstance(ai_conf, float):
                 sb["edge_size_ai_conf"] = round(ai_conf, 4)
 
+        # 2026-05-29 (Fase D): apply orchestrator dynamic size_multiplier last.
+        adjusted = self._apply_dynamic_size_multiplier(
+            stake=adjusted,
+            dynamic_cfg=dynamic_cfg,
+            dynamic_active=dynamic_active,
+            profile_stake_cap=profile_stake_cap,
+            sb=sb,
+        )
         return adjusted
 
     def _allow_ai_veto_recovery_probe(

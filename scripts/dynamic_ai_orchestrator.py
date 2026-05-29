@@ -25,7 +25,7 @@ import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -484,6 +484,9 @@ class SymbolCfg:
     zero_peak_grace_sec: int
     score_min_override: float
     is_active: bool = True
+    # 2026-05-29 (Fase D): per-symbol stake multiplier (soft quarantine knob).
+    # 1.0 = neutral, 0.5 = half size, 1.5 = +50% conviction. Range [0.1, 2.0].
+    size_multiplier: float = 1.0
 
 
 def _now_iso() -> str:
@@ -497,6 +500,11 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
         regime = "NORMAL"
     zero_peak_floor = ZERO_PEAK_FLOOR_BY_SYMBOL.get(sym, 0)
     score_floor = _symbol_score_floor(sym)
+    try:
+        _size_mult_raw = float(getattr(cfg, "size_multiplier", 1.0) or 1.0)
+    except Exception:  # noqa: BLE001
+        _size_mult_raw = 1.0
+    size_mult = max(0.10, min(_size_mult_raw, 2.00))
     return SymbolCfg(
         regime=regime,
         spike_pre_filter_target=max(
@@ -506,6 +514,7 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
         score_min_override=max(score_floor, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
+        size_multiplier=size_mult,
     )
 
 
@@ -560,6 +569,7 @@ def _cfg_to_dict(cfg: SymbolCfg) -> dict[str, Any]:
         "zero_peak_grace_sec": cfg.zero_peak_grace_sec,
         "score_min_override": round(float(cfg.score_min_override), 3),
         "is_active": bool(cfg.is_active),
+        "size_multiplier": round(float(getattr(cfg, "size_multiplier", 1.0) or 1.0), 3),
     }
 
 
@@ -571,6 +581,7 @@ def _cfg_diff_items(old_cfg: SymbolCfg, new_cfg: SymbolCfg) -> list[str]:
         "score_min_override",
         "regime",
         "is_active",
+        "size_multiplier",
     )
     old_map = _cfg_to_dict(old_cfg)
     new_map = _cfg_to_dict(new_cfg)
@@ -2510,6 +2521,75 @@ def _update_market_phase_baseline(
         LOG.warning("[market-phase] baseline save failed: %s", exc)
 
 
+def _compute_hour_perf_for_telemetry(
+    logs_dir: Path,
+    lookback_days: int = 7,
+) -> dict[str, dict[str, Any]]:
+    """For each symbol compute aggregate WR/EV for the SAME UTC hour-of-day over
+    the last `lookback_days`. This feeds the LLM with hour-of-day context so it
+    can dial size_multiplier and score_min_override hour by hour.
+
+    Output: {SYMBOL: {hour_utc, trades_same_hour_7d, win_rate, ev, pnl_total,
+                       prev_hour: {...}, next_hour: {...}}}
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        rows = _load_json(logs_dir / "deriv_closed_contracts.json")
+    except Exception:  # noqa: BLE001
+        rows = []
+    if not rows:
+        return out
+    now_utc = datetime.now(tz=timezone.utc)
+    cur_hour = now_utc.hour
+    prev_hour = (cur_hour - 1) % 24
+    next_hour = (cur_hour + 1) % 24
+    cutoff = now_utc - timedelta(days=int(lookback_days))
+    cutoff_ts = cutoff.timestamp()
+
+    # Aggregate per (symbol, hour_utc).
+    agg: dict[tuple[str, int], list[float]] = {}
+    for r in rows:
+        try:
+            sym = str(r.get("symbol") or r.get("symbol_norm") or "").upper()
+            if not sym:
+                continue
+            cts = (
+                _safe_ts(r.get("closed_at_ts"))
+                or _safe_ts(r.get("opened_at_ts"))
+                or _safe_ts(r.get("closed_at"))
+                or _safe_ts(r.get("opened_at"))
+            )
+            if cts is None or cts < cutoff_ts:
+                continue
+            pnl = float(r.get("realized_pnl_usdt") or r.get("pnl_usdt") or 0.0)
+        except Exception:
+            continue
+        hr = datetime.fromtimestamp(cts, tz=timezone.utc).hour
+        agg.setdefault((sym, hr), []).append(pnl)
+
+    def _bucket(sym: str, hr: int) -> dict[str, Any]:
+        pnls = agg.get((sym, hr), [])
+        n = len(pnls)
+        if n == 0:
+            return {"hour_utc": hr, "trades": 0, "win_rate": None, "ev": None, "pnl_total": 0.0}
+        wins = sum(1 for p in pnls if p > 0)
+        return {
+            "hour_utc": hr,
+            "trades": n,
+            "win_rate": round(100.0 * wins / n, 2),
+            "ev": round(sum(pnls) / n, 4),
+            "pnl_total": round(sum(pnls), 3),
+        }
+
+    for sym in SYMBOLS:
+        out[sym] = {
+            "current": _bucket(sym, cur_hour),
+            "prev_hour": _bucket(sym, prev_hour),
+            "next_hour": _bucket(sym, next_hour),
+        }
+    return out
+
+
 def _scrub_telemetry_for_prompt(telemetry: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of telemetry suitable for the LLM prompt.
 
@@ -2527,33 +2607,46 @@ def _scrub_telemetry_for_prompt(telemetry: dict[str, Any]) -> dict[str, Any]:
 
 def _build_prompt(telemetry_json: dict[str, Any]) -> str:
     score_max = f"{SCORE_MAX_GUARDRAIL:.1f}"
+    now_utc = datetime.now(tz=timezone.utc)
     return (
         "Actua como un motor cuantitativo de alta frecuencia para indices sinteticos Deriv.\n"
         "Tu objetivo es ajustar los parametros de trading en tiempo real para evitar entradas tardias y salidas prematuras.\n\n"
-        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo):\n"
+        f"HORA UTC ACTUAL: {now_utc.strftime('%Y-%m-%d %H:%M')} (hora del dia = {now_utc.hour}).\n\n"
+        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo, incluye hour_perf 7d para la hora actual):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
-        "REGLAS DE AJUSTE:\n"
+        "PARAMETROS QUE PUEDES DEVOLVER POR SIMBOLO:\n"
+        "- regime: 'FAST' | 'NORMAL' | 'SLOW'\n"
+        "- zero_peak_grace_sec: int [0,120] (segundos antes de cerrar por zero-peak)\n"
+        f"- score_min_override: float [6.5,{score_max}] (umbral minimo de score para abrir trade)\n"
+        "- size_multiplier: float [0.10,2.00] (NEW Fase D) — multiplicador del tamano de posicion.\n"
+        "    * 1.0 = neutral. 0.5 = media posicion (cuarentena soft sin desactivar).\n"
+        "    * 1.5 = +50% conviccion. Solo usar >1.0 si hour_perf, ev_per_trade_6h y win_rate son fuertes (WR>=65%, ev>0.05, hour_perf positivo).\n"
+        "    * Si lockout activo o symbol_guard_active -> NO subir size_multiplier (manten o baja).\n"
+        "    * Si hour_perf negativo, baja size_multiplier a 0.4-0.6 en vez de cerrar el simbolo.\n"
+        "\nREGLAS DE AJUSTE:\n"
         "1. ENTRADAS SON TICK-DRIVEN: NO usar eventos de spike para decidir entrada directa.\n"
         "2. No modificar spike_pre_filter_target automaticamente; el sidecar lo recalcula fuera del LLM con ventana reactiva 2h y baseline 6h.\n"
         "3. Si entry_lag_sec >120s o mercado FAST, SUBE score_min_override para endurecer entradas y evitar chase.\n"
         "4. Si hay zero_peak_exit antes del spike siguiente (<80s), aumentar zero_peak_grace_sec para esperar mas.\n"
         "5. Si mercado SLOW, subir score_min_override para evitar ruido.\n"
-        "6. Regla de Recuperacion (Regimen Estable): Si 0.8 <= Ratio <= 1.2 (el mercado esta a un ritmo normal y estable), tu obligacion es RELAJAR la cuarentena. Debes bajar gradualmente el score_min_override acercandolo de nuevo al valor base de 6.80 (ejemplo: si estaba en 8.00, bajalo a 7.20; si estaba en 7.20, bajalo a 6.80). No mantengas los scores en 8.00 si el ratio de aceleracion es normal, o asfixiaras la estrategia.\n"
-        "7. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override inmediatamente.\n"
-        "8. Si symbol_guard_active=true (o symbol_guard_pnl_window <= -2.0), imponer piso dinamico estricto: score_min_override >= 7.5 + max(0, symbol_guard_bonus-0.5).\n"
-        "9. Si symbol_guard_bonus >= 1.0, preferir regime=SLOW para ese simbolo hasta que mejore.\n"
-        f"10. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120].\n"
+        "6. Regla de Recuperacion (Regimen Estable): Si 0.8 <= Ratio <= 1.2, RELAJA score_min_override hacia el piso (~6.8). NO mantengas 8.00 con ratio normal.\n"
+        "7. Si ai_approval_rate_6h >85% y win_rate_6h <45% (o ev_per_trade_6h <0), ENDURECER score_min_override Y bajar size_multiplier a 0.5.\n"
+        "8. Si symbol_guard_active=true (o symbol_guard_pnl_window <= -2.0), score_min_override >= 7.5 + max(0, symbol_guard_bonus-0.5) Y size_multiplier <= 0.6.\n"
+        "9. Si symbol_guard_bonus >= 1.0, preferir regime=SLOW y size_multiplier=0.4 hasta que mejore.\n"
+        f"10. Mantener guardrails: score_min_override [6.5,{score_max}], zero_peak_grace_sec [0,120], size_multiplier [0.10,2.00].\n"
         "11. BOOM500/CRASH500/CRASH600 deben mantener zero_peak_grace_sec >= 60.\n"
-        "12. Cualquier simbolo puede entrar en cuarentena soft si cae su calidad (WR bajo, EV negativo, lag alto).\n"
-        "13. Cuarentena soft NO deshabilita: solo endurece score_min_override para reducir entradas de baja calidad.\n"
-        "14. Si un simbolo se recupera (WR/EV/lag mejoran), relajar score_min_override gradualmente.\n"
+        "12. Cuarentena soft preferida: NO desactivar is_active; usar size_multiplier=0.4-0.6 + score_min_override alto.\n"
+        "13. Si hour_perf de la hora actual es positivo (wr>=55, ev>=0) y trades>=5 muestras, NO subir score_min_override por encima del piso del simbolo; size_multiplier puede ir a 1.1-1.3.\n"
+        "14. Si hour_perf de la hora actual es negativo (wr<45 o ev<-0.05) con trades>=5, score_min_override+=0.3 y size_multiplier=0.4-0.6 (no cerrar; solo reducir riesgo).\n"
         "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n"
-        "16. Cada simbolo trae un objeto market_phase con: phase (ACCEL/NORMAL/CAUTION/DECEL/DEAD), ratio (recent/baseline spikes-per-min para la hora UTC actual), baseline_rate y samples_baseline. Es una capa estructural ABOVE intra-session signals: si phase=DECEL o DEAD, ese simbolo esta produciendo MENOS spikes de los que historicamente produce en esta franja horaria — endurecer fuerte (regime=SLOW, score_min_override >= 7.4). Si phase=CAUTION, endurecer leve (+0.4). Si phase=ACCEL, NO relajar mas alla del piso del simbolo. Si market_phase no esta presente o samples_baseline < 5, ignorar.\n"
-        "17. Cuando phase in {DECEL, DEAD} y el LLM responde, NUNCA bajar score_min_override por debajo del valor actual del simbolo — el sidecar aplicara su propio piso despues.\n\n"
-        "18. Considera cadence de spikes: spike_rate_per_hour_1h, spike_rate_per_hour_3h y spike_rate_ratio_1h_vs_3h. Si 1h acelera vs 3h, puedes relajar levemente score_min_override; si 1h desacelera de forma sostenida, endurece score_min_override y evita FAST.\n\n"
-        "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma:\n"
+        "16. Cada simbolo trae market_phase con phase (ACCEL/NORMAL/CAUTION/DECEL/DEAD), ratio, baseline_rate. Si phase=DECEL/DEAD: regime=SLOW, score_min_override >= 7.4, size_multiplier <= 0.6. Si phase=CAUTION: +0.4 al score. Si phase=ACCEL: NO relajar por debajo del piso del simbolo. Ignorar si samples_baseline<5.\n"
+        "17. Cuando phase in {DECEL, DEAD}, NUNCA bajar score_min_override por debajo del valor actual del simbolo.\n"
+        "18. Cadence de spikes (rate_1h vs rate_3h): si 1h acelera, relaja score levemente; si 1h desacelera sostenidamente, endurece score y evita FAST.\n"
+        "19. PRIORIZA INTELIGENCIA: si un simbolo tiene 0 trades_24h pero hour_perf 7d positivo, baja score_min_override 0.3-0.5 y size_multiplier=0.8 para incentivar muestreo controlado.\n"
+        "20. NO bloquees simbolos historicamente rentables solo por mala racha 6h; usa size_multiplier=0.4 y score+0.3 (sigue evaluando entradas mas selectivas en lugar de apagar).\n\n"
+        "Devuelve UNICAMENTE un JSON valido sin markdown ni texto extra con esta forma (size_multiplier opcional, default mantiene el actual):\n"
         "{\n"
-        "  \"BOOM1000\": {\"regime\": \"FAST\", \"spike_pre_filter_target\": 120, \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8}\n"
+        "  \"BOOM1000\": {\"regime\": \"FAST\", \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"size_multiplier\": 1.0}\n"
         "}\n"
     )
 
@@ -2599,29 +2692,50 @@ def _call_llm(prompt: str) -> dict[str, Any]:
 
 
 async def _read_current_cfg(conn: Any) -> dict[str, SymbolCfg]:
-    rows = await conn.fetch(
-        """
-        SELECT symbol, market_regime, spike_pre_filter_target,
-               zero_peak_grace_sec, score_min_override, is_active
-        FROM dynamic_symbol_config
-        """
-    )
+    # 2026-05-29 (Fase D): size_multiplier added in migration 015. Use COALESCE to
+    # tolerate environments where the column may not exist yet (asyncpg will raise
+    # UndefinedColumnError; in that case we retry the legacy SELECT).
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT symbol, market_regime, spike_pre_filter_target,
+                   zero_peak_grace_sec, score_min_override, is_active,
+                   COALESCE(size_multiplier, 1.0) AS size_multiplier
+            FROM dynamic_symbol_config
+            """
+        )
+        has_size_mult = True
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[dynamic-ai] size_multiplier column missing (apply migration 015); falling back. err=%s", exc)
+        rows = await conn.fetch(
+            """
+            SELECT symbol, market_regime, spike_pre_filter_target,
+                   zero_peak_grace_sec, score_min_override, is_active
+            FROM dynamic_symbol_config
+            """
+        )
+        has_size_mult = False
     out: dict[str, SymbolCfg] = {}
     for row in rows:
         sym = str(row["symbol"] or "").upper()
         if not sym:
             continue
+        try:
+            sm_val = float(row["size_multiplier"]) if has_size_mult else 1.0
+        except Exception:  # noqa: BLE001
+            sm_val = 1.0
         out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=str(row["market_regime"] or "NORMAL").upper(),
             spike_pre_filter_target=int(row["spike_pre_filter_target"] or 280),
             zero_peak_grace_sec=int(row["zero_peak_grace_sec"] or 0),
             score_min_override=float(row["score_min_override"] or 6.0),
             is_active=bool(row["is_active"]),
+            size_multiplier=sm_val,
         ))
 
     # Ensure defaults for missing symbols
     for sym in SYMBOLS:
-        out.setdefault(sym, _clamp_cfg(sym, SymbolCfg("NORMAL", 280, 0, 7.0, True)))
+        out.setdefault(sym, _clamp_cfg(sym, SymbolCfg("NORMAL", 280, 0, 7.0, True, 1.0)))
     return out
 
 
@@ -2631,12 +2745,18 @@ def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) 
         cur = current_cfg[sym]
         payload = raw.get(sym) if isinstance(raw.get(sym), dict) else {}
         # spike_pre_filter_target intentionally frozen: entry is tick-driven.
+        try:
+            sm_raw = payload.get("size_multiplier", getattr(cur, "size_multiplier", 1.0))
+            sm_val = float(sm_raw) if sm_raw is not None else float(getattr(cur, "size_multiplier", 1.0))
+        except Exception:  # noqa: BLE001
+            sm_val = float(getattr(cur, "size_multiplier", 1.0) or 1.0)
         out[sym] = _clamp_cfg(sym, SymbolCfg(
             regime=str(payload.get("regime", cur.regime)).upper(),
             spike_pre_filter_target=int(cur.spike_pre_filter_target),
             zero_peak_grace_sec=int(payload.get("zero_peak_grace_sec", cur.zero_peak_grace_sec)),
             score_min_override=float(payload.get("score_min_override", cur.score_min_override)),
             is_active=cur.is_active,
+            size_multiplier=sm_val,
         ))
     return out
 
@@ -2650,6 +2770,21 @@ async def _apply_cfg(
 ) -> int:
     updates = 0
     db_score_max = await _detect_db_score_max(conn)
+    # 2026-05-29 (Fase D): detect size_multiplier column ONCE per call so a
+    # missing-column UndefinedColumnError doesn't abort the transaction below.
+    has_size_mult_col = False
+    try:
+        _probe = await conn.fetchval(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'dynamic_symbol_config'
+              AND column_name = 'size_multiplier'
+            LIMIT 1
+            """
+        )
+        has_size_mult_col = bool(_probe)
+    except Exception:  # noqa: BLE001
+        has_size_mult_col = False
     async with conn.transaction():
         for sym, cfg in cfgs.items():
             previous = current_cfg.get(sym)
@@ -2684,28 +2819,62 @@ async def _apply_cfg(
                     ),
                 )
 
-            await conn.execute(
-                """
-                INSERT INTO dynamic_symbol_config (
-                    symbol, market_regime, spike_pre_filter_target,
-                    zero_peak_grace_sec, score_min_override, is_active
+            try:
+                if has_size_mult_col:
+                    await conn.execute(
+                        """
+                        INSERT INTO dynamic_symbol_config (
+                            symbol, market_regime, spike_pre_filter_target,
+                            zero_peak_grace_sec, score_min_override, is_active,
+                            size_multiplier
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            market_regime = EXCLUDED.market_regime,
+                            spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
+                            zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
+                            score_min_override = EXCLUDED.score_min_override,
+                            is_active = EXCLUDED.is_active,
+                            size_multiplier = EXCLUDED.size_multiplier,
+                            last_updated = NOW()
+                        """,
+                        sym,
+                        cfg_to_write.regime,
+                        cfg_to_write.spike_pre_filter_target,
+                        cfg_to_write.zero_peak_grace_sec,
+                        cfg_to_write.score_min_override,
+                        cfg_to_write.is_active,
+                        float(getattr(cfg_to_write, "size_multiplier", 1.0) or 1.0),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO dynamic_symbol_config (
+                            symbol, market_regime, spike_pre_filter_target,
+                            zero_peak_grace_sec, score_min_override, is_active
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            market_regime = EXCLUDED.market_regime,
+                            spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
+                            zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
+                            score_min_override = EXCLUDED.score_min_override,
+                            is_active = EXCLUDED.is_active,
+                            last_updated = NOW()
+                        """,
+                        sym,
+                        cfg_to_write.regime,
+                        cfg_to_write.spike_pre_filter_target,
+                        cfg_to_write.zero_peak_grace_sec,
+                        cfg_to_write.score_min_override,
+                        cfg_to_write.is_active,
+                    )
+            except Exception as _sm_exc:  # noqa: BLE001
+                LOG.warning(
+                    "[dynamic-ai] INSERT failed for %s (%s); skipping this symbol this cycle",
+                    sym, _sm_exc,
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    market_regime = EXCLUDED.market_regime,
-                    spike_pre_filter_target = EXCLUDED.spike_pre_filter_target,
-                    zero_peak_grace_sec = EXCLUDED.zero_peak_grace_sec,
-                    score_min_override = EXCLUDED.score_min_override,
-                    is_active = EXCLUDED.is_active,
-                    last_updated = NOW()
-                """,
-                sym,
-                cfg_to_write.regime,
-                cfg_to_write.spike_pre_filter_target,
-                cfg_to_write.zero_peak_grace_sec,
-                cfg_to_write.score_min_override,
-                cfg_to_write.is_active,
-            )
+                continue
             updates += 1
 
             if previous is not None:
@@ -3031,6 +3200,23 @@ async def run_loop() -> None:
                     await _update_pattern_memory(conn, logs_dir)
                 except Exception as memory_exc:  # noqa: BLE001
                     LOG.warning("[dynamic-ai] pattern memory skipped: %s", memory_exc)
+
+            # 2026-05-29 (Fase C): inject per-symbol hour-of-day perf into
+            # telemetry so the LLM can reason hour by hour and tune
+            # size_multiplier / score_min_override accordingly.
+            try:
+                hour_perf = _compute_hour_perf_for_telemetry(logs_dir, lookback_days=7)
+                if hour_perf:
+                    for sym, hp in hour_perf.items():
+                        if sym in telemetry and isinstance(telemetry[sym], dict):
+                            telemetry[sym]["hour_perf"] = hp
+                    LOG.info(
+                        "[dynamic-ai][HOUR_PERF] sample=%s",
+                        {s: hour_perf[s]["current"] for s in list(hour_perf)[:3]},
+                    )
+            except Exception as hp_exc:  # noqa: BLE001
+                LOG.warning("[dynamic-ai][HOUR_PERF] skip: %s", hp_exc)
+
             prompt = _build_prompt(_scrub_telemetry_for_prompt(telemetry))
 
             try:
@@ -3099,8 +3285,8 @@ async def run_loop() -> None:
                 updates,
                 blocked_regime_flips,
                 {
-                    "BOOM500": smoothed_cfg.get("BOOM500").__dict__ if smoothed_cfg.get("BOOM500") else None,
-                    "CRASH900": smoothed_cfg.get("CRASH900").__dict__ if smoothed_cfg.get("CRASH900") else None,
+                    "BOOM500": _cfg_to_dict(smoothed_cfg["BOOM500"]) if "BOOM500" in smoothed_cfg else None,
+                    "CRASH900": _cfg_to_dict(smoothed_cfg["CRASH900"]) if "CRASH900" in smoothed_cfg else None,
                 },
             )
             # 2026-05-29: per-symbol risk floor visibility.
