@@ -2986,6 +2986,10 @@ async def run_loop() -> None:
                     "[dynamic-ai][24H] applying adjustments symbols=%d details=%s",
                     len(feedback_applied),
                     feedback_applied,
+                )
+
+            new_cfg = _apply_force_active_policy(current_cfg, new_cfg)
+
             # 2026-05-29: per-symbol short-window risk floor + CRASH900 Hurst clamp.
             # Runs AFTER all LLM/heuristic/policy layers and AFTER force_active,
             # so it is the last word before smoothing. Lockouts persist on disk.
@@ -2995,10 +2999,6 @@ async def run_loop() -> None:
                 symbol_risk_lockout_path,
                 now_ts=time.time(),
             )
-
-                )
-
-            new_cfg = _apply_force_active_policy(current_cfg, new_cfg)
 
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
