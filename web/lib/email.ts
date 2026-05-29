@@ -440,3 +440,140 @@ export async function sendPammAllocationEmail(
 
   await sgMail.send(msg);
 }
+
+// ─── sendDailyCloseSummaryEmail ───────────────────────────────────────────────
+
+type DailyCloseSummary = {
+  dayKeyUtc: string;
+  trades: number;
+  pnl: number;
+  service: number;
+  clientNet: number;
+  capitalStart: number;
+  capitalEnd: number;
+  firstDayPartial: boolean;
+};
+
+/**
+ * Sends ONE daily close summary per client.
+ * This is the official replacement for per-trade win emails.
+ */
+export async function sendDailyCloseSummaryEmail(
+  to: string,
+  investorName: string | null,
+  summary: DailyCloseSummary,
+): Promise<void> {
+  if (!process.env.SENDGRID_API_KEY) {
+    console.warn(`[email] SENDGRID_API_KEY not set. Daily close for ${to} ${summary.dayKeyUtc}`);
+    return;
+  }
+  if (!FROM_EMAIL) {
+    console.warn(`[email] MAIL_FROM_EMAIL not set. Daily close for ${to} ${summary.dayKeyUtc}`);
+    return;
+  }
+
+  const name = investorName ?? "Inversor";
+  const dayLabel = new Date(`${summary.dayKeyUtc}T00:00:00Z`).toLocaleDateString("es-ES", {
+    year: "numeric",
+    month: "long",
+    day: "2-digit",
+    timeZone: "UTC",
+  });
+  const pnlColor = summary.pnl >= 0 ? "#12d98b" : "#ff6b6b";
+  const netColor = summary.clientNet >= 0 ? "#12d98b" : "#ff6b6b";
+  const year = new Date().getFullYear();
+
+  const msg: MailDataRequired = {
+    to,
+    from: { email: FROM_EMAIL, name: FROM_NAME },
+    subject: `${PRODUCT_NAME} — Cierre diario ${summary.dayKeyUtc} · ${summary.pnl >= 0 ? "+" : ""}${summary.pnl.toFixed(2)} USDT`,
+    text: [
+      `Hola ${name},`,
+      "",
+      `Este es tu cierre diario consolidado (${summary.dayKeyUtc} UTC).`,
+      "",
+      `Trades cerrados:      ${summary.trades}`,
+      `PnL del dia:          ${summary.pnl >= 0 ? "+" : ""}${summary.pnl.toFixed(4)} USDT`,
+      `Servicio (20%):       ${summary.service.toFixed(4)} USDT`,
+      `Neto cliente:         ${summary.clientNet >= 0 ? "+" : ""}${summary.clientNet.toFixed(4)} USDT`,
+      `Capital inicio dia:   ${summary.capitalStart.toFixed(2)} USDT`,
+      `Capital cierre dia:   ${summary.capitalEnd.toFixed(2)} USDT`,
+      summary.firstDayPartial ? "Nota: dia parcial desde tu hora exacta de alta." : "",
+      "",
+      "Este correo se envia una sola vez por dia para evitar saturacion.",
+      `— Equipo ${PRODUCT_NAME}`,
+    ].filter(Boolean).join("\n"),
+    html: `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${PRODUCT_NAME}</title>
+</head>
+<body style="margin:0;padding:0;background:#060d17;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#060d17;padding:38px 16px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#0a1018;border:1px solid #183248;border-radius:16px;overflow:hidden;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f2236 0%,#08202e 100%);padding:28px 34px;border-bottom:1px solid #1f425b;">
+              <p style="margin:0;color:#7cc8ff;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;">Cierre diario consolidado</p>
+              <p style="margin:8px 0 0;color:#e6f2ff;font-size:22px;font-weight:800;letter-spacing:-0.4px;">${PRODUCT_NAME}</p>
+              <p style="margin:6px 0 0;color:#8aa5bf;font-size:13px;">${dayLabel} (UTC)</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px 34px;">
+              <p style="margin:0 0 18px;color:#9bb7cf;font-size:14px;line-height:1.6;">Hola <strong style="color:#e6f2ff;">${name}</strong>, este es tu resumen diario oficial con liquidacion consolidada.</p>
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#070e17;border:1px solid #1b3246;border-radius:10px;overflow:hidden;margin-bottom:18px;">
+                <tr>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Trades cerrados</td>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#e6f2ff;font-size:13px;font-weight:700;text-align:right;">${summary.trades}</td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">PnL del dia</td>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:${pnlColor};font-size:13px;font-weight:700;text-align:right;">${summary.pnl >= 0 ? "+" : ""}${summary.pnl.toFixed(4)} USDT</td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Servicio (20%)</td>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#ffbf47;font-size:13px;font-weight:700;text-align:right;">${summary.service.toFixed(4)} USDT</td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Neto cliente</td>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:${netColor};font-size:13px;font-weight:700;text-align:right;">${summary.clientNet >= 0 ? "+" : ""}${summary.clientNet.toFixed(4)} USDT</td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Capital inicio dia</td>
+                  <td style="padding:14px 16px;border-bottom:1px solid #1b3246;color:#3dd6ff;font-size:13px;font-weight:700;text-align:right;">${summary.capitalStart.toFixed(2)} USDT</td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 16px;color:#8aa5bf;font-size:12px;">Capital cierre dia</td>
+                  <td style="padding:14px 16px;color:#3dd6ff;font-size:13px;font-weight:700;text-align:right;">${summary.capitalEnd.toFixed(2)} USDT</td>
+                </tr>
+              </table>
+              <p style="margin:0;color:#708ba4;font-size:12px;line-height:1.6;">
+                ${summary.firstDayPartial ? "Nota: este dia fue parcial porque inicio desde tu hora exacta de alta. " : ""}
+                Este correo se envia una sola vez por dia para evitar congestionar tu bandeja.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 34px;border-top:1px solid #1b3246;">
+              <p style="margin:0;color:#41566a;font-size:11px;text-align:center;line-height:1.6;">© ${year} ${PRODUCT_NAME} · Resumen diario institucional</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`,
+    trackingSettings: {
+      clickTracking: { enable: false },
+      openTracking: { enable: false },
+    },
+  };
+
+  await sgMail.send(msg);
+}

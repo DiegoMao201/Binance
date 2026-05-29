@@ -56,6 +56,12 @@ function dayKey(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function addDaysUtc(dayKeyUtc: string, deltaDays: number): string {
+  const d = new Date(`${dayKeyUtc}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
 type PnlSnapshot = {
   totalTrades: number;
   realizedPnlTotal: number;
@@ -70,38 +76,34 @@ type PnlSnapshot = {
   serviceDueTodayUtc: number;
   clientNetTodayUtc: number;
   projectedNextDayCapital: number;
+  yesterdayKeyUtc: string;
+  yesterdayPnlUtc: number;
+  serviceDueYesterdayUtc: number;
+  clientNetYesterdayUtc: number;
+  operationalCapitalYesterday: number;
+  projectedAfterYesterdayCapital: number;
+  tradesYesterdayUtc: number;
   firstDayPartial: boolean;
   lastSettledDayKey: string | null;
   lastSettledDayPnl: number;
   lastSettledDayService: number;
+  dailySettlement: Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    partialDay: boolean;
+  }>;
 };
 
 async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
-  if (!p.fechaInicio) {
-    return {
-      totalTrades: 0,
-      realizedPnlTotal: 0,
-      realizedPnlTodayUtc: 0,
-      latestDayKey: null,
-      latestDayPnl: 0,
-      serviceEstimatedTotal: 0,
-      serviceEstimatedLatestDay: 0,
-      todayKeyUtc: new Date().toISOString().slice(0, 10),
-      pnlBeforeTodayUtc: 0,
-      operationalCapitalToday: p.capitalInicial,
-      serviceDueTodayUtc: 0,
-      clientNetTodayUtc: 0,
-      projectedNextDayCapital: p.capitalInicial,
-      firstDayPartial: false,
-      lastSettledDayKey: null,
-      lastSettledDayPnl: 0,
-      lastSettledDayService: 0,
-    };
-  }
+  const todayKeyUtc = new Date().toISOString().slice(0, 10);
+  const yesterdayKeyUtc = addDaysUtc(todayKeyUtc, -1);
 
-  const trades = await listClosedTradesSinceFechaInicio(p.fechaInicio, p.id);
-  if (!trades.length) {
-    const todayKeyUtc = new Date().toISOString().slice(0, 10);
+  if (!p.fechaInicio) {
     return {
       totalTrades: 0,
       realizedPnlTotal: 0,
@@ -116,24 +118,64 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
       serviceDueTodayUtc: 0,
       clientNetTodayUtc: 0,
       projectedNextDayCapital: p.capitalInicial,
+      yesterdayKeyUtc,
+      yesterdayPnlUtc: 0,
+      serviceDueYesterdayUtc: 0,
+      clientNetYesterdayUtc: 0,
+      operationalCapitalYesterday: p.capitalInicial,
+      projectedAfterYesterdayCapital: p.capitalInicial,
+      tradesYesterdayUtc: 0,
+      firstDayPartial: false,
+      lastSettledDayKey: null,
+      lastSettledDayPnl: 0,
+      lastSettledDayService: 0,
+      dailySettlement: [],
+    };
+  }
+
+  const trades = await listClosedTradesSinceFechaInicio(p.fechaInicio, p.id);
+  if (!trades.length) {
+    return {
+      totalTrades: 0,
+      realizedPnlTotal: 0,
+      realizedPnlTodayUtc: 0,
+      latestDayKey: null,
+      latestDayPnl: 0,
+      serviceEstimatedTotal: 0,
+      serviceEstimatedLatestDay: 0,
+      todayKeyUtc,
+      pnlBeforeTodayUtc: 0,
+      operationalCapitalToday: p.capitalInicial,
+      serviceDueTodayUtc: 0,
+      clientNetTodayUtc: 0,
+      projectedNextDayCapital: p.capitalInicial,
+      yesterdayKeyUtc,
+      yesterdayPnlUtc: 0,
+      serviceDueYesterdayUtc: 0,
+      clientNetYesterdayUtc: 0,
+      operationalCapitalYesterday: p.capitalInicial,
+      projectedAfterYesterdayCapital: p.capitalInicial,
+      tradesYesterdayUtc: 0,
       firstDayPartial: p.fechaInicio.toISOString().slice(0, 10) === todayKeyUtc,
       lastSettledDayKey: null,
       lastSettledDayPnl: 0,
       lastSettledDayService: 0,
+      dailySettlement: [],
     };
   }
 
   const byDay = new Map<string, number>();
+  const tradesByDay = new Map<string, number>();
   for (const t of trades) {
     const k = dayKey(t.closedAt);
     byDay.set(k, (byDay.get(k) ?? 0) + t.realizedPnl);
+    tradesByDay.set(k, (tradesByDay.get(k) ?? 0) + 1);
   }
 
   const daily = Array.from(byDay.entries()).sort((a, b) => (a[0] < b[0] ? -1 : 1));
   const latest = daily[daily.length - 1] ?? null;
   const latestDayKey = latest?.[0] ?? null;
   const latestDayPnl = latest?.[1] ?? 0;
-  const todayKeyUtc = new Date().toISOString().slice(0, 10);
   const realizedPnlTodayUtc = byDay.get(todayKeyUtc) ?? 0;
   const realizedPnlTotal = trades.reduce((acc, t) => acc + t.realizedPnl, 0);
 
@@ -145,6 +187,46 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
   const clientNetTodayUtc = realizedPnlTodayUtc - serviceDueTodayUtc;
   const projectedNextDayCapital = operationalCapitalToday + realizedPnlTodayUtc;
   const firstDayPartial = p.fechaInicio.toISOString().slice(0, 10) === todayKeyUtc;
+
+  const dailySettlement = [] as Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    partialDay: boolean;
+  }>;
+  let runningCapital = p.capitalInicial;
+  const inicioDayKey = p.fechaInicio.toISOString().slice(0, 10);
+  for (const [k, pnl] of daily) {
+    const capitalStart = runningCapital;
+    const service = Math.max(pnl, 0) * 0.20;
+    const clientNet = pnl - service;
+    const capitalEnd = capitalStart + pnl;
+    dailySettlement.push({
+      dayKey: k,
+      pnl,
+      service,
+      clientNet,
+      capitalStart,
+      capitalEnd,
+      trades: tradesByDay.get(k) ?? 0,
+      partialDay: k === inicioDayKey,
+    });
+    runningCapital = capitalEnd;
+  }
+
+  const yesterdayPnlUtc = byDay.get(yesterdayKeyUtc) ?? 0;
+  const serviceDueYesterdayUtc = Math.max(yesterdayPnlUtc, 0) * 0.20;
+  const clientNetYesterdayUtc = yesterdayPnlUtc - serviceDueYesterdayUtc;
+  const pnlBeforeYesterdayUtc = daily
+    .filter(([k]) => k < yesterdayKeyUtc)
+    .reduce((acc, [, pnl]) => acc + pnl, 0);
+  const operationalCapitalYesterday = p.capitalInicial + pnlBeforeYesterdayUtc;
+  const projectedAfterYesterdayCapital = operationalCapitalYesterday + yesterdayPnlUtc;
+  const tradesYesterdayUtc = tradesByDay.get(yesterdayKeyUtc) ?? 0;
 
   const settled = daily.filter(([k]) => k < todayKeyUtc);
   const lastSettled = settled.length ? settled[settled.length - 1] : null;
@@ -166,10 +248,18 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
     serviceDueTodayUtc,
     clientNetTodayUtc,
     projectedNextDayCapital,
+    yesterdayKeyUtc,
+    yesterdayPnlUtc,
+    serviceDueYesterdayUtc,
+    clientNetYesterdayUtc,
+    operationalCapitalYesterday,
+    projectedAfterYesterdayCapital,
+    tradesYesterdayUtc,
     firstDayPartial,
     lastSettledDayKey,
     lastSettledDayPnl,
     lastSettledDayService,
+    dailySettlement,
   };
 }
 
@@ -195,6 +285,7 @@ export async function GET() {
       const adminFeeLatestDay = estado?.enModoRecuperacion ? 0 : pnl.serviceDueTodayUtc;
       const adminFeeTotalEstimated = estado?.enModoRecuperacion ? 0 : pnl.serviceEstimatedTotal;
       const serviceDueTodayUtc = estado?.enModoRecuperacion ? 0 : pnl.serviceDueTodayUtc;
+      const serviceDueYesterdayUtc = estado?.enModoRecuperacion ? 0 : pnl.serviceDueYesterdayUtc;
 
       return {
         id: c.id,
@@ -225,10 +316,18 @@ export async function GET() {
         serviceDueTodayUtc,
         clientNetTodayUtc: pnl.clientNetTodayUtc,
         projectedNextDayCapital: pnl.projectedNextDayCapital,
+        yesterdayKeyUtc: pnl.yesterdayKeyUtc,
+        yesterdayPnlUtc: pnl.yesterdayPnlUtc,
+        serviceDueYesterdayUtc,
+        clientNetYesterdayUtc: pnl.clientNetYesterdayUtc,
+        operationalCapitalYesterday: pnl.operationalCapitalYesterday,
+        projectedAfterYesterdayCapital: pnl.projectedAfterYesterdayCapital,
+        tradesYesterdayUtc: pnl.tradesYesterdayUtc,
         firstDayPartial: pnl.firstDayPartial,
         lastSettledDayKey: pnl.lastSettledDayKey,
         lastSettledDayPnl: pnl.lastSettledDayPnl,
         lastSettledDayService: pnl.lastSettledDayService,
+        dailySettlement: pnl.dailySettlement,
       };
     }),
   );
@@ -237,7 +336,45 @@ export async function GET() {
   const totalAdminFee20Estimated = enriched.reduce((acc, c) => acc + (c.adminFee20TotalEstimated ?? 0), 0);
   const totalRealizedPnl = enriched.reduce((acc, c) => acc + (c.realizedPnlTotal ?? 0), 0);
   const totalServiceDueTodayUtc = enriched.reduce((acc, c) => acc + (c.serviceDueTodayUtc ?? 0), 0);
+  const totalServiceDueYesterdayUtc = enriched.reduce((acc, c) => acc + (c.serviceDueYesterdayUtc ?? 0), 0);
+  const totalPnlYesterdayUtc = enriched.reduce((acc, c) => acc + (c.yesterdayPnlUtc ?? 0), 0);
   const totalProjectedNextDayCapital = enriched.reduce((acc, c) => acc + (c.projectedNextDayCapital ?? 0), 0);
+
+  const dailyBiMap = new Map<string, {
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    clients: number;
+  }>();
+  for (const c of enriched) {
+    const settlements = Array.isArray(c.dailySettlement) ? c.dailySettlement : [];
+    for (const d of settlements) {
+      const acc = dailyBiMap.get(d.dayKey) ?? {
+        dayKey: d.dayKey,
+        pnl: 0,
+        service: 0,
+        clientNet: 0,
+        capitalStart: 0,
+        capitalEnd: 0,
+        trades: 0,
+        clients: 0,
+      };
+      acc.pnl += d.pnl;
+      acc.service += d.service;
+      acc.clientNet += d.clientNet;
+      acc.capitalStart += d.capitalStart;
+      acc.capitalEnd += d.capitalEnd;
+      acc.trades += d.trades;
+      acc.clients += 1;
+      dailyBiMap.set(d.dayKey, acc);
+    }
+  }
+  const dailyBiTimeline = Array.from(dailyBiMap.values())
+    .sort((a, b) => (a.dayKey < b.dayKey ? -1 : 1));
 
   return NextResponse.json({
     ok: true,
@@ -247,7 +384,10 @@ export async function GET() {
     totalAdminFee20Estimated,
     totalRealizedPnl,
     totalServiceDueTodayUtc,
+    totalServiceDueYesterdayUtc,
+    totalPnlYesterdayUtc,
     totalProjectedNextDayCapital,
+    dailyBiTimeline,
     count: enriched.length,
   });
 }

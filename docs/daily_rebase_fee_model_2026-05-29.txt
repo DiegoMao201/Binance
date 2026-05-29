@@ -33,9 +33,24 @@ Frontend Changes
   - KPIs now emphasize: operational capital today, today PnL, today fee,
     client net today, next-day base.
   - Added explicit first-day-partial messaging and daily formula transparency.
+  - Added BI panel with per-day filter (date picker + today/yesterday),
+    selected-day KPIs, and growth curve chart.
 - web/app/admin/dashboard/_components/AdminDashboardView.tsx
   - Client table aligned to daily rebasing semantics.
   - Header KPIs now show today service due and next-day projected capital.
+  - Added BI panel with per-day filter, aggregated daily KPIs,
+    capital growth chart, and per-client breakdown for selected day.
+
+Daily Email Policy (new)
+- Per-trade win emails were removed from web/app/api/webhooks/trade-closed/route.ts.
+- New endpoint: web/app/api/internal/daily-close-emails/route.ts
+  - Sends exactly one daily close summary per client and day.
+  - Uses Bearer auth with DAILY_CLOSE_EMAIL_SECRET (fallback WEBHOOK_SECRET).
+  - Idempotency persisted in logs/daily_close_email_log.json.
+- New installer script:
+  - scripts/install_frontend_daily_close_mail_cron_remote.sh
+  - Installs a cron job on the server (00:05 UTC daily) that triggers
+    the frontend daily-close endpoint.
 
 Validation
 - next build completed successfully after these changes.

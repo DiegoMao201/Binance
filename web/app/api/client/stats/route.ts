@@ -23,6 +23,12 @@ function dayKey(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function addDaysUtc(dayKeyUtc: string, deltaDays: number): string {
+  const d = new Date(`${dayKeyUtc}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
 function serviceFromNetPnl(pnl: number): number {
   return Math.max(pnl, 0) * 0.20;
 }
@@ -53,9 +59,11 @@ export async function GET() {
 
   // Agregado diario
   const byDay = new Map<string, number>();
+  const tradesByDay = new Map<string, number>();
   for (const t of trades) {
     const k = dayKey(t.closedAt);
     byDay.set(k, (byDay.get(k) ?? 0) + t.realizedPnl);
+    tradesByDay.set(k, (tradesByDay.get(k) ?? 0) + 1);
   }
   const dailyPnl = Array.from(byDay.entries())
     .map(([date, pnl]) => ({ date, pnl }))
@@ -82,6 +90,36 @@ export async function GET() {
   const estimatedServiceTodayUtc = serviceFromNetPnl(todayPnlUtc);
   const estimatedServiceTotal = serviceFromNetPnl(totalPnl);
 
+  const dailySettlement = [] as Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    partialDay: boolean;
+  }>;
+  let runningCapital = profile.capitalInicial;
+  const inicioDayKey = inicio.toISOString().slice(0, 10);
+  for (const d of dailyPnl) {
+    const capitalStart = runningCapital;
+    const service = serviceFromNetPnl(d.pnl);
+    const clientNet = d.pnl - service;
+    const capitalEnd = capitalStart + d.pnl;
+    dailySettlement.push({
+      dayKey: d.date,
+      pnl: d.pnl,
+      service,
+      clientNet,
+      capitalStart,
+      capitalEnd,
+      trades: tradesByDay.get(d.date) ?? 0,
+      partialDay: d.date === inicioDayKey,
+    });
+    runningCapital = capitalEnd;
+  }
+
   const pnlBeforeTodayUtc = dailyPnl
     .filter((d) => d.date < todayKeyUtc)
     .reduce((acc, d) => acc + d.pnl, 0);
@@ -93,6 +131,17 @@ export async function GET() {
   const settledDays = dailyPnl.filter((d) => d.date < todayKeyUtc);
   const lastSettledDay = settledDays.length ? settledDays[settledDays.length - 1] : null;
   const lastSettledDayService = serviceFromNetPnl(lastSettledDay?.pnl ?? 0);
+
+  const yesterdayKeyUtc = addDaysUtc(todayKeyUtc, -1);
+  const yesterdayPnlUtc = byDay.get(yesterdayKeyUtc) ?? 0;
+  const serviceDueYesterdayUtc = serviceFromNetPnl(yesterdayPnlUtc);
+  const clientNetYesterdayUtc = yesterdayPnlUtc - serviceDueYesterdayUtc;
+  const pnlBeforeYesterdayUtc = dailyPnl
+    .filter((d) => d.date < yesterdayKeyUtc)
+    .reduce((acc, d) => acc + d.pnl, 0);
+  const operationalCapitalYesterday = profile.capitalInicial + pnlBeforeYesterdayUtc;
+  const projectedAfterYesterdayCapital = operationalCapitalYesterday + yesterdayPnlUtc;
+  const tradesYesterdayUtc = tradesByDay.get(yesterdayKeyUtc) ?? 0;
 
   return NextResponse.json({
     ok: true,
@@ -121,9 +170,17 @@ export async function GET() {
     serviceDueTodayUtc: estimatedServiceTodayUtc,
     clientNetTodayUtc,
     projectedNextDayCapital,
+    yesterdayKeyUtc,
+    yesterdayPnlUtc,
+    serviceDueYesterdayUtc,
+    clientNetYesterdayUtc,
+    operationalCapitalYesterday,
+    projectedAfterYesterdayCapital,
+    tradesYesterdayUtc,
     firstDayPartial,
     lastSettledDayKey: lastSettledDay?.date ?? null,
     lastSettledDayPnl: lastSettledDay?.pnl ?? 0,
     lastSettledDayService,
+    dailySettlement,
   });
 }

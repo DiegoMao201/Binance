@@ -10,7 +10,7 @@
  *  - metricas + por simbolo: cuando cambia la ventana
  */
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 const BG    = "#050b12";
 const CARD  = "rgba(8,15,25,0.78)";
@@ -64,10 +64,27 @@ type ClientRow = {
   serviceDueTodayUtc: number;
   clientNetTodayUtc: number;
   projectedNextDayCapital: number;
+  yesterdayKeyUtc: string;
+  yesterdayPnlUtc: number;
+  serviceDueYesterdayUtc: number;
+  clientNetYesterdayUtc: number;
+  operationalCapitalYesterday: number;
+  projectedAfterYesterdayCapital: number;
+  tradesYesterdayUtc: number;
   firstDayPartial: boolean;
   lastSettledDayKey: string | null;
   lastSettledDayPnl: number;
   lastSettledDayService: number;
+  dailySettlement: Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    partialDay: boolean;
+  }>;
 };
 
 type ClientsResponse = {
@@ -78,7 +95,19 @@ type ClientsResponse = {
   totalAdminFee20Estimated?: number;
   totalRealizedPnl?: number;
   totalServiceDueTodayUtc?: number;
+  totalServiceDueYesterdayUtc?: number;
+  totalPnlYesterdayUtc?: number;
   totalProjectedNextDayCapital?: number;
+  dailyBiTimeline?: Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    clients: number;
+  }>;
   count?: number;
 };
 
@@ -115,6 +144,12 @@ function fmtMaybeUSD(n: number | null, sign = false): string {
   return fmtUSD(n, sign);
 }
 
+function addDaysUtc(dayKeyUtc: string, deltaDays: number): string {
+  const d = new Date(`${dayKeyUtc}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
 export function AdminDashboardView() {
   const [bot, setBot] = useState<BotStatus | null>(null);
   const [clients, setClients] = useState<ClientsResponse | null>(null);
@@ -122,6 +157,7 @@ export function AdminDashboardView() {
   const [windowSel, setWindowSel] = useState<"24h" | "7d" | "30d">("24h");
   const [metrics, setMetrics] = useState<BotMetrics | null>(null);
   const [symMetrics, setSymMetrics] = useState<SymMetrics | null>(null);
+  const [selectedDayKey, setSelectedDayKey] = useState("");
   const [showAdd, setShowAdd] = useState(false);
 
   useEffect(() => {
@@ -169,6 +205,18 @@ export function AdminDashboardView() {
     return () => { cancelled = true; clearInterval(id); };
   }, [windowSel]);
 
+  useEffect(() => {
+    if (!clients?.ok) return;
+    const timeline = clients.dailyBiTimeline ?? [];
+    const days = timeline.map((d) => d.dayKey);
+    if (!days.length) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = addDaysUtc(today, -1);
+    const fallback = days.includes(yesterday) ? yesterday : days[days.length - 1];
+    const next = selectedDayKey && days.includes(selectedDayKey) ? selectedDayKey : fallback;
+    if (next && next !== selectedDayKey) setSelectedDayKey(next);
+  }, [clients, selectedDayKey]);
+
   function reloadClients() {
     fetch("/api/admin/clients", { cache: "no-store" })
       .then((r) => r.json())
@@ -197,13 +245,16 @@ export function AdminDashboardView() {
       {/* Seccion 2 — Tabla de clientes */}
       <ClientsPanel clients={clients} onAdd={() => setShowAdd(true)} />
 
-      {/* Seccion 3 — Posiciones abiertas del bot maestro */}
+      {/* Seccion 3 — BI diario por fecha */}
+      <DailyControlBiPanel clients={clients} selectedDayKey={selectedDayKey} onChangeDay={setSelectedDayKey} />
+
+      {/* Seccion 4 — Posiciones abiertas del bot maestro */}
       <OpenPositionsPanel positions={openPos?.positions ?? []} />
 
-      {/* Seccion 4 — Metricas del bot */}
+      {/* Seccion 5 — Metricas del bot */}
       <BotMetricsPanel metrics={metrics} windowSel={windowSel} onChangeWindow={setWindowSel} />
 
-      {/* Seccion 5 — Por simbolo */}
+      {/* Seccion 6 — Por simbolo */}
       <SymbolMetricsPanel data={symMetrics} />
 
       {showAdd && (
@@ -255,6 +306,8 @@ function BotStatusPanel({ bot, openCount }: { bot: BotStatus | null; openCount: 
 function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onAdd: () => void }) {
   const rows = clients?.clients ?? [];
   const totalServiceDueToday = clients?.totalServiceDueTodayUtc ?? clients?.totalAdminFee20LatestDay ?? clients?.totalAdminFee20 ?? 0;
+  const totalServiceDueYesterday = clients?.totalServiceDueYesterdayUtc ?? 0;
+  const totalPnlYesterday = clients?.totalPnlYesterdayUtc ?? 0;
   const totalProjectedNextDayCapital = clients?.totalProjectedNextDayCapital ?? 0;
   const totalRealizedPnl = clients?.totalRealizedPnl ?? 0;
   return (
@@ -277,6 +330,8 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 12 }}>
         <MiniKpi label="Clientes activos" value={String(rows.length)} color={BLUE} />
         <MiniKpi label="PnL real acumulado" value={fmtUSD(totalRealizedPnl, true)} color={totalRealizedPnl >= 0 ? GREEN : RED} />
+        <MiniKpi label="PnL ayer (UTC)" value={fmtUSD(totalPnlYesterday, true)} color={totalPnlYesterday >= 0 ? GREEN : RED} />
+        <MiniKpi label="Cobro ayer (20%)" value={fmtUSD(totalServiceDueYesterday)} color={AMBER} />
         <MiniKpi label="Cobro hoy (20%)" value={fmtUSD(totalServiceDueToday)} color={AMBER} />
         <MiniKpi label="Capital base manana" value={fmtUSD(totalProjectedNextDayCapital)} color={BLUE} />
       </div>
@@ -284,7 +339,7 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
       {rows.length === 0 ? (
         <p style={{ color: MUTE }}>Sin clientes activos.</p>
       ) : (
-        <Table headers={["Cliente", "Balance live", "Inicio conteo", "Capital base hoy", "PnL hoy", "Cobro hoy (20%)", "Base manana", "Estado"]}>
+        <Table headers={["Cliente", "Balance live", "Inicio conteo", "Capital base hoy", "PnL hoy", "Cobro hoy (20%)", "Cobro ayer (20%)", "Base manana", "Estado"]}>
           {rows.map((c) => (
             <tr key={c.id}>
               <Td>
@@ -317,6 +372,9 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
               <Td mono color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? MUTE : AMBER}>
                 {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.serviceDueTodayUtc)}
               </Td>
+              <Td mono color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? MUTE : AMBER}>
+                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.serviceDueYesterdayUtc)}
+              </Td>
               <Td mono color={BLUE}>
                 {fmtUSD(c.projectedNextDayCapital)}
               </Td>
@@ -333,6 +391,171 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
       </p>
     </Card>
   );
+}
+
+function DailyControlBiPanel({
+  clients,
+  selectedDayKey,
+  onChangeDay,
+}: {
+  clients: ClientsResponse | null;
+  selectedDayKey: string;
+  onChangeDay: (value: string) => void;
+}) {
+  const timeline = [...(clients?.dailyBiTimeline ?? [])].sort((a, b) => (a.dayKey < b.dayKey ? -1 : 1));
+  if (!timeline.length) {
+    return (
+      <Card title="BI diario por fecha" accent={BLUE}>
+        <p style={{ color: MUTE, margin: 0 }}>Aun no hay cierres diarios para construir el centro BI.</p>
+      </Card>
+    );
+  }
+
+  const selected = timeline.find((d) => d.dayKey === selectedDayKey) ?? timeline[timeline.length - 1];
+  const minDay = timeline[0].dayKey;
+  const maxDay = timeline[timeline.length - 1].dayKey;
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const yesterdayKey = addDaysUtc(todayKey, -1);
+
+  const selectedClientRows = (clients?.clients ?? [])
+    .map((c) => {
+      const d = (c.dailySettlement ?? []).find((row) => row.dayKey === selected.dayKey) ?? null;
+      return { client: c, day: d };
+    })
+    .filter((row) => row.day !== null)
+    .sort((a, b) => (b.day!.pnl - a.day!.pnl));
+
+  const recentTimeline = timeline.slice(-30);
+
+  return (
+    <Card title="BI diario por fecha" accent={BLUE}>
+      <div style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        marginBottom: 12,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: MUTE, fontSize: 12 }}>Filtro por dia:</span>
+          <input
+            type="date"
+            min={minDay}
+            max={maxDay}
+            value={selected.dayKey}
+            onChange={(e) => onChangeDay(e.target.value)}
+            style={{
+              background: "rgba(8,15,25,0.95)",
+              border: `1px solid ${BORD}`,
+              color: TEXT,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+            }}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => onChangeDay(todayKey)} style={adminChipButtonStyle(selected.dayKey === todayKey)}>Hoy</button>
+          <button onClick={() => onChangeDay(yesterdayKey)} style={adminChipButtonStyle(selected.dayKey === yesterdayKey)}>Ayer</button>
+          <button onClick={() => onChangeDay(maxDay)} style={adminChipButtonStyle(selected.dayKey === maxDay)}>Ultimo cierre</button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 }}>
+        <MiniKpi label="Dia" value={new Date(`${selected.dayKey}T00:00:00Z`).toLocaleDateString("es-ES")} />
+        <MiniKpi label="PnL del dia" value={fmtUSD(selected.pnl, true)} color={selected.pnl >= 0 ? GREEN : RED} />
+        <MiniKpi label="Cobro del dia (20%)" value={fmtUSD(selected.service)} color={AMBER} />
+        <MiniKpi label="Neto clientes" value={fmtUSD(selected.clientNet, true)} color={selected.clientNet >= 0 ? GREEN : RED} />
+        <MiniKpi label="Capital inicio" value={fmtUSD(selected.capitalStart)} color={BLUE} />
+        <MiniKpi label="Capital cierre" value={fmtUSD(selected.capitalEnd)} color={BLUE} />
+        <MiniKpi label="Trades" value={String(selected.trades)} />
+        <MiniKpi label="Clientes con dato" value={String(selected.clients)} />
+      </div>
+
+      <div style={{
+        border: `1px solid ${BORD}`,
+        borderRadius: 12,
+        padding: 12,
+        background: "linear-gradient(180deg, rgba(13,22,34,0.95) 0%, rgba(7,12,20,0.95) 100%)",
+        marginBottom: 12,
+      }}>
+        <p style={{ margin: "0 0 8px", color: MUTE, fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+          Curva agregada de capital (ultimos {recentTimeline.length} dias)
+        </p>
+        <AdminGrowthCurve points={recentTimeline.map((d) => ({ dayKey: d.dayKey, value: d.capitalEnd }))} />
+      </div>
+
+      {selectedClientRows.length > 0 && (
+        <Table headers={["Cliente", "PnL", "Cobro (20%)", "Neto cliente", "Capital inicio", "Capital cierre", "Trades"]}>
+          {selectedClientRows.map((row) => (
+            <tr key={`${row.client.id}-${selected.dayKey}`}>
+              <Td>{row.client.displayName || row.client.email}</Td>
+              <Td mono color={row.day!.pnl >= 0 ? GREEN : RED}>{fmtUSD(row.day!.pnl, true)}</Td>
+              <Td mono color={AMBER}>{fmtUSD(row.day!.service)}</Td>
+              <Td mono color={row.day!.clientNet >= 0 ? GREEN : RED}>{fmtUSD(row.day!.clientNet, true)}</Td>
+              <Td mono color={BLUE}>{fmtUSD(row.day!.capitalStart)}</Td>
+              <Td mono color={BLUE}>{fmtUSD(row.day!.capitalEnd)}</Td>
+              <Td mono>{String(row.day!.trades)}</Td>
+            </tr>
+          ))}
+        </Table>
+      )}
+    </Card>
+  );
+}
+
+function AdminGrowthCurve({ points }: { points: Array<{ dayKey: string; value: number }> }) {
+  if (points.length < 2) {
+    return <p style={{ margin: 0, color: MUTE, fontSize: 12 }}>Se requieren al menos 2 dias para dibujar la curva.</p>;
+  }
+
+  const width = 1000;
+  const height = 180;
+  const values = points.map((p) => p.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(1, max - min);
+  const coords = points.map((p, i) => {
+    const x = (i / (points.length - 1)) * width;
+    const y = height - ((p.value - min) / range) * (height - 20) - 10;
+    return { x, y };
+  });
+  const linePath = coords.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x.toFixed(2)} ${c.y.toFixed(2)}`).join(" ");
+  const areaPath = `${linePath} L ${width} ${height} L 0 ${height} Z`;
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: 180, display: "block" }}>
+        <defs>
+          <linearGradient id="adminGrowthFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgba(61,214,255,0.34)" />
+            <stop offset="100%" stopColor="rgba(61,214,255,0.03)" />
+          </linearGradient>
+        </defs>
+        <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="rgba(138,165,191,0.25)" strokeWidth="1" />
+        <path d={areaPath} fill="url(#adminGrowthFill)" />
+        <path d={linePath} fill="none" stroke={BLUE} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11, color: MUTE }}>
+        <span>{new Date(`${points[0].dayKey}T00:00:00Z`).toLocaleDateString("es-ES")}</span>
+        <span style={{ color: BLUE, fontFamily: "ui-monospace, Menlo, monospace" }}>{fmtUSD(points[points.length - 1].value)}</span>
+      </div>
+    </div>
+  );
+}
+
+function adminChipButtonStyle(active: boolean) {
+  return {
+    background: active ? BLUE : "transparent",
+    color: active ? "#000" : TEXT,
+    border: `1px solid ${BORD}`,
+    borderRadius: 8,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+  };
 }
 
 function OpenPositionsPanel({ positions }: { positions: OpenPos[] }) {

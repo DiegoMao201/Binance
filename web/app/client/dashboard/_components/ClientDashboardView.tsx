@@ -11,7 +11,7 @@
  * el capital_inicial; nunca se calcula a partir de datos legacy.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 const BG    = "#050b12";
 const CARD  = "rgba(8,15,25,0.78)";
@@ -91,10 +91,27 @@ type StatsState = {
   serviceDueTodayUtc?: number;
   clientNetTodayUtc?: number;
   projectedNextDayCapital?: number;
+  yesterdayKeyUtc?: string;
+  yesterdayPnlUtc?: number;
+  serviceDueYesterdayUtc?: number;
+  clientNetYesterdayUtc?: number;
+  operationalCapitalYesterday?: number;
+  projectedAfterYesterdayCapital?: number;
+  tradesYesterdayUtc?: number;
   firstDayPartial?: boolean;
   lastSettledDayKey?: string | null;
   lastSettledDayPnl?: number;
   lastSettledDayService?: number;
+  dailySettlement?: Array<{
+    dayKey: string;
+    pnl: number;
+    service: number;
+    clientNet: number;
+    capitalStart: number;
+    capitalEnd: number;
+    trades: number;
+    partialDay: boolean;
+  }>;
 };
 
 function fmtUSD(n: number, sign = false): string {
@@ -122,6 +139,7 @@ export function ClientDashboardView() {
   const [account, setAccount] = useState<AccountState | null>(null);
   const [positions, setPositions] = useState<OpenPositions | null>(null);
   const [stats, setStats] = useState<StatsState | null>(null);
+  const [selectedDayKey, setSelectedDayKey] = useState("");
   const [tick, setTick] = useState(0);
 
   // Polling cada 5s para balance + posiciones
@@ -166,6 +184,20 @@ export function ClientDashboardView() {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    if (!stats?.ok) return;
+    const settlements = Array.isArray(stats.dailySettlement) ? stats.dailySettlement : [];
+    const days = settlements.map((d) => d.dayKey);
+    if (!days.length) return;
+    const fallback = stats.yesterdayKeyUtc ?? stats.todayKeyUtc ?? days[days.length - 1];
+    const next = selectedDayKey && days.includes(selectedDayKey)
+      ? selectedDayKey
+      : (days.includes(fallback ?? "") ? (fallback ?? "") : days[days.length - 1]);
+    if (next && next !== selectedDayKey) {
+      setSelectedDayKey(next);
+    }
+  }, [stats, selectedDayKey]);
+
   const estado = account?.estado;
   const enRec = Boolean(estado?.enModoRecuperacion);
 
@@ -205,7 +237,7 @@ export function ClientDashboardView() {
       <ClientStats stats={stats} />
 
       {/* Seccion 4 — Grafico diario */}
-      <DailyPnlChart points={stats?.dailyPnl ?? []} />
+      <DailyBiPanel stats={stats} selectedDayKey={selectedDayKey} onChangeDay={setSelectedDayKey} />
     </div>
   );
 }
@@ -280,6 +312,11 @@ function AccountSummary({ state, stats }: { state: AccountState | null; stats: S
     ? (stats?.serviceDueTodayUtc ?? stats?.estimatedServiceTodayUtc ?? Math.max(todayPnlUtc, 0) * 0.20)
     : 0;
   const clientNetToday = statsOk ? (stats?.clientNetTodayUtc ?? (todayPnlUtc - serviceDueToday)) : 0;
+  const yesterdayPnlUtc = statsOk ? (stats?.yesterdayPnlUtc ?? 0) : 0;
+  const serviceDueYesterday = statsOk
+    ? (stats?.serviceDueYesterdayUtc ?? Math.max(yesterdayPnlUtc, 0) * 0.20)
+    : 0;
+  const clientNetYesterday = statsOk ? (stats?.clientNetYesterdayUtc ?? (yesterdayPnlUtc - serviceDueYesterday)) : 0;
   const operationalCapitalToday = statsOk ? (stats?.operationalCapitalToday ?? e.capitalInicial) : e.capitalInicial;
   const projectedNextDayCapital = statsOk
     ? (stats?.projectedNextDayCapital ?? (operationalCapitalToday + todayPnlUtc))
@@ -303,6 +340,9 @@ function AccountSummary({ state, stats }: { state: AccountState | null; stats: S
         <Kpi label="PnL Hoy (UTC)" value={fmtUSD(todayPnlUtc, true)} accent={todayPnlUtc >= 0 ? GREEN : RED} />
         <Kpi label="Servicio Hoy (20%)" value={fmtUSD(enRec ? 0 : serviceDueToday)} accent={enRec ? MUTE : AMBER} />
         <Kpi label="Tu Neto Hoy" value={fmtUSD(clientNetToday, true)} accent={clientNetToday >= 0 ? GREEN : RED} />
+        <Kpi label="PnL Ayer (UTC)" value={fmtUSD(yesterdayPnlUtc, true)} accent={yesterdayPnlUtc >= 0 ? GREEN : RED} />
+        <Kpi label="Servicio Ayer (20%)" value={fmtUSD(enRec ? 0 : serviceDueYesterday)} accent={enRec ? MUTE : AMBER} />
+        <Kpi label="Tu Neto Ayer" value={fmtUSD(clientNetYesterday, true)} accent={clientNetYesterday >= 0 ? GREEN : RED} />
         <Kpi label="Base Capital Manana" value={fmtUSD(projectedNextDayCapital)} accent={BLUE} mono />
         <Kpi
           label="Ultimo Dia Liquidado"
@@ -384,56 +424,189 @@ function ClientStats({ stats }: { stats: StatsState | null }) {
   );
 }
 
-function DailyPnlChart({ points }: { points: Array<{ date: string; pnl: number }> }) {
-  const latest = useMemo(
-    () => [...points].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 10),
-    [points],
-  );
-  const neto = useMemo(
-    () => points.reduce((acc, p) => acc + p.pnl, 0),
-    [points],
-  );
-  return (
-    <Card title="PnL por dia (desde inicio)" accent={BLUE}>
-      {points.length === 0 ? (
-        <p style={{ color: MUTE, fontSize: 13 }}>Sin datos todavia.</p>
-      ) : (
-        <div>
-          <div style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 10,
-            fontSize: 12,
-            color: MUTE,
-          }}>
-            <span>Ultimos {latest.length} dias</span>
-            <span>
-              Neto acumulado: <strong style={{ color: neto >= 0 ? GREEN : RED }}>{fmtUSD(neto, true)}</strong>
-            </span>
-          </div>
+function DailyBiPanel({
+  stats,
+  selectedDayKey,
+  onChangeDay,
+}: {
+  stats: StatsState | null;
+  selectedDayKey: string;
+  onChangeDay: (value: string) => void;
+}) {
+  if (!stats || !stats.ok) {
+    return <Card title="Centro de control diario"><p style={{ color: MUTE }}>Cargando…</p></Card>;
+  }
 
+  const settlements = [...(stats.dailySettlement ?? [])].sort((a, b) => (a.dayKey < b.dayKey ? -1 : 1));
+  if (!settlements.length) {
+    return (
+      <Card title="Centro de control diario" accent={BLUE}>
+        <p style={{ color: MUTE, fontSize: 13 }}>Aun no hay cierres diarios para construir la vista BI.</p>
+      </Card>
+    );
+  }
+
+  const selected = settlements.find((d) => d.dayKey === selectedDayKey) ?? settlements[settlements.length - 1];
+  const totalService = settlements.reduce((acc, d) => acc + d.service, 0);
+  const totalNet = settlements.reduce((acc, d) => acc + d.clientNet, 0);
+  const recent = settlements.slice(-21);
+  const minDay = settlements[0].dayKey;
+  const maxDay = settlements[settlements.length - 1].dayKey;
+  const todayKey = stats.todayKeyUtc ?? "";
+  const yesterdayKey = stats.yesterdayKeyUtc ?? "";
+
+  return (
+    <Card title="Centro de control diario" accent={BLUE}>
+      <div style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        marginBottom: 12,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: MUTE, fontSize: 12 }}>Filtro por fecha:</span>
+          <input
+            type="date"
+            min={minDay}
+            max={maxDay}
+            value={selected.dayKey}
+            onChange={(e) => onChangeDay(e.target.value)}
+            style={{
+              background: "rgba(8,15,25,0.95)",
+              border: `1px solid ${BORD}`,
+              color: TEXT,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+            }}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => todayKey && onChangeDay(todayKey)} style={chipButtonStyle(selected.dayKey === todayKey)}>Hoy</button>
+          <button onClick={() => yesterdayKey && onChangeDay(yesterdayKey)} style={chipButtonStyle(selected.dayKey === yesterdayKey)}>Ayer</button>
+          <button onClick={() => onChangeDay(maxDay)} style={chipButtonStyle(selected.dayKey === maxDay)}>Ultimo cierre</button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, marginBottom: 14 }}>
+        <Kpi label="Dia seleccionado" value={new Date(`${selected.dayKey}T00:00:00Z`).toLocaleDateString("es-ES")} sub={selected.partialDay ? "dia parcial" : "dia completo"} />
+        <Kpi label="PnL del dia" value={fmtUSD(selected.pnl, true)} accent={selected.pnl >= 0 ? GREEN : RED} />
+        <Kpi label="Servicio del dia (20%)" value={fmtUSD(selected.service)} accent={AMBER} />
+        <Kpi label="Neto cliente del dia" value={fmtUSD(selected.clientNet, true)} accent={selected.clientNet >= 0 ? GREEN : RED} />
+        <Kpi label="Capital inicio dia" value={fmtUSD(selected.capitalStart)} accent={BLUE} mono />
+        <Kpi label="Capital cierre dia" value={fmtUSD(selected.capitalEnd)} accent={BLUE} mono />
+        <Kpi label="Trades del dia" value={String(selected.trades)} />
+        <Kpi label="Servicio acumulado" value={fmtUSD(totalService)} accent={AMBER} />
+      </div>
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "1.35fr 1fr",
+        gap: 12,
+      }}>
+        <GrowthCurveCard points={recent.map((d) => ({ dayKey: d.dayKey, value: d.capitalEnd }))} />
+        <div style={{
+          border: `1px solid ${BORD}`,
+          borderRadius: 12,
+          padding: 12,
+          background: "linear-gradient(180deg, rgba(13,22,34,0.95) 0%, rgba(7,12,20,0.95) 100%)",
+        }}>
+          <p style={{ margin: "0 0 8px", color: MUTE, fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+            Resumen historico
+          </p>
           <div style={{ display: "grid", gap: 8 }}>
-            {latest.map((p) => (
-              <div key={p.date} style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                border: `1px solid ${BORD}`,
-                background: "rgba(255,255,255,0.02)",
-                borderRadius: 10,
-                padding: "8px 10px",
-              }}>
-                <span style={{ color: TEXT, fontSize: 12 }}>{new Date(`${p.date}T00:00:00Z`).toLocaleDateString("es-ES")}</span>
-                <span style={{ color: p.pnl >= 0 ? GREEN : RED, fontSize: 13, fontFamily: "ui-monospace, Menlo, monospace" }}>
-                  {fmtUSD(p.pnl, true)}
-                </span>
-              </div>
-            ))}
+            <MiniStatLine label="Dias con cierres" value={String(settlements.length)} color={TEXT} />
+            <MiniStatLine label="Neto acumulado cliente" value={fmtUSD(totalNet, true)} color={totalNet >= 0 ? GREEN : RED} />
+            <MiniStatLine label="Mejor dia" value={fmtUSD(Math.max(...settlements.map((d) => d.pnl)), true)} color={GREEN} />
+            <MiniStatLine label="Peor dia" value={fmtUSD(Math.min(...settlements.map((d) => d.pnl)), true)} color={RED} />
           </div>
         </div>
-      )}
+      </div>
     </Card>
+  );
+}
+
+function GrowthCurveCard({ points }: { points: Array<{ dayKey: string; value: number }> }) {
+  if (points.length < 2) {
+    return (
+      <div style={{ border: `1px solid ${BORD}`, borderRadius: 12, padding: 12, background: "rgba(255,255,255,0.02)" }}>
+        <p style={{ margin: 0, color: MUTE, fontSize: 12 }}>Se requieren al menos 2 dias para dibujar la curva de crecimiento.</p>
+      </div>
+    );
+  }
+
+  const width = 1000;
+  const height = 220;
+  const values = points.map((p) => p.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(1, max - min);
+  const coords = points.map((p, i) => {
+    const x = (i / (points.length - 1)) * width;
+    const y = height - ((p.value - min) / range) * (height - 24) - 12;
+    return { x, y };
+  });
+  const linePath = coords.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x.toFixed(2)} ${c.y.toFixed(2)}`).join(" ");
+  const areaPath = `${linePath} L ${width} ${height} L 0 ${height} Z`;
+
+  return (
+    <div style={{
+      border: `1px solid ${BORD}`,
+      borderRadius: 12,
+      padding: 12,
+      background: "linear-gradient(180deg, rgba(13,22,34,0.95) 0%, rgba(7,12,20,0.95) 100%)",
+    }}>
+      <p style={{ margin: "0 0 8px", color: MUTE, fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+        Curva de crecimiento (ultimos {points.length} dias)
+      </p>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: 220, display: "block" }}>
+        <defs>
+          <linearGradient id="growthFillClient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgba(61,214,255,0.38)" />
+            <stop offset="100%" stopColor="rgba(61,214,255,0.02)" />
+          </linearGradient>
+        </defs>
+        <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="rgba(138,165,191,0.25)" strokeWidth="1" />
+        <path d={areaPath} fill="url(#growthFillClient)" />
+        <path d={linePath} fill="none" stroke={BLUE} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11, color: MUTE }}>
+        <span>{new Date(`${points[0].dayKey}T00:00:00Z`).toLocaleDateString("es-ES")}</span>
+        <span style={{ color: BLUE, fontFamily: "ui-monospace, Menlo, monospace" }}>{fmtUSD(points[points.length - 1].value)}</span>
+      </div>
+    </div>
+  );
+}
+
+function chipButtonStyle(active: boolean) {
+  return {
+    background: active ? BLUE : "transparent",
+    color: active ? "#000" : TEXT,
+    border: `1px solid ${BORD}`,
+    borderRadius: 8,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+function MiniStatLine({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div style={{
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      borderBottom: `1px solid ${BORD}55`,
+      paddingBottom: 6,
+      fontSize: 12,
+      color: MUTE,
+    }}>
+      <span>{label}</span>
+      <span style={{ color: color ?? TEXT, fontFamily: "ui-monospace, Menlo, monospace", fontWeight: 700 }}>{value}</span>
+    </div>
   );
 }
 

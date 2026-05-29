@@ -43,7 +43,6 @@ import { timingSafeEqual, createHash } from "crypto";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { sendPammAllocationEmail } from "@/lib/email";
 
 // ─── Payload schema ───────────────────────────────────────────────────────────
 const TradeClosedSchema = z.object({
@@ -331,19 +330,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     adminTotalShare.toFixed(8),
   );
 
-  // ── 7. Fire-and-forget email for client (WIN only) ─────────────────────────
-  if (isWin) {
-    dispatchWinEmail(
-      client.email,
-      client.name,
-      p.symbol,
-      clientNetShare,
-      clientBalanceAfter,
-    ).catch((err) =>
-      console.error("[pamm-webhook] Email dispatch error:", err),
-    );
-  }
-
   return NextResponse.json({
     success:        true,
     tradeId:        p.tradeId,
@@ -354,22 +340,5 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     clientNetShare: clientNetShare.toFixed(8),
     adminTotalShare: adminTotalShare.toFixed(8),
   });
-}
-
-// ─── Fire-and-forget win email ─────────────────────────────────────────────────
-async function dispatchWinEmail(
-  email: string,
-  name: string | null,
-  symbol: string,
-  netPnlUsdt: Prisma.Decimal,
-  balanceAfter: Prisma.Decimal,
-): Promise<void> {
-  await sendPammAllocationEmail(
-    email,
-    name,
-    symbol,
-    parseFloat(netPnlUsdt.toFixed(8)),
-    parseFloat(balanceAfter.toFixed(2)),
-  );
 }
 
