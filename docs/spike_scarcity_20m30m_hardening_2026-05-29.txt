@@ -1,0 +1,55 @@
+Spike Scarcity 20m/30m Hardening - 2026-05-29
+
+Objective
+- Make dynamic orchestration react to true short-window slowdown so the bot does not keep opening in dead tape conditions.
+
+Implemented Changes
+1) Telemetry enrichment in scripts/dynamic_ai_orchestrator.py
+- Added short windows per symbol:
+  - spikes_20m
+  - spikes_30m
+  - spikes_prev_30m
+  - spike_rate_per_hour_20m
+  - spike_rate_per_hour_30m
+  - spike_rate_per_hour_prev30m
+  - spike_rate_ratio_30m_vs_prev30m
+
+2) Cadence policy hardening
+- In _apply_spike_cadence_policy, score now hardens when short-window scarcity is detected:
+  - low spikes in 20m/30m and
+  - deceleration vs previous 30m and/or COOL/COLD pulse and/or SLOW cadence regime.
+- A stronger hardening bump applies when 30m has zero spikes or severe deceleration.
+- Regime is forced to SLOW and grace floor is preserved under scarcity.
+
+3) Day-over-day same-slot guard
+- market_pulse now computes:
+  - spike_rate_prevday_1h
+  - rate_ratio_1h_prevday_1h
+- If current 1h cadence is materially below the same UTC slot yesterday, score hardens further.
+
+4) Prompt alignment
+- Prompt text updated to explicitly consider 15m/20m/30m plus 6h cadence and same-slot prev-day comparison.
+
+New Env Vars (all optional)
+- DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES (default: 1)
+- DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES (default: 2)
+- DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX (default: 0.70)
+- DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN (default: 0.35)
+- DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN_STRONG (default: scarcity + 0.20)
+- DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_MIN_RATE_1H (default: 3.0)
+- DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_RATIO_1H_MAX (default: 0.70)
+- DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_SCORE_HARDEN (default: 0.25)
+
+Expected Runtime Effect
+- Fewer ENTRY_ALLOWED decisions in slow windows where spikes are sparse in the last 20m/30m.
+- Better adaptation when current hour is weaker than the same hour on the prior day.
+- Reduced probability of chasing non-existent spikes during intraday slowdown.
+
+Verification
+- Syntax validation passed:
+  - python3 -m py_compile scripts/dynamic_ai_orchestrator.py
+
+Git
+- Commit: bb04429
+- Branch: main
+- Push: main -> origin/main
