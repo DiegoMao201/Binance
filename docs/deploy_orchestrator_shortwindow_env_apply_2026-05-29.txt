@@ -1,0 +1,62 @@
+Deploy Verification - Orchestrator IA Short-Window Scarcity
+Date (UTC): 2026-05-29
+
+Scope
+- Deploy/restart bot services to load new orchestrator logic and env vars for:
+  - 20m/30m spike scarcity hardening
+  - 30m vs previous 30m deceleration hardening
+  - 1h vs same-slot previous-day hardening
+
+Repository state
+- Runtime image observed in production:
+  - o4w1ns4cceccmn2ozqt7sol2:c8ec3815666d6e20dd22c4990eb6d575a1aa2bda
+
+Actions executed
+1) Forced recreate of app stack in Coolify app directory:
+   - /data/coolify/applications/o4w1ns4cceccmn2ozqt7sol2
+   - docker compose up -d --force-recreate
+
+2) Explicitly added new env vars into production .env:
+   - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES=1
+   - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES=2
+   - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX=0.70
+   - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN=0.35
+   - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN_STRONG=0.55
+   - DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_MIN_RATE_1H=3.0
+   - DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_RATIO_1H_MAX=0.70
+   - DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_SCORE_HARDEN=0.25
+
+3) Synced sidecar via official script:
+   - /opt/deriv-ai-sync/deriv_ai_sidecar_sync.sh o4w1ns4cceccmn2ozqt7sol2
+
+Runtime verification evidence
+- Containers healthy after restart:
+  - /o4w1ns4cceccmn2ozqt7sol2 health=healthy
+  - /o4w1ns4cceccmn2ozqt7sol2-ai health=healthy
+
+- Sidecar env includes new vars (verified via docker inspect Config.Env).
+
+- Orchestrator code markers present inside running AI container:
+  - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES
+  - DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES
+  - spike_rate_ratio_30m_vs_prev30m
+  - spike_rate_prevday_1h
+  - rate_ratio_1h_prevday_1h
+
+- Post-restart AI logs show new fields active in SPIKE_CADENCE lines:
+  - spikes20m, spikes30m, prev30m
+  - ratio30mPrev30m
+  - ratio1hPrevDay
+
+- Dynamic diff stream is active after restart:
+  - recent events observed in last 20m
+  - last event age around ~1 minute during verification window
+
+- Remote release gate result:
+  - scripts/deriv_release_gate_remote.sh => PASS
+  - validator checks: all OK (heartbeat, dynamic refresh, symbols loaded, diff freshness/activity, env checks, db guardrails)
+
+Conclusion
+- Deploy/restart completed successfully.
+- New orchestrator scarcity/day-over-day logic is loaded and running in production.
+- Health and runtime validation are green.
