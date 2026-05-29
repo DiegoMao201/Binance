@@ -54,6 +54,15 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 
+# Ensure the file ends with a newline before appending. Coolify sometimes
+# regenerates .env WITHOUT a trailing newline, which would cause our first
+# `echo "$KV" >> file` to glue our key onto the previous line and corrupt
+# both variables (e.g. TRADE_COOLDOWN_MINUTES=3DYNAMIC_AI_...=-3.0).
+if [[ -s "${ENV_FILE}" ]] && [[ "$(tail -c 1 "${ENV_FILE}" | wc -l | tr -d ' ')" -eq 0 ]]; then
+  echo "" >> "${ENV_FILE}"
+  log "appended trailing newline to env (was missing)"
+fi
+
 CHANGED=0
 
 for KV in "${REQUIRED_VARS[@]}"; do
