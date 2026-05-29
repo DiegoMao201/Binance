@@ -1,0 +1,55 @@
+CRASH stake=5 deploy report (2026-05-29)
+
+Objective
+- Set CRASH symbols to stake 5.
+- Keep BOOM stake behavior unchanged.
+- Keep bot and sidecar synchronized on same code/image.
+
+Applied commits
+- 147e098 fix(deriv): enforce crash stake target 5 without altering boom profiles
+
+Code changes
+1) src/main_deriv.py
+- Added _enforce_profile_stake_target(...)
+- Applied in both execution paths after adaptive sizing:
+  - hard math override path
+  - AI-approved path
+- Scope guard: only applies to spike_crash profiles.
+
+2) src/strategies/deriv_signals.py
+- Added stake_target_usdt=5.00 for:
+  - CRASH300, CRASH500, CRASH600, CRASH900, CRASH1000
+- Set stake_max_usdt=5.00 for:
+  - CRASH500, CRASH600, CRASH900, CRASH1000
+- BOOM stake settings were not changed.
+
+Deployment and sync
+- main pushed to origin/main.
+- Live bot image verified:
+  - o4w1ns4cceccmn2ozqt7sol2:147e0983c167bce16fa7e8302c017fbbc77313e8
+- Sidecar synchronized to same image:
+  - /opt/deriv-ai-sync/deriv_ai_sidecar_sync.sh o4w1ns4cceccmn2ozqt7sol2
+- Health check:
+  - bot: running healthy
+  - sidecar: running healthy
+
+Runtime verification inside bot container
+- BOOM:
+  - BOOM500 stake_max=3.0 stake_target=None
+  - BOOM600 stake_max=1.5 stake_target=None
+  - BOOM900 stake_max=1.5 stake_target=None
+- CRASH:
+  - CRASH500 stake_max=5.0 stake_target=5.0
+  - CRASH600 stake_max=5.0 stake_target=5.0
+  - CRASH900 stake_max=5.0 stake_target=5.0
+  - CRASH1000 stake_max=5.0 stake_target=5.0
+
+Post-deploy trade evidence
+- Closed after deploy:
+  - 2026-05-29 16:29:28 UTC CRASH600 stake=5.0 pnl=+1.37
+- Open sample after deploy:
+  - BOOM500 stake=1.6 (unchanged BOOM behavior)
+
+Notes
+- Stake policy for CRASH is deterministic when entries pass score/regime gates.
+- If CRASH entries are blocked by gates, no order is placed (expected behavior).
