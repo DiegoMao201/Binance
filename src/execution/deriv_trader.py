@@ -321,13 +321,26 @@ class DerivTradeExecutor:
             0.05,
             min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_LOSS_FRAC", "0.25") or 0.25), 1.5),
         )
-        # Hard-cut variant: even if MFE is borderline, when held far beyond the
-        # spike-wait window with severe loss, exit without further deferral.
-        # Per-symbol soft T + hardcut_margin (default +240s).
+        # Hard-cut variant: same loss threshold as soft (default 0.25 stake) but
+        # bypasses the defer guard, so we don't wait for the spike-cycle defer
+        # to clear if it never does. CRITICAL: must be < broker SL (typically
+        # ~36% of stake) or the broker hits SL first and the cut never fires.
+        # Per-symbol soft T + hardcut_margin (default +120s).
         self._spike_wait_hardcut_loss_frac = max(
             self._spike_wait_timeout_loss_frac,
             min(
-                float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_LOSS_FRAC", "0.50") or 0.50),
+                float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_LOSS_FRAC", "0.25") or 0.25),
+                2.0,
+            ),
+        )
+        # Emergency cut: if at T_soft the floating loss is already deep (close
+        # to broker SL), bypass the defer even if the spike-cycle says one is
+        # coming. Default 0.32 stake (= -$1.60 on $5 stake), well under the
+        # broker SL at -$1.80 (~36% stake). Set to >=1.0 to disable.
+        self._spike_wait_emergency_loss_frac = max(
+            self._spike_wait_timeout_loss_frac,
+            min(
+                float(os.getenv("DERIV_SPIKE_WAIT_EMERGENCY_LOSS_FRAC", "0.32") or 0.32),
                 2.0,
             ),
         )
@@ -346,10 +359,10 @@ class DerivTradeExecutor:
             os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_SEC_MAP", _swt_default_map),
             max_value=1800.0,
         )
-        # Hard-cut margin added on top of the per-symbol soft T (default 240s).
+        # Hard-cut margin added on top of the per-symbol soft T (default 120s).
         self._spike_wait_hardcut_margin_sec = max(
-            60.0,
-            min(float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_MARGIN_SEC", "240") or 240), 900.0),
+            30.0,
+            min(float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_MARGIN_SEC", "120") or 120), 900.0),
         )
         # Optional operator override map: "BOOM600:90,CRASH900:120".
         self._spike_hold_bonus_map = self._parse_symbol_seconds_map(
@@ -364,13 +377,14 @@ class DerivTradeExecutor:
             self._zero_peak_exit_enabled,
         )
         _LOGGER.info(
-            "[deriv-trader] spike_wait_timeout_enabled=%s default_T=%.0fs mfe<=stake*%.2f loss>=stake*%.2f hardcut_margin=%.0fs hardcut_loss>=stake*%.2f per_sym=%s",
+            "[deriv-trader] spike_wait_timeout_enabled=%s default_T=%.0fs mfe<=stake*%.2f loss>=stake*%.2f hardcut_margin=%.0fs hardcut_loss>=stake*%.2f emergency_loss>=stake*%.2f per_sym=%s",
             self._spike_wait_timeout_enabled,
             self._spike_wait_timeout_sec,
             self._spike_wait_timeout_mfe_frac,
             self._spike_wait_timeout_loss_frac,
             self._spike_wait_hardcut_margin_sec,
             self._spike_wait_hardcut_loss_frac,
+            self._spike_wait_emergency_loss_frac,
             self._spike_wait_timeout_sec_map,
         )
         _LOGGER.info(
@@ -1297,19 +1311,32 @@ class DerivTradeExecutor:
                     _mfe_cap = _stake * self._spike_wait_timeout_mfe_frac
                     _soft_loss_cap = -_stake * self._spike_wait_timeout_loss_frac
                     _hard_loss_cap = -_stake * self._spike_wait_hardcut_loss_frac
+                    _emergency_loss_cap = -_stake * self._spike_wait_emergency_loss_frac
+                    _peak_v = float(oc_check.peak_profit)
+                    _float_v = float(oc_check.floating_pnl)
                     _soft_hit = (
                         held >= _T_soft
-                        and float(oc_check.peak_profit) <= _mfe_cap
-                        and float(oc_check.floating_pnl) <= _soft_loss_cap
+                        and _peak_v <= _mfe_cap
+                        and _float_v <= _soft_loss_cap
+                    )
+                    # Emergency: at T_soft, if loss is already near broker SL,
+                    # bypass defer even if the spike-cycle says one is coming.
+                    _emergency_hit = (
+                        held >= _T_soft
+                        and _peak_v <= _mfe_cap
+                        and _float_v <= _emergency_loss_cap
                     )
                     _hard_hit = (
                         held >= _T_hard
-                        and float(oc_check.floating_pnl) <= _hard_loss_cap
+                        and _float_v <= _hard_loss_cap
                     )
                     if _soft_hit or _hard_hit:
-                        if _hard_hit:
+                        if _hard_hit or _emergency_hit:
                             _defer = False
-                            _defer_reason = "hardcut_bypass_defer"
+                            _defer_reason = (
+                                "hardcut_bypass_defer" if _hard_hit
+                                else "emergency_bypass_defer"
+                            )
                         else:
                             _defer, _defer_reason = self._should_defer_zero_peak_exit(
                                 oc_check.symbol,
@@ -1323,29 +1350,32 @@ class DerivTradeExecutor:
                                 oc_check.symbol,
                                 held,
                                 _T_soft,
-                                oc_check.peak_profit,
-                                oc_check.floating_pnl,
+                                _peak_v,
+                                _float_v,
                                 _stake,
                                 _defer_reason,
                             )
                         else:
                             self._closing.add(cid)
                             oc_check.pending_close_reason = "spike_wait_timeout"
+                            _trigger = (
+                                "HARDCUT" if _hard_hit
+                                else ("EMERGENCY" if _emergency_hit else "SOFT")
+                            )
                             _LOGGER.info(
                                 "[deriv-trader] spike_wait_timeout: %s (%s) "
-                                "held=%.1fs T_soft=%.0fs T_hard=%.0fs hardcut=%s "
-                                "peak=%.4f<=%.4f floating=%.4f<=%.4f stake=%.2f "
+                                "held=%.1fs T_soft=%.0fs T_hard=%.0fs trigger=%s "
+                                "peak=%.4f<=%.4f floating=%.4f stake=%.2f "
                                 "— closing stagnant trade",
                                 cid,
                                 oc_check.symbol,
                                 held,
                                 _T_soft,
                                 _T_hard,
-                                _hard_hit,
-                                oc_check.peak_profit,
+                                _trigger,
+                                _peak_v,
                                 _mfe_cap,
-                                oc_check.floating_pnl,
-                                (_hard_loss_cap if _hard_hit else _soft_loss_cap),
+                                _float_v,
                                 _stake,
                             )
                             try:
