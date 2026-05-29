@@ -291,6 +291,7 @@ export async function GET() {
         id: c.id,
         displayName: c.displayName,
         email: c.email,
+        billingWhatsApp: c.billingWhatsApp,
         derivAccountId: c.derivAccountId,
         hasDerivToken: Boolean(c.derivToken),
         fechaInicio: c.fechaInicio?.toISOString() ?? null,
@@ -399,7 +400,14 @@ const CreateClientSchema = z.object({
   fechaInicio: z.string().min(8), // ISO date or datetime
   derivToken: z.string().min(8).max(512),
   derivAccountId: z.string().min(2).max(64),
+  billingWhatsApp: z.string().max(32).optional(),
 });
+
+function normalizeWhatsapp(raw: string | undefined): string | null {
+  const value = (raw ?? "").trim();
+  if (!value) return null;
+  return value.replace(/\s+/g, "");
+}
 
 export async function POST(req: Request) {
   if (!(await requireAdmin())) {
@@ -419,6 +427,7 @@ export async function POST(req: Request) {
     }, { status: 400 });
   }
   const data = parsed.data;
+  const billingWhatsApp = normalizeWhatsapp(data.billingWhatsApp);
 
   const fechaInicio = new Date(data.fechaInicio);
   if (Number.isNaN(fechaInicio.getTime())) {
@@ -442,6 +451,7 @@ export async function POST(req: Request) {
                fecha_inicio        = ${fechaInicio}::timestamptz,
                deriv_token         = ${data.derivToken},
                deriv_account_id    = ${data.derivAccountId},
+                 billing_whatsapp    = ${billingWhatsApp},
                comision_total_cobrada = COALESCE(comision_total_cobrada, 0),
                updated_at          = NOW()
          WHERE id = ${existing.id}::uuid
@@ -468,6 +478,7 @@ export async function POST(req: Request) {
              fecha_inicio        = ${fechaInicio}::timestamptz,
              deriv_token         = ${data.derivToken},
              deriv_account_id    = ${data.derivAccountId},
+           billing_whatsapp    = ${billingWhatsApp},
              comision_total_cobrada = 0
        WHERE id = ${created.id}::uuid
     `;

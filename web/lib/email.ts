@@ -577,3 +577,132 @@ export async function sendDailyCloseSummaryEmail(
 
   await sgMail.send(msg);
 }
+
+// ─── sendBillingStatementEmail ────────────────────────────────────────────────
+
+type BillingStatementSummary = {
+  periodStart: string;
+  periodEnd: string;
+  tradesCount: number;
+  pnlUsdt: number;
+  serviceDueUsdt: number;
+  paidAmountUsdt: number;
+  clientNetUsdt: number;
+  capitalStartUsdt: number;
+  capitalEndUsdt: number;
+  status: string;
+  paymentNequi: string;
+  paymentDaviKey: string;
+};
+
+/**
+ * Sends a billing statement email for admin collections.
+ */
+export async function sendBillingStatementEmail(
+  to: string,
+  investorName: string | null,
+  statement: BillingStatementSummary,
+): Promise<void> {
+  if (!process.env.SENDGRID_API_KEY) {
+    console.warn(`[email] SENDGRID_API_KEY not set. Billing statement for ${to} ${statement.periodStart}-${statement.periodEnd}`);
+    return;
+  }
+  if (!FROM_EMAIL) {
+    console.warn(`[email] MAIL_FROM_EMAIL not set. Billing statement for ${to} ${statement.periodStart}-${statement.periodEnd}`);
+    return;
+  }
+
+  const name = investorName ?? "Inversor";
+  const pending = Math.max(statement.serviceDueUsdt - statement.paidAmountUsdt, 0);
+  const pnlSigned = `${statement.pnlUsdt > 0 ? "+" : ""}${statement.pnlUsdt.toFixed(2)}`;
+  const netSigned = `${statement.clientNetUsdt > 0 ? "+" : ""}${statement.clientNetUsdt.toFixed(2)}`;
+  const year = new Date().getFullYear();
+
+  const msg: MailDataRequired = {
+    to,
+    from: { email: FROM_EMAIL, name: FROM_NAME },
+    subject: `${PRODUCT_NAME} - Estado de cuenta ${statement.periodStart} a ${statement.periodEnd} - Pendiente ${pending.toFixed(2)} USDT`,
+    text: [
+      `Hola ${name},`,
+      "",
+      `Este es tu estado de cuenta de servicio (${statement.periodStart} a ${statement.periodEnd}, UTC).`,
+      "",
+      `Operaciones cerradas:  ${statement.tradesCount}`,
+      `PnL del periodo:       ${pnlSigned} USDT`,
+      `Servicio (20%):        ${statement.serviceDueUsdt.toFixed(2)} USDT`,
+      `Pagado:                ${statement.paidAmountUsdt.toFixed(2)} USDT`,
+      `Saldo pendiente:       ${pending.toFixed(2)} USDT`,
+      `Neto cliente:          ${netSigned} USDT`,
+      `Capital inicial corte: ${statement.capitalStartUsdt.toFixed(2)} USDT`,
+      `Capital final corte:   ${statement.capitalEndUsdt.toFixed(2)} USDT`,
+      `Estado:                ${statement.status.toUpperCase()}`,
+      "",
+      "Canales de pago:",
+      `Nequi: ${statement.paymentNequi}`,
+      `Llave Davivienda: ${statement.paymentDaviKey}`,
+      "",
+      "Envia tu soporte de pago para marcar la cuenta como pagada.",
+      `- Equipo ${PRODUCT_NAME}`,
+    ].join("\n"),
+    html: `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${PRODUCT_NAME}</title>
+</head>
+<body style="margin:0;padding:0;background:#050b12;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#050b12;padding:34px 16px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#0a1018;border:1px solid #1b3246;border-radius:16px;overflow:hidden;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#13263b 0%,#0b2030 100%);padding:26px 30px;border-bottom:1px solid #21455f;">
+              <p style="margin:0;color:#89d6ff;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;">Estado de cuenta de servicio</p>
+              <p style="margin:7px 0 0;color:#e6f2ff;font-size:22px;font-weight:800;letter-spacing:-0.3px;">${PRODUCT_NAME}</p>
+              <p style="margin:6px 0 0;color:#8aa5bf;font-size:13px;">Corte: ${statement.periodStart} a ${statement.periodEnd} (UTC)</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px 30px;">
+              <p style="margin:0 0 16px;color:#9bb7cf;font-size:14px;line-height:1.6;">Hola <strong style="color:#e6f2ff;">${name}</strong>, compartimos tu estado de cuenta para control y pago del servicio.</p>
+
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#07101a;border:1px solid #1b3246;border-radius:10px;overflow:hidden;margin-bottom:16px;">
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Operaciones cerradas</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#e6f2ff;font-size:13px;font-weight:700;text-align:right;">${statement.tradesCount}</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">PnL del periodo</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:${statement.pnlUsdt >= 0 ? "#19c37d" : "#ff6b6b"};font-size:13px;font-weight:700;text-align:right;">${pnlSigned} USDT</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Servicio (20%)</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#ffbf47;font-size:13px;font-weight:700;text-align:right;">${statement.serviceDueUsdt.toFixed(2)} USDT</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Pagado</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#3dd6ff;font-size:13px;font-weight:700;text-align:right;">${statement.paidAmountUsdt.toFixed(2)} USDT</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Saldo pendiente</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:${pending > 0 ? "#ff6b6b" : "#19c37d"};font-size:13px;font-weight:800;text-align:right;">${pending.toFixed(2)} USDT</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Neto cliente</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:${statement.clientNetUsdt >= 0 ? "#19c37d" : "#ff6b6b"};font-size:13px;font-weight:700;text-align:right;">${netSigned} USDT</td></tr>
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Capital inicio corte</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#3dd6ff;font-size:13px;font-weight:700;text-align:right;">${statement.capitalStartUsdt.toFixed(2)} USDT</td></tr>
+                <tr><td style="padding:12px 14px;color:#8aa5bf;font-size:12px;">Capital cierre corte</td><td style="padding:12px 14px;color:#3dd6ff;font-size:13px;font-weight:700;text-align:right;">${statement.capitalEndUsdt.toFixed(2)} USDT</td></tr>
+              </table>
+
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#070e17;border:1px solid #1b3246;border-radius:10px;overflow:hidden;">
+                <tr><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#8aa5bf;font-size:12px;">Canal de pago</td><td style="padding:12px 14px;border-bottom:1px solid #1b3246;color:#e6f2ff;font-size:13px;font-weight:700;text-align:right;">Nequi ${statement.paymentNequi}</td></tr>
+                <tr><td style="padding:12px 14px;color:#8aa5bf;font-size:12px;">Canal alterno</td><td style="padding:12px 14px;color:#e6f2ff;font-size:13px;font-weight:700;text-align:right;">Llave ${statement.paymentDaviKey}</td></tr>
+              </table>
+
+              <p style="margin:14px 0 0;color:#8aa5bf;font-size:12px;line-height:1.6;">Comparte tu soporte de pago para registrar el estado como pagado en el panel administrativo.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 30px;border-top:1px solid #1b3246;">
+              <p style="margin:0;color:#43576b;font-size:11px;text-align:center;line-height:1.6;">© ${year} ${PRODUCT_NAME} · Estado de cuenta institucional</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`,
+    trackingSettings: {
+      clickTracking: { enable: false },
+      openTracking: { enable: false },
+    },
+  };
+
+  await sgMail.send(msg);
+}

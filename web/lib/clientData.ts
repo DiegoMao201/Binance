@@ -23,6 +23,7 @@ export interface ClientCoreProfile {
   fechaInicio: Date | null;
   derivToken: string | null;
   derivAccountId: string | null;
+  billingWhatsApp: string | null;
   balanceActualCache: number | null;
   balanceActualAt: Date | null;
   comisionTotalCobrada: number;
@@ -37,6 +38,7 @@ type RawClientRow = {
   fecha_inicio: Date | null;
   deriv_token: string | null;
   deriv_account_id: string | null;
+  billing_whatsapp: string | null;
   balance_actual_cache: Prisma.Decimal | null;
   balance_actual_at: Date | null;
   comision_total_cobrada: Prisma.Decimal | null;
@@ -52,6 +54,7 @@ function rowToProfile(row: RawClientRow): ClientCoreProfile {
     fechaInicio: row.fecha_inicio,
     derivToken: row.deriv_token,
     derivAccountId: row.deriv_account_id,
+    billingWhatsApp: row.billing_whatsapp,
     balanceActualCache: row.balance_actual_cache ? Number(row.balance_actual_cache) : null,
     balanceActualAt: row.balance_actual_at,
     comisionTotalCobrada: row.comision_total_cobrada ? Number(row.comision_total_cobrada) : 0,
@@ -69,6 +72,7 @@ export async function getClientProfile(userId: string): Promise<ClientCoreProfil
       (to_jsonb(u)->>'fecha_inicio')::timestamptz             AS fecha_inicio,
       to_jsonb(u)->>'deriv_token'               AS deriv_token,
       to_jsonb(u)->>'deriv_account_id'          AS deriv_account_id,
+      to_jsonb(u)->>'billing_whatsapp'          AS billing_whatsapp,
       to_jsonb(u)->>'balance_actual_cache'      AS balance_actual_cache,
       (to_jsonb(u)->>'balance_actual_at')::timestamptz        AS balance_actual_at,
       COALESCE(to_jsonb(u)->>'comision_total_cobrada', '0')   AS comision_total_cobrada
@@ -91,6 +95,7 @@ export async function listActiveClients(): Promise<ClientCoreProfile[]> {
       (to_jsonb(u)->>'fecha_inicio')::timestamptz             AS fecha_inicio,
       to_jsonb(u)->>'deriv_token'               AS deriv_token,
       to_jsonb(u)->>'deriv_account_id'          AS deriv_account_id,
+      to_jsonb(u)->>'billing_whatsapp'          AS billing_whatsapp,
       to_jsonb(u)->>'balance_actual_cache'      AS balance_actual_cache,
       (to_jsonb(u)->>'balance_actual_at')::timestamptz        AS balance_actual_at,
       COALESCE(to_jsonb(u)->>'comision_total_cobrada', '0')   AS comision_total_cobrada

@@ -39,6 +39,7 @@ type ClientRow = {
   id: string;
   displayName: string;
   email: string;
+  billingWhatsApp?: string | null;
   derivAccountId: string | null;
   hasDerivToken: boolean;
   fechaInicio: string | null;
@@ -134,6 +135,56 @@ type SymMetrics = {
   symbols?: Array<{ symbol: string; trades: number; wr: number; pnl: number; slPct: number }>;
 };
 
+type BillingMode = "rolling_7d" | "rolling_15d" | "since_last_payment" | "custom";
+type BillingStatus = "pending" | "paid" | "waived";
+
+type BillingStatementRow = {
+  id: string;
+  userId: string;
+  displayName: string;
+  email: string;
+  billingWhatsApp: string | null;
+  periodStart: string;
+  periodEnd: string;
+  mode: BillingMode;
+  tradesCount: number;
+  pnlUsdt: number;
+  serviceDueUsdt: number;
+  clientNetUsdt: number;
+  capitalStartUsdt: number;
+  capitalEndUsdt: number;
+  status: BillingStatus;
+  paidAmountUsdt: number;
+  pendingAmountUsdt: number;
+  paidAt: string | null;
+  paymentChannel: string | null;
+  paymentReference: string | null;
+  notes: string | null;
+  emailSentAt: string | null;
+  generatedAt: string;
+  updatedAt: string;
+};
+
+type BillingListResponse = {
+  ok: boolean;
+  statements?: BillingStatementRow[];
+  totals?: {
+    pendingAmountUsdt: number;
+    serviceDueUsdt: number;
+    paidAmountUsdt: number;
+    pendingCount: number;
+    paidCount: number;
+    waivedCount: number;
+    clientsWithDebt: number;
+  };
+  paymentMethods?: {
+    nequi?: string;
+    daviKey?: string;
+  };
+  count?: number;
+  error?: string;
+};
+
 function fmtUSD(n: number, sign = false): string {
   const prefix = n < 0 ? "-" : sign && n > 0 ? "+" : "";
   return `${prefix}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -150,7 +201,41 @@ function addDaysUtc(dayKeyUtc: string, deltaDays: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+function sanitizeWhatsapp(raw: string): string {
+  const cleaned = raw.replace(/[^\d+]/g, "").trim();
+  if (!cleaned) return "";
+  return cleaned.startsWith("+") ? cleaned.slice(1) : cleaned;
+}
+
+function modeLabel(mode: BillingMode): string {
+  if (mode === "rolling_7d") return "Ultimos 7 dias";
+  if (mode === "rolling_15d") return "Ultimos 15 dias";
+  if (mode === "custom") return "Rango manual";
+  return "Desde ultimo pago";
+}
+
+function buildWhatsappChargeMessage(statement: BillingStatementRow, nequi: string, daviKey: string): string {
+  const pnlSign = statement.pnlUsdt > 0 ? "+" : "";
+  return [
+    `Hola ${statement.displayName},`,
+    "",
+    "Te comparto tu estado de cuenta de servicio OptiFerre.",
+    `Corte: ${statement.periodStart} a ${statement.periodEnd} (UTC)`,
+    `Operaciones cerradas: ${statement.tradesCount}`,
+    `PnL del periodo: ${pnlSign}${statement.pnlUsdt.toFixed(2)} USDT`,
+    `Valor servicio (20%): ${statement.serviceDueUsdt.toFixed(2)} USDT`,
+    `Saldo pendiente: ${statement.pendingAmountUsdt.toFixed(2)} USDT`,
+    "",
+    "Canales de pago:",
+    `Nequi: ${nequi}`,
+    `Llave Davivienda: ${daviKey}`,
+    "",
+    "Cuando realices el pago, por favor comparte el soporte para marcar tu cuenta como pagada.",
+  ].join("\n");
+}
+
 export function AdminDashboardView() {
+  const todayKeyUtc = new Date().toISOString().slice(0, 10);
   const [bot, setBot] = useState<BotStatus | null>(null);
   const [clients, setClients] = useState<ClientsResponse | null>(null);
   const [openPos, setOpenPos] = useState<OpenResp | null>(null);
@@ -159,6 +244,18 @@ export function AdminDashboardView() {
   const [symMetrics, setSymMetrics] = useState<SymMetrics | null>(null);
   const [selectedDayKey, setSelectedDayKey] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [adminTab, setAdminTab] = useState<"control" | "billing">("control");
+  const [billing, setBilling] = useState<BillingListResponse | null>(null);
+  const [billingStatusFilter, setBillingStatusFilter] = useState<"all" | BillingStatus>("all");
+  const [billingClientFilter, setBillingClientFilter] = useState<string>("all");
+  const [billingMode, setBillingMode] = useState<BillingMode>("since_last_payment");
+  const [billingCutoffDay, setBillingCutoffDay] = useState(addDaysUtc(todayKeyUtc, -1));
+  const [billingStartDay, setBillingStartDay] = useState(addDaysUtc(todayKeyUtc, -14));
+  const [billingEndDay, setBillingEndDay] = useState(addDaysUtc(todayKeyUtc, -1));
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [billingActionBusyId, setBillingActionBusyId] = useState<string | null>(null);
+  const [whatsAppDraftByClient, setWhatsAppDraftByClient] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -181,13 +278,52 @@ export function AdminDashboardView() {
     async function pull() {
       try {
         const c = await fetch("/api/admin/clients", { cache: "no-store" }).then((r) => r.json());
-        if (!cancelled) setClients(c);
+        if (!cancelled) {
+          setClients(c);
+          const rows = Array.isArray(c?.clients) ? c.clients : [];
+          setWhatsAppDraftByClient((prev) => {
+            const next = { ...prev };
+            for (const row of rows) {
+              if (typeof next[row.id] !== "string") {
+                next[row.id] = row.billingWhatsApp ?? "";
+              }
+            }
+            return next;
+          });
+        }
       } catch { /* noop */ }
     }
     pull();
     const id = setInterval(pull, 15_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function pullBilling() {
+      try {
+        const params = new URLSearchParams();
+        if (billingStatusFilter !== "all") params.set("status", billingStatusFilter);
+        if (billingClientFilter !== "all") params.set("userId", billingClientFilter);
+        params.set("limit", "700");
+        const res = await fetch(`/api/admin/billing/statements?${params.toString()}`, { cache: "no-store" });
+        const payload = await res.json();
+        if (!cancelled) {
+          if (!res.ok || !payload?.ok) {
+            setBillingError(payload?.error ?? "No se pudo cargar cobranzas.");
+          } else {
+            setBillingError(null);
+            setBilling(payload);
+          }
+        }
+      } catch {
+        if (!cancelled) setBillingError("No se pudo cargar cobranzas.");
+      }
+    }
+    pullBilling();
+    const id = setInterval(pullBilling, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [billingStatusFilter, billingClientFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +360,137 @@ export function AdminDashboardView() {
       .catch(() => { /* noop */ });
   }
 
+  function reloadBilling() {
+    const params = new URLSearchParams();
+    if (billingStatusFilter !== "all") params.set("status", billingStatusFilter);
+    if (billingClientFilter !== "all") params.set("userId", billingClientFilter);
+    params.set("limit", "700");
+    fetch(`/api/admin/billing/statements?${params.toString()}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((payload) => {
+        if (!payload?.ok) {
+          setBillingError(payload?.error ?? "No se pudo cargar cobranzas.");
+          return;
+        }
+        setBillingError(null);
+        setBilling(payload);
+      })
+      .catch(() => setBillingError("No se pudo cargar cobranzas."));
+  }
+
+  async function generateStatements() {
+    setBillingLoading(true);
+    setBillingError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        mode: billingMode,
+        cutoffDay: billingCutoffDay,
+        includeZeroDue: true,
+      };
+      if (billingClientFilter !== "all") payload.userId = billingClientFilter;
+      if (billingMode === "custom") {
+        payload.startDay = billingStartDay;
+        payload.endDay = billingEndDay;
+      }
+
+      const res = await fetch("/api/admin/billing/statements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setBillingError(data?.error ?? "No se pudieron generar estados de cuenta.");
+        return;
+      }
+      setBilling(data);
+      setBillingError(null);
+    } catch {
+      setBillingError("No se pudieron generar estados de cuenta.");
+    } finally {
+      setBillingLoading(false);
+    }
+  }
+
+  async function markStatementStatus(statementId: string, status: BillingStatus) {
+    setBillingActionBusyId(statementId);
+    try {
+      const res = await fetch(`/api/admin/billing/statements/${statementId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setBillingError(data?.error ?? "No se pudo actualizar el estado de pago.");
+      } else {
+        setBillingError(null);
+        reloadBilling();
+      }
+    } catch {
+      setBillingError("No se pudo actualizar el estado de pago.");
+    } finally {
+      setBillingActionBusyId(null);
+    }
+  }
+
+  async function sendStatementEmail(statementId: string) {
+    setBillingActionBusyId(statementId);
+    try {
+      const res = await fetch(`/api/admin/billing/statements/${statementId}/send-email`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setBillingError(data?.error ?? "No se pudo enviar el correo de cobro.");
+      } else {
+        setBillingError(null);
+        reloadBilling();
+      }
+    } catch {
+      setBillingError("No se pudo enviar el correo de cobro.");
+    } finally {
+      setBillingActionBusyId(null);
+    }
+  }
+
+  async function saveClientWhatsapp(clientId: string) {
+    const value = whatsAppDraftByClient[clientId] ?? "";
+    setBillingActionBusyId(clientId);
+    try {
+      const res = await fetch(`/api/admin/clients/${clientId}/billing-contact`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ billingWhatsApp: value }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setBillingError(data?.error ?? "No se pudo guardar el WhatsApp del cliente.");
+      } else {
+        setBillingError(null);
+        reloadClients();
+        reloadBilling();
+      }
+    } catch {
+      setBillingError("No se pudo guardar el WhatsApp del cliente.");
+    } finally {
+      setBillingActionBusyId(null);
+    }
+  }
+
+  function openWhatsappForStatement(statement: BillingStatementRow) {
+    const nequi = billing?.paymentMethods?.nequi ?? "3206876633";
+    const daviKey = billing?.paymentMethods?.daviKey ?? "@DAVI3205046277";
+    const target = sanitizeWhatsapp(statement.billingWhatsApp ?? "");
+    if (!target) {
+      setBillingError(`El cliente ${statement.displayName} no tiene WhatsApp configurado.`);
+      return;
+    }
+    const text = buildWhatsappChargeMessage(statement, nequi, daviKey);
+    const url = `https://wa.me/${target}?text=${encodeURIComponent(text)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
   return (
     <div style={{
       minHeight: "100vh",
@@ -237,25 +504,56 @@ export function AdminDashboardView() {
       padding: 24,
       boxSizing: "border-box",
     }}>
-      <Header />
+      <Header adminTab={adminTab} onChangeTab={setAdminTab} />
 
-      {/* Seccion 1 — Estado del bot */}
-      <BotStatusPanel bot={bot} openCount={openPos?.count ?? 0} />
+      {adminTab === "control" ? (
+        <>
+          {/* Seccion 1 — Estado del bot */}
+          <BotStatusPanel bot={bot} openCount={openPos?.count ?? 0} />
 
-      {/* Seccion 2 — Tabla de clientes */}
-      <ClientsPanel clients={clients} onAdd={() => setShowAdd(true)} />
+          {/* Seccion 2 — Tabla de clientes */}
+          <ClientsPanel clients={clients} onAdd={() => setShowAdd(true)} />
 
-      {/* Seccion 3 — BI diario por fecha */}
-      <DailyControlBiPanel clients={clients} selectedDayKey={selectedDayKey} onChangeDay={setSelectedDayKey} />
+          {/* Seccion 3 — BI diario por fecha */}
+          <DailyControlBiPanel clients={clients} selectedDayKey={selectedDayKey} onChangeDay={setSelectedDayKey} />
 
-      {/* Seccion 4 — Posiciones abiertas del bot maestro */}
-      <OpenPositionsPanel positions={openPos?.positions ?? []} />
+          {/* Seccion 4 — Posiciones abiertas del bot maestro */}
+          <OpenPositionsPanel positions={openPos?.positions ?? []} />
 
-      {/* Seccion 5 — Metricas del bot */}
-      <BotMetricsPanel metrics={metrics} windowSel={windowSel} onChangeWindow={setWindowSel} />
+          {/* Seccion 5 — Metricas del bot */}
+          <BotMetricsPanel metrics={metrics} windowSel={windowSel} onChangeWindow={setWindowSel} />
 
-      {/* Seccion 6 — Por simbolo */}
-      <SymbolMetricsPanel data={symMetrics} />
+          {/* Seccion 6 — Por simbolo */}
+          <SymbolMetricsPanel data={symMetrics} />
+        </>
+      ) : (
+        <BillingHubPanel
+          clients={clients?.clients ?? []}
+          billing={billing}
+          billingStatusFilter={billingStatusFilter}
+          onStatusFilterChange={setBillingStatusFilter}
+          billingClientFilter={billingClientFilter}
+          onClientFilterChange={setBillingClientFilter}
+          billingMode={billingMode}
+          onModeChange={setBillingMode}
+          billingCutoffDay={billingCutoffDay}
+          onCutoffDayChange={setBillingCutoffDay}
+          billingStartDay={billingStartDay}
+          onStartDayChange={setBillingStartDay}
+          billingEndDay={billingEndDay}
+          onEndDayChange={setBillingEndDay}
+          billingLoading={billingLoading}
+          billingError={billingError}
+          billingActionBusyId={billingActionBusyId}
+          whatsAppDraftByClient={whatsAppDraftByClient}
+          onWhatsAppDraftChange={(clientId, value) => setWhatsAppDraftByClient((prev) => ({ ...prev, [clientId]: value }))}
+          onGenerate={generateStatements}
+          onMarkStatus={markStatementStatus}
+          onSendEmail={sendStatementEmail}
+          onOpenWhatsapp={openWhatsappForStatement}
+          onSaveClientWhatsapp={saveClientWhatsapp}
+        />
+      )}
 
       {showAdd && (
         <AddClientModal onClose={() => setShowAdd(false)} onCreated={() => { setShowAdd(false); reloadClients(); }} />
@@ -264,16 +562,54 @@ export function AdminDashboardView() {
   );
 }
 
-function Header() {
+function Header({
+  adminTab,
+  onChangeTab,
+}: {
+  adminTab: "control" | "billing";
+  onChangeTab: (tab: "control" | "billing") => void;
+}) {
   return (
     <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
       <div>
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0, letterSpacing: "-0.02em" }}>
-          ◈ OptiFerre <span style={{ color: GREEN }}>Mission Control</span>
+          ◈ OptiFerre <span style={{ color: GREEN }}>{adminTab === "control" ? "Mission Control" : "Cobros & Estados"}</span>
         </h1>
         <p style={{ color: MUTE, fontSize: 11, margin: "4px 0 0", letterSpacing: "0.08em" }}>
-          ADMIN · liquidacion transparente
+          ADMIN · liquidacion transparente y cobranza ejecutiva
         </p>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={() => onChangeTab("control")}
+          style={{
+            background: adminTab === "control" ? BLUE : "transparent",
+            color: adminTab === "control" ? "#000" : TEXT,
+            border: `1px solid ${BORD}`,
+            borderRadius: 9,
+            padding: "8px 12px",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          Control operativo
+        </button>
+        <button
+          onClick={() => onChangeTab("billing")}
+          style={{
+            background: adminTab === "billing" ? AMBER : "transparent",
+            color: adminTab === "billing" ? "#000" : TEXT,
+            border: `1px solid ${BORD}`,
+            borderRadius: 9,
+            padding: "8px 12px",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          Cobros y estado de cuenta
+        </button>
       </div>
     </header>
   );
@@ -391,6 +727,314 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
       </p>
     </Card>
   );
+}
+
+function BillingHubPanel({
+  clients,
+  billing,
+  billingStatusFilter,
+  onStatusFilterChange,
+  billingClientFilter,
+  onClientFilterChange,
+  billingMode,
+  onModeChange,
+  billingCutoffDay,
+  onCutoffDayChange,
+  billingStartDay,
+  onStartDayChange,
+  billingEndDay,
+  onEndDayChange,
+  billingLoading,
+  billingError,
+  billingActionBusyId,
+  whatsAppDraftByClient,
+  onWhatsAppDraftChange,
+  onGenerate,
+  onMarkStatus,
+  onSendEmail,
+  onOpenWhatsapp,
+  onSaveClientWhatsapp,
+}: {
+  clients: ClientRow[];
+  billing: BillingListResponse | null;
+  billingStatusFilter: "all" | BillingStatus;
+  onStatusFilterChange: (value: "all" | BillingStatus) => void;
+  billingClientFilter: string;
+  onClientFilterChange: (value: string) => void;
+  billingMode: BillingMode;
+  onModeChange: (value: BillingMode) => void;
+  billingCutoffDay: string;
+  onCutoffDayChange: (value: string) => void;
+  billingStartDay: string;
+  onStartDayChange: (value: string) => void;
+  billingEndDay: string;
+  onEndDayChange: (value: string) => void;
+  billingLoading: boolean;
+  billingError: string | null;
+  billingActionBusyId: string | null;
+  whatsAppDraftByClient: Record<string, string>;
+  onWhatsAppDraftChange: (clientId: string, value: string) => void;
+  onGenerate: () => void;
+  onMarkStatus: (statementId: string, status: BillingStatus) => Promise<void>;
+  onSendEmail: (statementId: string) => Promise<void>;
+  onOpenWhatsapp: (statement: BillingStatementRow) => void;
+  onSaveClientWhatsapp: (clientId: string) => Promise<void>;
+}) {
+  const statements = billing?.statements ?? [];
+  const totals = billing?.totals ?? {
+    pendingAmountUsdt: 0,
+    serviceDueUsdt: 0,
+    paidAmountUsdt: 0,
+    pendingCount: 0,
+    paidCount: 0,
+    waivedCount: 0,
+    clientsWithDebt: 0,
+  };
+  const paymentNequi = billing?.paymentMethods?.nequi ?? "3206876633";
+  const paymentDavi = billing?.paymentMethods?.daviKey ?? "@DAVI3205046277";
+
+  return (
+    <Card
+      title="Centro de cobranzas y estados de cuenta"
+      accent={AMBER}
+      action={
+        <button
+          onClick={onGenerate}
+          disabled={billingLoading}
+          style={{
+            background: billingLoading ? "rgba(255,255,255,0.15)" : AMBER,
+            color: billingLoading ? MUTE : "#000",
+            border: "none",
+            borderRadius: 8,
+            padding: "8px 14px",
+            fontWeight: 700,
+            cursor: billingLoading ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {billingLoading ? "Generando..." : "Generar estados de cuenta"}
+        </button>
+      }
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10, marginBottom: 12 }}>
+        <MiniKpi label="Pendiente total" value={fmtUSD(totals.pendingAmountUsdt)} color={totals.pendingAmountUsdt > 0 ? RED : GREEN} />
+        <MiniKpi label="Cobrado" value={fmtUSD(totals.paidAmountUsdt)} color={BLUE} />
+        <MiniKpi label="Estados pendientes" value={String(totals.pendingCount)} color={AMBER} />
+        <MiniKpi label="Clientes con deuda" value={String(totals.clientsWithDebt)} color={totals.clientsWithDebt > 0 ? RED : GREEN} />
+      </div>
+
+      <div style={{
+        border: `1px solid ${BORD}`,
+        borderRadius: 12,
+        padding: 12,
+        marginBottom: 12,
+        background: "linear-gradient(180deg, rgba(13,22,34,0.95) 0%, rgba(7,12,20,0.95) 100%)",
+      }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ color: MUTE, fontSize: 11 }}>Cliente</label>
+            <select
+              value={billingClientFilter}
+              onChange={(e) => onClientFilterChange(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="all">Todos los clientes</option>
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>{c.displayName || c.email}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ color: MUTE, fontSize: 11 }}>Modo de corte</label>
+            <select
+              value={billingMode}
+              onChange={(e) => onModeChange(e.target.value as BillingMode)}
+              style={selectStyle}
+            >
+              <option value="since_last_payment">Desde ultimo pago</option>
+              <option value="rolling_7d">Ultimos 7 dias</option>
+              <option value="rolling_15d">Ultimos 15 dias</option>
+              <option value="custom">Rango manual</option>
+            </select>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ color: MUTE, fontSize: 11 }}>Estado</label>
+            <select
+              value={billingStatusFilter}
+              onChange={(e) => onStatusFilterChange(e.target.value as "all" | BillingStatus)}
+              style={selectStyle}
+            >
+              <option value="all">Todos</option>
+              <option value="pending">Pendiente</option>
+              <option value="paid">Pagado</option>
+              <option value="waived">Sin cobro</option>
+            </select>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ color: MUTE, fontSize: 11 }}>Corte hasta dia</label>
+            <input type="date" value={billingCutoffDay} onChange={(e) => onCutoffDayChange(e.target.value)} style={inputStyle} />
+          </div>
+
+          {billingMode === "custom" && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ color: MUTE, fontSize: 11 }}>Inicio manual</label>
+                <input type="date" value={billingStartDay} onChange={(e) => onStartDayChange(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ color: MUTE, fontSize: 11 }}>Fin manual</label>
+                <input type="date" value={billingEndDay} onChange={(e) => onEndDayChange(e.target.value)} style={inputStyle} />
+              </div>
+            </>
+          )}
+        </div>
+
+        <p style={{ margin: 0, color: MUTE, fontSize: 11 }}>
+          Modo activo: <span style={{ color: TEXT }}>{modeLabel(billingMode)}</span>. Pago institucional por Nequi <span style={{ color: TEXT }}>{paymentNequi}</span> o llave <span style={{ color: TEXT }}>{paymentDavi}</span>.
+        </p>
+      </div>
+
+      {billingError && (
+        <p style={{ margin: "0 0 10px", color: RED, fontSize: 12 }}>{billingError}</p>
+      )}
+
+      {statements.length === 0 ? (
+        <p style={{ margin: 0, color: MUTE }}>No hay estados de cuenta para el filtro actual. Genera un corte para poblar la cartera.</p>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <Table headers={["Cliente", "Periodo", "Opero", "PnL", "Servicio 20%", "Pendiente", "Estado", "WhatsApp", "Acciones"]}>
+            {statements.map((row) => {
+              const clientDraft = whatsAppDraftByClient[row.userId] ?? row.billingWhatsApp ?? "";
+              const savingWhatsapp = billingActionBusyId === row.userId;
+              const actingOnStatement = billingActionBusyId === row.id;
+              const nextStatus: BillingStatus = row.status === "paid" ? "pending" : "paid";
+
+              return (
+                <tr key={row.id}>
+                  <Td>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <span>{row.displayName || row.email}</span>
+                      <span style={{ color: MUTE, fontSize: 10 }}>{row.email}</span>
+                    </div>
+                  </Td>
+                  <Td mono>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <span>{row.periodStart} a {row.periodEnd}</span>
+                      <span style={{ color: MUTE, fontSize: 10 }}>{modeLabel(row.mode)}</span>
+                    </div>
+                  </Td>
+                  <Td mono>{row.tradesCount}</Td>
+                  <Td mono color={row.pnlUsdt >= 0 ? GREEN : RED}>{fmtUSD(row.pnlUsdt, true)}</Td>
+                  <Td mono color={AMBER}>{fmtUSD(row.serviceDueUsdt)}</Td>
+                  <Td mono color={row.pendingAmountUsdt > 0 ? RED : GREEN}>{fmtUSD(row.pendingAmountUsdt)}</Td>
+                  <Td>
+                    <Badge
+                      color={row.status === "paid" ? GREEN : row.status === "pending" ? AMBER : BLUE}
+                      text={row.status === "paid" ? "Pagado" : row.status === "pending" ? "Pendiente" : "Sin cobro"}
+                    />
+                  </Td>
+                  <Td>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        value={clientDraft}
+                        onChange={(e) => onWhatsAppDraftChange(row.userId, e.target.value)}
+                        placeholder="573001112233"
+                        style={{
+                          ...inputStyle,
+                          minWidth: 130,
+                          fontSize: 12,
+                          padding: "6px 8px",
+                        }}
+                      />
+                      <button
+                        onClick={() => onSaveClientWhatsapp(row.userId)}
+                        disabled={savingWhatsapp}
+                        style={{
+                          background: "transparent",
+                          color: TEXT,
+                          border: `1px solid ${BORD}`,
+                          borderRadius: 7,
+                          padding: "6px 8px",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: savingWhatsapp ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {savingWhatsapp ? "Guardando" : "Guardar"}
+                      </button>
+                    </div>
+                  </Td>
+                  <Td>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button
+                        onClick={() => onOpenWhatsapp(row)}
+                        disabled={actingOnStatement}
+                        style={smallActionButton("#25d366", actingOnStatement)}
+                      >
+                        WhatsApp
+                      </button>
+                      <button
+                        onClick={() => onSendEmail(row.id)}
+                        disabled={actingOnStatement}
+                        style={smallActionButton(BLUE, actingOnStatement)}
+                      >
+                        Correo
+                      </button>
+                      <button
+                        onClick={() => onMarkStatus(row.id, nextStatus)}
+                        disabled={actingOnStatement}
+                        style={smallActionButton(row.status === "paid" ? AMBER : GREEN, actingOnStatement)}
+                      >
+                        {row.status === "paid" ? "Marcar pendiente" : "Marcar pagado"}
+                      </button>
+                    </div>
+                  </Td>
+                </tr>
+              );
+            })}
+          </Table>
+        </div>
+      )}
+
+      <p style={{ marginTop: 12, color: MUTE, fontSize: 12, lineHeight: 1.5 }}>
+        El valor del servicio (20%) es dinamico por periodo y solo aplica sobre PnL positivo. Si el PnL cae por perdidas, el cobro tambien baja; si el PnL del periodo es negativo, el cobro del servicio queda en cero.
+      </p>
+    </Card>
+  );
+}
+
+const selectStyle: React.CSSProperties = {
+  background: "rgba(8,15,25,0.95)",
+  border: `1px solid ${BORD}`,
+  color: TEXT,
+  borderRadius: 8,
+  padding: "8px 10px",
+  fontSize: 12,
+};
+
+const inputStyle: React.CSSProperties = {
+  background: "rgba(8,15,25,0.95)",
+  border: `1px solid ${BORD}`,
+  color: TEXT,
+  borderRadius: 8,
+  padding: "8px 10px",
+  fontSize: 12,
+};
+
+function smallActionButton(color: string, disabled: boolean): React.CSSProperties {
+  return {
+    background: disabled ? "rgba(255,255,255,0.15)" : color,
+    color: "#000",
+    border: "none",
+    borderRadius: 7,
+    padding: "6px 9px",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: disabled ? "not-allowed" : "pointer",
+  };
 }
 
 function DailyControlBiPanel({
@@ -651,6 +1295,7 @@ function AddClientModal({ onClose, onCreated }: { onClose: () => void; onCreated
     fechaInicio: new Date().toISOString().slice(0, 16),
     derivToken: "",
     derivAccountId: "",
+    billingWhatsApp: "",
   });
   const [err, setErr] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -692,6 +1337,7 @@ function AddClientModal({ onClose, onCreated }: { onClose: () => void; onCreated
         <Input label="Fecha de inicio" type="datetime-local" value={form.fechaInicio} onChange={(v) => setForm({ ...form, fechaInicio: v })} />
         <Input label="Token Deriv" value={form.derivToken} onChange={(v) => setForm({ ...form, derivToken: v })} />
         <Input label="Account ID Deriv" value={form.derivAccountId} onChange={(v) => setForm({ ...form, derivAccountId: v })} placeholder="CR1234567" />
+        <Input label="WhatsApp cobro cliente" value={form.billingWhatsApp} onChange={(v) => setForm({ ...form, billingWhatsApp: v })} placeholder="573001112233" />
         {err && <p style={{ color: RED, fontSize: 12 }}>{err}</p>}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
           <button onClick={onClose} style={{ background: "transparent", color: MUTE, border: `1px solid ${BORD}`, padding: "8px 14px", borderRadius: 8, cursor: "pointer" }}>Cancelar</button>

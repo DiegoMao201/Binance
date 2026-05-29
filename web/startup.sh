@@ -60,6 +60,11 @@ npx prisma db execute --schema ./prisma/schema.prisma \
   --file ./db/migrations/007_add_missing_uta_columns.sql || \
   echo "[startup] WARN: migration 007 failed — symbol column may be missing."
 
+echo "[startup] Running migration 008 (billing statements + whatsapp contact)..."
+npx prisma db execute --schema ./prisma/schema.prisma \
+  --file ./db/migrations/008_billing_statements_and_payments.sql || \
+  echo "[startup] WARN: migration 008 failed — billing module may be limited."
+
 echo "[startup] Starting Next.js server..."
 exec npm run start
 
