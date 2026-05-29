@@ -2152,6 +2152,212 @@ def _write_market_phase_hints(
         LOG.warning("[market-phase] hints write failed path=%s err=%s", path, exc)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-05-29: Per-symbol short-window risk floor + per-symbol Hurst clamp.
+# Two safety policies enforced locally (not by the LLM) right before smoothing:
+#   1) If a symbol's realized PnL over the last 6h <= SYMBOL_RISK_DD_FLOOR_USDT,
+#      force is_active=False and persist a 6h lockout to disk so the lockout
+#      survives across orchestrator restarts and is honored across cycles.
+#   2) CRASH900 specific: if recent Hurst readings (from market_context) are
+#      consistently below CRASH900_HURST_CLAMP_THRESHOLD, force
+#      score_min_override >= CRASH900_HURST_SCORE_FLOOR so entries demand more
+#      conviction while the chop/anti-trend phase persists.
+# ─────────────────────────────────────────────────────────────────────────────
+SYMBOL_RISK_DD_FLOOR_USDT = float(
+    os.getenv("DYNAMIC_AI_SYMBOL_DD_FLOOR_USDT", "-2.0") or -2.0
+)
+SYMBOL_RISK_DD_WINDOW_SEC = max(
+    1800,
+    int(os.getenv("DYNAMIC_AI_SYMBOL_DD_WINDOW_SEC", str(6 * 3600)) or 6 * 3600),
+)
+SYMBOL_RISK_LOCKOUT_SEC = max(
+    1800,
+    int(os.getenv("DYNAMIC_AI_SYMBOL_LOCKOUT_SEC", str(6 * 3600)) or 6 * 3600),
+)
+SYMBOL_RISK_MIN_TRADES = max(
+    1,
+    int(os.getenv("DYNAMIC_AI_SYMBOL_DD_MIN_TRADES", "3") or 3),
+)
+CRASH900_HURST_CLAMP_THRESHOLD = float(
+    os.getenv("DYNAMIC_AI_CRASH900_HURST_THRESHOLD", "0.43") or 0.43
+)
+CRASH900_HURST_SCORE_FLOOR = float(
+    os.getenv("DYNAMIC_AI_CRASH900_HURST_SCORE_FLOOR", "8.5") or 8.5
+)
+CRASH900_HURST_MIN_SAMPLES = max(
+    2,
+    int(os.getenv("DYNAMIC_AI_CRASH900_HURST_MIN_SAMPLES", "3") or 3),
+)
+CRASH900_HURST_LOOKBACK_SEC = max(
+    300,
+    int(os.getenv("DYNAMIC_AI_CRASH900_HURST_LOOKBACK_SEC", "1800") or 1800),
+)
+
+
+def _load_symbol_risk_lockouts(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            out: dict[str, dict[str, Any]] = {}
+            for k, v in raw.items():
+                if isinstance(v, dict):
+                    out[str(k).upper()] = v
+            return out
+    except Exception:
+        return {}
+    return {}
+
+
+def _save_symbol_risk_lockouts(path: Path, state: dict[str, dict[str, Any]]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[symbol-risk] lockout state write failed path=%s err=%s", path, exc)
+
+
+def _apply_symbol_risk_floor_policy(
+    candidate_cfg: dict[str, SymbolCfg],
+    logs_dir: Path,
+    lockout_path: Path,
+    now_ts: float | None = None,
+) -> tuple[dict[str, SymbolCfg], dict[str, dict[str, Any]]]:
+    """Hard-floor DD per symbol (6h window) + CRASH900 Hurst clamp.
+
+    Returns (modified_cfg, report) where report has per-symbol diagnostic info
+    that is logged in the heartbeat for transparency.
+    """
+    ts_now = float(now_ts if isinstance(now_ts, (int, float)) else time.time())
+    report: dict[str, dict[str, Any]] = {}
+    existing_lockouts = _load_symbol_risk_lockouts(lockout_path)
+    updated_lockouts: dict[str, dict[str, Any]] = {}
+
+    # Aggregate closed PnL per symbol within DD window.
+    closed_rows = _load_json(logs_dir / "deriv_closed_contracts.json")
+    cutoff_ts = ts_now - float(SYMBOL_RISK_DD_WINDOW_SEC)
+    pnl_per_sym: dict[str, float] = {}
+    trades_per_sym: dict[str, int] = {}
+    for row in closed_rows:
+        try:
+            sym = str(row.get("symbol") or row.get("symbol_norm") or "").upper()
+            if not sym:
+                continue
+            cts = (
+                _safe_ts(row.get("closed_at_ts"))
+                or _safe_ts(row.get("closed_at"))
+                or _safe_ts(row.get("ts"))
+            )
+            if cts is None or cts < cutoff_ts:
+                continue
+            pnl = float(row.get("realized_pnl_usdt") or row.get("pnl_usdt") or 0.0)
+        except Exception:
+            continue
+        pnl_per_sym[sym] = pnl_per_sym.get(sym, 0.0) + pnl
+        trades_per_sym[sym] = trades_per_sym.get(sym, 0) + 1
+
+    # Pre-load CRASH900 recent Hurst readings from market_context.
+    crash900_hursts: list[float] = []
+    try:
+        mctx = _load_json(logs_dir / "deriv_market_context.json")
+        hurst_cutoff = ts_now - float(CRASH900_HURST_LOOKBACK_SEC)
+        for snap in mctx:
+            if str(snap.get("symbol") or "").upper() != "CRASH900":
+                continue
+            st = _safe_ts(snap.get("ts")) or _safe_ts(snap.get("iso"))
+            if st is None or st < hurst_cutoff:
+                continue
+            hv = snap.get("hurst")
+            if hv is None:
+                continue
+            try:
+                crash900_hursts.append(float(hv))
+            except Exception:
+                continue
+    except Exception:
+        crash900_hursts = []
+
+    out: dict[str, SymbolCfg] = {}
+    for sym in SYMBOLS:
+        base = candidate_cfg[sym]
+        sym_report: dict[str, Any] = {
+            "pnl_6h": round(pnl_per_sym.get(sym, 0.0), 4),
+            "trades_6h": trades_per_sym.get(sym, 0),
+            "lockout_active": False,
+            "lockout_until_ts": None,
+            "hurst_clamp_applied": False,
+        }
+
+        # 1) DD lockout (engage or honor existing).
+        prior = existing_lockouts.get(sym) or {}
+        prior_until = _safe_ts(prior.get("until_ts")) if prior else None
+        engage_new_lockout = False
+        if (
+            trades_per_sym.get(sym, 0) >= SYMBOL_RISK_MIN_TRADES
+            and pnl_per_sym.get(sym, 0.0) <= SYMBOL_RISK_DD_FLOOR_USDT
+        ):
+            engage_new_lockout = True
+
+        next_until: float | None = None
+        if engage_new_lockout:
+            # Refresh window so the lockout is exactly SYMBOL_RISK_LOCKOUT_SEC
+            # from now (clamp at most one renew per cycle).
+            next_until = ts_now + float(SYMBOL_RISK_LOCKOUT_SEC)
+        elif prior_until is not None and prior_until > ts_now:
+            next_until = prior_until
+
+        is_active_override = base.is_active
+        if next_until is not None and next_until > ts_now:
+            is_active_override = False
+            sym_report["lockout_active"] = True
+            sym_report["lockout_until_ts"] = round(float(next_until), 1)
+            updated_lockouts[sym] = {
+                "until_ts": float(next_until),
+                "until_iso": datetime.fromtimestamp(next_until, tz=timezone.utc).isoformat(),
+                "engaged_at_ts": float(prior.get("engaged_at_ts") or ts_now) if prior_until is not None and not engage_new_lockout else ts_now,
+                "engaged_at_iso": datetime.fromtimestamp(
+                    float(prior.get("engaged_at_ts") or ts_now)
+                    if prior_until is not None and not engage_new_lockout
+                    else ts_now,
+                    tz=timezone.utc,
+                ).isoformat(),
+                "trigger_pnl_6h": round(pnl_per_sym.get(sym, 0.0), 4),
+                "trigger_trades_6h": int(trades_per_sym.get(sym, 0)),
+                "renewed_this_cycle": bool(engage_new_lockout),
+            }
+
+        # 2) CRASH900 Hurst clamp on score_min_override.
+        next_score = float(base.score_min_override)
+        if sym == "CRASH900" and len(crash900_hursts) >= CRASH900_HURST_MIN_SAMPLES:
+            recent = crash900_hursts[-CRASH900_HURST_MIN_SAMPLES:]
+            if all(h < CRASH900_HURST_CLAMP_THRESHOLD for h in recent):
+                if next_score < CRASH900_HURST_SCORE_FLOOR:
+                    next_score = CRASH900_HURST_SCORE_FLOOR
+                    sym_report["hurst_clamp_applied"] = True
+            sym_report["hurst_samples"] = len(crash900_hursts)
+            sym_report["hurst_recent_min"] = round(min(recent), 4)
+            sym_report["hurst_recent_max"] = round(max(recent), 4)
+
+        new_cfg = _clamp_cfg(
+            sym,
+            SymbolCfg(
+                regime=base.regime,
+                spike_pre_filter_target=base.spike_pre_filter_target,
+                zero_peak_grace_sec=base.zero_peak_grace_sec,
+                score_min_override=next_score,
+                is_active=is_active_override,
+            ),
+        )
+        out[sym] = new_cfg
+        report[sym] = sym_report
+
+    _save_symbol_risk_lockouts(lockout_path, updated_lockouts)
+    return out, report
+
+
 def _apply_24h_feedback_policy(
     candidate_cfg: dict[str, SymbolCfg],
     feedback_state: dict[str, Any],
@@ -2662,6 +2868,10 @@ async def run_loop() -> None:
         os.getenv("DYNAMIC_AI_24H_STATE_PATH")
         or str(logs_dir / "deriv_24h_feedback_state.json")
     ).expanduser()
+    symbol_risk_lockout_path = Path(
+        os.getenv("DYNAMIC_AI_SYMBOL_LOCKOUT_PATH")
+        or str(logs_dir / "deriv_symbol_risk_lockout.json")
+    ).expanduser()
 
     _load_activity_memory(activity_state_path)
 
@@ -2776,6 +2986,16 @@ async def run_loop() -> None:
                     "[dynamic-ai][24H] applying adjustments symbols=%d details=%s",
                     len(feedback_applied),
                     feedback_applied,
+            # 2026-05-29: per-symbol short-window risk floor + CRASH900 Hurst clamp.
+            # Runs AFTER all LLM/heuristic/policy layers and AFTER force_active,
+            # so it is the last word before smoothing. Lockouts persist on disk.
+            new_cfg, symbol_risk_report = _apply_symbol_risk_floor_policy(
+                new_cfg,
+                logs_dir,
+                symbol_risk_lockout_path,
+                now_ts=time.time(),
+            )
+
                 )
 
             new_cfg = _apply_force_active_policy(current_cfg, new_cfg)
@@ -2802,6 +3022,46 @@ async def run_loop() -> None:
                     "CRASH900": smoothed_cfg.get("CRASH900").__dict__ if smoothed_cfg.get("CRASH900") else None,
                 },
             )
+            # 2026-05-29: per-symbol risk floor visibility.
+            try:
+                _risk_summary = {
+                    s: {
+                        "pnl_6h": r.get("pnl_6h"),
+                        "trades_6h": r.get("trades_6h"),
+                        "lockout": r.get("lockout_active"),
+                        "hurst_clamp": r.get("hurst_clamp_applied"),
+                    }
+                    for s, r in (symbol_risk_report or {}).items()
+                }
+                LOG.info("[dynamic-ai][SYMBOL_RISK_FLOOR] window=%ss floor=%.2fUSDT lockout=%ss sample=%s",
+                         SYMBOL_RISK_DD_WINDOW_SEC, SYMBOL_RISK_DD_FLOOR_USDT,
+                         SYMBOL_RISK_LOCKOUT_SEC, _risk_summary)
+            except Exception:
+                pass
+            # 2026-05-29: feedback_24h per-symbol visibility (why applied_symbols may be empty).
+            try:
+                _fb_sym = (feedback_state.get("symbols") or {}) if isinstance(feedback_state, dict) else {}
+                _fb_summary = {
+                    s: {
+                        "trades": (p or {}).get("trades"),
+                        "win_rate": (p or {}).get("win_rate"),
+                        "avg_pnl": (p or {}).get("avg_pnl"),
+                        "score_delta": (p or {}).get("score_delta"),
+                        "regime_bias": (p or {}).get("regime_bias"),
+                        "reasons": (p or {}).get("reasons"),
+                    }
+                    for s, p in _fb_sym.items()
+                }
+                LOG.info(
+                    "[dynamic-ai][24H_DETAIL] min_trades=%d target_wr=%.1f target_avg_pnl=%.3f applied=%d sample=%s",
+                    FB24.FEEDBACK_MIN_TRADES,
+                    FB24.FEEDBACK_TARGET_WR,
+                    FB24.FEEDBACK_TARGET_AVG_PNL,
+                    len(feedback_applied or {}),
+                    _fb_summary,
+                )
+            except Exception:
+                pass
             LOG.info(
                 "[dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=%d sample=%s",
                 tick_updates,
@@ -2878,6 +3138,7 @@ async def run_loop() -> None:
                         "applied_symbols": feedback_applied,
                         "pending_after_apply": FB24.has_pending_apply(feedback_state),
                     },
+                    "symbol_risk_floor": symbol_risk_report,
                     "market_phase": {
                         sym: {
                             "phase": payload.get("phase"),

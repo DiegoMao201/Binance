@@ -902,8 +902,15 @@ class DerivAnalyst:
                 "confidence": result.get("confidence"),
                 "reason": result.get("reason"),
                 "model": result.get("model"),
-                **{k: v for k, v in context.items() if k in ("hurst", "autocorr", "score", "vol_regime")},
+                **{k: v for k, v in context.items() if k in ("hurst", "autocorr", "score", "vol_regime", "regime", "setup_type")},
             }
+            # 2026-05-29: ensure `regime` is always present (alias from vol_regime
+            # or snapshot) so feedback_24h/audits don't see "?".
+            if "regime" not in entry or entry.get("regime") in (None, "", "?"):
+                _reg = context.get("regime") or context.get("vol_regime")
+                if (_reg in (None, "", "?")) and snapshot:
+                    _reg = snapshot.get("regime") or snapshot.get("vol_regime")
+                entry["regime"] = _reg if _reg not in (None, "") else "?"
             if snapshot:
                 entry["snapshot"] = snapshot
             existing.append(entry)
