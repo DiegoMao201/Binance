@@ -1,0 +1,53 @@
+BOOM+CRASH stake=5 + multi-account deploy boot-sync report (2026-05-29)
+
+Objective
+- Raise BOOM stake to 5 (CRASH already at 5).
+- Ensure deploy/restart reconciliation closes/syncs follower-account contracts like principal account, avoiding orphan opens after deploy.
+
+Code commit
+- f03f864 fix(deriv): boom stake 5 and mirror boot-sync orphan close
+
+Files changed
+1) src/strategies/deriv_signals.py
+- BOOM300/500/600/900/1000 now include stake_target_usdt=5.00.
+- BOOM500/600/900 stake_max_usdt raised to 5.00.
+- CRASH stake settings kept at 5.00.
+
+2) src/main_deriv.py
+- _enforce_profile_stake_target now applies to spike_boom and spike_crash profiles (not only crash).
+
+3) src/execution/deriv_mirror_client.py
+- Added persisted mirror link state file: deriv_mirror_links.json.
+- Added boot_sync_followers() that:
+  - rebuilds principal<->follower links after restart using symbol/side/time/stake matching,
+  - closes unmatched follower orphan contracts,
+  - persists updated link map.
+- buy()/close paths now persist mirror link state.
+
+4) src/execution/deriv_trader.py
+- Added _boot_sync_mirror_followers() hook.
+- Boot reconciliation now triggers mirror boot sync in all boot return paths.
+
+Production verification
+- Bot image running: o4w1ns4cceccmn2ozqt7sol2:f03f864...
+- Sidecar synced to same image using /opt/deriv-ai-sync/deriv_ai_sidecar_sync.sh.
+- Both containers healthy.
+
+Boot-sync evidence (production logs)
+- [mirror] boot-sync linked principal=1017459559 <-> alias=esposa mirror_contract=1017459619 symbol=CRASH500
+- [mirror] boot-sync linked principal=1017028859 <-> alias=esposa mirror_contract=1017028899 symbol=CRASH600
+- [mirror] boot-sync linked principal=1017429559 <-> alias=esposa mirror_contract=1017429639 symbol=BOOM500
+- [mirror] BOOT-SYNC summary: {'enabled': True, 'principal_open': 3, 'linked': 3, 'closed_orphans': 0, 'scanned': 3, 'stale_principal_links': 0}
+
+Live account parity snapshot
+- principal DOT92114701 open=3
+- follower esposa DOT92477032 open=3
+- Contract parity observed for symbol/side/stake across both accounts.
+
+Stake runtime profile verification (inside live bot)
+- BOOM300/500/600/900/1000 stake_max=5.0 stake_target=5.0
+- CRASH300/500/600/900/1000 stake_max=5.0 stake_target=5.0
+
+Important note
+- Existing BOOM opens created before this deploy keep their original stake until they close.
+- New BOOM/CRASH entries from this build enforce stake target 5.0.
