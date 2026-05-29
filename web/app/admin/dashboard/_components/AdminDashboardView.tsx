@@ -403,8 +403,8 @@ export function AdminDashboardView() {
         setBillingError(data?.error ?? "No se pudieron generar estados de cuenta.");
         return;
       }
-      setBilling(data);
       setBillingError(null);
+      reloadBilling();
     } catch {
       setBillingError("No se pudieron generar estados de cuenta.");
     } finally {
