@@ -16,6 +16,7 @@ import { prisma } from "@/lib/db";
 import { resolveSessionFromCookies } from "@/lib/authSession";
 import {
   listActiveClients,
+  listClosedTradesSinceFechaInicio,
   updateBalanceCache,
   type ClientCoreProfile,
 } from "@/lib/clientData";
@@ -51,6 +52,71 @@ async function resolveLiveBalance(
   return { balance: null, source: "unavailable", error: "Cliente sin token Deriv." };
 }
 
+function dayKey(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+type PnlSnapshot = {
+  totalTrades: number;
+  realizedPnlTotal: number;
+  realizedPnlTodayUtc: number;
+  latestDayKey: string | null;
+  latestDayPnl: number;
+  serviceEstimatedTotal: number;
+  serviceEstimatedLatestDay: number;
+};
+
+async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
+  if (!p.fechaInicio) {
+    return {
+      totalTrades: 0,
+      realizedPnlTotal: 0,
+      realizedPnlTodayUtc: 0,
+      latestDayKey: null,
+      latestDayPnl: 0,
+      serviceEstimatedTotal: 0,
+      serviceEstimatedLatestDay: 0,
+    };
+  }
+
+  const trades = await listClosedTradesSinceFechaInicio(p.fechaInicio, p.id);
+  if (!trades.length) {
+    return {
+      totalTrades: 0,
+      realizedPnlTotal: 0,
+      realizedPnlTodayUtc: 0,
+      latestDayKey: null,
+      latestDayPnl: 0,
+      serviceEstimatedTotal: 0,
+      serviceEstimatedLatestDay: 0,
+    };
+  }
+
+  const byDay = new Map<string, number>();
+  for (const t of trades) {
+    const k = dayKey(t.closedAt);
+    byDay.set(k, (byDay.get(k) ?? 0) + t.realizedPnl);
+  }
+
+  const daily = Array.from(byDay.entries()).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const latest = daily[daily.length - 1] ?? null;
+  const latestDayKey = latest?.[0] ?? null;
+  const latestDayPnl = latest?.[1] ?? 0;
+  const todayKeyUtc = new Date().toISOString().slice(0, 10);
+  const realizedPnlTodayUtc = byDay.get(todayKeyUtc) ?? 0;
+  const realizedPnlTotal = trades.reduce((acc, t) => acc + t.realizedPnl, 0);
+
+  return {
+    totalTrades: trades.length,
+    realizedPnlTotal,
+    realizedPnlTodayUtc,
+    latestDayKey,
+    latestDayPnl,
+    serviceEstimatedTotal: Math.max(realizedPnlTotal, 0) * 0.20,
+    serviceEstimatedLatestDay: Math.max(latestDayPnl, 0) * 0.20,
+  };
+}
+
 export async function GET() {
   if (!(await requireAdmin())) {
     return NextResponse.json({ ok: false, error: "Acceso denegado." }, { status: 403 });
@@ -59,7 +125,10 @@ export async function GET() {
   const clients = await listActiveClients();
   const enriched = await Promise.all(
     clients.map(async (c) => {
-      const live = await resolveLiveBalance(c);
+      const [live, pnl] = await Promise.all([
+        resolveLiveBalance(c),
+        resolvePnlSnapshot(c),
+      ]);
       const estado = live.balance == null
         ? null
         : calcularEstadoCuenta(
@@ -67,9 +136,8 @@ export async function GET() {
           live.balance,
           c.comisionTotalCobrada,
         );
-      // "Mi 20%" sobre la ganancia que esta por encima del capital_inicial.
-      const gananciaSobreUmbral = estado ? Math.max(estado.gananciaNeta, 0) : 0;
-      const adminFee20 = gananciaSobreUmbral * 0.20;
+      const adminFeeLatestDay = estado?.enModoRecuperacion ? 0 : pnl.serviceEstimatedLatestDay;
+      const adminFeeTotalEstimated = estado?.enModoRecuperacion ? 0 : pnl.serviceEstimatedTotal;
 
       return {
         id: c.id,
@@ -86,17 +154,29 @@ export async function GET() {
         rendimientoPct: estado?.rendimientoPct ?? null,
         enModoRecuperacion: estado?.enModoRecuperacion ?? null,
         mensajeEstado: estado?.mensajeEstado ?? "Saldo no disponible.",
-        adminFee20: estado && !estado.enModoRecuperacion ? adminFee20 : 0,
+        adminFee20: adminFeeLatestDay,
+        adminFee20LatestDay: adminFeeLatestDay,
+        adminFee20TotalEstimated: adminFeeTotalEstimated,
+        realizedPnlTotal: pnl.realizedPnlTotal,
+        realizedPnlTodayUtc: pnl.realizedPnlTodayUtc,
+        latestDayKey: pnl.latestDayKey,
+        latestDayPnl: pnl.latestDayPnl,
+        tradesSinceStart: pnl.totalTrades,
       };
     }),
   );
 
-  const totalAdminFee20 = enriched.reduce((acc, c) => acc + (c.enModoRecuperacion ? 0 : c.adminFee20), 0);
+  const totalAdminFee20LatestDay = enriched.reduce((acc, c) => acc + (c.adminFee20LatestDay ?? 0), 0);
+  const totalAdminFee20Estimated = enriched.reduce((acc, c) => acc + (c.adminFee20TotalEstimated ?? 0), 0);
+  const totalRealizedPnl = enriched.reduce((acc, c) => acc + (c.realizedPnlTotal ?? 0), 0);
 
   return NextResponse.json({
     ok: true,
     clients: enriched,
-    totalAdminFee20,
+    totalAdminFee20: totalAdminFee20LatestDay,
+    totalAdminFee20LatestDay,
+    totalAdminFee20Estimated,
+    totalRealizedPnl,
     count: enriched.length,
   });
 }

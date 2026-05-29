@@ -23,6 +23,10 @@ function dayKey(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function serviceFromNetPnl(pnl: number): number {
+  return Math.max(pnl, 0) * 0.20;
+}
+
 export async function GET() {
   const cookieStore = await cookies();
   const session = await resolveSessionFromCookies(cookieStore, "client");
@@ -68,6 +72,15 @@ export async function GET() {
   );
   const totalPnl = dailyPnl.reduce((acc, d) => acc + d.pnl, 0);
   const promedioDiario = diasActivo > 0 ? totalPnl / diasActivo : 0;
+  const latestDay = dailyPnl.length ? dailyPnl[dailyPnl.length - 1] : null;
+  const todayKeyUtc = new Date().toISOString().slice(0, 10);
+  const todayDay = dailyPnl.find((d) => d.date === todayKeyUtc) ?? null;
+
+  const latestDayPnl = latestDay?.pnl ?? 0;
+  const todayPnlUtc = todayDay?.pnl ?? 0;
+  const estimatedServiceLatestDay = serviceFromNetPnl(latestDayPnl);
+  const estimatedServiceTodayUtc = serviceFromNetPnl(todayPnlUtc);
+  const estimatedServiceTotal = serviceFromNetPnl(totalPnl);
 
   return NextResponse.json({
     ok: true,
@@ -83,5 +96,14 @@ export async function GET() {
     promedioDiario,
     totalPnl,
     dailyPnl,
+    latestDayKey: latestDay?.date ?? null,
+    latestDayPnl,
+    todayKeyUtc,
+    todayPnlUtc,
+    estimatedServiceLatestDay,
+    estimatedServiceTodayUtc,
+    estimatedServiceTotal,
+    estimatedClientShareLatestDay: latestDayPnl - estimatedServiceLatestDay,
+    estimatedClientShareTotal: totalPnl - estimatedServiceTotal,
   });
 }

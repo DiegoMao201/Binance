@@ -12,15 +12,15 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 
-const BG    = "#04070c";
-const CARD  = "rgba(10,15,22,0.72)";
-const BORD  = "rgba(63,87,114,0.28)";
-const TEXT  = "#dce7f5";
-const MUTE  = "#6b8299";
-const GREEN = "#10b981";
-const RED   = "#fb7185";
-const AMBER = "#fbbf24";
-const BLUE  = "#22d3ee";
+const BG    = "#050b12";
+const CARD  = "rgba(8,15,25,0.78)";
+const BORD  = "rgba(76,136,170,0.24)";
+const TEXT  = "#e6f2ff";
+const MUTE  = "#8aa5bf";
+const GREEN = "#19c37d";
+const RED   = "#ff6b6b";
+const AMBER = "#ffbf47";
+const BLUE  = "#3dd6ff";
 
 type BotStatus = {
   ok?: boolean;
@@ -51,9 +51,24 @@ type ClientRow = {
   enModoRecuperacion: boolean | null;
   mensajeEstado: string;
   adminFee20: number;
+  adminFee20LatestDay: number;
+  adminFee20TotalEstimated: number;
+  realizedPnlTotal: number;
+  realizedPnlTodayUtc: number;
+  latestDayKey: string | null;
+  latestDayPnl: number;
+  tradesSinceStart: number;
 };
 
-type ClientsResponse = { ok: boolean; clients?: ClientRow[]; totalAdminFee20?: number; count?: number };
+type ClientsResponse = {
+  ok: boolean;
+  clients?: ClientRow[];
+  totalAdminFee20?: number;
+  totalAdminFee20LatestDay?: number;
+  totalAdminFee20Estimated?: number;
+  totalRealizedPnl?: number;
+  count?: number;
+};
 
 type OpenPos = { symbol: string; stake: number; currentPnl: number; openedAt: string | null; contractId: unknown };
 type OpenResp = { ok: boolean; positions?: OpenPos[]; count?: number };
@@ -152,9 +167,13 @@ export function AdminDashboardView() {
   return (
     <div style={{
       minHeight: "100vh",
-      background: `radial-gradient(900px 600px at 12% -10%, rgba(168,85,247,0.07), transparent 60%), ${BG}`,
+      background: [
+        "radial-gradient(900px 600px at 8% -10%, rgba(25,195,125,0.10), transparent 62%)",
+        "radial-gradient(760px 460px at 95% 12%, rgba(61,214,255,0.10), transparent 65%)",
+        "linear-gradient(180deg, #060d17 0%, #050b12 100%)",
+      ].join(", "),
       color: TEXT,
-      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      fontFamily: "Sora, Manrope, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       padding: 24,
       boxSizing: "border-box",
     }}>
@@ -187,10 +206,10 @@ function Header() {
     <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
       <div>
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0, letterSpacing: "-0.02em" }}>
-          ◈ OptiFerre <span style={{ color: "#c084fc" }}>Mission Control</span>
+          ◈ OptiFerre <span style={{ color: GREEN }}>Mission Control</span>
         </h1>
         <p style={{ color: MUTE, fontSize: 11, margin: "4px 0 0", letterSpacing: "0.08em" }}>
-          ADMIN · simple-commission v1
+          ADMIN · liquidacion transparente
         </p>
       </div>
     </header>
@@ -223,7 +242,9 @@ function BotStatusPanel({ bot, openCount }: { bot: BotStatus | null; openCount: 
 
 function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onAdd: () => void }) {
   const rows = clients?.clients ?? [];
-  const total = clients?.totalAdminFee20 ?? 0;
+  const totalLatestDay = clients?.totalAdminFee20LatestDay ?? clients?.totalAdminFee20 ?? 0;
+  const totalEstimated = clients?.totalAdminFee20Estimated ?? 0;
+  const totalRealizedPnl = clients?.totalRealizedPnl ?? 0;
   return (
     <Card
       title="Clientes"
@@ -241,16 +262,26 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
         }}>+ Anadir Cliente</button>
       }
     >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 12 }}>
+        <MiniKpi label="Clientes activos" value={String(rows.length)} color={BLUE} />
+        <MiniKpi label="PnL real acumulado" value={fmtUSD(totalRealizedPnl, true)} color={totalRealizedPnl >= 0 ? GREEN : RED} />
+        <MiniKpi label="Cobro ultimo cierre (20%)" value={fmtUSD(totalLatestDay)} color={AMBER} />
+        <MiniKpi label="Cobro acumulado estimado" value={fmtUSD(totalEstimated)} color={AMBER} />
+      </div>
+
       {rows.length === 0 ? (
         <p style={{ color: MUTE }}>Sin clientes activos.</p>
       ) : (
-        <Table headers={["Cliente", "Capital", "Balance", "Ganancia", "Mi 20%", "Estado"]}>
+        <Table headers={["Cliente", "Capital", "Balance live", "PnL real desde inicio", "Ultimo cierre", "Cobro 20% ultimo cierre", "Estado"]}>
           {rows.map((c) => (
             <tr key={c.id}>
               <Td>
                 <div style={{ display: "flex", flexDirection: "column" }}>
                   <span>{c.displayName || c.email}</span>
                   <span style={{ color: MUTE, fontSize: 10 }}>{c.derivAccountId ?? "sin Deriv"} · {c.balanceSource}</span>
+                  <span style={{ color: MUTE, fontSize: 10 }}>
+                    conteo desde {c.fechaInicio ? new Date(c.fechaInicio).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "sin fecha_inicio"}
+                  </span>
                   {c.balanceError && <span style={{ color: AMBER, fontSize: 10 }}>{c.balanceError}</span>}
                 </div>
               </Td>
@@ -258,21 +289,32 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
               <Td mono color={c.balanceSource === "deriv_ws" ? TEXT : c.balanceSource === "cache" ? MUTE : AMBER}>
                 {fmtMaybeUSD(c.balanceActual)}
               </Td>
-              <Td mono color={c.gananciaNeta == null ? MUTE : c.gananciaNeta >= 0 ? GREEN : RED}>
-                {fmtMaybeUSD(c.gananciaNeta, true)}
+              <Td mono color={c.realizedPnlTotal >= 0 ? GREEN : RED}>
+                {fmtUSD(c.realizedPnlTotal, true)}
+              </Td>
+              <Td>
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <span style={{ color: MUTE, fontSize: 10 }}>
+                    {c.latestDayKey ? new Date(`${c.latestDayKey}T00:00:00Z`).toLocaleDateString("es-ES") : "Sin cierres"}
+                  </span>
+                  <span style={{ color: c.latestDayPnl >= 0 ? GREEN : RED, fontFamily: "ui-monospace, Menlo, monospace" }}>
+                    {fmtUSD(c.latestDayPnl, true)}
+                  </span>
+                </div>
               </Td>
               <Td mono color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? MUTE : AMBER}>
-                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.adminFee20)}
+                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.adminFee20LatestDay)}
               </Td>
               <Td color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? AMBER : GREEN}>
-                {c.enModoRecuperacion == null ? "Sin lectura Deriv" : c.enModoRecuperacion ? "⚠ Recuperacion" : "● En ganancia"}
+                {c.enModoRecuperacion == null ? "Sin lectura Deriv" : c.enModoRecuperacion ? "Recuperacion" : "En ganancia"}
               </Td>
             </tr>
           ))}
         </Table>
       )}
-      <p style={{ marginTop: 12, color: AMBER, fontSize: 13, fontWeight: 700, textAlign: "right" }}>
-        TOTAL MI 20% ACUMULADO: {fmtUSD(total)}
+      <p style={{ marginTop: 12, color: MUTE, fontSize: 12, lineHeight: 1.5 }}>
+        Regla de cobro visible para todo el equipo: 20% sobre el PnL neto positivo del ultimo dia cerrado.
+        No se toma como base el saldo historico total de Deriv.
       </p>
     </Card>
   );
@@ -307,7 +349,7 @@ function BotMetricsPanel({ metrics, windowSel, onChangeWindow }: {
   return (
     <Card
       title="Metricas del bot"
-      accent="#c084fc"
+      accent={BLUE}
       action={
         <div style={{ display: "flex", gap: 6 }}>
           {(["24h", "7d", "30d"] as const).map((w) => (

@@ -13,15 +13,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const BG    = "#04070c";
-const CARD  = "rgba(10,15,22,0.72)";
-const BORD  = "rgba(63,87,114,0.28)";
-const TEXT  = "#dce7f5";
-const MUTE  = "#6b8299";
-const GREEN = "#10b981";
-const RED   = "#fb7185";
-const AMBER = "#fbbf24";
-const BLUE  = "#22d3ee";
+const BG    = "#050b12";
+const CARD  = "rgba(8,15,25,0.78)";
+const BORD  = "rgba(76,136,170,0.24)";
+const TEXT  = "#e6f2ff";
+const MUTE  = "#8aa5bf";
+const GREEN = "#19c37d";
+const RED   = "#ff6b6b";
+const AMBER = "#ffbf47";
+const BLUE  = "#3dd6ff";
 
 type AccountState = {
   ok: boolean;
@@ -78,6 +78,15 @@ type StatsState = {
   promedioDiario?: number;
   totalPnl?: number;
   dailyPnl?: Array<{ date: string; pnl: number }>;
+  latestDayKey?: string | null;
+  latestDayPnl?: number;
+  todayKeyUtc?: string;
+  todayPnlUtc?: number;
+  estimatedServiceLatestDay?: number;
+  estimatedServiceTodayUtc?: number;
+  estimatedServiceTotal?: number;
+  estimatedClientShareLatestDay?: number;
+  estimatedClientShareTotal?: number;
 };
 
 function fmtUSD(n: number, sign = false): string {
@@ -155,9 +164,13 @@ export function ClientDashboardView() {
   return (
     <div style={{
       minHeight: "100vh",
-      background: `radial-gradient(900px 600px at 8% -8%, rgba(16,185,129,0.07), transparent 60%), ${BG}`,
+      background: [
+        "radial-gradient(900px 600px at 8% -8%, rgba(25,195,125,0.10), transparent 62%)",
+        "radial-gradient(760px 460px at 95% 10%, rgba(61,214,255,0.10), transparent 65%)",
+        "linear-gradient(180deg, #060d17 0%, #050b12 100%)",
+      ].join(", "),
       color: TEXT,
-      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      fontFamily: "Sora, Manrope, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       padding: "24px",
       boxSizing: "border-box",
     }}>
@@ -175,7 +188,7 @@ export function ClientDashboardView() {
       )}
 
       {/* Seccion 1 — Resumen */}
-      <AccountSummary state={account} />
+      <AccountSummary state={account} stats={stats} />
 
       {/* Seccion 2 — Posiciones abiertas */}
       <OpenPositionsTable positions={positions?.positions ?? []} tick={tick} />
@@ -236,31 +249,65 @@ function Banner({ color, children }: { color: string; children: React.ReactNode 
   );
 }
 
-function AccountSummary({ state }: { state: AccountState | null }) {
+function AccountSummary({ state, stats }: { state: AccountState | null; stats: StatsState | null }) {
   const e = state?.estado;
   if (!e) return (
     <Card title="Resumen de cuenta"><p style={{ color: MUTE }}>Cargando…</p></Card>
   );
 
   const enRec = e.enModoRecuperacion;
+  const countingFromIso = state?.profile?.fechaInicio ?? stats?.activeSince ?? null;
+  const countingFromHuman = countingFromIso
+    ? new Date(countingFromIso).toLocaleString("es-ES", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
+    : "—";
+  const statsOk = Boolean(stats?.ok);
+  const latestDayKey = statsOk ? (stats?.latestDayKey ?? null) : null;
+  const latestDayPnl = statsOk ? (stats?.latestDayPnl ?? 0) : 0;
+  const latestDayService = statsOk ? (stats?.estimatedServiceLatestDay ?? Math.max(latestDayPnl, 0) * 0.20) : 0;
+  const latestDayClientShare = statsOk ? (stats?.estimatedClientShareLatestDay ?? (latestDayPnl - latestDayService)) : 0;
+  const totalPnlReal = statsOk ? (stats?.totalPnl ?? 0) : 0;
+  const totalServiceEstimated = statsOk ? (stats?.estimatedServiceTotal ?? Math.max(totalPnlReal, 0) * 0.20) : 0;
+
   return (
     <Card title="Resumen de cuenta" accent={enRec ? AMBER : GREEN}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
         <Kpi label="Capital Inicial" value={fmtUSD(e.capitalInicial)} accent={BLUE} />
         <Kpi label="Balance Actual" value={fmtUSD(e.balanceActual)} accent={BLUE} mono />
-        <Kpi label="Ganancia Neta" value={`${fmtUSD(e.gananciaNeta, true)} (${fmtPct(e.rendimientoPct)})`} accent={e.gananciaNeta >= 0 ? GREEN : RED} />
-        {!enRec ? (
-          <>
-            <Kpi label="Tu parte (80%)" value={fmtUSD(e.parteClienteSobreUmbral, true)} accent={GREEN} />
-            <Kpi label="Servicio (20%)" value={fmtUSD(e.comisionEstimadaSobreUmbral)} accent={AMBER} />
-          </>
-        ) : (
-          <Kpi label="Comisiones" value={fmtUSD(0)} accent={MUTE} sub="Pausadas hasta recuperar" />
-        )}
+        <Kpi label="PnL Real Desde Inicio" value={fmtUSD(totalPnlReal, true)} accent={totalPnlReal >= 0 ? GREEN : RED} />
+        <Kpi
+          label="Ultimo Dia Cerrado"
+          value={latestDayKey ? new Date(`${latestDayKey}T00:00:00Z`).toLocaleDateString("es-ES") : "—"}
+          sub={latestDayKey ? "Basado en cierres reales" : "Sin cierres todavia"}
+        />
+        <Kpi label="PnL Ultimo Cierre" value={fmtUSD(latestDayPnl, true)} accent={latestDayPnl >= 0 ? GREEN : RED} />
+        <Kpi label="Tu Parte Ultimo Cierre (80%)" value={fmtUSD(latestDayClientShare, true)} accent={latestDayClientShare >= 0 ? GREEN : RED} />
+        <Kpi label="Servicio Ultimo Cierre (20%)" value={fmtUSD(enRec ? 0 : latestDayService)} accent={enRec ? MUTE : AMBER} />
+        <Kpi label="Servicio Acumulado Estimado" value={fmtUSD(enRec ? 0 : totalServiceEstimated)} accent={enRec ? MUTE : AMBER} />
       </div>
       <p style={{ marginTop: 14, color: enRec ? AMBER : GREEN, fontSize: 13 }}>
         Estado: <strong>● {e.mensajeEstado}</strong>
       </p>
+      <div style={{
+        marginTop: 10,
+        background: "rgba(255,255,255,0.02)",
+        border: `1px solid ${BORD}`,
+        borderRadius: 10,
+        padding: "10px 12px",
+        color: MUTE,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}>
+        Inicio de conteo cobrable: <strong style={{ color: TEXT }}>{countingFromHuman}</strong>.
+        Liquidacion transparente: el servicio se estima sobre PnL real cerrado, no sobre saldo historico total.
+        Formula visible: <strong style={{ color: TEXT }}>Servicio = 20% × max(PnL del dia cerrado, 0)</strong>.
+        {enRec && " En recuperacion activa, por lo tanto el servicio mostrado se pausa en 0."}
+      </div>
     </Card>
   );
 }
@@ -301,6 +348,8 @@ function ClientStats({ stats }: { stats: StatsState | null }) {
         <Kpi label="Mejor dia" value={fmtUSD(stats.bestDay ?? 0, true)} accent={GREEN} />
         <Kpi label="Dias positivos" value={`${stats.positiveDays ?? 0} de ${stats.totalDays ?? 0}`} />
         <Kpi label="Promedio diario" value={fmtUSD(stats.promedioDiario ?? 0, true)} accent={(stats.promedioDiario ?? 0) >= 0 ? GREEN : RED} />
+        <Kpi label="Cobro Ultimo Cierre" value={fmtUSD(stats.estimatedServiceLatestDay ?? 0)} accent={AMBER} />
+        <Kpi label="Cobro Acumulado Estimado" value={fmtUSD(stats.estimatedServiceTotal ?? 0)} accent={AMBER} />
       </div>
     </Card>
   );
