@@ -87,6 +87,14 @@ type StatsState = {
   estimatedServiceTotal?: number;
   estimatedClientShareLatestDay?: number;
   estimatedClientShareTotal?: number;
+  operationalCapitalToday?: number;
+  serviceDueTodayUtc?: number;
+  clientNetTodayUtc?: number;
+  projectedNextDayCapital?: number;
+  firstDayPartial?: boolean;
+  lastSettledDayKey?: string | null;
+  lastSettledDayPnl?: number;
+  lastSettledDayService?: number;
 };
 
 function fmtUSD(n: number, sign = false): string {
@@ -267,10 +275,21 @@ function AccountSummary({ state, stats }: { state: AccountState | null; stats: S
     })
     : "—";
   const statsOk = Boolean(stats?.ok);
-  const latestDayKey = statsOk ? (stats?.latestDayKey ?? null) : null;
-  const latestDayPnl = statsOk ? (stats?.latestDayPnl ?? 0) : 0;
-  const latestDayService = statsOk ? (stats?.estimatedServiceLatestDay ?? Math.max(latestDayPnl, 0) * 0.20) : 0;
-  const latestDayClientShare = statsOk ? (stats?.estimatedClientShareLatestDay ?? (latestDayPnl - latestDayService)) : 0;
+  const todayPnlUtc = statsOk ? (stats?.todayPnlUtc ?? 0) : 0;
+  const serviceDueToday = statsOk
+    ? (stats?.serviceDueTodayUtc ?? stats?.estimatedServiceTodayUtc ?? Math.max(todayPnlUtc, 0) * 0.20)
+    : 0;
+  const clientNetToday = statsOk ? (stats?.clientNetTodayUtc ?? (todayPnlUtc - serviceDueToday)) : 0;
+  const operationalCapitalToday = statsOk ? (stats?.operationalCapitalToday ?? e.capitalInicial) : e.capitalInicial;
+  const projectedNextDayCapital = statsOk
+    ? (stats?.projectedNextDayCapital ?? (operationalCapitalToday + todayPnlUtc))
+    : e.capitalInicial;
+  const firstDayPartial = statsOk ? Boolean(stats?.firstDayPartial) : false;
+  const lastSettledDayKey = statsOk ? (stats?.lastSettledDayKey ?? null) : null;
+  const lastSettledDayPnl = statsOk ? (stats?.lastSettledDayPnl ?? 0) : 0;
+  const lastSettledDayService = statsOk
+    ? (stats?.lastSettledDayService ?? Math.max(lastSettledDayPnl, 0) * 0.20)
+    : 0;
   const totalPnlReal = statsOk ? (stats?.totalPnl ?? 0) : 0;
   const totalServiceEstimated = statsOk ? (stats?.estimatedServiceTotal ?? Math.max(totalPnlReal, 0) * 0.20) : 0;
 
@@ -278,17 +297,25 @@ function AccountSummary({ state, stats }: { state: AccountState | null; stats: S
     <Card title="Resumen de cuenta" accent={enRec ? AMBER : GREEN}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
         <Kpi label="Capital Inicial" value={fmtUSD(e.capitalInicial)} accent={BLUE} />
+        <Kpi label="Capital Operativo Hoy" value={fmtUSD(operationalCapitalToday)} accent={BLUE} mono />
         <Kpi label="Balance Actual" value={fmtUSD(e.balanceActual)} accent={BLUE} mono />
         <Kpi label="PnL Real Desde Inicio" value={fmtUSD(totalPnlReal, true)} accent={totalPnlReal >= 0 ? GREEN : RED} />
+        <Kpi label="PnL Hoy (UTC)" value={fmtUSD(todayPnlUtc, true)} accent={todayPnlUtc >= 0 ? GREEN : RED} />
+        <Kpi label="Servicio Hoy (20%)" value={fmtUSD(enRec ? 0 : serviceDueToday)} accent={enRec ? MUTE : AMBER} />
+        <Kpi label="Tu Neto Hoy" value={fmtUSD(clientNetToday, true)} accent={clientNetToday >= 0 ? GREEN : RED} />
+        <Kpi label="Base Capital Manana" value={fmtUSD(projectedNextDayCapital)} accent={BLUE} mono />
         <Kpi
-          label="Ultimo Dia Cerrado"
-          value={latestDayKey ? new Date(`${latestDayKey}T00:00:00Z`).toLocaleDateString("es-ES") : "—"}
-          sub={latestDayKey ? "Basado en cierres reales" : "Sin cierres todavia"}
+          label="Ultimo Dia Liquidado"
+          value={lastSettledDayKey ? new Date(`${lastSettledDayKey}T00:00:00Z`).toLocaleDateString("es-ES") : "—"}
+          sub={lastSettledDayKey ? "Dia completo cerrado" : "Sin dia liquidado aun"}
         />
-        <Kpi label="PnL Ultimo Cierre" value={fmtUSD(latestDayPnl, true)} accent={latestDayPnl >= 0 ? GREEN : RED} />
-        <Kpi label="Tu Parte Ultimo Cierre (80%)" value={fmtUSD(latestDayClientShare, true)} accent={latestDayClientShare >= 0 ? GREEN : RED} />
-        <Kpi label="Servicio Ultimo Cierre (20%)" value={fmtUSD(enRec ? 0 : latestDayService)} accent={enRec ? MUTE : AMBER} />
-        <Kpi label="Servicio Acumulado Estimado" value={fmtUSD(enRec ? 0 : totalServiceEstimated)} accent={enRec ? MUTE : AMBER} />
+        <Kpi label="PnL Ultimo Liquidado" value={fmtUSD(lastSettledDayPnl, true)} accent={lastSettledDayPnl >= 0 ? GREEN : RED} />
+        <Kpi label="Servicio Ultimo Liquidado" value={fmtUSD(enRec ? 0 : lastSettledDayService)} accent={enRec ? MUTE : AMBER} />
+        <Kpi
+          label="Cobro Acumulado Referencial"
+          value={fmtUSD(enRec ? 0 : totalServiceEstimated)}
+          sub="Solo para contexto historico"
+        />
       </div>
       <p style={{ marginTop: 14, color: enRec ? AMBER : GREEN, fontSize: 13 }}>
         Estado: <strong>● {e.mensajeEstado}</strong>
@@ -304,8 +331,10 @@ function AccountSummary({ state, stats }: { state: AccountState | null; stats: S
         lineHeight: 1.5,
       }}>
         Inicio de conteo cobrable: <strong style={{ color: TEXT }}>{countingFromHuman}</strong>.
-        Liquidacion transparente: el servicio se estima sobre PnL real cerrado, no sobre saldo historico total.
-        Formula visible: <strong style={{ color: TEXT }}>Servicio = 20% × max(PnL del dia cerrado, 0)</strong>.
+        {firstDayPartial ? " Primer dia parcial: se cuenta solo desde tu hora exacta de alta." : ""}
+        Liquidacion transparente diaria: se cobra solo el PnL positivo del dia UTC en curso.
+        Formula visible: <strong style={{ color: TEXT }}>Servicio hoy = 20% × max(PnL hoy UTC, 0)</strong>.
+        Base del siguiente dia: <strong style={{ color: TEXT }}>Capital manana = capital operativo hoy + PnL hoy</strong>.
         {enRec && " En recuperacion activa, por lo tanto el servicio mostrado se pausa en 0."}
       </div>
     </Card>
@@ -348,8 +377,8 @@ function ClientStats({ stats }: { stats: StatsState | null }) {
         <Kpi label="Mejor dia" value={fmtUSD(stats.bestDay ?? 0, true)} accent={GREEN} />
         <Kpi label="Dias positivos" value={`${stats.positiveDays ?? 0} de ${stats.totalDays ?? 0}`} />
         <Kpi label="Promedio diario" value={fmtUSD(stats.promedioDiario ?? 0, true)} accent={(stats.promedioDiario ?? 0) >= 0 ? GREEN : RED} />
-        <Kpi label="Cobro Ultimo Cierre" value={fmtUSD(stats.estimatedServiceLatestDay ?? 0)} accent={AMBER} />
-        <Kpi label="Cobro Acumulado Estimado" value={fmtUSD(stats.estimatedServiceTotal ?? 0)} accent={AMBER} />
+        <Kpi label="Cobro Hoy (UTC)" value={fmtUSD(stats.serviceDueTodayUtc ?? stats.estimatedServiceTodayUtc ?? 0)} accent={AMBER} />
+        <Kpi label="Capital Base Manana" value={fmtUSD(stats.projectedNextDayCapital ?? 0)} accent={BLUE} />
       </div>
     </Card>
   );

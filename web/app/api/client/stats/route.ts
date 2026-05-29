@@ -82,6 +82,18 @@ export async function GET() {
   const estimatedServiceTodayUtc = serviceFromNetPnl(todayPnlUtc);
   const estimatedServiceTotal = serviceFromNetPnl(totalPnl);
 
+  const pnlBeforeTodayUtc = dailyPnl
+    .filter((d) => d.date < todayKeyUtc)
+    .reduce((acc, d) => acc + d.pnl, 0);
+  const operationalCapitalToday = profile.capitalInicial + pnlBeforeTodayUtc;
+  const projectedNextDayCapital = operationalCapitalToday + todayPnlUtc;
+  const clientNetTodayUtc = todayPnlUtc - estimatedServiceTodayUtc;
+  const firstDayPartial = inicio.toISOString().slice(0, 10) === todayKeyUtc;
+
+  const settledDays = dailyPnl.filter((d) => d.date < todayKeyUtc);
+  const lastSettledDay = settledDays.length ? settledDays[settledDays.length - 1] : null;
+  const lastSettledDayService = serviceFromNetPnl(lastSettledDay?.pnl ?? 0);
+
   return NextResponse.json({
     ok: true,
     activeSince: inicio.toISOString(),
@@ -105,5 +117,13 @@ export async function GET() {
     estimatedServiceTotal,
     estimatedClientShareLatestDay: latestDayPnl - estimatedServiceLatestDay,
     estimatedClientShareTotal: totalPnl - estimatedServiceTotal,
+    operationalCapitalToday,
+    serviceDueTodayUtc: estimatedServiceTodayUtc,
+    clientNetTodayUtc,
+    projectedNextDayCapital,
+    firstDayPartial,
+    lastSettledDayKey: lastSettledDay?.date ?? null,
+    lastSettledDayPnl: lastSettledDay?.pnl ?? 0,
+    lastSettledDayService,
   });
 }

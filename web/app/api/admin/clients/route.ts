@@ -64,6 +64,16 @@ type PnlSnapshot = {
   latestDayPnl: number;
   serviceEstimatedTotal: number;
   serviceEstimatedLatestDay: number;
+  todayKeyUtc: string;
+  pnlBeforeTodayUtc: number;
+  operationalCapitalToday: number;
+  serviceDueTodayUtc: number;
+  clientNetTodayUtc: number;
+  projectedNextDayCapital: number;
+  firstDayPartial: boolean;
+  lastSettledDayKey: string | null;
+  lastSettledDayPnl: number;
+  lastSettledDayService: number;
 };
 
 async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
@@ -76,11 +86,22 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
       latestDayPnl: 0,
       serviceEstimatedTotal: 0,
       serviceEstimatedLatestDay: 0,
+      todayKeyUtc: new Date().toISOString().slice(0, 10),
+      pnlBeforeTodayUtc: 0,
+      operationalCapitalToday: p.capitalInicial,
+      serviceDueTodayUtc: 0,
+      clientNetTodayUtc: 0,
+      projectedNextDayCapital: p.capitalInicial,
+      firstDayPartial: false,
+      lastSettledDayKey: null,
+      lastSettledDayPnl: 0,
+      lastSettledDayService: 0,
     };
   }
 
   const trades = await listClosedTradesSinceFechaInicio(p.fechaInicio, p.id);
   if (!trades.length) {
+    const todayKeyUtc = new Date().toISOString().slice(0, 10);
     return {
       totalTrades: 0,
       realizedPnlTotal: 0,
@@ -89,6 +110,16 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
       latestDayPnl: 0,
       serviceEstimatedTotal: 0,
       serviceEstimatedLatestDay: 0,
+      todayKeyUtc,
+      pnlBeforeTodayUtc: 0,
+      operationalCapitalToday: p.capitalInicial,
+      serviceDueTodayUtc: 0,
+      clientNetTodayUtc: 0,
+      projectedNextDayCapital: p.capitalInicial,
+      firstDayPartial: p.fechaInicio.toISOString().slice(0, 10) === todayKeyUtc,
+      lastSettledDayKey: null,
+      lastSettledDayPnl: 0,
+      lastSettledDayService: 0,
     };
   }
 
@@ -106,6 +137,21 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
   const realizedPnlTodayUtc = byDay.get(todayKeyUtc) ?? 0;
   const realizedPnlTotal = trades.reduce((acc, t) => acc + t.realizedPnl, 0);
 
+  const pnlBeforeTodayUtc = daily
+    .filter(([k]) => k < todayKeyUtc)
+    .reduce((acc, [, pnl]) => acc + pnl, 0);
+  const operationalCapitalToday = p.capitalInicial + pnlBeforeTodayUtc;
+  const serviceDueTodayUtc = Math.max(realizedPnlTodayUtc, 0) * 0.20;
+  const clientNetTodayUtc = realizedPnlTodayUtc - serviceDueTodayUtc;
+  const projectedNextDayCapital = operationalCapitalToday + realizedPnlTodayUtc;
+  const firstDayPartial = p.fechaInicio.toISOString().slice(0, 10) === todayKeyUtc;
+
+  const settled = daily.filter(([k]) => k < todayKeyUtc);
+  const lastSettled = settled.length ? settled[settled.length - 1] : null;
+  const lastSettledDayKey = lastSettled?.[0] ?? null;
+  const lastSettledDayPnl = lastSettled?.[1] ?? 0;
+  const lastSettledDayService = Math.max(lastSettledDayPnl, 0) * 0.20;
+
   return {
     totalTrades: trades.length,
     realizedPnlTotal,
@@ -114,6 +160,16 @@ async function resolvePnlSnapshot(p: ClientCoreProfile): Promise<PnlSnapshot> {
     latestDayPnl,
     serviceEstimatedTotal: Math.max(realizedPnlTotal, 0) * 0.20,
     serviceEstimatedLatestDay: Math.max(latestDayPnl, 0) * 0.20,
+    todayKeyUtc,
+    pnlBeforeTodayUtc,
+    operationalCapitalToday,
+    serviceDueTodayUtc,
+    clientNetTodayUtc,
+    projectedNextDayCapital,
+    firstDayPartial,
+    lastSettledDayKey,
+    lastSettledDayPnl,
+    lastSettledDayService,
   };
 }
 
@@ -136,8 +192,9 @@ export async function GET() {
           live.balance,
           c.comisionTotalCobrada,
         );
-      const adminFeeLatestDay = estado?.enModoRecuperacion ? 0 : pnl.serviceEstimatedLatestDay;
+      const adminFeeLatestDay = estado?.enModoRecuperacion ? 0 : pnl.serviceDueTodayUtc;
       const adminFeeTotalEstimated = estado?.enModoRecuperacion ? 0 : pnl.serviceEstimatedTotal;
+      const serviceDueTodayUtc = estado?.enModoRecuperacion ? 0 : pnl.serviceDueTodayUtc;
 
       return {
         id: c.id,
@@ -162,6 +219,16 @@ export async function GET() {
         latestDayKey: pnl.latestDayKey,
         latestDayPnl: pnl.latestDayPnl,
         tradesSinceStart: pnl.totalTrades,
+        todayKeyUtc: pnl.todayKeyUtc,
+        pnlBeforeTodayUtc: pnl.pnlBeforeTodayUtc,
+        operationalCapitalToday: pnl.operationalCapitalToday,
+        serviceDueTodayUtc,
+        clientNetTodayUtc: pnl.clientNetTodayUtc,
+        projectedNextDayCapital: pnl.projectedNextDayCapital,
+        firstDayPartial: pnl.firstDayPartial,
+        lastSettledDayKey: pnl.lastSettledDayKey,
+        lastSettledDayPnl: pnl.lastSettledDayPnl,
+        lastSettledDayService: pnl.lastSettledDayService,
       };
     }),
   );
@@ -169,6 +236,8 @@ export async function GET() {
   const totalAdminFee20LatestDay = enriched.reduce((acc, c) => acc + (c.adminFee20LatestDay ?? 0), 0);
   const totalAdminFee20Estimated = enriched.reduce((acc, c) => acc + (c.adminFee20TotalEstimated ?? 0), 0);
   const totalRealizedPnl = enriched.reduce((acc, c) => acc + (c.realizedPnlTotal ?? 0), 0);
+  const totalServiceDueTodayUtc = enriched.reduce((acc, c) => acc + (c.serviceDueTodayUtc ?? 0), 0);
+  const totalProjectedNextDayCapital = enriched.reduce((acc, c) => acc + (c.projectedNextDayCapital ?? 0), 0);
 
   return NextResponse.json({
     ok: true,
@@ -177,6 +246,8 @@ export async function GET() {
     totalAdminFee20LatestDay,
     totalAdminFee20Estimated,
     totalRealizedPnl,
+    totalServiceDueTodayUtc,
+    totalProjectedNextDayCapital,
     count: enriched.length,
   });
 }

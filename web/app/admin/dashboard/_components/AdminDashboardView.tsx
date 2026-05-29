@@ -58,6 +58,16 @@ type ClientRow = {
   latestDayKey: string | null;
   latestDayPnl: number;
   tradesSinceStart: number;
+  todayKeyUtc: string;
+  pnlBeforeTodayUtc: number;
+  operationalCapitalToday: number;
+  serviceDueTodayUtc: number;
+  clientNetTodayUtc: number;
+  projectedNextDayCapital: number;
+  firstDayPartial: boolean;
+  lastSettledDayKey: string | null;
+  lastSettledDayPnl: number;
+  lastSettledDayService: number;
 };
 
 type ClientsResponse = {
@@ -67,6 +77,8 @@ type ClientsResponse = {
   totalAdminFee20LatestDay?: number;
   totalAdminFee20Estimated?: number;
   totalRealizedPnl?: number;
+  totalServiceDueTodayUtc?: number;
+  totalProjectedNextDayCapital?: number;
   count?: number;
 };
 
@@ -242,8 +254,8 @@ function BotStatusPanel({ bot, openCount }: { bot: BotStatus | null; openCount: 
 
 function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onAdd: () => void }) {
   const rows = clients?.clients ?? [];
-  const totalLatestDay = clients?.totalAdminFee20LatestDay ?? clients?.totalAdminFee20 ?? 0;
-  const totalEstimated = clients?.totalAdminFee20Estimated ?? 0;
+  const totalServiceDueToday = clients?.totalServiceDueTodayUtc ?? clients?.totalAdminFee20LatestDay ?? clients?.totalAdminFee20 ?? 0;
+  const totalProjectedNextDayCapital = clients?.totalProjectedNextDayCapital ?? 0;
   const totalRealizedPnl = clients?.totalRealizedPnl ?? 0;
   return (
     <Card
@@ -265,45 +277,48 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 12 }}>
         <MiniKpi label="Clientes activos" value={String(rows.length)} color={BLUE} />
         <MiniKpi label="PnL real acumulado" value={fmtUSD(totalRealizedPnl, true)} color={totalRealizedPnl >= 0 ? GREEN : RED} />
-        <MiniKpi label="Cobro ultimo cierre (20%)" value={fmtUSD(totalLatestDay)} color={AMBER} />
-        <MiniKpi label="Cobro acumulado estimado" value={fmtUSD(totalEstimated)} color={AMBER} />
+        <MiniKpi label="Cobro hoy (20%)" value={fmtUSD(totalServiceDueToday)} color={AMBER} />
+        <MiniKpi label="Capital base manana" value={fmtUSD(totalProjectedNextDayCapital)} color={BLUE} />
       </div>
 
       {rows.length === 0 ? (
         <p style={{ color: MUTE }}>Sin clientes activos.</p>
       ) : (
-        <Table headers={["Cliente", "Capital", "Balance live", "PnL real desde inicio", "Ultimo cierre", "Cobro 20% ultimo cierre", "Estado"]}>
+        <Table headers={["Cliente", "Balance live", "Inicio conteo", "Capital base hoy", "PnL hoy", "Cobro hoy (20%)", "Base manana", "Estado"]}>
           {rows.map((c) => (
             <tr key={c.id}>
               <Td>
                 <div style={{ display: "flex", flexDirection: "column" }}>
                   <span>{c.displayName || c.email}</span>
                   <span style={{ color: MUTE, fontSize: 10 }}>{c.derivAccountId ?? "sin Deriv"} · {c.balanceSource}</span>
-                  <span style={{ color: MUTE, fontSize: 10 }}>
-                    conteo desde {c.fechaInicio ? new Date(c.fechaInicio).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "sin fecha_inicio"}
-                  </span>
+                  <span style={{ color: MUTE, fontSize: 10 }}>{c.tradesSinceStart} trades desde alta</span>
                   {c.balanceError && <span style={{ color: AMBER, fontSize: 10 }}>{c.balanceError}</span>}
                 </div>
               </Td>
-              <Td mono>{fmtUSD(c.capitalInicial)}</Td>
               <Td mono color={c.balanceSource === "deriv_ws" ? TEXT : c.balanceSource === "cache" ? MUTE : AMBER}>
                 {fmtMaybeUSD(c.balanceActual)}
               </Td>
-              <Td mono color={c.realizedPnlTotal >= 0 ? GREEN : RED}>
-                {fmtUSD(c.realizedPnlTotal, true)}
-              </Td>
               <Td>
                 <div style={{ display: "flex", flexDirection: "column" }}>
-                  <span style={{ color: MUTE, fontSize: 10 }}>
-                    {c.latestDayKey ? new Date(`${c.latestDayKey}T00:00:00Z`).toLocaleDateString("es-ES") : "Sin cierres"}
+                  <span style={{ color: TEXT, fontSize: 12 }}>
+                    {c.fechaInicio ? new Date(c.fechaInicio).toLocaleString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "sin fecha_inicio"}
                   </span>
-                  <span style={{ color: c.latestDayPnl >= 0 ? GREEN : RED, fontFamily: "ui-monospace, Menlo, monospace" }}>
-                    {fmtUSD(c.latestDayPnl, true)}
+                  <span style={{ color: MUTE, fontSize: 10 }}>
+                    {c.firstDayPartial ? "primer dia parcial desde hora de alta" : "dia completo"}
                   </span>
                 </div>
               </Td>
+              <Td mono color={BLUE}>
+                {fmtUSD(c.operationalCapitalToday)}
+              </Td>
+              <Td mono color={c.realizedPnlTodayUtc >= 0 ? GREEN : RED}>
+                {fmtUSD(c.realizedPnlTodayUtc, true)}
+              </Td>
               <Td mono color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? MUTE : AMBER}>
-                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.adminFee20LatestDay)}
+                {c.enModoRecuperacion == null ? "—" : c.enModoRecuperacion ? fmtUSD(0) : fmtUSD(c.serviceDueTodayUtc)}
+              </Td>
+              <Td mono color={BLUE}>
+                {fmtUSD(c.projectedNextDayCapital)}
               </Td>
               <Td color={c.enModoRecuperacion == null ? MUTE : c.enModoRecuperacion ? AMBER : GREEN}>
                 {c.enModoRecuperacion == null ? "Sin lectura Deriv" : c.enModoRecuperacion ? "Recuperacion" : "En ganancia"}
@@ -313,8 +328,8 @@ function ClientsPanel({ clients, onAdd }: { clients: ClientsResponse | null; onA
         </Table>
       )}
       <p style={{ marginTop: 12, color: MUTE, fontSize: 12, lineHeight: 1.5 }}>
-        Regla de cobro visible para todo el equipo: 20% sobre el PnL neto positivo del ultimo dia cerrado.
-        No se toma como base el saldo historico total de Deriv.
+        Regla aplicada: cada cliente cobra desde su fecha-hora de alta. El primer dia se cuenta solo desde esa hora.
+        Capital base del dia siguiente = capital base de hoy + PnL real de hoy (sin recobrar sobre ganancias de dias previos).
       </p>
     </Card>
   );
