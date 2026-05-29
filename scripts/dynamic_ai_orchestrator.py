@@ -389,6 +389,50 @@ SPIKE_CADENCE_SCORE_HARDEN_SLOW = max(
     0.0,
     min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCORE_HARDEN_SLOW", "0.30") or 0.30), 1.00),
 )
+SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES = max(
+    0,
+    int(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES", "1") or 1),
+)
+SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES = max(
+    SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES,
+    int(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES", "2") or 2),
+)
+SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX = max(
+    0.10,
+    min(
+        float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX", "0.70") or 0.70),
+        1.50,
+    ),
+)
+SPIKE_CADENCE_SCARCITY_SCORE_HARDEN = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN", "0.35") or 0.35), 1.20),
+)
+SPIKE_CADENCE_SCARCITY_SCORE_HARDEN_STRONG = max(
+    SPIKE_CADENCE_SCARCITY_SCORE_HARDEN,
+    min(
+        float(
+            os.getenv(
+                "DYNAMIC_AI_SPIKE_CADENCE_SCARCITY_SCORE_HARDEN_STRONG",
+                str(SPIKE_CADENCE_SCARCITY_SCORE_HARDEN + 0.20),
+            )
+            or (SPIKE_CADENCE_SCARCITY_SCORE_HARDEN + 0.20)
+        ),
+        1.50,
+    ),
+)
+SPIKE_CADENCE_PREVDAY_MIN_RATE_1H = max(
+    0.0,
+    float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_MIN_RATE_1H", "3.0") or 3.0),
+)
+SPIKE_CADENCE_PREVDAY_RATIO_1H_MAX = max(
+    0.10,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_RATIO_1H_MAX", "0.70") or 0.70), 1.50),
+)
+SPIKE_CADENCE_PREVDAY_SCORE_HARDEN = max(
+    0.0,
+    min(float(os.getenv("DYNAMIC_AI_SPIKE_CADENCE_PREVDAY_SCORE_HARDEN", "0.25") or 0.25), 1.00),
+)
 
 ACTIVITY_POLICY_MEMORY: dict[str, dict[str, Any]] = {}
 
@@ -892,6 +936,10 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
     recent_min_ts = now_ts - recent_window_sec
     micro_window_sec = min(lookback_sec, TELEMETRY_MICRO_WINDOW_SEC)
     micro_min_ts = now_ts - micro_window_sec
+    twenty_min_min_ts = now_ts - (20 * 60)
+    thirty_min_min_ts = now_ts - (30 * 60)
+    prev_thirty_min_min_ts = now_ts - (60 * 60)
+    prev_thirty_min_max_ts = now_ts - (30 * 60)
     one_hour_min_ts = now_ts - 3600
     three_hours_min_ts = now_ts - (3 * 3600)
 
@@ -953,6 +1001,9 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
         recent_1h = [(t, s) for t, s in arr if t >= one_hour_min_ts]
         entered_1h = [s for _, s in recent_1h if bool(s.get("bot_entered"))]
         blocked_1h = [s for _, s in recent_1h if not bool(s.get("bot_entered"))]
+        recent_20m = [(t, s) for t, s in arr if t >= twenty_min_min_ts]
+        recent_30m = [(t, s) for t, s in arr if t >= thirty_min_min_ts]
+        prev_30m = [(t, s) for t, s in arr if prev_thirty_min_min_ts <= t < prev_thirty_min_max_ts]
         recent_3h = [(t, s) for t, s in arr if t >= three_hours_min_ts]
         entered_3h = [s for _, s in recent_3h if bool(s.get("bot_entered"))]
         blocked_3h = [s for _, s in recent_3h if not bool(s.get("bot_entered"))]
@@ -971,10 +1022,16 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             regime = "SLOW"
 
         spike_rate_1h = float(len(recent_1h))
+        spike_rate_20m = float(len(recent_20m)) * 3.0
+        spike_rate_30m = float(len(recent_30m)) * 2.0
+        spike_rate_prev30m = float(len(prev_30m)) * 2.0
         spike_rate_3h = float(len(recent_3h)) / 3.0
         spike_rate_6h = (
             float(len(recent_macro)) / max(float(lookback_sec) / 3600.0, 1.0)
         )
+        spike_rate_ratio_30m_vs_prev30m = None
+        if spike_rate_prev30m > 0.0:
+            spike_rate_ratio_30m_vs_prev30m = spike_rate_30m / spike_rate_prev30m
         spike_rate_ratio_1h_vs_3h = None
         if spike_rate_3h > 0.0:
             spike_rate_ratio_1h_vs_3h = spike_rate_1h / spike_rate_3h
@@ -1188,6 +1245,9 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "entered_spikes_1h": len(entered_1h),
             "blocked_spikes_1h": len(blocked_1h),
             "entry_rate_pct_1h": (len(entered_1h) / len(recent_1h) * 100.0) if recent_1h else 0.0,
+            "spikes_20m": len(recent_20m),
+            "spikes_30m": len(recent_30m),
+            "spikes_prev_30m": len(prev_30m),
             "spikes_3h": len(recent_3h),
             "entered_spikes_3h": len(entered_3h),
             "blocked_spikes_3h": len(blocked_3h),
@@ -1197,9 +1257,13 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             "blocked_spikes_6h": len(blocked_macro),
             "entry_rate_pct_6h": (len(entered_macro) / len(recent_macro) * 100.0) if recent_macro else 0.0,
             "spike_rate_per_hour_1h": spike_rate_1h,
+            "spike_rate_per_hour_20m": spike_rate_20m,
+            "spike_rate_per_hour_30m": spike_rate_30m,
+            "spike_rate_per_hour_prev30m": spike_rate_prev30m,
             "spike_rate_per_hour_3h": spike_rate_3h,
             "spike_rate_per_hour_6h": spike_rate_6h,
             "spike_rate_ratio_1h_vs_3h": spike_rate_ratio_1h_vs_3h,
+            "spike_rate_ratio_30m_vs_prev30m": spike_rate_ratio_30m_vs_prev30m,
             "spike_cadence_regime": spike_cadence_regime,
             "top_block_reasons": block_reasons.most_common(5),
             "top_block_reasons_15m": block_reasons_micro.most_common(5),
@@ -1607,8 +1671,13 @@ def _apply_spike_cadence_policy(
         candidate = candidate_cfg[sym]
         t = telemetry.get(sym, {})
 
+        spikes_20m = int(t.get("spikes_20m") or 0)
+        spikes_30m = int(t.get("spikes_30m") or 0)
+        spikes_prev_30m = int(t.get("spikes_prev_30m") or 0)
         spikes_3h = int(t.get("spikes_3h") or 0)
         spike_rate_1h = float(t.get("spike_rate_per_hour_1h") or 0.0)
+        spike_rate_30m = float(t.get("spike_rate_per_hour_30m") or 0.0)
+        spike_rate_prev30m = float(t.get("spike_rate_per_hour_prev30m") or 0.0)
         spike_rate_3h = float(t.get("spike_rate_per_hour_3h") or 0.0)
         spike_ratio_raw = t.get("spike_rate_ratio_1h_vs_3h")
         spike_ratio_1h_3h = (
@@ -1616,7 +1685,22 @@ def _apply_spike_cadence_policy(
             if isinstance(spike_ratio_raw, (int, float))
             else None
         )
+        spike_ratio_30m_prev30m_raw = t.get("spike_rate_ratio_30m_vs_prev30m")
+        spike_ratio_30m_prev30m = (
+            float(spike_ratio_30m_prev30m_raw)
+            if isinstance(spike_ratio_30m_prev30m_raw, (int, float))
+            else None
+        )
         cadence_regime = str(t.get("spike_cadence_regime") or "NORMAL").upper()
+        market_pulse = t.get("market_pulse") if isinstance(t.get("market_pulse"), dict) else {}
+        pulse = str(market_pulse.get("pulse") or "NORMAL").upper()
+        spike_rate_prevday_1h = float(market_pulse.get("spike_rate_prevday_1h") or 0.0)
+        ratio_1h_prevday_raw = market_pulse.get("rate_ratio_1h_prevday_1h")
+        ratio_1h_prevday = (
+            float(ratio_1h_prevday_raw)
+            if isinstance(ratio_1h_prevday_raw, (int, float))
+            else None
+        )
 
         score = float(candidate.score_min_override)
         regime = str(candidate.regime or "NORMAL").upper()
@@ -1643,6 +1727,42 @@ def _apply_spike_cadence_policy(
             score = min(SCORE_MAX_GUARDRAIL, score + SPIKE_CADENCE_SCORE_HARDEN_SLOW)
             regime = "SLOW"
             grace = max(grace, ACTIVITY_STABILIZATION_GRACE_FLOOR)
+
+        # Hardening layer for true short-window scarcity: if last 20m/30m is
+        # sparse (or decelerating hard vs previous 30m), demand higher score.
+        short_window_sparse = (
+            spikes_20m <= SPIKE_CADENCE_SCARCITY_20M_MAX_SPIKES
+            and spikes_30m <= SPIKE_CADENCE_SCARCITY_30M_MAX_SPIKES
+        )
+        short_window_decel = (
+            spike_ratio_30m_prev30m is not None
+            and spike_ratio_30m_prev30m <= SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX
+        )
+        pulse_is_slow = pulse in {"COOL", "COLD"}
+        if short_window_sparse and (short_window_decel or pulse_is_slow or cadence_regime == "SLOW"):
+            scarcity_bump = SPIKE_CADENCE_SCARCITY_SCORE_HARDEN
+            if (
+                spikes_30m == 0
+                or (
+                    spike_ratio_30m_prev30m is not None
+                    and spike_ratio_30m_prev30m <= (SPIKE_CADENCE_SCARCITY_RATIO_30M_PREV30M_MAX * 0.50)
+                )
+            ):
+                scarcity_bump = SPIKE_CADENCE_SCARCITY_SCORE_HARDEN_STRONG
+            score = min(SCORE_MAX_GUARDRAIL, score + scarcity_bump)
+            regime = "SLOW"
+            grace = max(grace, ACTIVITY_STABILIZATION_GRACE_FLOOR)
+
+        # Day-over-day sanity: if current 1h cadence is materially below the
+        # same UTC slot yesterday, harden score to avoid overtrading dead tape.
+        if (
+            spike_rate_prevday_1h >= SPIKE_CADENCE_PREVDAY_MIN_RATE_1H
+            and ratio_1h_prevday is not None
+            and ratio_1h_prevday <= SPIKE_CADENCE_PREVDAY_RATIO_1H_MAX
+            and pulse in {"NORMAL", "COOL", "COLD"}
+        ):
+            score = min(SCORE_MAX_GUARDRAIL, score + SPIKE_CADENCE_PREVDAY_SCORE_HARDEN)
+            regime = "SLOW"
 
         guard_pnl_window = float(t.get("symbol_guard_pnl_window") or 0.0)
         guard_bonus = max(0.0, float(t.get("symbol_guard_bonus") or 0.0))
@@ -1672,13 +1792,21 @@ def _apply_spike_cadence_policy(
         if _cfg_changed(candidate, adjusted):
             updates += 1
             LOG.info(
-                "[dynamic-ai][SPIKE_CADENCE] %s cadence=%s spikes3h=%d rate1h=%.2f/h rate3h=%.2f/h ratio1h3h=%s score %.2f->%.2f regime %s->%s",
+                "[dynamic-ai][SPIKE_CADENCE] %s cadence=%s pulse=%s spikes20m=%d spikes30m=%d prev30m=%d spikes3h=%d rate30m=%.2f/h prev30m_rate=%.2f/h rate1h=%.2f/h rate3h=%.2f/h ratio30mPrev30m=%s ratio1h3h=%s ratio1hPrevDay=%s score %.2f->%.2f regime %s->%s",
                 sym,
                 cadence_regime,
+                pulse,
+                spikes_20m,
+                spikes_30m,
+                spikes_prev_30m,
                 spikes_3h,
+                spike_rate_30m,
+                spike_rate_prev30m,
                 spike_rate_1h,
                 spike_rate_3h,
+                f"{spike_ratio_30m_prev30m:.2f}" if spike_ratio_30m_prev30m is not None else "n/a",
                 f"{spike_ratio_1h_3h:.2f}" if spike_ratio_1h_3h is not None else "n/a",
+                f"{ratio_1h_prevday:.2f}" if ratio_1h_prevday is not None else "n/a",
                 float(current.score_min_override),
                 float(adjusted.score_min_override),
                 current.regime,
@@ -2536,7 +2664,9 @@ def _compute_market_pulse_for_telemetry(
           "pulse":                "HOT|WARM|NORMAL|COOL|COLD",
           "spike_rate_1h":        float (spikes/hour in last 1h),
           "spike_rate_6h":        float (spikes/hour in last 6h),
+                    "spike_rate_prevday_1h": float (spikes/hour in same UTC slot yesterday),
           "rate_ratio_1h_6h":     float (1h vs 6h, 1.0 = mismo ritmo),
+                    "rate_ratio_1h_prevday_1h": float|None,
           "mean_inter_spike_sec_1h":  int|None,
           "last_spike_age_sec":   int|None,
           "eta_next_spike_p50_sec": int|None,  (max(0, mean_inter_1h - last_age))
@@ -2561,8 +2691,12 @@ def _compute_market_pulse_for_telemetry(
     now_ts = time.time()
     win_1h = 3600.0
     win_6h = 6 * 3600.0
+    win_prevday_1h = 24 * 3600.0
+    cutoff_prevday_1h = now_ts - win_prevday_1h
+    cutoff_prevday_1h_start = cutoff_prevday_1h - 3600.0
     cutoff_1h = now_ts - win_1h
     cutoff_6h = now_ts - win_6h
+    cutoff_25h = cutoff_prevday_1h_start
 
     # Index per symbol
     per_sym: dict[str, list[dict[str, Any]]] = {s: [] for s in SYMBOLS}
@@ -2574,7 +2708,7 @@ def _compute_market_pulse_for_telemetry(
             ts = ev.get("ts")
             if not isinstance(ts, (int, float)):
                 continue
-            if ts < cutoff_6h:
+            if ts < cutoff_25h:
                 continue
             per_sym[sym].append(ev)
         except Exception:  # noqa: BLE001
@@ -2600,12 +2734,19 @@ def _compute_market_pulse_for_telemetry(
         events = per_sym.get(sym) or []
         events_1h = [e for e in events if e.get("ts", 0) >= cutoff_1h]
         events_6h = events  # already filtered to >=cutoff_6h above
+        events_prevday_1h = [
+            e for e in events
+            if cutoff_prevday_1h_start <= float(e.get("ts", 0.0)) < cutoff_prevday_1h
+        ]
 
         n1 = len(events_1h)
         n6 = len(events_6h)
+        n_prevday_1h = len(events_prevday_1h)
         rate_1h = round(n1 / 1.0, 3) if n1 else 0.0
         rate_6h = round(n6 / 6.0, 3) if n6 else 0.0
+        rate_prevday_1h = round(n_prevday_1h / 1.0, 3) if n_prevday_1h else 0.0
         ratio = round(rate_1h / rate_6h, 3) if rate_6h > 0 else None
+        ratio_1h_prevday = round(rate_1h / rate_prevday_1h, 3) if rate_prevday_1h > 0 else None
 
         # inter-spike timing (1h window)
         ts_sorted = sorted(float(e["ts"]) for e in events_1h)
@@ -2664,7 +2805,9 @@ def _compute_market_pulse_for_telemetry(
             "pulse": _classify_pulse(rate_1h, ratio),
             "spike_rate_1h": rate_1h,
             "spike_rate_6h": rate_6h,
+            "spike_rate_prevday_1h": rate_prevday_1h,
             "rate_ratio_1h_6h": ratio,
+            "rate_ratio_1h_prevday_1h": ratio_1h_prevday,
             "mean_inter_spike_sec_1h": mean_inter,
             "last_spike_age_sec": last_age,
             "eta_next_spike_p50_sec": eta_next,
@@ -2774,7 +2917,7 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "Actua como un motor cuantitativo de alta frecuencia para indices sinteticos Deriv.\n"
         "Tu objetivo es ajustar los parametros de trading en tiempo real para evitar entradas tardias y salidas prematuras.\n\n"
         f"HORA UTC ACTUAL: {now_utc.strftime('%Y-%m-%d %H:%M')} (hora del dia = {now_utc.hour}).\n\n"
-        "DATOS DE TELEMETRIA (micro 15m + macro 6h por simbolo, incluye hour_perf 7d y market_pulse 1h/6h):\n"
+        "DATOS DE TELEMETRIA (micro 15m/20m/30m + macro 6h por simbolo, incluye hour_perf 7d y market_pulse 1h/6h/prevday):\n"
         f"{json.dumps(telemetry_json, ensure_ascii=True)}\n\n"
         "PARAMETROS QUE PUEDES DEVOLVER POR SIMBOLO:\n"
         "- regime: 'FAST' | 'NORMAL' | 'SLOW'\n"
@@ -2803,13 +2946,14 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "15. Evitar cambiar de regime continuamente; priorizar estabilidad macro.\n"
         "16. Cada simbolo trae market_phase con phase (ACCEL/NORMAL/CAUTION/DECEL/DEAD), ratio, baseline_rate. Si phase=DECEL/DEAD: regime=SLOW, score_min_override >= 7.4, size_multiplier <= 0.6. Si phase=CAUTION: +0.4 al score. Si phase=ACCEL: NO relajar por debajo del piso del simbolo. Ignorar si samples_baseline<5.\n"
         "17. Cuando phase in {DECEL, DEAD}, NUNCA bajar score_min_override por debajo del valor actual del simbolo.\n"
-        "18. Cadence de spikes (rate_1h vs rate_3h): si 1h acelera, relaja score levemente; si 1h desacelera sostenidamente, endurece score y evita FAST.\n"
+        "18. Cadence de spikes (rate_1h vs rate_3h): si 1h acelera, relaja score levemente; si 1h desacelera sostenidamente, endurece score y evita FAST. Si spikes_20m/spikes_30m estan bajos y ratio_30m_vs_prev30m cae, endurece aunque 1h aun no marque SLOW.\n"
         "19. PRIORIZA INTELIGENCIA: si un simbolo tiene 0 trades_24h pero hour_perf 7d positivo, baja score_min_override 0.3-0.5 y size_multiplier=0.8 para incentivar muestreo controlado.\n"
         "20. NO bloquees simbolos historicamente rentables solo por mala racha 6h; usa size_multiplier=0.4 y score+0.3 (sigue evaluando entradas mas selectivas en lugar de apagar).\n"
         "\nMARKET_PULSE (Fase H — vision UNIFICADA de cadencia + fuerza + captura por simbolo):\n"
         "Cada simbolo trae 'market_pulse' con UN bloque coherente. NO razones con campos sueltos: USA market_pulse como vision integrada.\n"
         "  - pulse: HOT (mercado fuerte y acelerando) | WARM | NORMAL | COOL | COLD (mercado dormido)\n"
         "  - spike_rate_1h, spike_rate_6h (spikes/hora). rate_ratio_1h_6h: >1.10 = acelera, <0.70 = desacelera.\n"
+        "  - spike_rate_prevday_1h y rate_ratio_1h_prevday_1h: comparacion directa contra la misma franja UTC de ayer (si <0.70 = mercado notablemente mas lento).\n"
         "  - mean_inter_spike_sec_1h: tiempo medio entre spikes. last_spike_age_sec: hace cuanto el ultimo. eta_next_spike_p50_sec: estimacion al proximo.\n"
         "  - bot_capture_rate_1h: fraccion de spikes con entrada del bot. Si <0.20 con pulse>=WARM, el bot esta perdiendo oportunidades.\n"
         "  - chase_block_rate_1h: fraccion bloqueada por chase_guard. Si >0.50 con pulse>=WARM, el filtro de chase esta demasiado estricto para esta cadencia (ajustas via score, no toques pre_filter).\n"
