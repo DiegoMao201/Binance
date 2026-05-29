@@ -1241,8 +1241,8 @@ class DerivDaemon:
     ) -> float:
         """Apply explicit profile-level final stake target when configured.
 
-        This is intentionally scoped to spike_crash profiles so BOOM and
-        volatility symbols keep their existing adaptive sizing behaviour.
+        This is intentionally scoped to spike profiles so volatility symbols
+        keep their existing adaptive sizing behaviour.
         """
         try:
             target = float(profile.get("stake_target_usdt") or 0.0)
@@ -1251,7 +1251,8 @@ class DerivDaemon:
         if target <= 0:
             return float(stake)
 
-        if str(profile.get("type", "")).lower() != "spike_crash":
+        _ptype = str(profile.get("type", "")).lower()
+        if _ptype not in {"spike_crash", "spike_boom"}:
             return float(stake)
 
         fixed = round(max(1.0, target), 2)

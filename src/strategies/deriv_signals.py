@@ -330,6 +330,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # BOOM spikes UP from accumulation zones. Extended prices = wrong entry timing.
         "geo_entry_max": 0.50,          # Phase 31: 0.40→0.50 to allow more setups while collecting data
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
+        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — BOOM fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 31: align with other BOOM profiles → sl_usd > broker floor
         "spike_capture_tp_usdt": 0.15,  # Phase 31: small spikes still valid exits
         "spike_profit_delta_usdt": 0.10,
@@ -358,7 +359,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.50,          # cap geo — previous batch failed at geo+1.48; 0.50 blocks those
-        "stake_max_usdt": 3.00,         # Prueba4-restart: 2.00→3.00 — BOOM500 MVP 57%WR +$1.13/7t
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -389,6 +391,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
+        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — BOOM fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
@@ -556,7 +559,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 1.50,
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -632,7 +636,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,          # tighter geo for higher-quality entries
-        "stake_max_usdt": 1.50,
+        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,

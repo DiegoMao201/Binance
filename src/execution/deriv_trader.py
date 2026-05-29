@@ -1069,6 +1069,35 @@ class DerivTradeExecutor:
                 exc,
             )
 
+    async def _boot_sync_mirror_followers(self) -> None:
+        """Best-effort boot sync for follower accounts after deploy/restart.
+
+        Delegates to DerivMirrorClient when available. It rebuilds missing
+        principal->mirror links and closes follower orphans that no longer have
+        a principal counterpart after boot reconciliation.
+        """
+        hook = getattr(self._client, "boot_sync_followers", None)
+        if hook is None:
+            return
+
+        async with self._lock:
+            principal_open = [
+                {
+                    "contract_id": cid,
+                    "symbol": oc.symbol,
+                    "side": oc.side,
+                    "stake_usdt": oc.stake_usdt,
+                    "opened_at_ts": oc.opened_at_ts,
+                }
+                for cid, oc in self._open.items()
+            ]
+
+        try:
+            summary = await hook(principal_open)
+            _LOGGER.info("[deriv-recon] BOOT-SYNC mirror summary: %s", summary)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("[deriv-recon] BOOT-SYNC mirror sync failed: %s", exc)
+
     async def reap_closed(self) -> list[dict[str, Any]]:
         """
         Poll every open contract; if any has been closed by Deriv (SL/TP hit),
@@ -2587,6 +2616,7 @@ class DerivTradeExecutor:
             # container that lost its disk state entirely).
             if boot:
                 await self._boot_recover_broker_orphans(broker_contracts)
+                await self._boot_sync_mirror_followers()
             return
 
         # Broker must return a non-empty list before we trust any diff.
@@ -2607,6 +2637,7 @@ class DerivTradeExecutor:
                 # Still run boot recovery even though ghost-purge is skipped.
                 if boot:
                     await self._boot_recover_broker_orphans(broker_contracts)
+                    await self._boot_sync_mirror_followers()
                 return
             _LOGGER.info(
                 "[deriv-recon] BOOT-SYNC: broker returned empty portfolio and all %d "
@@ -2695,6 +2726,7 @@ class DerivTradeExecutor:
             # Doing this AFTER orphan recovery ensures ALL open contracts
             # (both disk-restored and broker-recovered) are considered.
             await self._reapply_broker_be_locks()
+            await self._boot_sync_mirror_followers()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 15: Broker BE lock re-application on restart
