@@ -678,18 +678,28 @@ class DerivTradeExecutor:
         dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
         tier_floor = peak_profit * (1.0 - tier_pct)
 
-        # "wait_for_quota v2": el tier % SOLO empieza a cerrar cuando la
-        # cuota horaria ya se cumplió (o cuando peak < $1, donde no hay
-        # protección).  Antes de cuota, el ÚNICO piso es dollar_floor:
-        # esperamos los spikes que faltan y dejamos correr el peak.
-        wait = bool(_SPIKE_WAIT_FOR_QUOTA_ENABLED and not quota_done and peak_profit >= 1.0)
-        out["wait_for_quota"] = wait
-        if wait:
-            sl_floor = dollar_floor                # solo escalón duro $
+        # 2026-05-30 "wait_for_quota v3": reglas explícitas del usuario.
+        # CASO A: peak < $1 → NADA cierra por tier/giveback.  Sólo el SL
+        # broker (−$1) puede cerrar.  El bot ESPERA spikes que vienen.
+        # CASO B: peak ≥ $1 + cuota pendiente → SOLO dollar_floor protege
+        # (escalón duro).  Tier % sigue OFF.
+        # CASO C: peak ≥ $1 + cuota cumplida → tier % + dollar_floor.
+        if peak_profit < 1.0:
+            out["wait_for_quota"] = True
+            out["tier_active"] = False
+            out["sl_floor"] = None          # no ratchet → ningún cierre por tier
+            out["dollar_floor"] = 0.0
+            out["tier_floor"] = round(tier_floor, 4)
+            return out
+
+        if _SPIKE_WAIT_FOR_QUOTA_ENABLED and not quota_done:
+            sl_floor = dollar_floor          # SOLO escalón $
+            out["wait_for_quota"] = True
             out["tier_active"] = False
         else:
             sl_floor = max(dollar_floor, tier_floor)
-            out["tier_active"] = peak_profit >= 1.0
+            out["wait_for_quota"] = False
+            out["tier_active"] = True
 
         out["dollar_floor"] = round(dollar_floor, 4)
         out["tier_floor"] = round(tier_floor, 4)
