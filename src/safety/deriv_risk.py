@@ -556,6 +556,12 @@ class DerivRiskManager:
         # Used by main_deriv spike_pre_filter to adapt min_post window per symbol.
         self._spike_intervals: dict[str, list[int]] = {}
         self._MAX_SPIKE_INTERVALS = 80
+        # Rolling spike timestamps for cadence-aware decisions (entry/exit).
+        self._spike_recent_ts: dict[str, list[float]] = {}
+        self._spike_count_window_sec = max(
+            600.0,
+            min(float(os.getenv("DERIV_SPIKE_COUNT_WINDOW_SEC", "3600") or 3600), 72 * 3600.0),
+        )
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Tick-only entry mode: spike events remain for telemetry and dynamic tuning,
         # but cannot directly gate or force entry decisions.
@@ -906,6 +912,10 @@ class DerivRiskManager:
                         # Update trackers
                         self._last_spike_ts[symbol]   = _spike_ts
                         self._last_spike_tick[symbol] = _cur_tick_n
+                        _recent = self._spike_recent_ts.setdefault(symbol, [])
+                        _recent.append(_spike_ts)
+                        _cutoff = _spike_ts - self._spike_count_window_sec
+                        self._spike_recent_ts[symbol] = [ts for ts in _recent if ts >= _cutoff]
                         # Persist inter-spike intervals for adaptive pre-filter.
                         # Ignore ultra-short clusters (same impulse burst).
                         _min_real_interval = int(os.getenv("DERIV_SPIKE_INTERVAL_MIN_TICKS", "25"))
@@ -997,6 +1007,18 @@ class DerivRiskManager:
         of the signal stack (Hurst, ATR, momentum — all tick-indexed).
         """
         return self._last_spike_tick.get(symbol, 0)
+
+    def get_spike_count_last_hour(self, symbol: str) -> int:
+        """Return detected spikes in the last 1h for *symbol* (rolling window)."""
+        now = time.time()
+        cutoff = now - 3600.0
+        key = str(symbol or "").upper()
+        raw = list(self._spike_recent_ts.get(key) or self._spike_recent_ts.get(symbol, []))
+        if not raw:
+            return 0
+        pruned = [ts for ts in raw if ts >= cutoff]
+        self._spike_recent_ts[key] = pruned
+        return len(pruned)
 
     def get_current_atr(self, symbol: str) -> float | None:
         """Return the most-recent synthetic ATR for *symbol* (mean of last 5 ATR samples).
@@ -1536,6 +1558,55 @@ class DerivRiskManager:
                     f"hd_opposed: macro_500t slope contradicts {trend_dir:+d} → {_hd_bonus:.1f}"
                 )
 
+        # Spike cadence (1h) contributes a small directional confidence delta.
+        # Higher cadence supports continuation expectancy; zero cadence tightens quality.
+        _spikes_1h = self.get_spike_count_last_hour(symbol) if _is_spike else 0
+        _expected_spikes_1h = (
+            int(round(3600.0 / float(_spike_interval_ticks(symbol))))
+            if _is_spike and _spike_interval_ticks(symbol) > 0
+            else 0
+        )
+        _spike_density_1h = (
+            float(_spikes_1h) / float(max(1, _expected_spikes_1h))
+            if _expected_spikes_1h > 0
+            else 0.0
+        )
+        _spike_hour_bonus = 0.0
+        if _is_spike:
+            _spike_min_for_bonus = max(
+                1,
+                int(float(os.getenv("DERIV_SPIKE_ENTRY_HOURLY_MIN", "2") or 2)),
+            )
+            _spike_bonus_step = max(
+                0.0,
+                min(float(os.getenv("DERIV_SPIKE_ENTRY_HOURLY_BONUS_STEP", "0.08") or 0.08), 0.30),
+            )
+            _spike_bonus_cap = max(
+                0.0,
+                min(float(os.getenv("DERIV_SPIKE_ENTRY_HOURLY_BONUS_CAP", "0.45") or 0.45), 1.0),
+            )
+            _spike_idle_penalty = max(
+                -1.0,
+                min(float(os.getenv("DERIV_SPIKE_ENTRY_HOURLY_IDLE_PENALTY", "-0.15") or -0.15), 0.0),
+            )
+            if _spikes_1h <= 0:
+                _spike_hour_bonus = _spike_idle_penalty
+            elif _spikes_1h >= _spike_min_for_bonus:
+                _spike_hour_bonus = min(
+                    _spike_bonus_cap,
+                    _spike_bonus_step * float(_spikes_1h - _spike_min_for_bonus + 1),
+                )
+            if _spike_hour_bonus != 0.0:
+                score = max(0.0, min(10.0, score + _spike_hour_bonus))
+                if _spike_hour_bonus > 0:
+                    snap.reasons.append(
+                        f"spike_cadence_1h: spikes={_spikes_1h} density={_spike_density_1h:.2f} +{_spike_hour_bonus:.2f}"
+                    )
+                else:
+                    snap.reasons.append(
+                        f"spike_cadence_1h_low: spikes={_spikes_1h} density={_spike_density_1h:.2f} {_spike_hour_bonus:.2f}"
+                    )
+
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
             "momentum": round(momentum_score, 2),
@@ -1555,6 +1626,10 @@ class DerivRiskManager:
             # Allows post-trade analysis to split 600/900/300 vs 1000/500.
             "spike_family_interval": _spike_interval_ticks(symbol) if _is_spike else 0,
             "spike_family": _get_asset_profile(symbol).get("spike_family", ""),
+            "spikes_1h": int(_spikes_1h),
+            "spikes_1h_expected": int(_expected_spikes_1h),
+            "spike_density_1h": round(_spike_density_1h, 3),
+            "spike_hour_bonus": round(_spike_hour_bonus, 3),
             # ── Telemetry (CALIBRATION SAMPLING MODE) ──────────────────────
             "setup_type": _setup_type,  # overridden below if SMC/spike/scalp fires
             "symbol": symbol,

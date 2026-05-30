@@ -68,6 +68,12 @@ _OPEN_PROB_SHADOW_LOG_EVERY_SEC = max(
     10.0,
     min(float(os.getenv("DERIV_OPEN_PROB_SHADOW_LOG_EVERY_SEC", "45") or 45.0), 300.0),
 )
+_SPIKE_SL_ONLY_MODE = _env_flag("DERIV_SPIKE_SL_ONLY_MODE", "true")
+_MULTISPIKE_EXIT_ENABLED = _env_flag("DERIV_MULTISPIKE_EXIT_ENABLED", "false")
+_SPIKE_TIER_TP_WINDOW_PCT = max(
+    0.10,
+    min(float(os.getenv("DERIV_SPIKE_TIER_TP_WINDOW_PCT", "0.20") or 0.20), 0.40),
+)
 
 
 def _symbol_from_shortcode(shortcode: str) -> str:
@@ -285,6 +291,8 @@ class DerivTradeExecutor:
         # Manages ratchet SL + momentum-based exit for every open contract.
         self._dpm = DynamicPositionManager()
         self._disable_spike_timeout = _DISABLE_SPIKE_TIMEOUT
+        self._spike_sl_only_mode = _SPIKE_SL_ONLY_MODE
+        self._multispike_exit_enabled = _MULTISPIKE_EXIT_ENABLED
         # Phase 37+: multispike buffer state (tick-domain ratchet).
         # dict[contract_id, {peak_pnl, entry_pnl, start_tick, buffer_ticks,
         #                    retention_pct, min_floor_usdt, drift_ticks, regime}]
@@ -307,7 +315,7 @@ class DerivTradeExecutor:
         #   - hold buckets >=600s collapse to <=51% win rate and net negative pnl
         self._spike_wait_timeout_enabled = os.getenv(
             "DERIV_SPIKE_WAIT_TIMEOUT_ENABLED",
-            "true",
+            "false",
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._spike_wait_timeout_sec = max(
             120.0,
@@ -350,6 +358,12 @@ class DerivTradeExecutor:
             self._spike_wait_timeout_sec,
             self._spike_wait_timeout_mfe_frac,
             self._spike_wait_timeout_sec_map,
+        )
+        _LOGGER.info(
+            "[deriv-trader] spike_sl_only_mode=%s multispike_exit_enabled=%s tier_tp_window_base=%.2f",
+            self._spike_sl_only_mode,
+            self._multispike_exit_enabled,
+            _SPIKE_TIER_TP_WINDOW_PCT,
         )
         _LOGGER.info(
             "[deriv-trader] disable_spike_timeout=%s (DERIV_DISABLE_SPIKE_TIMEOUT)",
@@ -468,6 +482,129 @@ class DerivTradeExecutor:
         if _cycle <= 600:
             return min(90.0 + _extra, 420.0)
         return min(120.0 + _extra, 420.0)
+
+    def _spike_count_last_hour(self, symbol: str) -> int:
+        """Read rolling 1h spike count from risk manager (best effort)."""
+        if self._risk is None:
+            return 0
+        getter = getattr(self._risk, "get_spike_count_last_hour", None)
+        if not callable(getter):
+            return 0
+        try:
+            return max(0, int(getter(symbol) or 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _spike_tier_window_pct(self, symbol: str) -> float:
+        """Resolve TierTP drawdown window for spike symbols.
+
+        Base is 20%. We widen slightly on high hourly cadence (wait next spike),
+        and tighten slightly when cadence is near-zero.
+        """
+        window = float(_SPIKE_TIER_TP_WINDOW_PCT)
+        spikes_1h = self._spike_count_last_hour(symbol)
+        low_delta = float(os.getenv("DERIV_SPIKE_TIER_WINDOW_LOW_SPIKE_DELTA", "-0.04") or -0.04)
+        mid_delta = float(os.getenv("DERIV_SPIKE_TIER_WINDOW_MID_SPIKE_DELTA", "0.03") or 0.03)
+        high_delta = float(os.getenv("DERIV_SPIKE_TIER_WINDOW_HIGH_SPIKE_DELTA", "0.06") or 0.06)
+        if spikes_1h <= 1:
+            window += low_delta
+        elif spikes_1h >= 6:
+            window += high_delta
+        elif spikes_1h >= 4:
+            window += mid_delta
+        return max(0.10, min(window, 0.40))
+
+    def _spike_tier_tp_floor(
+        self,
+        symbol: str,
+        peak_profit: float,
+        stake_usdt: float,
+    ) -> float | None:
+        """Compute SL-only TierTP floor for spike symbols.
+
+        Tier 2 (>=T2): lock +20% stake.
+        Tier 3 (>=T3): trail with configurable window (default 20%).
+        """
+        if stake_usdt <= 0 or peak_profit <= 0:
+            return None
+
+        profile = get_asset_profile(symbol)
+        try:
+            floor_min = float(
+                profile.get(
+                    "trail_stop_floor_min",
+                    profile.get("trail_floor_min_usdt", _TRAIL_FLOOR_GLOBAL_MIN),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            floor_min = _TRAIL_FLOOR_GLOBAL_MIN
+
+        peak_pct = float(peak_profit) / max(float(stake_usdt), 1e-9)
+        sl_max_loss = float(stake_usdt) * _TRAIL_MAX_LOSS_PCT
+
+        if peak_pct >= _T3_PCT:
+            window_pct = self._spike_tier_window_pct(symbol)
+            floor = (peak_pct - window_pct) * float(stake_usdt)
+            return round(max(floor, floor_min, -sl_max_loss), 4)
+
+        if peak_pct >= _T2_PCT:
+            floor = float(stake_usdt) * _T2_LOCK_PCT
+            return round(max(floor, floor_min, -sl_max_loss), 4)
+
+        return None
+
+    async def _maybe_close_spike_tier_tp(
+        self,
+        cid: int,
+        oc: DerivOpenContract,
+        current_profit: float,
+        source: str,
+    ) -> bool:
+        """Close spike position when TierTP floor is breached in SL-only mode."""
+        if not (self._spike_sl_only_mode and is_spike_market(oc.symbol)):
+            return False
+
+        if current_profit > oc.peak_profit:
+            oc.peak_profit = float(current_profit)
+
+        tier_floor = self._spike_tier_tp_floor(
+            oc.symbol,
+            float(oc.peak_profit),
+            float(oc.stake_usdt),
+        )
+        if tier_floor is None:
+            return False
+
+        if tier_floor > oc.trail_sl_locked:
+            oc.trail_sl_locked = float(tier_floor)
+
+        if current_profit > oc.trail_sl_locked or cid in self._closing:
+            return False
+
+        self._closing.add(cid)
+        _window = self._spike_tier_window_pct(oc.symbol)
+        _spikes_1h = self._spike_count_last_hour(oc.symbol)
+        oc.pending_close_reason = f"tier_tp_window_{int(round(_window * 100.0))}"
+        _LOGGER.info(
+            "[SPIKE-TIER-TP] %s cid=%s sym=%s close pnl=%.4f floor=%.4f peak=%.4f "
+            "window=%.2f spikes_1h=%d",
+            source,
+            cid,
+            oc.symbol,
+            current_profit,
+            oc.trail_sl_locked,
+            oc.peak_profit,
+            _window,
+            _spikes_1h,
+        )
+        try:
+            await self._client.sell(cid)
+        except DerivClientError as exc:
+            _LOGGER.warning("[SPIKE-TIER-TP] %s sell failed for %s: %s", source, cid, exc)
+            self._closing.discard(cid)
+            oc.pending_close_reason = None
+            return False
+        return True
 
     def _multispike_policy(self, symbol: str) -> dict[str, Any]:
         """Resolve multispike ratchet policy (dynamic config + env fallback)."""
@@ -946,7 +1083,7 @@ class DerivTradeExecutor:
         # profile value baked into ASSET_INTEL_PROFILES.
         _profile_mh = float(get_asset_profile(order.symbol).get("max_hold_seconds", 0.0))
         if is_spike_market(order.symbol) and _profile_mh > 0:
-            if self._disable_spike_timeout:
+            if self._disable_spike_timeout or self._spike_sl_only_mode:
                 if order.max_hold_seconds > 0:
                     _LOGGER.info(
                         "[deriv-trader] spike_timeout disabled: forcing max_hold_seconds=0 for %s",
@@ -1168,87 +1305,87 @@ class DerivTradeExecutor:
                 oc_check = self._open.get(cid)
             if oc_check is not None and oc_check.max_hold_seconds > 0:
                 _timeout_enabled = not (
-                    self._disable_spike_timeout and is_spike_market(oc_check.symbol)
+                    (self._disable_spike_timeout or self._spike_sl_only_mode)
+                    and is_spike_market(oc_check.symbol)
                 )
-                if not _timeout_enabled:
-                    continue
                 held = time.time() - oc_check.opened_at_ts
-                _base_zero_peak_sec = float(os.getenv("DERIV_ZERO_PEAK_BASE_SEC", "150"))
-                _dyn_zero_peak_grace = self._dynamic_zero_peak_grace_sec(oc_check.symbol)
-                _dynamic_hold_limit = _base_zero_peak_sec + float(_dyn_zero_peak_grace)
-                if is_spike_market(oc_check.symbol):
-                    _dynamic_hold_limit = self._dynamic_zero_peak_wait_limit_sec(
-                        oc_check.symbol,
-                        _dynamic_hold_limit,
-                    )
-                    # zero_peak_exit is emergency-only; never fire too far ahead of timeout.
-                    _pre_timeout_margin = max(
-                        10.0,
-                        float(os.getenv("DERIV_ZERO_PEAK_PRE_TIMEOUT_MARGIN_SEC", "20") or 20),
-                    )
-                    _max_emergency_limit = max(0.0, oc_check.max_hold_seconds - _pre_timeout_margin)
-                    _dynamic_hold_limit = min(_dynamic_hold_limit, _max_emergency_limit)
-                if held >= oc_check.max_hold_seconds:
-                    # Phase 35: close-lock guard
-                    if cid in self._closing:
-                        pass  # sell already in-flight; fall through to poll
-                    else:
+                if _timeout_enabled:
+                    _base_zero_peak_sec = float(os.getenv("DERIV_ZERO_PEAK_BASE_SEC", "150"))
+                    _dyn_zero_peak_grace = self._dynamic_zero_peak_grace_sec(oc_check.symbol)
+                    _dynamic_hold_limit = _base_zero_peak_sec + float(_dyn_zero_peak_grace)
+                    if is_spike_market(oc_check.symbol):
+                        _dynamic_hold_limit = self._dynamic_zero_peak_wait_limit_sec(
+                            oc_check.symbol,
+                            _dynamic_hold_limit,
+                        )
+                        # zero_peak_exit is emergency-only; never fire too far ahead of timeout.
+                        _pre_timeout_margin = max(
+                            10.0,
+                            float(os.getenv("DERIV_ZERO_PEAK_PRE_TIMEOUT_MARGIN_SEC", "20") or 20),
+                        )
+                        _max_emergency_limit = max(0.0, oc_check.max_hold_seconds - _pre_timeout_margin)
+                        _dynamic_hold_limit = min(_dynamic_hold_limit, _max_emergency_limit)
+                    if held >= oc_check.max_hold_seconds:
+                        # Phase 35: close-lock guard
+                        if cid in self._closing:
+                            pass  # sell already in-flight; fall through to poll
+                        else:
+                            self._closing.add(cid)
+                            _LOGGER.info(
+                                "[deriv-trader] spike_timeout: force-selling %s (%s held=%.1fs limit=%.0fs)",
+                                cid, oc_check.symbol, held, oc_check.max_hold_seconds,
+                            )
+                            try:
+                                await self._client.sell(cid)
+                            except DerivClientError as exc:
+                                _LOGGER.warning(
+                                    "[deriv-trader] spike_timeout sell failed for %s: %s", cid, exc
+                                )
+                                self._closing.discard(cid)  # allow retry next reap
+                            # Contract may already be closed; continue to poll below
+
+                    # Prueba4-restart: zero_peak_exit — if after 150s the trade NEVER turned
+                    # profitable (peak_profit=0.0) and is currently negative, cut the loss now.
+                    # Data basis: BOOM900 62% zero_peak, BOOM600 60% zero_peak — these trades
+                    # NEVER recover; waiting the full 480-600s hold just multiplies the loss.
+                    # Condition: held>=150s, peak=0.0, floating<-0.05 (to avoid spread noise).
+                    elif (
+                        self._zero_peak_exit_enabled
+                        and is_spike_market(oc_check.symbol)
+                        and held >= _dynamic_hold_limit
+                        and oc_check.peak_profit == 0.0
+                        and oc_check.floating_pnl < -0.05
+                        and cid not in self._closing
+                    ):
+                        _defer_zero_peak, _defer_reason = self._should_defer_zero_peak_exit(
+                            oc_check.symbol,
+                            held,
+                        )
+                        if _defer_zero_peak:
+                            _LOGGER.info(
+                                "[deriv-trader] zero_peak_exit deferred: %s (%s) held=%.1fs limit=%.1fs pnl=%.4f %s",
+                                cid,
+                                oc_check.symbol,
+                                held,
+                                _dynamic_hold_limit,
+                                oc_check.floating_pnl,
+                                _defer_reason,
+                            )
+                            continue
                         self._closing.add(cid)
+                        oc_check.pending_close_reason = "zero_peak_exit"
                         _LOGGER.info(
-                            "[deriv-trader] spike_timeout: force-selling %s (%s held=%.1fs limit=%.0fs)",
-                            cid, oc_check.symbol, held, oc_check.max_hold_seconds,
+                            "[deriv-trader] zero_peak_exit: %s (%s) held=%.1fs limit=%.1fs peak=0.0 pnl=%.4f — cutting stagnant loss",
+                            cid, oc_check.symbol, held, _dynamic_hold_limit, oc_check.floating_pnl,
                         )
                         try:
                             await self._client.sell(cid)
                         except DerivClientError as exc:
                             _LOGGER.warning(
-                                "[deriv-trader] spike_timeout sell failed for %s: %s", cid, exc
+                                "[deriv-trader] zero_peak_exit sell failed for %s: %s", cid, exc
                             )
-                            self._closing.discard(cid)  # allow retry next reap
-                        # Contract may already be closed; continue to poll below
-
-                # Prueba4-restart: zero_peak_exit — if after 150s the trade NEVER turned
-                # profitable (peak_profit=0.0) and is currently negative, cut the loss now.
-                # Data basis: BOOM900 62% zero_peak, BOOM600 60% zero_peak — these trades
-                # NEVER recover; waiting the full 480-600s hold just multiplies the loss.
-                # Condition: held>=150s, peak=0.0, floating<-0.05 (to avoid spread noise).
-                elif (
-                    self._zero_peak_exit_enabled
-                    and is_spike_market(oc_check.symbol)
-                    and held >= _dynamic_hold_limit
-                    and oc_check.peak_profit == 0.0
-                    and oc_check.floating_pnl < -0.05
-                    and cid not in self._closing
-                ):
-                    _defer_zero_peak, _defer_reason = self._should_defer_zero_peak_exit(
-                        oc_check.symbol,
-                        held,
-                    )
-                    if _defer_zero_peak:
-                        _LOGGER.info(
-                            "[deriv-trader] zero_peak_exit deferred: %s (%s) held=%.1fs limit=%.1fs pnl=%.4f %s",
-                            cid,
-                            oc_check.symbol,
-                            held,
-                            _dynamic_hold_limit,
-                            oc_check.floating_pnl,
-                            _defer_reason,
-                        )
-                        continue
-                    self._closing.add(cid)
-                    oc_check.pending_close_reason = "zero_peak_exit"
-                    _LOGGER.info(
-                        "[deriv-trader] zero_peak_exit: %s (%s) held=%.1fs limit=%.1fs peak=0.0 pnl=%.4f — cutting stagnant loss",
-                        cid, oc_check.symbol, held, _dynamic_hold_limit, oc_check.floating_pnl,
-                    )
-                    try:
-                        await self._client.sell(cid)
-                    except DerivClientError as exc:
-                        _LOGGER.warning(
-                            "[deriv-trader] zero_peak_exit sell failed for %s: %s", cid, exc
-                        )
-                        self._closing.discard(cid)
-                        oc_check.pending_close_reason = None
+                            self._closing.discard(cid)
+                            oc_check.pending_close_reason = None
 
                 # Spike-wait timeout v5 (2026-05-29 PM): PURE TIME CUT.
                 # User directive: "no quiero mas perseguir fuerza de un spike a
@@ -1262,6 +1399,7 @@ class DerivTradeExecutor:
                 #   3. self._spike_wait_timeout_sec               (global default)
                 if (
                     self._spike_wait_timeout_enabled
+                    and not self._spike_sl_only_mode
                     and is_spike_market(oc_check.symbol)
                     and cid not in self._closing
                 ):
@@ -1340,6 +1478,18 @@ class DerivTradeExecutor:
                 # BUG-B fix: update floating PnL on poll path (safety-net for WS gaps)
                 oc_check.floating_pnl = _current_profit
                 _held_sec = time.time() - oc_check.opened_at_ts
+
+                if self._spike_sl_only_mode and is_spike_market(oc_check.symbol):
+                    _tier_closed = await self._maybe_close_spike_tier_tp(
+                        cid,
+                        oc_check,
+                        _current_profit,
+                        source="reaper",
+                    )
+                    if _tier_closed:
+                        continue
+                    # SL-only mode for spikes: keep holding unless SL/TierTP floor is hit.
+                    continue
 
                 _dep_close, _dep_shadow, _dep_reason, _dep_details = self._dep_decay_signal(
                     oc_check,
@@ -1539,7 +1689,8 @@ class DerivTradeExecutor:
                 oc_check is not None
                 and oc_check.max_hold_seconds > 0
                 and not (
-                    self._disable_spike_timeout and is_spike_market(oc_check.symbol)
+                    (self._disable_spike_timeout or self._spike_sl_only_mode)
+                    and is_spike_market(oc_check.symbol)
                 )
             ):
                 held = time.time() - oc_check.opened_at_ts
@@ -2116,7 +2267,11 @@ class DerivTradeExecutor:
             #   OR if ticks_since_last_spike > drift_ticks.
             # This captures clustered spikes while avoiding long drift givebacks.
 
-            if is_spike_market(oc_check.symbol) and current_profit > 0.10:
+            if (
+                self._multispike_exit_enabled
+                and is_spike_market(oc_check.symbol)
+                and current_profit > 0.10
+            ):
 
                 # ── Check active spike buffer first ──────────────────────────
                 _sbuf = self._spike_buffer.get(cid)
@@ -2212,6 +2367,14 @@ class DerivTradeExecutor:
                     oc_check.last_profit = current_profit
                     return  # Don't close yet — buffer will decide
             oc_check.last_profit = current_profit
+            if self._spike_sl_only_mode and is_spike_market(oc_check.symbol):
+                await self._maybe_close_spike_tier_tp(
+                    cid,
+                    oc_check,
+                    current_profit,
+                    source="ws",
+                )
+                return
             # ─────────────────────────────────────────────────────────────────
 
             _held_sec = time.time() - oc_check.opened_at_ts
@@ -2347,7 +2510,10 @@ class DerivTradeExecutor:
         if (
             oc.max_hold_seconds > 0
             and held >= oc.max_hold_seconds
-            and not (self._disable_spike_timeout and is_spike_market(oc.symbol))
+            and not (
+                (self._disable_spike_timeout or self._spike_sl_only_mode)
+                and is_spike_market(oc.symbol)
+            )
         ):
             exit_reason = "spike_timeout"
         elif oc.pending_close_reason:
@@ -2496,7 +2662,14 @@ class DerivTradeExecutor:
                         oc.trail_sl_locked > _TRAIL_INIT_SL
                         and realized <= oc.trail_sl_locked + 0.01
                     )
-                    if oc.max_hold_seconds > 0 and _held_hb >= oc.max_hold_seconds:
+                    if (
+                        oc.max_hold_seconds > 0
+                        and _held_hb >= oc.max_hold_seconds
+                        and not (
+                            (self._disable_spike_timeout or self._spike_sl_only_mode)
+                            and is_spike_market(oc.symbol)
+                        )
+                    ):
                         exit_reason = "spike_timeout"
                     elif oc.pending_close_reason:
                         exit_reason = oc.pending_close_reason
@@ -2561,7 +2734,10 @@ class DerivTradeExecutor:
                         if oc.max_hold_seconds > 0
                     ]
                 for cid, oc in candidates:
-                    if self._disable_spike_timeout and is_spike_market(oc.symbol):
+                    if (
+                        (self._disable_spike_timeout or self._spike_sl_only_mode)
+                        and is_spike_market(oc.symbol)
+                    ):
                         continue
                     held = time.time() - oc.opened_at_ts
                     if held >= oc.max_hold_seconds:
@@ -2601,7 +2777,8 @@ class DerivTradeExecutor:
                         (cid, oc) for cid, oc in self._open.items()
                         if oc.max_hold_seconds > 0
                         and not (
-                            self._disable_spike_timeout and is_spike_market(oc.symbol)
+                            (self._disable_spike_timeout or self._spike_sl_only_mode)
+                            and is_spike_market(oc.symbol)
                         )
                         and (now_ts - oc.opened_at_ts) > (oc.max_hold_seconds + _GRACE_SEC)
                     ]
@@ -2979,7 +3156,7 @@ class DerivTradeExecutor:
             _oc_profile = get_asset_profile(symbol)
             _max_hold_recovered = float(_oc_profile.get("max_hold_seconds", 0.0))
             if is_spike_market(symbol) and _max_hold_recovered > 0:
-                if self._disable_spike_timeout:
+                if self._disable_spike_timeout or self._spike_sl_only_mode:
                     _max_hold_recovered = 0.0
                 else:
                     _max_hold_recovered += self._spike_hold_bonus_sec(symbol)

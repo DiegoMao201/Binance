@@ -1,0 +1,51 @@
+SPIKE SL-ONLY + TIERTP WINDOW 20% (2026-05-30)
+
+Objetivo
+- Volver a logica SL-first para BOOM/CRASH.
+- Desactivar salida multispike.
+- Implementar TierTP con ventana base 20% y ajuste por frecuencia de spikes en 1h.
+- Evitar bloqueos por dynamic inactive en simbolos CRASH foco.
+
+Cambios aplicados
+1) main_deriv.py
+- Nuevo bypass para dynamic inactive (solo gate de entrada):
+  - DERIV_DYNAMIC_INACTIVE_BYPASS_ENABLE (default: true)
+  - DERIV_DYNAMIC_INACTIVE_BYPASS_SYMBOLS (default: CRASH300,CRASH500,CRASH600,CRASH900,CRASH1000)
+- Post-spike chase guard ahora usa spikes_1h para endurecer/relajar bloqueo.
+- Post-spike strength gate agrega signal spikes_1h y densidad 1h.
+
+2) deriv_risk.py
+- Nueva memoria rolling de timestamps de spikes por simbolo.
+- Nuevo metodo: get_spike_count_last_hour(symbol).
+- Score agrega ajuste pequeno por cadencia 1h (bonus/penalty configurables).
+- Telemetria nueva: spikes_1h, spikes_1h_expected, spike_density_1h, spike_hour_bonus.
+
+3) deriv_trader.py
+- Modo SL-only para simbolos spike:
+  - DERIV_SPIKE_SL_ONLY_MODE (default: true)
+- Salida multispike apagada por defecto:
+  - DERIV_MULTISPIKE_EXIT_ENABLED (default: false)
+- TierTP floor para spikes:
+  - T2 (>= T2): lock +20% del stake.
+  - T3 (>= T3): trailing por ventana sobre peak, base 20%.
+  - DERIV_SPIKE_TIER_TP_WINDOW_PCT (default: 0.20)
+- Ajuste dinamico de ventana TierTP por spikes_1h:
+  - baja cadencia: ventana mas corta (mas conservador)
+  - alta cadencia: ventana mas amplia (esperar siguiente spike)
+- Timeouts de spike (spike_timeout/spike_wait_timeout) no disparan en modo SL-only.
+- Rutas DEP/open-prob/DPM para simbolos spike quedan fuera cuando SL-only esta activo.
+
+Nuevas variables opcionales (fine-tuning)
+- DERIV_SPIKE_TIER_WINDOW_LOW_SPIKE_DELTA (default: -0.04)
+- DERIV_SPIKE_TIER_WINDOW_MID_SPIKE_DELTA (default: +0.03)
+- DERIV_SPIKE_TIER_WINDOW_HIGH_SPIKE_DELTA (default: +0.06)
+- DERIV_POST_SPIKE_STRENGTH_SPIKES_1H_MIN (default: 3)
+- DERIV_SPIKE_ENTRY_HOURLY_MIN (default: 2)
+- DERIV_SPIKE_ENTRY_HOURLY_BONUS_STEP (default: 0.08)
+- DERIV_SPIKE_ENTRY_HOURLY_BONUS_CAP (default: 0.45)
+- DERIV_SPIKE_ENTRY_HOURLY_IDLE_PENALTY (default: -0.15)
+
+Rollback rapido
+- Rehabilitar multispike exit: DERIV_MULTISPIKE_EXIT_ENABLED=true
+- Volver a timeout exits en spike: DERIV_SPIKE_SL_ONLY_MODE=false
+- Desactivar bypass dynamic inactive: DERIV_DYNAMIC_INACTIVE_BYPASS_ENABLE=false

@@ -135,6 +135,17 @@ _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
     "BOOM1000,CRASH1000",
 )
 
+# Dynamic inactive bypass (entry gate only): keeps dynamic score/regime logic
+# active while avoiding hard symbol starvation for selected symbols.
+_DYNAMIC_INACTIVE_BYPASS_ENABLE: bool = _env_flag(
+    "DERIV_DYNAMIC_INACTIVE_BYPASS_ENABLE",
+    "true",
+)
+_DYNAMIC_INACTIVE_BYPASS_SYMBOLS: set[str] = _env_symbol_set(
+    "DERIV_DYNAMIC_INACTIVE_BYPASS_SYMBOLS",
+    "CRASH300,CRASH500,CRASH600,CRASH900,CRASH1000",
+)
+
 # ─── Dynamic score-gate shaping (sniper mode) ──────────────────────────────
 # Risk-engine and AI sidecar must speak the same score language:
 # - trending / FAST: lower ceiling to improve conversion when structure confirms.
@@ -602,6 +613,27 @@ class DerivDaemon:
         if resolved <= 0:
             resolved = self._post_spike_chase_block_ticks_default
 
+        # Hourly spike cadence hardens anti-chase when market is slow and
+        # relaxes slightly when cadence is clearly active.
+        _spikes_1h = int(getattr(self._risk, "get_spike_count_last_hour", lambda _s: 0)(sym))
+        if is_spike_market(sym) and not explicit_override:
+            _low_spike_floor = max(
+                self._post_spike_chase_min_ticks,
+                float(os.getenv("DERIV_LOW_SPIKE_CHASE_BLOCK_TICKS", "240") or 240),
+            )
+            _high_spike_threshold = max(
+                2,
+                int(float(os.getenv("DERIV_HIGH_SPIKE_CHASE_THRESHOLD_1H", "5") or 5)),
+            )
+            _high_spike_relax_mult = max(
+                0.70,
+                min(float(os.getenv("DERIV_HIGH_SPIKE_CHASE_RELAX_MULT", "0.90") or 0.90), 1.0),
+            )
+            if _spikes_1h <= 1:
+                resolved = max(resolved, _low_spike_floor)
+            elif _spikes_1h >= _high_spike_threshold:
+                resolved = max(self._post_spike_chase_min_ticks, resolved * _high_spike_relax_mult)
+
         # Sniper safety floor for spike markets.
         # Important: explicit per-symbol overrides MUST bypass this floor,
         # otherwise tuned maps (e.g. BOOM500:15) are silently ignored.
@@ -671,12 +703,24 @@ class DerivDaemon:
         _velocity_score = float(_sb.get("velocity_score") or 0.0)
         _hd_bonus = float(_sb.get("hd_bonus") or 0.0)
         _velocity_dir = str(_sb.get("velocity_dir") or "").upper()
+        _spikes_1h = int(getattr(self._risk, "get_spike_count_last_hour", lambda _s: 0)(symbol))
+        _cycle_ticks = int((profile or {}).get("spike_interval_ticks", 0) or 0)
+        _expected_spikes_1h = int(round(3600.0 / float(_cycle_ticks))) if _cycle_ticks > 0 else 0
+        _spike_density_1h = (
+            float(_spikes_1h) / float(max(1, _expected_spikes_1h))
+            if _expected_spikes_1h > 0
+            else 0.0
+        )
 
         _min_margin = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_SCORE_MARGIN", "0.60") or 0.60)
         _min_momentum = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_MOMENTUM_MIN", "1.10") or 1.10)
         _min_velocity = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_VELOCITY_MIN", "0.45") or 0.45)
         _min_atr = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_ATR_MIN", "1.00") or 1.00)
         _min_hd = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_HD_MIN", "0.50") or 0.50)
+        _min_spikes_1h_signal = max(
+            1,
+            int(float(os.getenv("DERIV_POST_SPIKE_STRENGTH_SPIKES_1H_MIN", "3") or 3)),
+        )
         _required_signals = max(
             1,
             min(
@@ -696,21 +740,30 @@ class DerivDaemon:
             _signals.append("atr")
         if _hd_bonus >= _min_hd:
             _signals.append("hd")
+        if _spikes_1h >= _min_spikes_1h_signal:
+            _signals.append("spikes_1h")
+
+        _required_signals_effective = _required_signals
+        if _spikes_1h <= 1:
+            _required_signals_effective = min(5, _required_signals + 1)
 
         _dir_conflict = bool(
             _velocity_dir
             and snap.side
             and _velocity_dir != str(snap.side).upper()
         )
-        _strong_enough = (len(_signals) >= _required_signals) and not _dir_conflict
+        _strong_enough = (len(_signals) >= _required_signals_effective) and not _dir_conflict
 
         _sb["post_spike_strength_elapsed_ticks"] = round(_elapsed, 1)
         _sb["post_spike_strength_window_ticks"] = round(_strength_window, 1)
         # Backward-compatible keys for existing dashboards/parsers.
         _sb["post_spike_strength_elapsed_sec"] = round(_elapsed, 1)
         _sb["post_spike_strength_window_sec"] = round(_strength_window, 1)
+        _sb["post_spike_strength_spikes_1h"] = int(_spikes_1h)
+        _sb["post_spike_strength_expected_spikes_1h"] = int(_expected_spikes_1h)
+        _sb["post_spike_strength_spike_density_1h"] = round(_spike_density_1h, 3)
         _sb["post_spike_strength_signals"] = list(_signals)
-        _sb["post_spike_strength_required"] = _required_signals
+        _sb["post_spike_strength_required"] = _required_signals_effective
         _sb["post_spike_strength_ok"] = _strong_enough
 
         if _strong_enough:
@@ -738,7 +791,7 @@ class DerivDaemon:
                     "vel=%.2f atr=%.2f hd=%.2f score=%.2f",
                     symbol,
                     f"{_starv_ticks:.0f}" if _starv_ticks != float("inf") else "never",
-                    len(_signals), _required_signals,
+                    len(_signals), _required_signals_effective,
                     _score_margin, _momentum, _velocity_score, _atr_score, _hd_bonus,
                     float(snap.score or 0.0),
                 )
@@ -751,18 +804,19 @@ class DerivDaemon:
         _LOGGER.warning(
             "[POST_SPIKE_REJECT_TELEMETRY] symbol=%s elapsed=%.0ft window=%.0ft "
             "signals=%d/%d score=%.2f margin=%.2f momentum=%.2f velocity=%.2f "
-            "atr=%.2f hd=%.2f dir_conflict=%s side=%s vel_dir=%s regime=%s",
+            "atr=%.2f hd=%.2f spikes_1h=%d density=%.2f dir_conflict=%s side=%s vel_dir=%s regime=%s",
             symbol, _elapsed, _strength_window,
-            len(_signals), _required_signals,
+            len(_signals), _required_signals_effective,
             float(snap.score or 0.0), _score_margin, _momentum, _velocity_score,
-            _atr_score, _hd_bonus, _dir_conflict, snap.side, _velocity_dir,
+            _atr_score, _hd_bonus, _spikes_1h, _spike_density_1h,
+            _dir_conflict, snap.side, _velocity_dir,
             snap.regime,
         )
 
         _reason = (
             "post_spike_strength_veto:"
             f"{_elapsed:.0f}t<{_strength_window:.0f}t "
-            f"signals={len(_signals)}/{_required_signals} "
+            f"signals={len(_signals)}/{_required_signals_effective} "
             f"margin={_score_margin:.2f} mom={_momentum:.2f} "
             f"vel={_velocity_score:.2f} atr={_atr_score:.2f}"
         )
@@ -1819,6 +1873,7 @@ class DerivDaemon:
         _dyn_cfg = self.get_dynamic_config(tick.symbol, _early_profile)
         _dyn_active = bool(_dyn_cfg.get("is_active", False))
         _dyn_source = str(_dyn_cfg.get("source") or "")
+        _dyn_inactive_bypassed = False
         if tick.symbol.upper() in _FORCED_DISABLED_SYMBOLS:
             _LOGGER.info("[PIPELINE] SYMBOL_FORCED_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_forced_disabled")
@@ -1832,33 +1887,53 @@ class DerivDaemon:
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_suspended")
             return
         if _dyn_source == "dynamic_db" and not _dyn_active:
-            _LOGGER.info("[PIPELINE] SYMBOL_DYNAMIC_INACTIVE %s — skipping", tick.symbol)
-            _inactive_now = time.time()
-            _inactive_last = float(self._dynamic_inactive_last_emit_ts.get(tick.symbol) or 0.0)
-            if (_inactive_now - _inactive_last) >= float(self._dynamic_inactive_decision_interval_sec):
-                self._dynamic_inactive_last_emit_ts[tick.symbol] = _inactive_now
-                _dyn_score_min = float(_dyn_cfg.get("score_min_override") or 0.0)
-                _dyn_regime = str(_dyn_cfg.get("market_regime") or "NORMAL")
-                _dyn_spf = int(_dyn_cfg.get("spike_pre_filter_target") or 0)
-                self._record_decision(
-                    symbol=tick.symbol,
-                    allowed=False,
-                    side=None,
-                    score=_dyn_score_min,
-                    reason=(
-                        f"DYNAMIC_INACTIVE: regime={_dyn_regime} "
-                        f"score_min={_dyn_score_min:.2f} spf={_dyn_spf}"
-                    ),
-                    extra={
-                        "dynamic_inactive": True,
-                        "dynamic_cfg_source": _dyn_source,
-                        "dynamic_cfg_regime": _dyn_regime,
-                        "dynamic_cfg_score_min": round(_dyn_score_min, 3),
-                        "dynamic_cfg_spike_pre_filter": _dyn_spf,
-                    },
-                )
-            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="dynamic_symbol_inactive")
-            return
+            _sym_u = tick.symbol.upper()
+            if _DYNAMIC_INACTIVE_BYPASS_ENABLE and _sym_u in _DYNAMIC_INACTIVE_BYPASS_SYMBOLS:
+                _dyn_inactive_bypassed = True
+                _dyn_active = True
+                _dyn_cfg = {
+                    **_dyn_cfg,
+                    "is_active": True,
+                    "inactive_bypassed": True,
+                    "source": "dynamic_db_bypass",
+                }
+                _bypass_now = time.time()
+                _bypass_key = f"{tick.symbol}:dynamic_bypass"
+                _bypass_last = float(self._dynamic_inactive_last_emit_ts.get(_bypass_key) or 0.0)
+                if (_bypass_now - _bypass_last) >= float(self._dynamic_inactive_decision_interval_sec):
+                    self._dynamic_inactive_last_emit_ts[_bypass_key] = _bypass_now
+                    _LOGGER.info(
+                        "[PIPELINE] SYMBOL_DYNAMIC_INACTIVE_BYPASS %s — continuing with dynamic config",
+                        tick.symbol,
+                    )
+            else:
+                _LOGGER.info("[PIPELINE] SYMBOL_DYNAMIC_INACTIVE %s — skipping", tick.symbol)
+                _inactive_now = time.time()
+                _inactive_last = float(self._dynamic_inactive_last_emit_ts.get(tick.symbol) or 0.0)
+                if (_inactive_now - _inactive_last) >= float(self._dynamic_inactive_decision_interval_sec):
+                    self._dynamic_inactive_last_emit_ts[tick.symbol] = _inactive_now
+                    _dyn_score_min = float(_dyn_cfg.get("score_min_override") or 0.0)
+                    _dyn_regime = str(_dyn_cfg.get("market_regime") or "NORMAL")
+                    _dyn_spf = int(_dyn_cfg.get("spike_pre_filter_target") or 0)
+                    self._record_decision(
+                        symbol=tick.symbol,
+                        allowed=False,
+                        side=None,
+                        score=_dyn_score_min,
+                        reason=(
+                            f"DYNAMIC_INACTIVE: regime={_dyn_regime} "
+                            f"score_min={_dyn_score_min:.2f} spf={_dyn_spf}"
+                        ),
+                        extra={
+                            "dynamic_inactive": True,
+                            "dynamic_cfg_source": _dyn_source,
+                            "dynamic_cfg_regime": _dyn_regime,
+                            "dynamic_cfg_score_min": round(_dyn_score_min, 3),
+                            "dynamic_cfg_spike_pre_filter": _dyn_spf,
+                        },
+                    )
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="dynamic_symbol_inactive")
+                return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 0c — GATE: spike pre-filter (BOOM/CRASH only)
@@ -2290,6 +2365,7 @@ class DerivDaemon:
             _dyn_score_min = max(_dyn_score_min, self._dynamic_gate_fast_floor)
 
         snap.score_breakdown["dynamic_cfg_active"] = _dyn_active
+        snap.score_breakdown["dynamic_inactive_bypassed"] = _dyn_inactive_bypassed
         snap.score_breakdown["dynamic_score_raw"] = round(_dyn_score_min_raw, 3)
         snap.score_breakdown["dynamic_score_ceiling"] = round(_dyn_score_ceiling, 3)
         snap.score_breakdown["dynamic_score_ceiling_source"] = _dyn_score_ceiling_source
