@@ -215,6 +215,8 @@ class DerivOpenContract:
     side: str
     stake_usdt: float
     multiplier: int
+    stop_loss_pct: float = field(default=0.0)
+    take_profit_pct: float = field(default=0.0)
     entry_price: float
     opened_at_ts: float
     score_breakdown: dict | None = field(default=None)
@@ -395,6 +397,8 @@ class DerivTradeExecutor:
                         side=_r["side"],
                         stake_usdt=float(_r["stake_usdt"]),
                         multiplier=int(_r.get("multiplier", 200)),
+                        stop_loss_pct=float(_r.get("stop_loss_pct", 0.0)),
+                        take_profit_pct=float(_r.get("take_profit_pct", 0.0)),
                         entry_price=float(_r.get("entry_price", 0.0)),
                         opened_at_ts=float(_r["opened_at_ts"]),
                         score_breakdown=_r.get("score_breakdown"),
@@ -1159,6 +1163,8 @@ class DerivTradeExecutor:
             side=order.side,
             stake_usdt=actual_stake,
             multiplier=order.multiplier,
+            stop_loss_pct=float(order.stop_loss_pct or 0.0),
+            take_profit_pct=float(order.take_profit_pct or 0.0),
             entry_price=entry_price,
             opened_at_ts=time.time(),
             score_breakdown=order.score_breakdown,
@@ -1709,6 +1715,11 @@ class DerivTradeExecutor:
                 exit_reason = f"ratchet_sl_alcanzado(floor={oc_check.trail_sl_locked:.4f})"
             else:
                 exit_reason = self._classify_exit(poc)
+            exit_reason = self._relabel_unknown_as_broker_sl(
+                exit_reason,
+                realized,
+                oc_check,
+            )
 
             async with self._lock:
                 oc = self._open.pop(cid, None)
@@ -2233,6 +2244,44 @@ class DerivTradeExecutor:
             return f"unknown_pnl_{_pnl:+.2f}"
         return f"broker_{status}"
 
+    def _relabel_unknown_as_broker_sl(
+        self,
+        exit_reason: str,
+        realized_pnl: float,
+        oc: DerivOpenContract | None,
+    ) -> str:
+        """Relabel unknown negative closes as broker SL when they match configured SL.
+
+        Deriv WS close pushes sometimes omit status/limit metadata, which may
+        leave `_classify_exit` with `unknown_pnl_-X.XX` even when broker SL was
+        hit exactly. This helper uses local order metadata as a deterministic
+        fallback for classification only.
+        """
+        if not str(exit_reason or "").startswith("unknown_pnl_"):
+            return exit_reason
+        if oc is None:
+            return exit_reason
+
+        stake = max(0.0, float(getattr(oc, "stake_usdt", 0.0) or 0.0))
+        if stake <= 0:
+            return exit_reason
+
+        sl_pct = max(0.0, float(getattr(oc, "stop_loss_pct", 0.0) or 0.0))
+        if sl_pct <= 0.0:
+            with suppress(Exception):
+                sl_pct = max(
+                    0.0,
+                    float(get_asset_profile(str(getattr(oc, "symbol", ""))).get("stop_loss_pct", 0.0) or 0.0),
+                )
+        if sl_pct <= 0.0:
+            return exit_reason
+
+        expected_sl_usdt = stake * sl_pct
+        tol = max(0.03, expected_sl_usdt * 0.20)
+        if float(realized_pnl) <= -(expected_sl_usdt - tol):
+            return "broker_sl_hit"
+        return exit_reason
+
     # ─────────────────────────────────────────────────────────────────────────
     # Live WS update callback
     # Fired on EVERY broker POC push (tick updates + is_sold=1 close events).
@@ -2522,6 +2571,7 @@ class DerivTradeExecutor:
             exit_reason = f"ratchet_sl_alcanzado(floor={oc.trail_sl_locked:.4f})"
         else:
             exit_reason = self._classify_exit(poc)
+        exit_reason = self._relabel_unknown_as_broker_sl(exit_reason, realized, oc)
 
         record = {
             "broker": "deriv",
@@ -2679,6 +2729,7 @@ class DerivTradeExecutor:
                         exit_reason = self._classify_exit(poc)
                         if exit_reason in ("", "unknown"):
                             exit_reason = "forced_close"
+                    exit_reason = self._relabel_unknown_as_broker_sl(exit_reason, realized, oc)
 
                     _dpm_stats = self._dpm.get_close_stats(cid, realized)
                     self._dpm.unregister(cid)
@@ -3168,6 +3219,8 @@ class DerivTradeExecutor:
                 side=side,
                 stake_usdt=stake,
                 multiplier=multiplier,
+                stop_loss_pct=float(_oc_profile.get("stop_loss_pct", 0.0) or 0.0),
+                take_profit_pct=float(_oc_profile.get("take_profit_pct", 0.0) or 0.0),
                 entry_price=entry_price,
                 opened_at_ts=opened_at,
                 score_breakdown={"recovered": True},
