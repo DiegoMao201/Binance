@@ -299,6 +299,27 @@ class DerivDaemon:
             ),
         )
         self._post_spike_chase_block_sec_map = self._load_post_spike_chase_block_map()
+        # 2026-05-30 POST-SL ENTRY GATE: after a broker_sl_hit on a spike market,
+        # most explosions arrive within 60-180s (forensic 28 SLs/12h: 36% within 120s).
+        # During AWAIT_SEC, only enter when a fresh SPIKE_EVENT lands for the
+        # same symbol (we are the legitimate spike-rider). If the await window
+        # expires without spike, lock chase entries for CHASE_LOCK_SEC more
+        # (typical chase entries 5-15min later lose money).
+        self._post_sl_await_sec = max(
+            0,
+            int(os.getenv("DERIV_POST_SL_SPIKE_AWAIT_SEC", "180") or 180),
+        )
+        self._post_sl_chase_lock_sec = max(
+            0,
+            int(os.getenv("DERIV_POST_SL_CHASE_LOCK_SEC", "240") or 240),
+        )
+        self._post_sl_gate_enabled = os.getenv(
+            "DERIV_POST_SL_GATE_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._post_sl_emit_throttle_sec = max(
+            10,
+            int(os.getenv("DERIV_POST_SL_EMIT_THROTTLE_SEC", "30") or 30),
+        )
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -1903,6 +1924,60 @@ class DerivDaemon:
                 tick.symbol, bot_entered=False, block_reason="symbol_profit_locked"
             )
             return
+        # 2026-05-30 POST-SL ENTRY GATE (spike markets only):
+        # Forensic 12h pattern: 36% of broker_sl_hits are followed by a real
+        # spike within 120s. Entering pre-spike again in that window almost
+        # always SL'd again. Entering post-spike within ~90s captures the move.
+        # Rule:
+        #   age = now - last_sl_ts(symbol)
+        #   spike_since_sl = (last_spike_ts > last_sl_ts)
+        #   if 0 < age <= AWAIT_SEC and not spike_since_sl  → BLOCK post_sl_await
+        #   if AWAIT_SEC < age <= AWAIT+CHASE_LOCK and not spike_since_sl → BLOCK post_sl_chase_lock
+        #   else (spike landed OR window expired) → ALLOW
+        if self._post_sl_gate_enabled and is_spike_market(tick.symbol):
+            _sl_age = None
+            with suppress(Exception):
+                _sl_age = self._executor.last_sl_age_sec(tick.symbol)
+            if _sl_age is not None and _sl_age > 0:
+                _last_sl_ts = float(self._executor.last_sl_ts(tick.symbol) or 0.0)
+                _last_spike_ts = 0.0
+                with suppress(Exception):
+                    _last_spike_ts = float(
+                        self._risk._last_spike_ts.get(tick.symbol, 0.0) or 0.0  # noqa: SLF001
+                    )
+                _spike_since_sl = _last_spike_ts > _last_sl_ts
+                _await_lim = float(self._post_sl_await_sec)
+                _full_lim = _await_lim + float(self._post_sl_chase_lock_sec)
+                _reason = None
+                if _sl_age <= _await_lim and not _spike_since_sl:
+                    _reason = "post_sl_spike_await"
+                elif _sl_age <= _full_lim and not _spike_since_sl:
+                    _reason = "post_sl_chase_lock"
+                if _reason is not None:
+                    _now_psl = time.time()
+                    _last_emit = float(
+                        self._dynamic_inactive_last_emit_ts.get(
+                            f"{tick.symbol}:{_reason}"
+                        ) or 0.0
+                    )
+                    if (_now_psl - _last_emit) >= self._post_sl_emit_throttle_sec:
+                        self._dynamic_inactive_last_emit_ts[
+                            f"{tick.symbol}:{_reason}"
+                        ] = _now_psl
+                        _LOGGER.info(
+                            "[PIPELINE] %s %s — sl_age=%.0fs await=%ds chase_lock=%ds "
+                            "spike_since_sl=%s (waiting for fresh spike to enter)",
+                            _reason.upper(),
+                            tick.symbol,
+                            _sl_age,
+                            self._post_sl_await_sec,
+                            self._post_sl_chase_lock_sec,
+                            _spike_since_sl,
+                        )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False, block_reason=_reason
+                    )
+                    return
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")

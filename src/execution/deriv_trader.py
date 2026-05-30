@@ -363,6 +363,9 @@ class DerivTradeExecutor:
         self._hourly_net_pnl_file = (
             self._settings.logs_dir / "deriv_hourly_net_pnl.json"
         )
+        # 2026-05-30 POST-SL ENTRY GATE: timestamp of last broker_sl_hit per
+        # spike symbol (used by main_deriv pipeline to enforce spike-await window).
+        self._last_sl_ts: dict[str, float] = {}
         with suppress(Exception):
             if self._profit_lock_state_file.exists():
                 raw = json.loads(self._profit_lock_state_file.read_text())
@@ -901,6 +904,17 @@ class DerivTradeExecutor:
                 self._persist_profit_lock()
             return (False, 0.0)
         return (True, unlock_at)
+
+    def last_sl_ts(self, symbol: str) -> float:
+        """Return timestamp of the most recent broker_sl_hit for *symbol* (0 if none)."""
+        return float(self._last_sl_ts.get(str(symbol or "").upper()) or 0.0)
+
+    def last_sl_age_sec(self, symbol: str) -> float | None:
+        """Return seconds since last broker_sl_hit for *symbol* (None if none)."""
+        ts = self.last_sl_ts(symbol)
+        if ts <= 0:
+            return None
+        return max(0.0, time.time() - ts)
 
     def _multispike_policy(self, symbol: str) -> dict[str, Any]:
         """Resolve multispike ratchet policy (dynamic config + env fallback)."""
@@ -2235,6 +2249,26 @@ class DerivTradeExecutor:
             _pnl = float(record.get("realized_pnl_usdt") or 0.0)
             if _sym and is_spike_market(_sym):
                 self._maybe_arm_profit_lock(_sym, _pnl)
+        # 2026-05-30 POST-SL ENTRY GATE: track SL hit timestamp per spike symbol.
+        # Enables main_deriv pipeline to enforce a "spike-await window" right
+        # after a SL hit (when explosions commonly arrive within 60-120s)
+        # and a chase-lock after the window if no spike materialized.
+        with suppress(Exception):
+            _sym2 = str(record.get("symbol") or "").upper()
+            _reason = str(record.get("exit_reason") or "")
+            _pnl2 = float(record.get("realized_pnl_usdt") or 0.0)
+            if (
+                _sym2
+                and is_spike_market(_sym2)
+                and _reason == "broker_sl_hit"
+                and _pnl2 < 0.0
+            ):
+                _close_ts = float(
+                    record.get("closed_at_ts")
+                    or record.get("ts")
+                    or time.time()
+                )
+                self._last_sl_ts[_sym2] = _close_ts
         # Enrich spike record when an existing position captured the spike
         if record.get("exit_reason") in (
             "spike_tp",
