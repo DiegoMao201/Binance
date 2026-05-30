@@ -297,72 +297,40 @@ class DerivTradeExecutor:
         ).strip().lower() in {"1", "true", "yes", "on"}
         # Spike-wait timeout (2026-05-29):
         # Forensic over 962 closed contracts:
+        # Spike-wait timeout (2026-05-29, simplified v4):
+        # Single rule: if held >= T_soft AND peak_profit <= stake*MFE_FRAC →
+        # CUT NOW. No defer, no loss threshold. Re-entry is allowed immediately
+        # once a fresh signal forms.
+        # Forensic over 962 trades:
         #   - wins hold p50=400s, p75=773s
         #   - losses hold p50=1048s, p75=1621s
         #   - hold buckets >=600s collapse to <=51% win rate and net negative pnl
-        # This exit cuts spike trades early when the spike clearly didn't show up:
-        # past T seconds, with very low MFE and meaningful floating loss, and not
-        # right before an expected spike (re-uses _should_defer_zero_peak_exit).
-        # After the close the per-symbol cooldown keeps re-entry possible if a
-        # real new signal arrives.
         self._spike_wait_timeout_enabled = os.getenv(
             "DERIV_SPIKE_WAIT_TIMEOUT_ENABLED",
             "true",
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._spike_wait_timeout_sec = max(
             120.0,
-            min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_SEC", "480") or 480), 1200.0),
+            min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_SEC", "450") or 450), 1200.0),
         )
         self._spike_wait_timeout_mfe_frac = max(
             0.0,
-            min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_MFE_FRAC", "0.15") or 0.15), 1.0),
+            min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_MFE_FRAC", "0.10") or 0.10), 1.0),
         )
-        self._spike_wait_timeout_loss_frac = max(
-            0.05,
-            min(float(os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_LOSS_FRAC", "0.25") or 0.25), 1.5),
-        )
-        # Hard-cut variant: same loss threshold as soft (default 0.25 stake) but
-        # bypasses the defer guard, so we don't wait for the spike-cycle defer
-        # to clear if it never does. CRITICAL: must be < broker SL (typically
-        # ~36% of stake) or the broker hits SL first and the cut never fires.
-        # Per-symbol soft T + hardcut_margin (default +120s).
-        self._spike_wait_hardcut_loss_frac = max(
-            self._spike_wait_timeout_loss_frac,
-            min(
-                float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_LOSS_FRAC", "0.25") or 0.25),
-                2.0,
-            ),
-        )
-        # Emergency cut: if at T_soft the floating loss is already deep (close
-        # to broker SL), bypass the defer even if the spike-cycle says one is
-        # coming. Default 0.32 stake (= -$1.60 on $5 stake), well under the
-        # broker SL at -$1.80 (~36% stake). Set to >=1.0 to disable.
-        self._spike_wait_emergency_loss_frac = max(
-            self._spike_wait_timeout_loss_frac,
-            min(
-                float(os.getenv("DERIV_SPIKE_WAIT_EMERGENCY_LOSS_FRAC", "0.32") or 0.32),
-                2.0,
-            ),
-        )
-        # Per-symbol soft-timeout overrides (dynamic per-symbol patience window).
-        # Derived from 962-trade audit: win_hold p75 per symbol.
-        # Format: "BOOM500:720,BOOM900:900,CRASH600:540,..."
+        # Per-symbol soft-timeout overrides — tightened (2026-05-29 v4).
+        # Operator request: "sale sí o sí en ~450s, sin esperar milagros".
+        # Format: "BOOM500:450,BOOM900:600,..."
         # Falls back to DERIV_SPIKE_WAIT_TIMEOUT_SEC for symbols not in the map.
         _swt_default_map = (
-            "BOOM300:300,CRASH300:300,"
-            "BOOM500:720,CRASH500:480,"
-            "BOOM600:540,CRASH600:540,"
-            "BOOM900:900,CRASH900:720,"
-            "BOOM1000:900,CRASH1000:720"
+            "BOOM300:240,CRASH300:240,"
+            "BOOM500:450,CRASH500:420,"
+            "BOOM600:450,CRASH600:420,"
+            "BOOM900:600,CRASH900:540,"
+            "BOOM1000:600,CRASH1000:540"
         )
         self._spike_wait_timeout_sec_map = self._parse_symbol_seconds_map(
             os.getenv("DERIV_SPIKE_WAIT_TIMEOUT_SEC_MAP", _swt_default_map),
             max_value=1800.0,
-        )
-        # Hard-cut margin added on top of the per-symbol soft T (default 120s).
-        self._spike_wait_hardcut_margin_sec = max(
-            30.0,
-            min(float(os.getenv("DERIV_SPIKE_WAIT_HARDCUT_MARGIN_SEC", "120") or 120), 900.0),
         )
         # Optional operator override map: "BOOM600:90,CRASH900:120".
         self._spike_hold_bonus_map = self._parse_symbol_seconds_map(
@@ -377,14 +345,10 @@ class DerivTradeExecutor:
             self._zero_peak_exit_enabled,
         )
         _LOGGER.info(
-            "[deriv-trader] spike_wait_timeout_enabled=%s default_T=%.0fs mfe<=stake*%.2f loss>=stake*%.2f hardcut_margin=%.0fs hardcut_loss>=stake*%.2f emergency_loss>=stake*%.2f per_sym=%s",
+            "[deriv-trader] spike_wait_timeout_enabled=%s default_T=%.0fs mfe<=stake*%.2f per_sym=%s",
             self._spike_wait_timeout_enabled,
             self._spike_wait_timeout_sec,
             self._spike_wait_timeout_mfe_frac,
-            self._spike_wait_timeout_loss_frac,
-            self._spike_wait_hardcut_margin_sec,
-            self._spike_wait_hardcut_loss_frac,
-            self._spike_wait_emergency_loss_frac,
             self._spike_wait_timeout_sec_map,
         )
         _LOGGER.info(
@@ -1286,12 +1250,11 @@ class DerivTradeExecutor:
                         self._closing.discard(cid)
                         oc_check.pending_close_reason = None
 
-                # Spike-wait timeout (2026-05-29 forensic):
-                # Cut loss early when the expected spike clearly did not show up.
-                # Conditions: spike market, held>=T, peak_profit small relative to
-                # stake AND floating loss is meaningful. Defers near an expected
-                # spike (re-uses chase/zero_peak defer). Hard-cut variant fires
-                # without deferral when far beyond T with severe loss.
+                # Spike-wait timeout v4 (2026-05-29): hard-time cut, no defer.
+                # If the spike didn't show up in T_soft seconds, sell. Period.
+                # Peak<=stake*MFE_FRAC means no real traction happened. The
+                # re-entry path is the same fresh-signal flow, so a real spike
+                # arriving later will be caught by the next entry.
                 if (
                     self._spike_wait_timeout_enabled
                     and is_spike_market(oc_check.symbol)
@@ -1299,95 +1262,40 @@ class DerivTradeExecutor:
                 ):
                     _stake = max(0.0, float(oc_check.stake_usdt))
                     _sym_u = str(oc_check.symbol or "").upper()
-                    # Per-symbol soft T (derived from real win-hold p75 audit);
-                    # default to env DERIV_SPIKE_WAIT_TIMEOUT_SEC when symbol
-                    # has no explicit override.
                     _T_soft = float(
                         self._spike_wait_timeout_sec_map.get(
                             _sym_u, self._spike_wait_timeout_sec
                         )
                     )
-                    _T_hard = _T_soft + self._spike_wait_hardcut_margin_sec
                     _mfe_cap = _stake * self._spike_wait_timeout_mfe_frac
-                    _soft_loss_cap = -_stake * self._spike_wait_timeout_loss_frac
-                    _hard_loss_cap = -_stake * self._spike_wait_hardcut_loss_frac
-                    _emergency_loss_cap = -_stake * self._spike_wait_emergency_loss_frac
                     _peak_v = float(oc_check.peak_profit)
                     _float_v = float(oc_check.floating_pnl)
-                    _soft_hit = (
-                        held >= _T_soft
-                        and _peak_v <= _mfe_cap
-                        and _float_v <= _soft_loss_cap
-                    )
-                    # Emergency: at T_soft, if loss is already near broker SL,
-                    # bypass defer even if the spike-cycle says one is coming.
-                    _emergency_hit = (
-                        held >= _T_soft
-                        and _peak_v <= _mfe_cap
-                        and _float_v <= _emergency_loss_cap
-                    )
-                    _hard_hit = (
-                        held >= _T_hard
-                        and _float_v <= _hard_loss_cap
-                    )
-                    if _soft_hit or _hard_hit:
-                        if _hard_hit or _emergency_hit:
-                            _defer = False
-                            _defer_reason = (
-                                "hardcut_bypass_defer" if _hard_hit
-                                else "emergency_bypass_defer"
-                            )
-                        else:
-                            _defer, _defer_reason = self._should_defer_zero_peak_exit(
-                                oc_check.symbol,
-                                held,
-                            )
-                        if _defer:
-                            _LOGGER.info(
-                                "[deriv-trader] spike_wait_timeout deferred: %s (%s) "
-                                "held=%.1fs T=%.0fs peak=%.4f floating=%.4f stake=%.2f %s",
+                    if held >= _T_soft and _peak_v <= _mfe_cap:
+                        self._closing.add(cid)
+                        oc_check.pending_close_reason = "spike_wait_timeout"
+                        _LOGGER.info(
+                            "[deriv-trader] spike_wait_timeout: %s (%s) "
+                            "held=%.1fs T=%.0fs peak=%.4f<=%.4f floating=%.4f stake=%.2f "
+                            "— no spike traction, cutting now",
+                            cid,
+                            oc_check.symbol,
+                            held,
+                            _T_soft,
+                            _peak_v,
+                            _mfe_cap,
+                            _float_v,
+                            _stake,
+                        )
+                        try:
+                            await self._client.sell(cid)
+                        except DerivClientError as exc:
+                            _LOGGER.warning(
+                                "[deriv-trader] spike_wait_timeout sell failed for %s: %s",
                                 cid,
-                                oc_check.symbol,
-                                held,
-                                _T_soft,
-                                _peak_v,
-                                _float_v,
-                                _stake,
-                                _defer_reason,
+                                exc,
                             )
-                        else:
-                            self._closing.add(cid)
-                            oc_check.pending_close_reason = "spike_wait_timeout"
-                            _trigger = (
-                                "HARDCUT" if _hard_hit
-                                else ("EMERGENCY" if _emergency_hit else "SOFT")
-                            )
-                            _LOGGER.info(
-                                "[deriv-trader] spike_wait_timeout: %s (%s) "
-                                "held=%.1fs T_soft=%.0fs T_hard=%.0fs trigger=%s "
-                                "peak=%.4f<=%.4f floating=%.4f stake=%.2f "
-                                "— closing stagnant trade",
-                                cid,
-                                oc_check.symbol,
-                                held,
-                                _T_soft,
-                                _T_hard,
-                                _trigger,
-                                _peak_v,
-                                _mfe_cap,
-                                _float_v,
-                                _stake,
-                            )
-                            try:
-                                await self._client.sell(cid)
-                            except DerivClientError as exc:
-                                _LOGGER.warning(
-                                    "[deriv-trader] spike_wait_timeout sell failed for %s: %s",
-                                    cid,
-                                    exc,
-                                )
-                                self._closing.discard(cid)
-                                oc_check.pending_close_reason = None
+                            self._closing.discard(cid)
+                            oc_check.pending_close_reason = None
 
             try:
                 resp = await self._client.proposal_open_contract(cid)
