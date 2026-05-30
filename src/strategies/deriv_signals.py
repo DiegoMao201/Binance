@@ -439,7 +439,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_profit_delta_usdt": 0.10,
         # Phase 31: full config additions
         "hurst_min_spike": 0.43,        # Phase 31: aligned with other CRASH profiles
-        "fvg_tier_minimo": "fvg_detected",  # Phase 31: Tier 1 sufficient — generate data first
+        # 2026-05-29 user directive: CRASH no necesita FVG — quitar veto estructural.
+        "require_fvg_mitigation": False,
+        "fvg_tier_minimo": "any",
+        "block_bc_escape_env": False,
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
         "stake_target_usdt": 5.00,      # 2026-05-29: user directive — CRASH fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 31: align with other CRASH profiles → sl_usd > broker floor
@@ -462,7 +465,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
         "hurst_min_spike": 0.42,        # Prueba4-restart: 0.43→0.42 — 2 spikes blocked at H=0.424-0.425
-        "fvg_tier_minimo": "fvg_detected",  # Phase 26: explicit Tier 1 OK (was implicit)
+        # 2026-05-29 user directive: CRASH no necesita FVG — desactivar exigencia estructural.
+        "require_fvg_mitigation": False,
+        "fvg_tier_minimo": "any",  # Phase 26 → 2026-05-29: cualquier estado FVG admitido
         # ── Phase 26: geo_entry_max relaxed to +0.30 ──────────────────────
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         # Muestra3: tighten overshoot soft→hard boundary from 0.30 to 0.25 for CRASH500.
@@ -478,9 +483,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         "min_score": 4.5,              # Phase 32: profile gate, let risk engine gate
-        # Prueba03: bc_escape_env 20% WR (5t) vs fvg_detected/mitigated mixed.
-        # All bc_escape_env entries timeout. block=True → only enter with real FVG structure.
-        "block_bc_escape_env": True,    # Prueba04: hard veto — CRASH500 bc_escape_env no edge
+        # 2026-05-29 user directive: CRASH puede entrar sin FVG (block_bc_escape_env=False).
+        "block_bc_escape_env": False,
         "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -521,14 +525,15 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": 0.30,          # Phase 26: was -0.20 — DEMO data generation
         "spike_family": "boom_crash",
         "spike_interval_ticks": 1000,
-        "fvg_tier_minimo": "fvg_detected",  # DEMO Phase 23: allow Tier 1 (FVG detected)
+        # 2026-05-29 user directive: CRASH no necesita FVG.
+        "require_fvg_mitigation": False,
+        "fvg_tier_minimo": "any",
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36, # Phase 27: align with CRASH600/900 → sl_usd > broker floor
-        # Prueba03: ALL 7 CRASH1000 trades bc_escape_env → 14% WR (1 win in 702s). Score doesn't help.
-        # Raising min_score 4.5→7.0 + block bc_escape_env. Only enter on strong FVG setups.
-        "min_score": 7.0,               # Prueba04: raised from 4.5 — low-score CRASH1000 entries all timeout
-        "block_bc_escape_env": True,    # Prueba04: hard veto — ALL Prueba03 CRASH1000 losses were bc_escape_env
+        # 2026-05-29 user directive: bajar score para que opere y permitir entradas sin FVG.
+        "min_score": 4.8,
+        "block_bc_escape_env": False,
         "cooldown_sec": 120,            # Prueba4-restart: 300→120
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
@@ -549,7 +554,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.20,
+        # 2026-05-29 user directive: BOOM900 0 entradas hoy — bajar gate manteniendo FVG obligatorio.
+        "min_score": 5.50,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -566,11 +572,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
+        # 2026-05-29: FVG mandatorio en BOOM900 por directiva del usuario.
         "fvg_tier_minimo": "fvg_mitigated",
         "block_bc_escape_env": True,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "spike_min_post_sec": 270,
+        "spike_min_post_sec": 200,
     },
     "CRASH900": {
         "type": "spike_crash",
@@ -583,10 +590,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # - max_hold 600→820s to give late CRASH900 spikes (526-576s observed) room.
         "max_hold_seconds": 820,
         "ema_distance_pct": 0.04,
-        "require_fvg_mitigation": True,
+        # 2026-05-29 user directive: CRASH900 sin FVG, score más bajo, must trade.
+        "require_fvg_mitigation": False,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 6.80,
+        "min_score": 4.80,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "sl_multiplier": 3.0,
@@ -602,12 +610,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 900,
-        "fvg_tier_minimo": "fvg_mitigated",
-        "block_bc_escape_env": True,
+        "fvg_tier_minimo": "any",
+        "block_bc_escape_env": False,
         "cooldown_sec": 240,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "spike_min_post_sec": 300,
+        "spike_min_post_sec": 200,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
@@ -626,7 +634,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.20,
+        # 2026-05-29 user directive: BOOM600 1 entrada en 12h — bajar gate manteniendo FVG obligatorio.
+        "min_score": 5.50,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,
@@ -643,11 +652,12 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
+        # 2026-05-29: FVG mandatorio en BOOM600 por directiva del usuario.
         "fvg_tier_minimo": "fvg_mitigated",
         "block_bc_escape_env": True,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "spike_min_post_sec": 200,
+        "spike_min_post_sec": 150,
     },
     "CRASH600": {
         "type": "spike_crash",
@@ -659,10 +669,11 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ema_distance_pct typo (600). Single source of truth per field now.
         "max_hold_seconds": 620,
         "ema_distance_pct": 0.03,
-        "require_fvg_mitigation": True,
+        # 2026-05-29 user directive: CRASH600 sin FVG, score más bajo, must trade.
+        "require_fvg_mitigation": False,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 7.20,
+        "min_score": 4.80,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "sl_multiplier": 3.0,
@@ -678,8 +689,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
         "spike_interval_ticks": 600,
-        "fvg_tier_minimo": "fvg_mitigated",
-        "block_bc_escape_env": True,
+        "fvg_tier_minimo": "any",
+        "block_bc_escape_env": False,
         "cooldown_sec": 240,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
