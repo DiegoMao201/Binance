@@ -348,13 +348,20 @@ class DerivTradeExecutor:
         # dict[contract_id, {peak_pnl, entry_pnl, start_tick, buffer_ticks,
         #                    retention_pct, min_floor_usdt, drift_ticks, regime}]
         self._spike_buffer: dict[int, dict[str, Any]] = {}
-        # 2026-05-30 "tier-staircase v1":
-        # Cuando un contrato spike cierra con realized_pnl >= profit_lock
-        # threshold (default $2), bloquea re-entradas del símbolo hasta el
-        # cambio de hora UTC siguiente (cuota asegurada).
+        # 2026-05-30 "tier-staircase v3 NET":
+        # Profit-lock por símbolo basado en PnL NETO de la hora UTC corriente.
+        # _profit_lock_state[symbol] = unlock_at_ts (sólo presente si net >= threshold)
+        # _hourly_net_pnl[symbol] = {hour_bucket_ts: cumulative_realized_pnl_de_esa_hora}
+        # Cada close suma su realized_pnl al bucket; si net >= threshold → arma
+        # lock hasta cambio de hora; si net < threshold (p.ej. tras una pérdida
+        # posterior) → DESARMA el lock automáticamente.
         self._profit_lock_state: dict[str, float] = {}
         self._profit_lock_state_file = (
             self._settings.logs_dir / "deriv_profit_lock.json"
+        )
+        self._hourly_net_pnl: dict[str, dict[int, float]] = {}
+        self._hourly_net_pnl_file = (
+            self._settings.logs_dir / "deriv_hourly_net_pnl.json"
         )
         with suppress(Exception):
             if self._profit_lock_state_file.exists():
@@ -366,6 +373,25 @@ class DerivTradeExecutor:
                         for k, v in raw.items()
                         if isinstance(v, (int, float)) and float(v) > now_ts
                     }
+        with suppress(Exception):
+            if self._hourly_net_pnl_file.exists():
+                raw_h = json.loads(self._hourly_net_pnl_file.read_text())
+                if isinstance(raw_h, dict):
+                    now_hour = int(time.time() // 3600) * 3600
+                    for k, v in raw_h.items():
+                        if not isinstance(v, dict):
+                            continue
+                        sym_key = str(k).upper()
+                        kept: dict[int, float] = {}
+                        for hh, pnl in v.items():
+                            try:
+                                hh_ts = int(hh)
+                                if hh_ts >= now_hour:
+                                    kept[hh_ts] = float(pnl)
+                            except Exception:  # noqa: BLE001
+                                continue
+                        if kept:
+                            self._hourly_net_pnl[sym_key] = kept
         # Phase 5D: zero_peak emergency cuts are disabled by default while we
         # stabilize spike timing. Timeout/SL/ratchet remain active.
         self._zero_peak_exit_enabled = os.getenv(
@@ -771,7 +797,7 @@ class DerivTradeExecutor:
             return False
         return True
 
-    # ─── Profit-lock per symbol (per-hour quota) ──────────────────────────
+    # ─── Profit-lock per symbol (per-hour NET PnL) ───────────────────────
     def _persist_profit_lock(self) -> None:
         """Write _profit_lock_state to disk (best effort)."""
         with suppress(Exception):
@@ -780,30 +806,87 @@ class DerivTradeExecutor:
                 json.dumps(self._profit_lock_state, sort_keys=True)
             )
 
+    def _persist_hourly_net_pnl(self) -> None:
+        """Write _hourly_net_pnl to disk (best effort)."""
+        with suppress(Exception):
+            self._hourly_net_pnl_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                k: {str(hh): float(v) for hh, v in d.items()}
+                for k, d in self._hourly_net_pnl.items()
+            }
+            self._hourly_net_pnl_file.write_text(json.dumps(payload, sort_keys=True))
+
+    def _prune_hourly_net_pnl(self, now_ts: float) -> None:
+        """Drop hour buckets older than the current UTC hour."""
+        cur_hour = int(now_ts // 3600) * 3600
+        for sym, buckets in list(self._hourly_net_pnl.items()):
+            kept = {hh: v for hh, v in buckets.items() if hh >= cur_hour}
+            if kept:
+                self._hourly_net_pnl[sym] = kept
+            else:
+                del self._hourly_net_pnl[sym]
+
     def _maybe_arm_profit_lock(self, symbol: str, realized_pnl: float) -> None:
-        """If realized_pnl ≥ profit_lock_usdt, mark symbol inactive until next UTC hour."""
+        """Update hourly NET PnL and arm/disarm profit lock based on threshold.
+
+        v3 NET (2026-05-30):
+          - Suma `realized_pnl` al bucket de la hora UTC corriente para
+            `symbol`. Acepta wins y losses (pueden ser negativos).
+          - Si net_hour >= threshold → arma lock hasta el cambio de hora.
+          - Si net_hour <  threshold → DESARMA el lock (si estaba puesto)
+            permitiendo seguir buscando ganancia en esa misma hora.
+          - Persistencia best-effort en deriv_profit_lock.json + deriv_hourly_net_pnl.json.
+        """
         if not _PROFIT_LOCK_INACTIVE_HOUR:
             return
         threshold = float(_PROFIT_LOCK_USDT_DEFAULT)
-        if threshold <= 0 or realized_pnl < threshold:
+        if threshold <= 0:
             return
         key = str(symbol or "").upper()
         if not key:
             return
         now = time.time()
-        unlock_at = (int(now // 3600) + 1) * 3600
-        prev = float(self._profit_lock_state.get(key) or 0.0)
-        if unlock_at <= prev:
+        self._prune_hourly_net_pnl(now)
+        cur_hour = int(now // 3600) * 3600
+        unlock_at = float(cur_hour + 3600)
+        buckets = self._hourly_net_pnl.setdefault(key, {})
+        prev_net = float(buckets.get(cur_hour, 0.0))
+        new_net = prev_net + float(realized_pnl or 0.0)
+        buckets[cur_hour] = new_net
+        self._persist_hourly_net_pnl()
+
+        prev_lock = float(self._profit_lock_state.get(key) or 0.0)
+        if new_net >= threshold:
+            # Net cuota cumplida en la hora → arma/refresca lock hasta proxima hora.
+            if unlock_at > prev_lock:
+                self._profit_lock_state[key] = float(unlock_at)
+                self._persist_profit_lock()
+                _LOGGER.info(
+                    "[PROFIT-LOCK] %s ARMED: net_hour=%.2f >= %.2f → inactive until %s UTC "
+                    "(this_pnl=%+.2f prev_net=%+.2f)",
+                    key,
+                    new_net,
+                    threshold,
+                    time.strftime("%H:%M:%S", time.gmtime(unlock_at)),
+                    realized_pnl,
+                    prev_net,
+                )
             return
-        self._profit_lock_state[key] = float(unlock_at)
-        self._persist_profit_lock()
-        _LOGGER.info(
-            "[PROFIT-LOCK] %s armed: realized_pnl=%.2f >= %.2f → inactive until %s UTC",
-            key,
-            realized_pnl,
-            threshold,
-            time.strftime("%H:%M:%S", time.gmtime(unlock_at)),
-        )
+
+        # net_hour < threshold → asegurar lock DESARMADO para esta hora.
+        if prev_lock > 0 and prev_lock <= unlock_at:
+            with suppress(Exception):
+                del self._profit_lock_state[key]
+                self._persist_profit_lock()
+            _LOGGER.info(
+                "[PROFIT-LOCK] %s DISARMED: net_hour=%.2f < %.2f (this_pnl=%+.2f prev_net=%+.2f) "
+                "→ symbol can keep hunting this hour",
+                key,
+                new_net,
+                threshold,
+                realized_pnl,
+                prev_net,
+            )
 
     def is_symbol_profit_locked(self, symbol: str) -> tuple[bool, float]:
         """Return (locked, unlock_at_ts) for *symbol* (pruning stale entries)."""
@@ -2144,8 +2227,9 @@ class DerivTradeExecutor:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(existing, indent=2, default=str))
         tmp.replace(path)
-        # 2026-05-30 tier-staircase v1: arm per-symbol profit lock when the
-        # contract banked realized_pnl ≥ DERIV_PROFIT_LOCK_USDT_PER_SYMBOL.
+        # 2026-05-30 tier-staircase v3 NET: feed every close (win OR loss)
+        # to hourly NET PnL accumulator → lock arms only when net >= threshold,
+        # disarms automatically when a later loss drops net below threshold.
         with suppress(Exception):
             _sym = str(record.get("symbol") or "").upper()
             _pnl = float(record.get("realized_pnl_usdt") or 0.0)

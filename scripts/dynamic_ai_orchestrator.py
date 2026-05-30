@@ -216,6 +216,9 @@ SYMBOL_SCORE_FLOOR_MAP: dict[str, float] = {
     "BOOM500": float(os.getenv("DYNAMIC_AI_BOOM500_SCORE_FLOOR", "6.8") or 6.8),
     "BOOM600": float(os.getenv("DYNAMIC_AI_BOOM600_SCORE_FLOOR", "5.8") or 5.8),
     "BOOM900": float(os.getenv("DYNAMIC_AI_BOOM900_SCORE_FLOOR", "5.8") or 5.8),
+    # 2026-05-30 v3: CRASH500 ligeramente más estricto que CRASH600 (6.2 vs 5.8)
+    # — venía operando con el guardrail por defecto (5.5) y entraba a mucho ruido.
+    "CRASH500": float(os.getenv("DYNAMIC_AI_CRASH500_SCORE_FLOOR", "6.2") or 6.2),
     "CRASH600": float(os.getenv("DYNAMIC_AI_CRASH600_SCORE_FLOOR", "5.8") or 5.8),
     "CRASH900": float(os.getenv("DYNAMIC_AI_CRASH900_SCORE_FLOOR", "5.8") or 5.8),
 }
@@ -228,6 +231,26 @@ def _symbol_score_floor(symbol: str) -> float:
     sym = str(symbol or "").upper()
     base = float(SYMBOL_SCORE_FLOOR_MAP.get(sym, SCORE_MIN_GUARDRAIL))
     return max(SCORE_MIN_GUARDRAIL, min(base, SCORE_MAX_GUARDRAIL))
+
+
+# 2026-05-30 v3: per-symbol consolidation floor for spike_pre_filter_target.
+# Un valor mayor obliga al orquestador a esperar más ticks de consolidación
+# antes de validar el spike → menos entradas a ruido, mismo upside.
+# CRASH500 sube de SPIKE_PREFILTER_MIN_TICKS (~90) a 180 (~3min) para confirmar.
+SYMBOL_PREFILTER_FLOOR_MAP: dict[str, int] = {
+    "CRASH500": int(os.getenv("DYNAMIC_AI_CRASH500_PREFILTER_FLOOR_TICKS", "180") or 180),
+}
+SYMBOL_PREFILTER_FLOOR_MAP.update(
+    {k: int(v) for k, v in _parse_symbol_float_map(
+        os.getenv("DYNAMIC_AI_SYMBOL_PREFILTER_FLOOR_MAP", "")
+    ).items()}
+)
+
+
+def _symbol_prefilter_floor(symbol: str) -> int:
+    sym = str(symbol or "").upper()
+    base = int(SYMBOL_PREFILTER_FLOOR_MAP.get(sym, SPIKE_PREFILTER_MIN_TICKS))
+    return max(SPIKE_PREFILTER_MIN_TICKS, min(base, SPIKE_PREFILTER_MAX_TICKS))
 
 
 def _symbol_cycle_ticks(symbol: str) -> int | None:
@@ -544,6 +567,7 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
         regime = "NORMAL"
     zero_peak_floor = ZERO_PEAK_FLOOR_BY_SYMBOL.get(sym, 0)
     score_floor = _symbol_score_floor(sym)
+    prefilter_floor = _symbol_prefilter_floor(sym)
     try:
         _size_mult_raw = float(getattr(cfg, "size_multiplier", 1.0) or 1.0)
     except Exception:  # noqa: BLE001
@@ -552,7 +576,7 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
     return SymbolCfg(
         regime=regime,
         spike_pre_filter_target=max(
-            SPIKE_PREFILTER_MIN_TICKS,
+            prefilter_floor,
             min(int(cfg.spike_pre_filter_target), SPIKE_PREFILTER_MAX_TICKS),
         ),
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
