@@ -291,6 +291,12 @@ class DerivDaemon:
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
+        # 2026-05-29 v5: per-symbol spike_wait_timeout published by orchestrator.
+        # File path resolved later from _ctx_state_dir; cached with TTL to avoid
+        # I/O on every dynamic_config lookup.
+        self._spike_wait_timeout_map: dict[str, float] = {}
+        self._spike_wait_timeout_loaded_at: float = 0.0
+        self._spike_wait_timeout_ttl_sec: float = 60.0
         _status_decisions_env = os.getenv(
             "DERIV_STATUS_DECISIONS_MAX",
             os.getenv("DERIV_AI_LOG_MAX", "500"),
@@ -807,6 +813,36 @@ class DerivDaemon:
             "multispike_timeout_drift_ticks": max(5, min(_drift, 400)),
         }
 
+    def _load_spike_wait_timeout_map(self) -> dict[str, float]:
+        """Load /data/deriv-logs/deriv_spike_wait_timeout.json (orchestrator-published, 6h refresh).
+
+        Returns the per-symbol timeout map (seconds). Cached with TTL to avoid I/O storms.
+        Format: {"updated_at": "ISO", "window_hours": 6, "per_symbol": {"BOOM500": 380.0, ...}}.
+        """
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if (now_ts - self._spike_wait_timeout_loaded_at) < self._spike_wait_timeout_ttl_sec:
+            return self._spike_wait_timeout_map
+        self._spike_wait_timeout_loaded_at = now_ts
+        try:
+            fp = self._ctx_state_dir / "deriv_spike_wait_timeout.json"
+            if not fp.exists():
+                return self._spike_wait_timeout_map
+            with fp.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            per_sym = payload.get("per_symbol") or {}
+            new_map: dict[str, float] = {}
+            for k, v in per_sym.items():
+                try:
+                    v_f = float(v)
+                except Exception:  # noqa: BLE001
+                    continue
+                if 60.0 <= v_f <= 1800.0:
+                    new_map[str(k).upper()] = v_f
+            self._spike_wait_timeout_map = new_map
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("[dynamic-config] could not read deriv_spike_wait_timeout.json: %s", exc)
+        return self._spike_wait_timeout_map
+
     def get_dynamic_config(self, symbol: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return in-memory dynamic config for a symbol (safe fallback if DB unavailable)."""
         _sym = symbol.upper()
@@ -835,6 +871,10 @@ class DerivDaemon:
             "last_updated": None,
         }
         _db_cfg = self._dynamic_configs.get(_sym)
+        _swt_map = self._load_spike_wait_timeout_map()
+        _swt_val = _swt_map.get(_sym)
+        if _swt_val is not None:
+            _default["spike_wait_timeout_sec"] = _swt_val
         if not _db_cfg:
             return _default
         _spf, _grace, _score = self._clamp_dynamic_values(
@@ -867,6 +907,7 @@ class DerivDaemon:
             **_policy,
             "source": "dynamic_db",
             "last_updated": _db_cfg.get("last_updated"),
+            "spike_wait_timeout_sec": _swt_val,
         }
 
     async def _refresh_dynamic_config_once(self) -> None:

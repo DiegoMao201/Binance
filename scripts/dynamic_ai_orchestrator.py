@@ -909,6 +909,127 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
         return []
 
 
+# 2026-05-29 v5: spike_wait_timeout dynamic publisher.
+# User directive: "pon a funcionar la salida dinamica calculada por el orquestador
+# cada 6 horas promedio de coguer el spike para los crash y boom500".
+SPIKE_WAIT_TIMEOUT_WINDOW_SEC = int(
+    os.getenv("DYNAMIC_AI_SPIKE_WAIT_TIMEOUT_WINDOW_SEC", "21600") or 21600
+)
+SPIKE_WAIT_TIMEOUT_SAFETY_MARGIN = float(
+    os.getenv("DYNAMIC_AI_SPIKE_WAIT_TIMEOUT_SAFETY_MARGIN", "1.25") or 1.25
+)
+SPIKE_WAIT_TIMEOUT_MIN_SEC = float(
+    os.getenv("DYNAMIC_AI_SPIKE_WAIT_TIMEOUT_MIN_SEC", "180") or 180
+)
+SPIKE_WAIT_TIMEOUT_MAX_SEC = float(
+    os.getenv("DYNAMIC_AI_SPIKE_WAIT_TIMEOUT_MAX_SEC", "900") or 900
+)
+SPIKE_WAIT_TIMEOUT_MIN_SAMPLES = int(
+    os.getenv("DYNAMIC_AI_SPIKE_WAIT_TIMEOUT_MIN_SAMPLES", "3") or 3
+)
+# Fallback timeout per symbol when not enough winners exist in the window.
+SPIKE_WAIT_TIMEOUT_FALLBACK: dict[str, float] = {
+    "BOOM300": 240.0, "CRASH300": 240.0,
+    "BOOM500": 420.0, "CRASH500": 420.0,
+    "BOOM600": 450.0, "CRASH600": 420.0,
+    "BOOM900": 540.0, "CRASH900": 540.0,
+    "BOOM1000": 600.0, "CRASH1000": 600.0,
+}
+
+
+def _compute_spike_wait_timeout_map(
+    logs_dir: Path,
+    window_sec: int = SPIKE_WAIT_TIMEOUT_WINDOW_SEC,
+) -> dict[str, dict[str, Any]]:
+    """Compute per-symbol spike_wait_timeout from winners' hold time over `window_sec`.
+
+    Returns a dict {symbol: {"timeout_sec": float, "samples": int, "source": "winners"|"fallback"}}.
+    Uses the MEDIAN hold time of WINNING trades (proxy for time-to-spike) and applies
+    a safety margin so we don't cut right at the median.
+    """
+    closed = _load_json(logs_dir / "deriv_closed_contracts.json")
+    now = time.time()
+    by_sym: dict[str, list[float]] = {}
+    for c in closed:
+        sym = str(c.get("symbol") or "").upper()
+        if not sym:
+            continue
+        opened = _safe_ts(c.get("opened_at_ts") or c.get("opened_at"))
+        closed_ts = _safe_ts(c.get("closed_at_ts") or c.get("closed_at"))
+        if opened is None or closed_ts is None:
+            continue
+        if (now - opened) > window_sec:
+            continue
+        # Use multiple net-pnl field names for robustness.
+        pnl = None
+        for k in ("net_profit", "pnl", "profit", "net_pnl"):
+            v = c.get(k)
+            if v is not None:
+                try:
+                    pnl = float(v)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+        if pnl is None or pnl <= 0:
+            continue
+        hold = float(closed_ts) - float(opened)
+        if hold <= 0 or hold > SPIKE_WAIT_TIMEOUT_MAX_SEC * 2:
+            continue
+        by_sym.setdefault(sym, []).append(hold)
+
+    out: dict[str, dict[str, Any]] = {}
+    for sym, holds in by_sym.items():
+        if len(holds) < SPIKE_WAIT_TIMEOUT_MIN_SAMPLES:
+            continue
+        holds.sort()
+        median = holds[len(holds) // 2]
+        timeout = max(
+            SPIKE_WAIT_TIMEOUT_MIN_SEC,
+            min(SPIKE_WAIT_TIMEOUT_MAX_SEC, median * SPIKE_WAIT_TIMEOUT_SAFETY_MARGIN),
+        )
+        out[sym] = {
+            "timeout_sec": round(timeout, 1),
+            "samples": len(holds),
+            "median_hold_sec": round(median, 1),
+            "source": "winners",
+        }
+    # Fill fallback for active spike symbols not covered.
+    for sym, fb in SPIKE_WAIT_TIMEOUT_FALLBACK.items():
+        out.setdefault(sym, {
+            "timeout_sec": round(fb, 1),
+            "samples": 0,
+            "median_hold_sec": None,
+            "source": "fallback",
+        })
+    return out
+
+
+def _write_spike_wait_timeout_file(
+    logs_dir: Path,
+    per_symbol: dict[str, dict[str, Any]],
+    window_sec: int = SPIKE_WAIT_TIMEOUT_WINDOW_SEC,
+) -> None:
+    """Persist the per-symbol map so the bot can pick it up via dynamic_config."""
+    try:
+        path = logs_dir / "deriv_spike_wait_timeout.json"
+        payload = {
+            "updated_at": _now_iso(),
+            "window_hours": round(window_sec / 3600.0, 2),
+            "safety_margin": SPIKE_WAIT_TIMEOUT_SAFETY_MARGIN,
+            "min_sec": SPIKE_WAIT_TIMEOUT_MIN_SEC,
+            "max_sec": SPIKE_WAIT_TIMEOUT_MAX_SEC,
+            "min_samples": SPIKE_WAIT_TIMEOUT_MIN_SAMPLES,
+            "per_symbol": {sym: d["timeout_sec"] for sym, d in per_symbol.items()},
+            "details": per_symbol,
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[spike-wait-timeout] could not write file: %s", exc)
+
+
 def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOOKBACK_SEC_DEFAULT) -> dict[str, Any]:
     spikes = _load_json(logs_dir / "deriv_spike_events.json")
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
@@ -3493,6 +3614,19 @@ async def run_loop() -> None:
             _seed_state_memory(current_cfg)
             _seed_activity_memory(current_cfg)
             telemetry = _build_telemetry_from_logs(logs_dir, lookback_sec=lookback_sec)
+            # 2026-05-29 v5: publish per-symbol spike_wait_timeout (6h window of winners).
+            try:
+                _swt_map = _compute_spike_wait_timeout_map(logs_dir)
+                _write_spike_wait_timeout_file(logs_dir, _swt_map)
+                _live = [
+                    f"{s}={d['timeout_sec']:.0f}s(n={d['samples']},src={d['source']})"
+                    for s, d in sorted(_swt_map.items())
+                    if d["source"] == "winners"
+                ]
+                if _live:
+                    LOG.info("[spike-wait-timeout] live: %s", " ".join(_live))
+            except Exception as _swt_exc:  # noqa: BLE001
+                LOG.warning("[spike-wait-timeout] compute/write failed: %s", _swt_exc)
             feedback_state = FB24.load_state(feedback_state_path)
             feedback_refreshed = False
             try:

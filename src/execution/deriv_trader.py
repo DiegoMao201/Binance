@@ -1250,11 +1250,16 @@ class DerivTradeExecutor:
                         self._closing.discard(cid)
                         oc_check.pending_close_reason = None
 
-                # Spike-wait timeout v4 (2026-05-29): hard-time cut, no defer.
-                # If the spike didn't show up in T_soft seconds, sell. Period.
-                # Peak<=stake*MFE_FRAC means no real traction happened. The
-                # re-entry path is the same fresh-signal flow, so a real spike
-                # arriving later will be caught by the next entry.
+                # Spike-wait timeout v5 (2026-05-29 PM): PURE TIME CUT.
+                # User directive: "no quiero mas perseguir fuerza de un spike a
+                # los dos o 3 minutos y que nunca va a salir y peor que llega al sl".
+                # Single rule: if held >= T_sym → SELL. No MFE check, no defer.
+                # T_sym priority:
+                #   1. dynamic_config_provider(symbol)["spike_wait_timeout_sec"]
+                #      (computed by orchestrator every 6h from median time-to-close
+                #      of winners.)
+                #   2. self._spike_wait_timeout_sec_map[symbol]   (env override)
+                #   3. self._spike_wait_timeout_sec               (global default)
                 if (
                     self._spike_wait_timeout_enabled
                     and is_spike_market(oc_check.symbol)
@@ -1267,22 +1272,33 @@ class DerivTradeExecutor:
                             _sym_u, self._spike_wait_timeout_sec
                         )
                     )
-                    _mfe_cap = _stake * self._spike_wait_timeout_mfe_frac
-                    _peak_v = float(oc_check.peak_profit)
-                    _float_v = float(oc_check.floating_pnl)
-                    if held >= _T_soft and _peak_v <= _mfe_cap:
+                    _T_source = "env_map"
+                    if self._dynamic_config_provider is not None:
+                        try:
+                            _dyn_cfg = self._dynamic_config_provider(_sym_u) or {}
+                            _dyn_T_raw = _dyn_cfg.get("spike_wait_timeout_sec")
+                            if _dyn_T_raw is not None:
+                                _dyn_T = float(_dyn_T_raw)
+                                if 60.0 <= _dyn_T <= 1800.0:
+                                    _T_soft = _dyn_T
+                                    _T_source = "dynamic_cfg"
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if held >= _T_soft:
+                        _peak_v = float(oc_check.peak_profit)
+                        _float_v = float(oc_check.floating_pnl)
                         self._closing.add(cid)
                         oc_check.pending_close_reason = "spike_wait_timeout"
                         _LOGGER.info(
-                            "[deriv-trader] spike_wait_timeout: %s (%s) "
-                            "held=%.1fs T=%.0fs peak=%.4f<=%.4f floating=%.4f stake=%.2f "
-                            "— no spike traction, cutting now",
+                            "[deriv-trader] spike_wait_timeout_v5(%s): %s (%s) "
+                            "held=%.1fs T=%.0fs peak=%.4f floating=%.4f stake=%.2f "
+                            "— pure time cut, no spike caught",
+                            _T_source,
                             cid,
                             oc_check.symbol,
                             held,
                             _T_soft,
                             _peak_v,
-                            _mfe_cap,
                             _float_v,
                             _stake,
                         )
