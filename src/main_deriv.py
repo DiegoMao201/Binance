@@ -320,6 +320,54 @@ class DerivDaemon:
             10,
             int(os.getenv("DERIV_POST_SL_EMIT_THROTTLE_SEC", "30") or 30),
         )
+        # 2026-05-30 SPIKE-DENSITY GATE — "ya van X spikes esta hora, espera"
+        # Lee del rolling window de risk._spike_recent_ts y compara con baseline
+        # de las últimas N horas. Tres reglas:
+        #   1) BURST: count_recent(BURST_WINDOW_SEC) >= BURST_THRESHOLD AND
+        #      last_spike_age <= BURST_BLOCK_AFTER_SEC → BLOCK 'spike_burst_cooldown'
+        #   2) SATURATED: count_60m / max(baseline_avg, MIN_BASELINE) >= BLOCK_RATIO
+        #      AND samples >= 2 → BLOCK 'spike_density_saturated'
+        #   3) ELEVATED: ratio >= WARN_RATIO → log only (AI orchestrator lo lee)
+        # Memoria persistida en spike_density_memory.json para que el sidecar AI
+        # pueda aprender el patrón.
+        self._spike_density_gate_enabled = os.getenv(
+            "DERIV_SPIKE_DENSITY_GATE_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._spike_density_burst_window_sec = max(
+            60,
+            int(os.getenv("DERIV_SPIKE_BURST_WINDOW_SEC", "300") or 300),
+        )
+        self._spike_density_burst_threshold = max(
+            2,
+            int(os.getenv("DERIV_SPIKE_BURST_THRESHOLD", "3") or 3),
+        )
+        self._spike_density_burst_block_after_sec = max(
+            30,
+            int(os.getenv("DERIV_SPIKE_BURST_BLOCK_AFTER_SEC", "180") or 180),
+        )
+        self._spike_density_block_ratio = max(
+            1.0,
+            float(os.getenv("DERIV_SPIKE_DENSITY_BLOCK_RATIO", "2.0") or 2.0),
+        )
+        self._spike_density_warn_ratio = max(
+            1.0,
+            float(os.getenv("DERIV_SPIKE_DENSITY_WARN_RATIO", "1.5") or 1.5),
+        )
+        self._spike_density_min_baseline = max(
+            1.0,
+            float(os.getenv("DERIV_SPIKE_DENSITY_MIN_BASELINE", "4.0") or 4.0),
+        )
+        self._spike_density_lookback_hours = max(
+            2,
+            int(os.getenv("DERIV_SPIKE_DENSITY_LOOKBACK_HOURS", "6") or 6),
+        )
+        self._spike_density_emit_throttle_sec = max(
+            10,
+            int(os.getenv("DERIV_SPIKE_DENSITY_EMIT_THROTTLE_SEC", "30") or 30),
+        )
+        self._spike_density_memory_path: Path | None = None
+        self._spike_density_memory: dict[str, dict[str, Any]] = {}
+        self._spike_density_memory_last_persist_ts: float = 0.0
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -1978,6 +2026,168 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False, block_reason=_reason
                     )
                     return
+        # 2026-05-30 SPIKE-DENSITY GATE — "ya van X spikes esta hora; espera"
+        # Cuenta rolling 60m vs baseline horas previas; bloquea si saturado o burst.
+        # Reglas (sólo en spike markets, sólo si gate enabled):
+        #  1) BURST: count_recent(BURST_WINDOW) >= BURST_THRESHOLD AND
+        #     last_spike_age <= BURST_BLOCK_AFTER_SEC → BLOCK 'spike_burst_cooldown'
+        #  2) SATURATED: ratio = count60 / max(baseline_avg, MIN_BASELINE);
+        #     ratio >= BLOCK_RATIO AND samples >= 2 → BLOCK 'spike_density_saturated'
+        #  3) ELEVATED: ratio >= WARN_RATIO → log only (orchestrator AI lo lee)
+        # Persiste memoria en spike_density_memory.json para el sidecar AI.
+        if self._spike_density_gate_enabled and is_spike_market(tick.symbol):
+            _sym_sd = tick.symbol.upper()
+            _count60 = 0
+            _count_recent = 0
+            _curr_h = 0
+            _avg_prev = 0.0
+            _samples = 0
+            _last_spike_age: float | None = None
+            with suppress(Exception):
+                _count60 = int(self._risk.get_spike_count_last_hour(_sym_sd))
+            with suppress(Exception):
+                _count_recent = int(
+                    self._risk.get_spike_count_recent(
+                        _sym_sd, float(self._spike_density_burst_window_sec)
+                    )
+                )
+            with suppress(Exception):
+                _curr_h, _avg_prev, _samples = self._risk.get_hourly_spike_buckets(
+                    _sym_sd, lookback_hours=self._spike_density_lookback_hours
+                )
+            with suppress(Exception):
+                _last_sp_ts = float(
+                    self._risk._last_spike_ts.get(_sym_sd, 0.0) or 0.0  # noqa: SLF001
+                )
+                if _last_sp_ts > 0:
+                    _last_spike_age = max(0.0, time.time() - _last_sp_ts)
+
+            _baseline = max(_avg_prev, float(self._spike_density_min_baseline))
+            _ratio = (_count60 / _baseline) if _baseline > 0 else 0.0
+            _block_reason_sd: str | None = None
+            _block_detail = ""
+
+            # Rule 1 — BURST
+            if (
+                _count_recent >= self._spike_density_burst_threshold
+                and _last_spike_age is not None
+                and _last_spike_age <= float(self._spike_density_burst_block_after_sec)
+            ):
+                _block_reason_sd = "spike_burst_cooldown"
+                _block_detail = (
+                    f"recent={_count_recent}≥{self._spike_density_burst_threshold} "
+                    f"in {self._spike_density_burst_window_sec}s "
+                    f"last_age={_last_spike_age:.0f}s"
+                )
+            # Rule 2 — SATURATED
+            elif (
+                _samples >= 2
+                and _ratio >= self._spike_density_block_ratio
+                and _count60 >= int(self._spike_density_min_baseline)
+            ):
+                _block_reason_sd = "spike_density_saturated"
+                _block_detail = (
+                    f"count60={_count60} baseline={_baseline:.2f} "
+                    f"ratio={_ratio:.2f}≥{self._spike_density_block_ratio:.2f} "
+                    f"samples={_samples}"
+                )
+
+            # Persist memory snapshot for AI sidecar to learn from
+            with suppress(Exception):
+                _now_sd = time.time()
+                _mem_entry = {
+                    "ts": _now_sd,
+                    "iso": datetime.fromtimestamp(_now_sd, tz=timezone.utc).isoformat(),
+                    "count_60m": _count60,
+                    "count_recent_window_sec": self._spike_density_burst_window_sec,
+                    "count_recent": _count_recent,
+                    "baseline_avg_prev_h": round(_avg_prev, 3),
+                    "baseline_used": round(_baseline, 3),
+                    "ratio": round(_ratio, 3),
+                    "samples": _samples,
+                    "last_spike_age_sec": (
+                        round(_last_spike_age, 1) if _last_spike_age is not None else None
+                    ),
+                    "block_reason": _block_reason_sd,
+                    "block_detail": _block_detail,
+                    "elevated": (_ratio >= self._spike_density_warn_ratio),
+                }
+                _prev_mem = self._spike_density_memory.get(_sym_sd, {})
+                _events_log = list(_prev_mem.get("recent_events") or [])
+                # only append meaningful events (block or elevated) to keep file small
+                if _block_reason_sd is not None or _mem_entry["elevated"]:
+                    _events_log.append({
+                        "ts": _now_sd,
+                        "iso": _mem_entry["iso"],
+                        "block_reason": _block_reason_sd,
+                        "ratio": _mem_entry["ratio"],
+                        "count_60m": _count60,
+                        "count_recent": _count_recent,
+                    })
+                    if len(_events_log) > 40:
+                        _events_log = _events_log[-40:]
+                self._spike_density_memory[_sym_sd] = {
+                    "last": _mem_entry,
+                    "recent_events": _events_log,
+                }
+                # throttle disk writes to once every 30s
+                if (_now_sd - self._spike_density_memory_last_persist_ts) >= 30.0:
+                    self._spike_density_memory_last_persist_ts = _now_sd
+                    if self._spike_density_memory_path is None:
+                        self._spike_density_memory_path = (
+                            self._ctx_state_dir / "spike_density_memory.json"
+                        )
+                    _payload = {
+                        "updated_at": _mem_entry["iso"],
+                        "config": {
+                            "burst_window_sec": self._spike_density_burst_window_sec,
+                            "burst_threshold": self._spike_density_burst_threshold,
+                            "block_ratio": self._spike_density_block_ratio,
+                            "warn_ratio": self._spike_density_warn_ratio,
+                            "min_baseline": self._spike_density_min_baseline,
+                            "lookback_hours": self._spike_density_lookback_hours,
+                        },
+                        "per_symbol": self._spike_density_memory,
+                    }
+                    _tmp = self._spike_density_memory_path.with_suffix(".json.tmp")
+                    _tmp.parent.mkdir(parents=True, exist_ok=True)
+                    _tmp.write_text(json.dumps(_payload, ensure_ascii=False))
+                    _tmp.replace(self._spike_density_memory_path)
+
+            if _block_reason_sd is not None:
+                _now_emit = time.time()
+                _emit_key = f"{_sym_sd}:{_block_reason_sd}"
+                _last_emit_sd = float(
+                    self._dynamic_inactive_last_emit_ts.get(_emit_key) or 0.0
+                )
+                if (_now_emit - _last_emit_sd) >= self._spike_density_emit_throttle_sec:
+                    self._dynamic_inactive_last_emit_ts[_emit_key] = _now_emit
+                    _LOGGER.info(
+                        "[PIPELINE] %s %s — %s (ya van %d spikes esta hora; "
+                        "espera mejor oportunidad)",
+                        _block_reason_sd.upper(),
+                        _sym_sd,
+                        _block_detail,
+                        _count60,
+                    )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False, block_reason=_block_reason_sd
+                )
+                return
+            elif _ratio >= self._spike_density_warn_ratio and _count60 >= 5:
+                # Elevated — log throttled, do NOT block (AI orchestrator can use it)
+                _now_emit = time.time()
+                _emit_key = f"{_sym_sd}:spike_density_elevated"
+                _last_emit_sd = float(
+                    self._dynamic_inactive_last_emit_ts.get(_emit_key) or 0.0
+                )
+                if (_now_emit - _last_emit_sd) >= self._spike_density_emit_throttle_sec:
+                    self._dynamic_inactive_last_emit_ts[_emit_key] = _now_emit
+                    _LOGGER.info(
+                        "[PIPELINE] SPIKE_DENSITY_ELEVATED %s — count60=%d "
+                        "baseline=%.2f ratio=%.2f (no block, AI puede subir score)",
+                        _sym_sd, _count60, _baseline, _ratio,
+                    )
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")

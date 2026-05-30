@@ -1020,6 +1020,26 @@ class DerivRiskManager:
         self._spike_recent_ts[key] = pruned
         return len(pruned)
 
+    def get_spike_count_recent(self, symbol: str, window_sec: float) -> int:
+        """Return number of spikes for *symbol* within the last *window_sec* seconds.
+
+        Used by the spike-density / burst gate to detect "3 spikes in 5 min"
+        scenarios where the bot was entering chasing the prior bursts.
+        """
+        try:
+            w = float(window_sec)
+        except (TypeError, ValueError):
+            return 0
+        if w <= 0:
+            return 0
+        now = time.time()
+        cutoff = now - w
+        key = str(symbol or "").upper()
+        raw = list(self._spike_recent_ts.get(key) or self._spike_recent_ts.get(symbol, []))
+        if not raw:
+            return 0
+        return sum(1 for ts in raw if ts >= cutoff)
+
     def get_hourly_spike_buckets(
         self, symbol: str, lookback_hours: int = 6
     ) -> tuple[int, float, int]:

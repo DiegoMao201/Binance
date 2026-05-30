@@ -1059,6 +1059,20 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
     closed = _load_json(logs_dir / "deriv_closed_contracts.json")
     ai_decisions = _load_json(logs_dir / "deriv_ai_decisions.json")
     market_ctx = _load_json(logs_dir / "deriv_market_context.json")
+    # 2026-05-30 spike density memory (per-symbol "ya van X esta hora") —
+    # written by main_deriv pipeline, consumed here to enrich AI prompt.
+    spike_density_memory: dict[str, Any] = {}
+    try:
+        _sdm_path = logs_dir / "spike_density_memory.json"
+        if _sdm_path.exists():
+            _sdm_raw = json.loads(_sdm_path.read_text(encoding="utf-8"))
+            if isinstance(_sdm_raw, dict):
+                spike_density_memory = (
+                    _sdm_raw.get("per_symbol")
+                    if isinstance(_sdm_raw.get("per_symbol"), dict) else {}
+                ) or {}
+    except Exception:  # noqa: BLE001
+        spike_density_memory = {}
     lockout_raw: dict[str, Any] = {}
     lockout_path = logs_dir / "deriv_lockout.json"
     if lockout_path.exists():
@@ -1480,6 +1494,26 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
             ],
             "as_of": _now_iso(),
         }
+        # 2026-05-30 inject spike-density memory snapshot (bot-side gate state)
+        try:
+            _sdm = spike_density_memory.get(sym) or spike_density_memory.get(sym.upper())
+            if isinstance(_sdm, dict):
+                _last = _sdm.get("last") if isinstance(_sdm.get("last"), dict) else {}
+                _events = _sdm.get("recent_events") if isinstance(_sdm.get("recent_events"), list) else []
+                telemetry[sym]["density_gate_state"] = {
+                    "count_60m": _last.get("count_60m"),
+                    "count_recent": _last.get("count_recent"),
+                    "count_recent_window_sec": _last.get("count_recent_window_sec"),
+                    "baseline_avg_prev_h": _last.get("baseline_avg_prev_h"),
+                    "ratio": _last.get("ratio"),
+                    "samples": _last.get("samples"),
+                    "last_spike_age_sec": _last.get("last_spike_age_sec"),
+                    "current_block_reason": _last.get("block_reason"),
+                    "elevated": _last.get("elevated"),
+                    "recent_block_events": _events[-10:],
+                }
+        except Exception:  # noqa: BLE001
+            pass
     return telemetry
 
 
