@@ -368,6 +368,37 @@ class DerivDaemon:
         self._spike_density_memory_path: Path | None = None
         self._spike_density_memory: dict[str, dict[str, Any]] = {}
         self._spike_density_memory_last_persist_ts: float = 0.0
+        # 2026-05-30 REACTIVATION-AWARENESS GATE — "ojo, mientras descansabas
+        # explotaron N spikes; espera confirmación fresca antes de entrar".
+        # Cuando un símbolo sale de profit_locked / dynamic_inactive /
+        # trade_cooldown, durante GRACE_SEC pedimos que haya un spike fresco
+        # (>= reactivation_ts) si en los últimos EXTENDED_WINDOW hubo
+        # >= BURST_THRESHOLD spikes. Si no hay spike fresco → BLOCK.
+        # Esta información también se persiste para el LLM.
+        self._reactivation_gate_enabled = os.getenv(
+            "DERIV_REACTIVATION_GATE_ENABLED", "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._reactivation_grace_sec = max(
+            60,
+            int(os.getenv("DERIV_REACTIVATION_GRACE_SEC", "600") or 600),
+        )
+        self._reactivation_extended_window_sec = max(
+            300,
+            int(os.getenv("DERIV_REACTIVATION_EXTENDED_WINDOW_SEC", "1800") or 1800),
+        )
+        self._reactivation_burst_threshold = max(
+            2,
+            int(os.getenv("DERIV_REACTIVATION_BURST_THRESHOLD", "3") or 3),
+        )
+        self._reactivation_emit_throttle_sec = max(
+            10,
+            int(os.getenv("DERIV_REACTIVATION_EMIT_THROTTLE_SEC", "30") or 30),
+        )
+        # tracking dicts
+        self._sym_last_inactive_ts: dict[str, float] = {}
+        self._sym_last_inactive_reason: dict[str, str] = {}
+        self._sym_reactivation_ts: dict[str, float] = {}
+        self._sym_inactive_streak: dict[str, int] = {}
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -1929,6 +1960,12 @@ class DerivDaemon:
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
         # ═══════════════════════════════════════════════════════════════════
         if not self._cooldown.can_fire(tick.symbol):
+            # mark inactive transition source for reactivation gate
+            self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
+            self._sym_last_inactive_reason[tick.symbol.upper()] = "trade_cooldown"
+            self._sym_inactive_streak[tick.symbol.upper()] = (
+                self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
+            )
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="trade_cooldown")
             return
 
@@ -1968,6 +2005,11 @@ class DerivDaemon:
                     tick.symbol,
                     _remaining_min,
                 )
+            self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
+            self._sym_last_inactive_reason[tick.symbol.upper()] = "symbol_profit_locked"
+            self._sym_inactive_streak[tick.symbol.upper()] = (
+                self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
+            )
             self._spike_enrich(
                 tick.symbol, bot_entered=False, block_reason="symbol_profit_locked"
             )
@@ -2188,6 +2230,99 @@ class DerivDaemon:
                         "baseline=%.2f ratio=%.2f (no block, AI puede subir score)",
                         _sym_sd, _count60, _baseline, _ratio,
                     )
+        # 2026-05-30 REACTIVATION-AWARENESS GATE
+        # Cuando un símbolo sale de profit_locked / dynamic_inactive /
+        # trade_cooldown, durante GRACE_SEC el bot DEBE saber qué pasó
+        # mientras descansaba. Si hubo ≥BURST_THRESHOLD spikes en los últimos
+        # EXTENDED_WINDOW_SEC y todavía NO ha llegado un spike fresco
+        # post-reactivación, BLOQUEA hasta que ese spike fresco llegue.
+        # Esto evita "entrar ciego" justo después de que el símbolo regresa.
+        if self._reactivation_gate_enabled and is_spike_market(tick.symbol):
+            _sym_rg = tick.symbol.upper()
+            _streak = int(self._sym_inactive_streak.get(_sym_rg, 0) or 0)
+            _last_inact = float(self._sym_last_inactive_ts.get(_sym_rg, 0.0) or 0.0)
+            _react_known = float(self._sym_reactivation_ts.get(_sym_rg, 0.0) or 0.0)
+            _now_rg = time.time()
+            # Detect transition: previously had inactive streak ≥3 ticks AND
+            # this tick is past the inactive blocks AND last_inactive > known react
+            if (
+                _streak >= 3
+                and _last_inact > 0
+                and _last_inact > _react_known
+            ):
+                # The symbol was inactive and now is active — record reactivation
+                self._sym_reactivation_ts[_sym_rg] = _last_inact
+                _react_known = _last_inact
+                self._sym_inactive_streak[_sym_rg] = 0
+                with suppress(Exception):
+                    _LOGGER.info(
+                        "[PIPELINE] REACTIVATION_DETECTED %s — was '%s', now active "
+                        "(streak ticks reset)",
+                        _sym_rg,
+                        self._sym_last_inactive_reason.get(_sym_rg, "?"),
+                    )
+            # Apply gate only during GRACE window after a reactivation
+            if _react_known > 0 and (_now_rg - _react_known) <= float(self._reactivation_grace_sec):
+                _spikes_ext = 0
+                with suppress(Exception):
+                    _spikes_ext = int(
+                        self._risk.get_spike_count_recent(
+                            _sym_rg, float(self._reactivation_extended_window_sec)
+                        )
+                    )
+                _last_spike_rg = 0.0
+                with suppress(Exception):
+                    _last_spike_rg = float(
+                        self._risk._last_spike_ts.get(_sym_rg, 0.0) or 0.0  # noqa: SLF001
+                    )
+                _fresh_spike_since_react = _last_spike_rg > _react_known
+                if (
+                    _spikes_ext >= self._reactivation_burst_threshold
+                    and not _fresh_spike_since_react
+                ):
+                    _emit_key = f"{_sym_rg}:reactivation_awareness"
+                    _last_emit = float(
+                        self._dynamic_inactive_last_emit_ts.get(_emit_key) or 0.0
+                    )
+                    if (_now_rg - _last_emit) >= self._reactivation_emit_throttle_sec:
+                        self._dynamic_inactive_last_emit_ts[_emit_key] = _now_rg
+                        _LOGGER.info(
+                            "[PIPELINE] REACTIVATION_AWARENESS_NO_FRESH_SPIKE %s — "
+                            "while inactive '%s' tuvo %d spikes en %ds; espera "
+                            "spike fresco antes de entrar (react_age=%.0fs grace=%ds)",
+                            _sym_rg,
+                            self._sym_last_inactive_reason.get(_sym_rg, "?"),
+                            _spikes_ext,
+                            self._reactivation_extended_window_sec,
+                            _now_rg - _react_known,
+                            self._reactivation_grace_sec,
+                        )
+                    # Persist to density memory so LLM sees it
+                    with suppress(Exception):
+                        _mem = self._spike_density_memory.setdefault(_sym_rg, {})
+                        _mem["reactivation_state"] = {
+                            "ts": _react_known,
+                            "iso": datetime.fromtimestamp(
+                                _react_known, tz=timezone.utc
+                            ).isoformat(),
+                            "from_reason": self._sym_last_inactive_reason.get(_sym_rg),
+                            "spikes_in_extended_window": _spikes_ext,
+                            "extended_window_sec": self._reactivation_extended_window_sec,
+                            "awaiting_fresh_spike": True,
+                            "react_age_sec": round(_now_rg - _react_known, 1),
+                        }
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason="reactivation_awareness_no_fresh_spike",
+                    )
+                    return
+                elif _fresh_spike_since_react:
+                    # Fresh spike landed → mark awareness satisfied
+                    with suppress(Exception):
+                        _mem = self._spike_density_memory.setdefault(_sym_rg, {})
+                        if "reactivation_state" in _mem:
+                            _mem["reactivation_state"]["awaiting_fresh_spike"] = False
+                            _mem["reactivation_state"]["fresh_spike_ts"] = _last_spike_rg
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
@@ -2242,6 +2377,11 @@ class DerivDaemon:
                             "dynamic_cfg_spike_pre_filter": _dyn_spf,
                         },
                     )
+                self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
+                self._sym_last_inactive_reason[tick.symbol.upper()] = "dynamic_symbol_inactive"
+                self._sym_inactive_streak[tick.symbol.upper()] = (
+                    self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
+                )
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="dynamic_symbol_inactive")
                 return
 
