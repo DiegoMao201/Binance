@@ -1,0 +1,46 @@
+RUNTIME AUDIT (SL EXIT + BOT/AI SYNC) — 2026-05-30
+
+Scope
+- Requested check: early exit vs SL behavior, runtime config alignment, bot<->AI sync health.
+
+Findings
+1) The screenshot close (CRASH500, ~8.7m, -1.00) is not a bot early-timeout close.
+- Record: contract_id=1061598919, closed_by=ws_event, exit_reason=unknown_pnl_-1.00.
+- max_hold_seconds=0.0 on the contract (spike timeout path disabled for spike symbols).
+- No sell trigger logs for that contract from DPM/DEP/open_prob/spike_wait_timeout.
+- Operational conclusion: broker-side SL close likely occurred, but was labeled as unknown due missing WS status/limit metadata.
+
+2) SL-only strategy behavior is active in live runtime.
+- Last 2h close reasons on server:
+  - unknown_pnl_-1.00: 9
+  - tier_tp_window_23: 1
+- No recent timeout_multispike / spike_wait_timeout / spike_timeout in last 2h window.
+
+3) Bot and AI sidecar are connected and running same image.
+- Containers healthy:
+  - o4w1ns4cceccmn2ozqt7sol2
+  - o4w1ns4cceccmn2ozqt7sol2-ai
+- Both on image: o4w1ns4cceccmn2ozqt7sol2:5fd360cef147a2aa77ec1fcf344a1c6e77946611
+- AI sidecar is actively producing DIFF/applied config cycles; bot logs show dynamic inactive bypass consumption.
+
+Actions taken
+A) Code fix for exit classification ambiguity
+- Commit: eddf963
+- Change in src/execution/deriv_trader.py:
+  - Persist stop_loss_pct / take_profit_pct in DerivOpenContract.
+  - Added relabel helper for unknown negative exits:
+    unknown_pnl_-X.XX -> broker_sl_hit when pnl matches configured SL expectancy.
+  - Applied relabel in reaper, ws settlement, and heartbeat settlement paths.
+
+B) Coolify env drift correction
+- DERIV_POST_SPIKE_CHASE_MAX_CYCLE_RATIO set to 0.35 for runtime+preview.
+- DERIV_SYMBOL_HOUR_VETO_MAP set to CRASH500:21 for runtime+preview.
+
+C) Deploy trigger
+- Deployment queued for app uuid o4w1ns4cceccmn2ozqt7sol2:
+  deployment_uuid=amg429vuo6dhjaaijufqqi7b
+- At audit close, deployment remained in queued state and containers still ran image 5fd360c.
+
+Operational note
+- .coolify_creds has APP_ID=wgk08oogswwwc0sgcs4g4kgo, but the live Deriv bot service uuid is o4w1ns4cceccmn2ozqt7sol2.
+- Use o4w1ns4cceccmn2ozqt7sol2 for bot env/deploy API operations.
