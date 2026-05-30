@@ -215,10 +215,10 @@ class DerivOpenContract:
     side: str
     stake_usdt: float
     multiplier: int
-    stop_loss_pct: float = field(default=0.0)
-    take_profit_pct: float = field(default=0.0)
     entry_price: float
     opened_at_ts: float
+    stop_loss_pct: float = field(default=0.0)
+    take_profit_pct: float = field(default=0.0)
     score_breakdown: dict | None = field(default=None)
     max_hold_seconds: float = field(default=0.0)
     # Trailing SL state (updated each poll cycle)
