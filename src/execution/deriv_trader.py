@@ -107,7 +107,17 @@ _TIER_QUOTA_TIGHTEN_PP = max(
     min(float(os.getenv("DERIV_TIER_QUOTA_TIGHTEN_PP", "0.03") or 0.03), 0.10),
 )
 _SPIKE_QUOTA_LOOKBACK_HOURS = max(
-    1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "6") or 6), 24)
+    1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "12") or 12), 24)
+)
+# 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
+# horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
+# (dollar_floor) cierra antes de cuota.  Esto evita ganancias chicas en
+# símbolos con racha de spikes aún por venir (caso CRASH500: 2/8).
+_SPIKE_WAIT_FOR_QUOTA_ENABLED = _env_flag("DERIV_SPIKE_WAIT_FOR_QUOTA", "true")
+# Cuota mínima absoluta (override por símbolo): si avg rolling 12h cae por
+# debajo de este número, usamos este piso para no quedarnos sin protección.
+_SPIKE_QUOTA_MIN_FLOOR = max(
+    1, min(int(os.getenv("DERIV_SPIKE_QUOTA_MIN_FLOOR", "3") or 3), 20)
 )
 
 
@@ -576,8 +586,14 @@ class DerivTradeExecutor:
             window += mid_delta
         return max(0.10, min(window, 0.40))
 
-    def _spike_quota_state(self, symbol: str) -> tuple[int, float, int, bool]:
-        """Return (current_hour_spikes, prev_hours_avg, samples, quota_done)."""
+    def _spike_quota_state(
+        self, symbol: str
+    ) -> tuple[int, float, int, int, bool]:
+        """Return (current_hour_spikes, prev_hours_avg, samples, quota_target, quota_done).
+
+        quota_target = max(round(avg), MIN_FLOOR) cuando hay datos suficientes,
+        sino MIN_FLOOR (fallback cauteloso). quota_done := curr >= quota_target.
+        """
         curr = 0
         avg = 0.0
         samples = 0
@@ -586,8 +602,14 @@ class DerivTradeExecutor:
             if callable(getter):
                 with suppress(Exception):
                     curr, avg, samples = getter(symbol, _SPIKE_QUOTA_LOOKBACK_HOURS)
-        quota_done = bool(samples >= 1 and avg > 0 and curr >= avg)
-        return (int(curr), float(avg), int(samples), quota_done)
+        if avg > 0:
+            quota_target = max(_SPIKE_QUOTA_MIN_FLOOR, int(round(avg)))
+        else:
+            # Sin datos previos confiables: usamos piso mínimo y NO marcamos done
+            # hasta que la actividad real lo confirme.
+            quota_target = _SPIKE_QUOTA_MIN_FLOOR
+        quota_done = bool(curr >= quota_target)
+        return (int(curr), float(avg), int(samples), int(quota_target), quota_done)
 
     def _spike_tier_dynamic_state(
         self,
@@ -619,16 +641,25 @@ class DerivTradeExecutor:
             "spikes_1h": 0,
             "spikes_avg_h": 0.0,
             "samples": 0,
+            "quota_target": _SPIKE_QUOTA_MIN_FLOOR,
+            "quota_remaining": _SPIKE_QUOTA_MIN_FLOOR,
             "quota_done": False,
+            "wait_for_quota": False,
+            "tier_active": False,
             "profit_lock_usdt": _PROFIT_LOCK_USDT_DEFAULT,
+            "lookback_hours": _SPIKE_QUOTA_LOOKBACK_HOURS,
         }
         if stake_usdt <= 0 or peak_profit <= 0:
             return out
 
-        spikes_1h, spikes_avg, samples, quota_done = self._spike_quota_state(symbol)
+        spikes_1h, spikes_avg, samples, quota_target, quota_done = (
+            self._spike_quota_state(symbol)
+        )
         out["spikes_1h"] = spikes_1h
         out["spikes_avg_h"] = spikes_avg
         out["samples"] = samples
+        out["quota_target"] = int(quota_target)
+        out["quota_remaining"] = max(0, int(quota_target) - int(spikes_1h))
         out["quota_done"] = quota_done
 
         pl = max(0.5, float(_PROFIT_LOCK_USDT_DEFAULT))
@@ -646,7 +677,19 @@ class DerivTradeExecutor:
         # Staircase: piso en dólares enteros (sólo si peak ≥ $1).
         dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
         tier_floor = peak_profit * (1.0 - tier_pct)
-        sl_floor = max(dollar_floor, tier_floor)
+
+        # "wait_for_quota v2": el tier % SOLO empieza a cerrar cuando la
+        # cuota horaria ya se cumplió (o cuando peak < $1, donde no hay
+        # protección).  Antes de cuota, el ÚNICO piso es dollar_floor:
+        # esperamos los spikes que faltan y dejamos correr el peak.
+        wait = bool(_SPIKE_WAIT_FOR_QUOTA_ENABLED and not quota_done and peak_profit >= 1.0)
+        out["wait_for_quota"] = wait
+        if wait:
+            sl_floor = dollar_floor                # solo escalón duro $
+            out["tier_active"] = False
+        else:
+            sl_floor = max(dollar_floor, tier_floor)
+            out["tier_active"] = peak_profit >= 1.0
 
         out["dollar_floor"] = round(dollar_floor, 4)
         out["tier_floor"] = round(tier_floor, 4)
@@ -691,7 +734,8 @@ class DerivTradeExecutor:
         oc.pending_close_reason = f"tier_staircase_{int(round(tier_pct * 100.0))}"
         _LOGGER.info(
             "[SPIKE-TIER-TP] %s cid=%s sym=%s close pnl=%.4f sl_floor=%.4f peak=%.4f "
-            "tier_pct=%.2f dollar_floor=%.2f spikes_1h=%d avg=%.2f quota_done=%s",
+            "tier_pct=%.2f tier_active=%s dollar_floor=%.2f spikes_1h=%d quota=%d/%d "
+            "avg=%.2f quota_done=%s wait_for_quota=%s",
             source,
             cid,
             oc.symbol,
@@ -699,10 +743,14 @@ class DerivTradeExecutor:
             float(oc.trail_sl_locked),
             float(oc.peak_profit),
             tier_pct,
+            bool(state.get("tier_active")),
             float(state.get("dollar_floor") or 0.0),
             int(state.get("spikes_1h") or 0),
+            int(state.get("spikes_1h") or 0),
+            int(state.get("quota_target") or 0),
             float(state.get("spikes_avg_h") or 0.0),
             bool(state.get("quota_done")),
+            bool(state.get("wait_for_quota")),
         )
         try:
             await self._client.sell(cid)

@@ -463,7 +463,12 @@ function DpmTierPanel({ c }) {
   const slFloorVal   = ts.sl_floor != null ? Number(ts.sl_floor) : (trailSl >= 0 ? trailSl : null);
   const spikes1h     = Number(ts.spikes_1h ?? 0);
   const spikesAvg    = Number(ts.spikes_avg_h ?? 0);
+  const quotaTarget  = Number(ts.quota_target ?? 0);
+  const quotaRemaining = Number(ts.quota_remaining ?? Math.max(0, quotaTarget - spikes1h));
   const quotaDone    = Boolean(ts.quota_done);
+  const waitForQuota = Boolean(ts.wait_for_quota);
+  const tierActive   = Boolean(ts.tier_active);
+  const lookbackHrs  = Number(ts.lookback_hours ?? 12);
   const profitLock   = Number(ts.profit_lock_usdt ?? 2);
   const profitLockedUntil = Number(c.profit_lock_unlock_at ?? 0);
   const isPhase2 = slFloorVal != null && slFloorVal >= 0 && peak > 0;
@@ -518,12 +523,22 @@ function DpmTierPanel({ c }) {
             </span>
           )}
           {quotaDone && (
-            <span title={`Spikes 1h (${spikes1h}) ≥ promedio (${n(spikesAvg, 1)}) — tier estricto`} style={{
+            <span title={`Spikes 1h (${spikes1h}) ≥ cuota (${quotaTarget}) — tier estricto, recogiendo en próxima caída`} style={{
               fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
               color: T.amber, background: `${T.amber}18`,
               border: `1px solid ${T.amber}44`, borderRadius: 4, padding: "2px 6px",
             }}>
               QUOTA ✓
+            </span>
+          )}
+          {waitForQuota && (
+            <span title={`Esperando ${quotaRemaining} spikes más para activar tier %. Solo escalón $ duro protege.`} style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
+              color: T.cyan, background: `${T.cyan}14`,
+              border: `1px solid ${T.cyan}44`, borderRadius: 4, padding: "2px 6px",
+              fontFamily: FONT_MONO,
+            }}>
+              ⏳ ESPERA {quotaRemaining}
             </span>
           )}
           {beLocked && (
@@ -616,23 +631,30 @@ function DpmTierPanel({ c }) {
 
       {/* Spike quota + profit lock telemetry */}
       {hasTierState && (
+        <>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
-            <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Spikes 1h</div>
-            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: T.cyan }}>
-              {spikes1h}
-              <span style={{ fontSize: 9, color: T.mute, fontWeight: 500 }}>
-                {` / avg ${n(spikesAvg, 1)}`}
-              </span>
+          <div
+            title={`Spikes vistos en la hora UTC actual (${spikes1h}) vs cuota objetivo ${quotaTarget} (avg rolling ${lookbackHrs}h = ${n(spikesAvg, 2)}). Si faltan, NO cierro por tier %, solo por piso $.`}
+            style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+            <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Cuota hora</div>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: quotaDone ? T.green : T.cyan }}>
+              {spikes1h}<span style={{ color: T.mute, fontWeight: 500 }}>{` / ${quotaTarget}`}</span>
+              {!quotaDone && quotaRemaining > 0 && (
+                <span style={{ fontSize: 9, color: T.amber, fontWeight: 600 }}>{` (faltan ${quotaRemaining})`}</span>
+              )}
             </div>
           </div>
-          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div
+            title={`Piso duro en dólares enteros. Se activa cada vez que peak cruza $1, $2, $3... — el bot NUNCA cerrará por debajo de este nivel.`}
+            style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
             <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Piso $</div>
             <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: dollarFloor > 0 ? T.green : T.mute }}>
               {dollarFloor > 0 ? `$${n(dollarFloor, 0)}` : "–"}
             </div>
           </div>
-          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+          <div
+            title={`Profit-lock: si este contrato cierra con PnL ≥ $${n(profitLock, 0)}, el símbolo queda inactivo hasta el cambio de hora UTC. Evita re-entradas perdedoras tras cumplir cuota.`}
+            style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
             <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Lock ≥ ${n(profitLock, 0)}</div>
             <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: profitLockedUntil > 0 ? T.amber : T.mute }}>
               {profitLockedUntil > 0
@@ -641,6 +663,29 @@ function DpmTierPanel({ c }) {
             </div>
           </div>
         </div>
+        {/* Plain-language status line */}
+        <div style={{
+          fontSize: 9, color: T.mute, lineHeight: 1.4,
+          background: "rgba(255,255,255,0.02)", padding: "4px 6px", borderRadius: 4,
+          border: `1px dashed ${T.border}`,
+        }}>
+          {peak < 1.0 && (
+            <span>📊 Esperando peak ≥ $1 para activar protección.</span>
+          )}
+          {peak >= 1.0 && waitForQuota && (
+            <span>
+              ⏳ <b style={{ color: T.cyan }}>Esperando {quotaRemaining} spikes</b> más en esta hora UTC ({spikes1h}/{quotaTarget}).
+              {dollarFloor > 0 && <> Mientras tanto, piso duro en <b style={{ color: T.green }}>${n(dollarFloor, 0)}</b>.</>}
+            </span>
+          )}
+          {peak >= 1.0 && quotaDone && (
+            <span>
+              ✓ <b style={{ color: T.amber }}>Cuota cumplida</b> ({spikes1h}/{quotaTarget}). Tier {Math.round(tierPct*1000)/10}% activo —
+              cerrará si PnL cae por debajo de <b style={{ color: T.green }}>${n(slFloorVal ?? 0, 2)}</b>.
+            </span>
+          )}
+        </div>
+        </>
       )}
     </div>
   );

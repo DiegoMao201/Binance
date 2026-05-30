@@ -1053,11 +1053,18 @@ class DerivRiskManager:
         prev_counts = [
             per_bucket.get(curr_bucket - i, 0) for i in range(1, lookback_hours + 1)
         ]
+        # 2026-05-30 "quota-gate v2": promedio incluye horas silenciosas (cautela).
+        # Antes se ignoraban buckets vacíos lo cual sobre-estimaba el avg en
+        # mercados con baches; el resultado era cerrar antes de tiempo. Ahora
+        # avg = total_pruned / lookback_hours → representa la verdadera tasa
+        # esperada de spikes por hora.  Devolvemos también el avg "activo"
+        # (sólo horas con spikes) para diagnóstico, pero la cuota la marca
+        # el avg pleno.
+        total_prev = float(sum(prev_counts))
+        avg_full = total_prev / float(lookback_hours)
         non_zero = [c for c in prev_counts if c > 0]
-        if non_zero:
-            avg = float(sum(non_zero)) / float(len(non_zero))
-            return (curr_count, round(avg, 3), len(non_zero))
-        return (curr_count, 0.0, 0)
+        samples = len(non_zero) if non_zero else 0
+        return (curr_count, round(avg_full, 3), samples)
 
     def get_current_atr(self, symbol: str) -> float | None:
         """Return the most-recent synthetic ATR for *symbol* (mean of last 5 ATR samples).
