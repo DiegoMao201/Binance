@@ -75,6 +75,41 @@ _SPIKE_TIER_TP_WINDOW_PCT = max(
     min(float(os.getenv("DERIV_SPIKE_TIER_TP_WINDOW_PCT", "0.20") or 0.20), 0.40),
 )
 
+# 2026-05-30 "tier-staircase v1": tier % degresivo + escalón en dólares
+# enteros + lock por hora si rescatamos >= profit_lock_usdt.
+# - Tier base 20% se reduce a 10% cuando peak >= profit_lock_usdt y a 5%
+#   cuando peak >= profit_lock_usdt * 2 (defaults: 20→$2→10%→$4→5%).
+# - Spike-quota done: si los spikes de la hora UTC actual ya igualan/superan
+#   el promedio de las horas anteriores, el tier % se contrae -3pp
+#   adicional (no esperar más spikes; rescatar lo más posible).
+# - Profit-lock: cuando el contrato cierra con realized_pnl >= profit_lock_usdt,
+#   el símbolo queda inactivo hasta el cambio de hora UTC siguiente.
+_PROFIT_LOCK_USDT_DEFAULT = max(
+    0.0, float(os.getenv("DERIV_PROFIT_LOCK_USDT_PER_SYMBOL", "2.0") or 2.0)
+)
+_PROFIT_LOCK_INACTIVE_HOUR = _env_flag(
+    "DERIV_PROFIT_LOCK_INACTIVE_UNTIL_NEXT_HOUR", "true"
+)
+_TIER_BASE_PCT = max(
+    0.05,
+    min(float(os.getenv("DERIV_TIER_BASE_PCT", "0.20") or 0.20), 0.40),
+)
+_TIER_MID_PCT = max(
+    0.03,
+    min(float(os.getenv("DERIV_TIER_MID_PCT", "0.10") or 0.10), 0.30),
+)
+_TIER_HIGH_PCT = max(
+    0.02,
+    min(float(os.getenv("DERIV_TIER_HIGH_PCT", "0.05") or 0.05), 0.20),
+)
+_TIER_QUOTA_TIGHTEN_PP = max(
+    0.0,
+    min(float(os.getenv("DERIV_TIER_QUOTA_TIGHTEN_PP", "0.03") or 0.03), 0.10),
+)
+_SPIKE_QUOTA_LOOKBACK_HOURS = max(
+    1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "6") or 6), 24)
+)
+
 
 def _symbol_from_shortcode(shortcode: str) -> str:
     """Extract the underlying symbol from a Deriv contract shortcode.
@@ -252,6 +287,10 @@ class DerivOpenContract:
     # Live audit snapshots for frontend visual forensics.
     dep_last_eval: dict[str, Any] = field(default_factory=dict)
     prob_last_eval: dict[str, Any] = field(default_factory=dict)
+    # 2026-05-30 tier-staircase v1: live tier/floor state for frontend cards.
+    # Keys: tier_pct, dollar_floor, tier_floor, sl_floor, spikes_1h,
+    #       spikes_avg_h, samples, quota_done, profit_lock_usdt.
+    tier_state: dict[str, Any] = field(default_factory=dict)
 
 
 class DerivTradeExecutor:
@@ -299,6 +338,24 @@ class DerivTradeExecutor:
         # dict[contract_id, {peak_pnl, entry_pnl, start_tick, buffer_ticks,
         #                    retention_pct, min_floor_usdt, drift_ticks, regime}]
         self._spike_buffer: dict[int, dict[str, Any]] = {}
+        # 2026-05-30 "tier-staircase v1":
+        # Cuando un contrato spike cierra con realized_pnl >= profit_lock
+        # threshold (default $2), bloquea re-entradas del símbolo hasta el
+        # cambio de hora UTC siguiente (cuota asegurada).
+        self._profit_lock_state: dict[str, float] = {}
+        self._profit_lock_state_file = (
+            self._settings.logs_dir / "deriv_profit_lock.json"
+        )
+        with suppress(Exception):
+            if self._profit_lock_state_file.exists():
+                raw = json.loads(self._profit_lock_state_file.read_text())
+                if isinstance(raw, dict):
+                    now_ts = time.time()
+                    self._profit_lock_state = {
+                        str(k).upper(): float(v)
+                        for k, v in raw.items()
+                        if isinstance(v, (int, float)) and float(v) > now_ts
+                    }
         # Phase 5D: zero_peak emergency cuts are disabled by default while we
         # stabilize spike timing. Timeout/SL/ratchet remain active.
         self._zero_peak_exit_enabled = os.getenv(
@@ -411,6 +468,7 @@ class DerivTradeExecutor:
                         dep_peak_atr=float(_r.get("dep_peak_atr", 0.0)),
                         dep_last_eval=dict(_r.get("dep_last_eval") or {}),
                         prob_last_eval=dict(_r.get("prob_last_eval") or {}),
+                        tier_state=dict(_r.get("tier_state") or {}),
                     )
                 if self._open:
                     _LOGGER.info(
@@ -518,44 +576,82 @@ class DerivTradeExecutor:
             window += mid_delta
         return max(0.10, min(window, 0.40))
 
-    def _spike_tier_tp_floor(
+    def _spike_quota_state(self, symbol: str) -> tuple[int, float, int, bool]:
+        """Return (current_hour_spikes, prev_hours_avg, samples, quota_done)."""
+        curr = 0
+        avg = 0.0
+        samples = 0
+        if self._risk is not None:
+            getter = getattr(self._risk, "get_hourly_spike_buckets", None)
+            if callable(getter):
+                with suppress(Exception):
+                    curr, avg, samples = getter(symbol, _SPIKE_QUOTA_LOOKBACK_HOURS)
+        quota_done = bool(samples >= 1 and avg > 0 and curr >= avg)
+        return (int(curr), float(avg), int(samples), quota_done)
+
+    def _spike_tier_dynamic_state(
         self,
         symbol: str,
         peak_profit: float,
         stake_usdt: float,
-    ) -> float | None:
-        """Compute SL-only TierTP floor for spike symbols.
+    ) -> dict[str, Any]:
+        """Compute the staircase + dynamic-tier state for a spike position.
 
-        Tier 2 (>=T2): lock +20% stake.
-        Tier 3 (>=T3): trail with configurable window (default 20%).
+        Returns dict with: tier_pct, dollar_floor, tier_floor, sl_floor,
+        spikes_1h, spikes_avg_h, samples, quota_done, profit_lock_usdt.
+
+        Semantics:
+          • Staircase: cada dólar entero alcanzado por peak es un piso fijo.
+            peak=$8.51 → dollar_floor=$8.00; peak=$3.40 → dollar_floor=$3.00.
+          • Tier % dinámico por nivel acumulado:
+              peak < profit_lock        → 20%
+              profit_lock ≤ peak < 2×PL → 10%
+              peak ≥ 2×PL               → 5%
+          • Spike-quota done: si current_hour ≥ avg de horas previas,
+            tier_pct -= TIGHTEN_PP (más estricto, no esperar más).
+          • Final SL floor = max(dollar_floor, peak × (1 − tier_pct))
         """
+        out: dict[str, Any] = {
+            "tier_pct": 0.0,
+            "dollar_floor": 0.0,
+            "tier_floor": 0.0,
+            "sl_floor": None,
+            "spikes_1h": 0,
+            "spikes_avg_h": 0.0,
+            "samples": 0,
+            "quota_done": False,
+            "profit_lock_usdt": _PROFIT_LOCK_USDT_DEFAULT,
+        }
         if stake_usdt <= 0 or peak_profit <= 0:
-            return None
+            return out
 
-        profile = get_asset_profile(symbol)
-        try:
-            floor_min = float(
-                profile.get(
-                    "trail_stop_floor_min",
-                    profile.get("trail_floor_min_usdt", _TRAIL_FLOOR_GLOBAL_MIN),
-                )
-            )
-        except Exception:  # noqa: BLE001
-            floor_min = _TRAIL_FLOOR_GLOBAL_MIN
+        spikes_1h, spikes_avg, samples, quota_done = self._spike_quota_state(symbol)
+        out["spikes_1h"] = spikes_1h
+        out["spikes_avg_h"] = spikes_avg
+        out["samples"] = samples
+        out["quota_done"] = quota_done
 
-        peak_pct = float(peak_profit) / max(float(stake_usdt), 1e-9)
-        sl_max_loss = float(stake_usdt) * _TRAIL_MAX_LOSS_PCT
+        pl = max(0.5, float(_PROFIT_LOCK_USDT_DEFAULT))
+        if peak_profit >= 2.0 * pl:
+            tier_pct = _TIER_HIGH_PCT
+        elif peak_profit >= pl:
+            tier_pct = _TIER_MID_PCT
+        else:
+            tier_pct = _TIER_BASE_PCT
+        if quota_done:
+            tier_pct = max(_TIER_HIGH_PCT - 0.02, tier_pct - _TIER_QUOTA_TIGHTEN_PP)
+        tier_pct = max(0.02, min(tier_pct, 0.40))
+        out["tier_pct"] = round(tier_pct, 4)
 
-        if peak_pct >= _T3_PCT:
-            window_pct = self._spike_tier_window_pct(symbol)
-            floor = (peak_pct - window_pct) * float(stake_usdt)
-            return round(max(floor, floor_min, -sl_max_loss), 4)
+        # Staircase: piso en dólares enteros (sólo si peak ≥ $1).
+        dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
+        tier_floor = peak_profit * (1.0 - tier_pct)
+        sl_floor = max(dollar_floor, tier_floor)
 
-        if peak_pct >= _T2_PCT:
-            floor = float(stake_usdt) * _T2_LOCK_PCT
-            return round(max(floor, floor_min, -sl_max_loss), 4)
-
-        return None
+        out["dollar_floor"] = round(dollar_floor, 4)
+        out["tier_floor"] = round(tier_floor, 4)
+        out["sl_floor"] = round(sl_floor, 4)
+        return out
 
     async def _maybe_close_spike_tier_tp(
         self,
@@ -564,42 +660,49 @@ class DerivTradeExecutor:
         current_profit: float,
         source: str,
     ) -> bool:
-        """Close spike position when TierTP floor is breached in SL-only mode."""
+        """Close spike position when staircase+tier floor is breached (SL-only)."""
         if not (self._spike_sl_only_mode and is_spike_market(oc.symbol)):
             return False
 
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
 
-        tier_floor = self._spike_tier_tp_floor(
+        state = self._spike_tier_dynamic_state(
             oc.symbol,
             float(oc.peak_profit),
             float(oc.stake_usdt),
         )
-        if tier_floor is None:
+        # Always publish live telemetry so the frontend cards reflect the
+        # current tier/floor even before any close trigger fires.
+        oc.tier_state = state
+
+        sl_floor = state.get("sl_floor")
+        if sl_floor is None:
             return False
+        # Sólo armamos el ratchet una vez que tenemos peak > 0.
+        if float(sl_floor) > float(oc.trail_sl_locked):
+            oc.trail_sl_locked = float(sl_floor)
 
-        if tier_floor > oc.trail_sl_locked:
-            oc.trail_sl_locked = float(tier_floor)
-
-        if current_profit > oc.trail_sl_locked or cid in self._closing:
+        if current_profit > float(oc.trail_sl_locked) or cid in self._closing:
             return False
 
         self._closing.add(cid)
-        _window = self._spike_tier_window_pct(oc.symbol)
-        _spikes_1h = self._spike_count_last_hour(oc.symbol)
-        oc.pending_close_reason = f"tier_tp_window_{int(round(_window * 100.0))}"
+        tier_pct = float(state.get("tier_pct") or 0.0)
+        oc.pending_close_reason = f"tier_staircase_{int(round(tier_pct * 100.0))}"
         _LOGGER.info(
-            "[SPIKE-TIER-TP] %s cid=%s sym=%s close pnl=%.4f floor=%.4f peak=%.4f "
-            "window=%.2f spikes_1h=%d",
+            "[SPIKE-TIER-TP] %s cid=%s sym=%s close pnl=%.4f sl_floor=%.4f peak=%.4f "
+            "tier_pct=%.2f dollar_floor=%.2f spikes_1h=%d avg=%.2f quota_done=%s",
             source,
             cid,
             oc.symbol,
             current_profit,
-            oc.trail_sl_locked,
-            oc.peak_profit,
-            _window,
-            _spikes_1h,
+            float(oc.trail_sl_locked),
+            float(oc.peak_profit),
+            tier_pct,
+            float(state.get("dollar_floor") or 0.0),
+            int(state.get("spikes_1h") or 0),
+            float(state.get("spikes_avg_h") or 0.0),
+            bool(state.get("quota_done")),
         )
         try:
             await self._client.sell(cid)
@@ -609,6 +712,54 @@ class DerivTradeExecutor:
             oc.pending_close_reason = None
             return False
         return True
+
+    # ─── Profit-lock per symbol (per-hour quota) ──────────────────────────
+    def _persist_profit_lock(self) -> None:
+        """Write _profit_lock_state to disk (best effort)."""
+        with suppress(Exception):
+            self._profit_lock_state_file.parent.mkdir(parents=True, exist_ok=True)
+            self._profit_lock_state_file.write_text(
+                json.dumps(self._profit_lock_state, sort_keys=True)
+            )
+
+    def _maybe_arm_profit_lock(self, symbol: str, realized_pnl: float) -> None:
+        """If realized_pnl ≥ profit_lock_usdt, mark symbol inactive until next UTC hour."""
+        if not _PROFIT_LOCK_INACTIVE_HOUR:
+            return
+        threshold = float(_PROFIT_LOCK_USDT_DEFAULT)
+        if threshold <= 0 or realized_pnl < threshold:
+            return
+        key = str(symbol or "").upper()
+        if not key:
+            return
+        now = time.time()
+        unlock_at = (int(now // 3600) + 1) * 3600
+        prev = float(self._profit_lock_state.get(key) or 0.0)
+        if unlock_at <= prev:
+            return
+        self._profit_lock_state[key] = float(unlock_at)
+        self._persist_profit_lock()
+        _LOGGER.info(
+            "[PROFIT-LOCK] %s armed: realized_pnl=%.2f >= %.2f → inactive until %s UTC",
+            key,
+            realized_pnl,
+            threshold,
+            time.strftime("%H:%M:%S", time.gmtime(unlock_at)),
+        )
+
+    def is_symbol_profit_locked(self, symbol: str) -> tuple[bool, float]:
+        """Return (locked, unlock_at_ts) for *symbol* (pruning stale entries)."""
+        key = str(symbol or "").upper()
+        unlock_at = float(self._profit_lock_state.get(key) or 0.0)
+        if unlock_at <= 0:
+            return (False, 0.0)
+        now = time.time()
+        if unlock_at <= now:
+            with suppress(Exception):
+                del self._profit_lock_state[key]
+                self._persist_profit_lock()
+            return (False, 0.0)
+        return (True, unlock_at)
 
     def _multispike_policy(self, symbol: str) -> dict[str, Any]:
         """Resolve multispike ratchet policy (dynamic config + env fallback)."""
@@ -1844,9 +1995,18 @@ class DerivTradeExecutor:
                 "score_breakdown": oc.score_breakdown or {},
                 "dep_last_eval": oc.dep_last_eval or {},
                 "prob_last_eval": oc.prob_last_eval or {},
+                # 2026-05-30 tier-staircase v1: live state for frontend cards
+                "tier_state": dict(oc.tier_state or {}),
+                "profit_lock_unlock_at": float(
+                    self._profit_lock_state.get(str(oc.symbol or "").upper()) or 0.0
+                ),
             }
             for oc in self._open.values()
         ]
+
+    def get_profit_lock_state(self) -> dict[str, float]:
+        """Return a copy of the profit-lock map (symbol → unlock_at_ts)."""
+        return dict(self._profit_lock_state)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Persistence (atomic writes, broker-scoped)
@@ -1878,6 +2038,9 @@ class DerivTradeExecutor:
                 "dep_peak_atr": round(oc.dep_peak_atr, 6),
                 "dep_last_eval": oc.dep_last_eval or {},
                 "prob_last_eval": oc.prob_last_eval or {},
+                "tier_state": dict(oc.tier_state or {}),
+                "stop_loss_pct": float(oc.stop_loss_pct or 0.0),
+                "take_profit_pct": float(oc.take_profit_pct or 0.0),
             }
             for oc in self._open.values()
         ]
@@ -1923,6 +2086,13 @@ class DerivTradeExecutor:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(existing, indent=2, default=str))
         tmp.replace(path)
+        # 2026-05-30 tier-staircase v1: arm per-symbol profit lock when the
+        # contract banked realized_pnl ≥ DERIV_PROFIT_LOCK_USDT_PER_SYMBOL.
+        with suppress(Exception):
+            _sym = str(record.get("symbol") or "").upper()
+            _pnl = float(record.get("realized_pnl_usdt") or 0.0)
+            if _sym and is_spike_market(_sym):
+                self._maybe_arm_profit_lock(_sym, _pnl)
         # Enrich spike record when an existing position captured the spike
         if record.get("exit_reason") in (
             "spike_tp",
@@ -2216,13 +2386,15 @@ class DerivTradeExecutor:
             # Bug detector: settled-but-status-open should never reach here
             return "settled_open_bug"
         if not status:
-            # BUG-A fix (2026-05-19 phase13): broker sends close events without
-            # a status field on forced multiplier-SL closes via WS push.
-            # Infer exit reason from PnL context so closed trades carry a
-            # meaningful label instead of opaque "unknown_no_status".
-            _pnl   = float(poc.get("profit") or 0)
+            # 2026-05-30: Deriv WS push for forced multiplier-SL closes
+            # frequently omits both `status` and `limit_order`.  Since the bot
+            # operates in SL-only mode for spike markets we never want to
+            # surface "unknown_pnl_-X.XX" any more — it confuses dashboards
+            # and hides the true cause (broker SL).  Classify by PnL sign with
+            # a small breakeven tolerance.
+            _pnl = float(poc.get("profit") or 0)
             _stake = float(poc.get("buy_price") or poc.get("ask_price") or 0)
-            # Prefer broker-set SL amount from limit_order (present in REST responses)
+            # Prefer broker-set SL amount from limit_order when present.
             _sl_amount = float(
                 ((poc.get("limit_order") or {}).get("stop_loss") or {}).get(
                     "order_amount", 0
@@ -2231,17 +2403,19 @@ class DerivTradeExecutor:
             if _sl_amount > 0 and _pnl <= -(_sl_amount * 0.85):
                 return "broker_sl_hit"
             if _stake > 0:
-                if _pnl <= -(_stake * 0.28):
+                if _pnl <= -(_stake * 0.10):
                     return "broker_sl_hit"
-                if _pnl >= _stake * 0.08:
+                if _pnl >= _stake * 0.06:
                     return "tp_or_ratchet"
-            elif _pnl <= -0.35:
+            elif _pnl <= -0.20:
                 return "broker_sl_hit"
             elif _pnl >= 0.05:
                 return "tp_or_ratchet"
             if abs(_pnl) <= 0.05:
                 return "breakeven_or_zero"
-            return f"unknown_pnl_{_pnl:+.2f}"
+            # Fallback: signed → broker_sl_hit / tp_or_ratchet by sign so we
+            # never emit unknown_pnl_* labels in production logs.
+            return "broker_sl_hit" if _pnl < 0 else "tp_or_ratchet"
         return f"broker_{status}"
 
     def _relabel_unknown_as_broker_sl(

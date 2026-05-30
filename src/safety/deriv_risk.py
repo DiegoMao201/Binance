@@ -1020,6 +1020,45 @@ class DerivRiskManager:
         self._spike_recent_ts[key] = pruned
         return len(pruned)
 
+    def get_hourly_spike_buckets(
+        self, symbol: str, lookback_hours: int = 6
+    ) -> tuple[int, float, int]:
+        """Return (current_hour_count, prev_hour_avg, prev_hour_samples).
+
+        Buckets are calendar hours in UTC (epoch // 3600).  Used by the
+        spike-quota exit path: when the current hour's spike count has already
+        matched or exceeded the rolling average of the previous N hours, the
+        bot is in "spike quota done" territory and should rescue capital
+        instead of waiting for more spikes that statistically won't come.
+        """
+        if lookback_hours <= 0:
+            return (0, 0.0, 0)
+        now = time.time()
+        curr_bucket = int(now // 3600)
+        key = str(symbol or "").upper()
+        raw = list(self._spike_recent_ts.get(key) or self._spike_recent_ts.get(symbol, []))
+        if not raw:
+            return (0, 0.0, 0)
+        # Prune anything older than lookback+1 hours.
+        cutoff = now - (lookback_hours + 1) * 3600.0
+        pruned = [ts for ts in raw if ts >= cutoff]
+        self._spike_recent_ts[key] = pruned
+        if not pruned:
+            return (0, 0.0, 0)
+        per_bucket: dict[int, int] = {}
+        for ts in pruned:
+            b = int(ts // 3600)
+            per_bucket[b] = per_bucket.get(b, 0) + 1
+        curr_count = int(per_bucket.get(curr_bucket, 0))
+        prev_counts = [
+            per_bucket.get(curr_bucket - i, 0) for i in range(1, lookback_hours + 1)
+        ]
+        non_zero = [c for c in prev_counts if c > 0]
+        if non_zero:
+            avg = float(sum(non_zero)) / float(len(non_zero))
+            return (curr_count, round(avg, 3), len(non_zero))
+        return (curr_count, 0.0, 0)
+
     def get_current_atr(self, symbol: str) -> float | None:
         """Return the most-recent synthetic ATR for *symbol* (mean of last 5 ATR samples).
 

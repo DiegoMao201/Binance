@@ -446,31 +446,48 @@ function ErrorShell({ err, onRetry }) {
    TAB 0 — OPERACIONES
    ════════════════════════════════════════════════════════════════════════ */
 function DpmTierPanel({ c }) {
-  // DPM Tier Visualizer — shows current ratchet state, SL floor, BE lock status,
-  // and a progress bar toward Phase 2. All values come from deriv_open_contracts.json
-  // which is refreshed every 10s by _write_status().
+  // DPM Tier Visualizer — 2026-05-30 tier-staircase v1.
+  // Prefiere tier_state nuevo (staircase + tier % dinámico + spike quota)
+  // y mantiene fallback al ratchet legacy si tier_state aún no se publica.
   const stake   = Number(c.stake_usdt || 0);
   const peak    = Number(c.peak_profit ?? 0);
   const trailSl = Number(c.trail_sl ?? c.trail_sl_locked ?? -1);
   const beLocked = Boolean(c.broker_be_locked);
   const durSec  = Number(c.duration_sec ?? 0);
+  const ts = c.tier_state || {};
+  const hasTierState = ts && typeof ts === "object" && Object.keys(ts).length > 0;
 
-  // Infer DPM phase from trail_sl:
-  // trail_sl < 0 → Phase 1 (initial sentinel, no ratchet yet)
-  // trail_sl >= 0 → Phase 2 (ratchet active)
-  const isPhase2 = trailSl >= 0;
-
-  // Progress toward Phase 2: using ratchet_step_pct=0.65 as reference (worst case)
-  // Shows % of stake that peak has reached. Phase 2 fires typically at 25–65% of stake.
-  const phasePct = stake > 0 ? Math.min(1, peak / (stake * 0.65)) : 0;
-
-  // SL floor to display: show trail_sl if Phase 2, else show "–"
-  const slDisplay = isPhase2 ? `$${n(trailSl, 3)}` : "–";
+  const tierPct      = Number(ts.tier_pct ?? 0);
+  const dollarFloor  = Number(ts.dollar_floor ?? 0);
+  const tierFloorVal = Number(ts.tier_floor ?? 0);
+  const slFloorVal   = ts.sl_floor != null ? Number(ts.sl_floor) : (trailSl >= 0 ? trailSl : null);
+  const spikes1h     = Number(ts.spikes_1h ?? 0);
+  const spikesAvg    = Number(ts.spikes_avg_h ?? 0);
+  const quotaDone    = Boolean(ts.quota_done);
+  const profitLock   = Number(ts.profit_lock_usdt ?? 2);
+  const profitLockedUntil = Number(c.profit_lock_unlock_at ?? 0);
+  const isPhase2 = slFloorVal != null && slFloorVal >= 0 && peak > 0;
+  const phasePct = stake > 0
+    ? Math.min(1, peak / (stake * 0.65))
+    : 0;
+  const slDisplay   = slFloorVal != null ? `$${n(slFloorVal, 3)}` : "–";
   const peakDisplay = peak > 0 ? `+$${n(peak, 3)}` : "–";
+  const tierLabel   = hasTierState && tierPct > 0
+    ? `${Math.round(tierPct * 1000) / 10}%`
+    : null;
 
-  const phase1Color = "#60a5fa"; // blue
+  const phase1Color = "#60a5fa";
   const phase2Color = T.green;
   const phaseColor  = isPhase2 ? phase2Color : phase1Color;
+  const tierBadgeColor = tierPct <= 0.05 ? T.green
+    : tierPct <= 0.10 ? T.cyan
+    : T.amber;
+
+  // Mini staircase: ticks por cada dólar alcanzado (max 6 escalones).
+  const stairSteps = [];
+  for (let i = 1; i <= 6; i += 1) {
+    stairSteps.push({ usd: i, reached: peak >= i });
+  }
 
   return (
     <div style={{
@@ -480,23 +497,42 @@ function DpmTierPanel({ c }) {
       flexDirection: "column",
       gap: 6,
     }}>
-      {/* Phase label + BE lock badge */}
+      {/* Phase label + BE lock + tier badge */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{
             fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
             color: phaseColor, background: `${phaseColor}18`,
             border: `1px solid ${phaseColor}44`, borderRadius: 4, padding: "2px 6px",
           }}>
-            {isPhase2 ? "▲ DPM FASE 2" : "● DPM FASE 1"}
+            {isPhase2 ? "▲ TIER ARMADO" : "● TIER OFF"}
           </span>
+          {tierLabel && (
+            <span title="Giveback máximo desde el peak" style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
+              color: tierBadgeColor, background: `${tierBadgeColor}18`,
+              border: `1px solid ${tierBadgeColor}44`, borderRadius: 4, padding: "2px 6px",
+              fontFamily: FONT_MONO,
+            }}>
+              TIER {tierLabel}
+            </span>
+          )}
+          {quotaDone && (
+            <span title={`Spikes 1h (${spikes1h}) ≥ promedio (${n(spikesAvg, 1)}) — tier estricto`} style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
+              color: T.amber, background: `${T.amber}18`,
+              border: `1px solid ${T.amber}44`, borderRadius: 4, padding: "2px 6px",
+            }}>
+              QUOTA ✓
+            </span>
+          )}
           {beLocked && (
             <span style={{
               fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
               color: T.green, background: `${T.green}14`,
               border: `1px solid ${T.green}44`, borderRadius: 4, padding: "2px 6px",
             }}>
-              🔒 BE BROKER
+              🔒 BE
             </span>
           )}
         </div>
@@ -505,7 +541,31 @@ function DpmTierPanel({ c }) {
         </span>
       </div>
 
-      {/* Progress bar toward Phase 2 */}
+      {/* Staircase visual + ratchet bar */}
+      {hasTierState && (
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {stairSteps.map((s) => (
+            <div key={s.usd} title={`Piso $${s.usd}`} style={{
+              flex: 1,
+              height: 10,
+              borderRadius: 2,
+              background: s.reached ? T.green : `${T.border}`,
+              border: `1px solid ${s.reached ? T.green : T.border}`,
+              fontSize: 7,
+              fontWeight: 700,
+              color: s.reached ? "#062" : T.mute,
+              fontFamily: FONT_MONO,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              letterSpacing: "0.02em",
+            }}>
+              ${s.usd}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <span style={{ fontSize: 9, color: T.mute }}>Progreso ratchet</span>
@@ -513,11 +573,7 @@ function DpmTierPanel({ c }) {
             {Math.round(phasePct * 100)}%
           </span>
         </div>
-        <div style={{
-          height: 4, borderRadius: 2,
-          background: `${T.border}`,
-          overflow: "hidden",
-        }}>
+        <div style={{ height: 4, borderRadius: 2, background: `${T.border}`, overflow: "hidden" }}>
           <div style={{
             height: "100%",
             width: `${Math.round(phasePct * 100)}%`,
@@ -530,7 +586,7 @@ function DpmTierPanel({ c }) {
         </div>
       </div>
 
-      {/* SL floor + Peak row */}
+      {/* SL floor + Peak + Stake */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
         <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
           <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>SL Floor</div>
@@ -557,6 +613,35 @@ function DpmTierPanel({ c }) {
           </div>
         </div>
       </div>
+
+      {/* Spike quota + profit lock telemetry */}
+      {hasTierState && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+            <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Spikes 1h</div>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: T.cyan }}>
+              {spikes1h}
+              <span style={{ fontSize: 9, color: T.mute, fontWeight: 500 }}>
+                {` / avg ${n(spikesAvg, 1)}`}
+              </span>
+            </div>
+          </div>
+          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+            <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Piso $</div>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: dollarFloor > 0 ? T.green : T.mute }}>
+              {dollarFloor > 0 ? `$${n(dollarFloor, 0)}` : "–"}
+            </div>
+          </div>
+          <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: "4px 6px" }}>
+            <div style={{ fontSize: 8, color: T.mute, textTransform: "uppercase", letterSpacing: "0.06em" }}>Lock ≥ ${n(profitLock, 0)}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: FONT_MONO, color: profitLockedUntil > 0 ? T.amber : T.mute }}>
+              {profitLockedUntil > 0
+                ? `${Math.max(0, Math.round((profitLockedUntil - Date.now()/1000) / 60))}m`
+                : "–"}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

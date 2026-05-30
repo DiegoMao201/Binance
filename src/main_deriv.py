@@ -1878,6 +1878,31 @@ class DerivDaemon:
             _LOGGER.info("[PIPELINE] SYMBOL_FORCED_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_forced_disabled")
             return
+        # 2026-05-30 tier-staircase v1: profit lock per UTC hour.
+        # If the symbol already banked >= profit_lock_usdt this hour, skip new
+        # entries until the next UTC hour boundary (don't risk back the gains).
+        _pl_locked = False
+        _pl_unlock_at = 0.0
+        with suppress(Exception):
+            _pl_locked, _pl_unlock_at = self._executor.is_symbol_profit_locked(tick.symbol)
+        if _pl_locked:
+            _now_pl = time.time()
+            _remaining_min = max(0.0, (_pl_unlock_at - _now_pl) / 60.0)
+            _last_emit = float(
+                self._dynamic_inactive_last_emit_ts.get(f"{tick.symbol}:profit_lock") or 0.0
+            )
+            if (_now_pl - _last_emit) >= float(self._dynamic_inactive_decision_interval_sec):
+                self._dynamic_inactive_last_emit_ts[f"{tick.symbol}:profit_lock"] = _now_pl
+                _LOGGER.info(
+                    "[PIPELINE] SYMBOL_PROFIT_LOCKED %s — banked quota this hour; "
+                    "unlock in %.1f min",
+                    tick.symbol,
+                    _remaining_min,
+                )
+            self._spike_enrich(
+                tick.symbol, bot_entered=False, block_reason="symbol_profit_locked"
+            )
+            return
         if _early_profile.get("disabled"):
             _LOGGER.debug("[PIPELINE] SYMBOL_DISABLED %s — skipping", tick.symbol)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="symbol_disabled")
