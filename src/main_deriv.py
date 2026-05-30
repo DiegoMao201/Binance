@@ -2244,11 +2244,19 @@ class DerivDaemon:
             _react_known = float(self._sym_reactivation_ts.get(_sym_rg, 0.0) or 0.0)
             _now_rg = time.time()
             # Detect transition: previously had inactive streak ≥3 ticks AND
-            # this tick is past the inactive blocks AND last_inactive > known react
+            # this tick is past the inactive blocks AND last_inactive > known react.
+            # Suppress re-detection while we're still inside the GRACE window from
+            # a previous detection (avoids log spam when symbol has high tick rate
+            # and inactive returns fire many times between active ticks).
+            _suppress_redetect = (
+                _react_known > 0
+                and (_now_rg - _react_known) < float(self._reactivation_grace_sec)
+            )
             if (
                 _streak >= 3
                 and _last_inact > 0
                 and _last_inact > _react_known
+                and not _suppress_redetect
             ):
                 # The symbol was inactive and now is active — record reactivation
                 self._sym_reactivation_ts[_sym_rg] = _last_inact
