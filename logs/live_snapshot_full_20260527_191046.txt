@@ -1,0 +1,510 @@
+=== LIVE_NOW_UTC ===
+2026-05-27T19:10:49Z
+=== CONTAINERS ===
+name=o4w1ns4cceccmn2ozqt7sol2-ai status=Up 22 minutes (healthy) image=o4w1ns4cceccmn2ozqt7sol2:172c4f4f5262a8254cc3b0aa644c5f267573dc34
+name=o4w1ns4cceccmn2ozqt7sol2 status=Up 24 minutes (healthy) image=o4w1ns4cceccmn2ozqt7sol2:172c4f4f5262a8254cc3b0aa644c5f267573dc34
+name=z9nciejyvxqat1gg8r94tw9i status=Up 23 hours image=ghcr.io/coollabsio/coolify-helper:1.0.13
+name=coolify-proxy status=Up 2 weeks (healthy) image=traefik:v3.6
+name=coolify-sentinel status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/sentinel:0.0.21
+name=coolify status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/coolify:latest
+name=coolify-realtime status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/coolify-realtime:1.0.13
+name=coolify-redis status=Up 2 weeks (healthy) image=redis:7-alpine
+name=coolify-db status=Up 2 weeks (healthy) image=postgres:15-alpine
+=== STATUS_SUMMARY ===
+{
+  "status_exists": true,
+  "status": "running",
+  "connected": true,
+  "updated_at": "2026-05-27T19:10:48.006828+00:00",
+  "heartbeat_at": "2026-05-27T19:10:48.006842+00:00",
+  "symbols": [
+    "BOOM500",
+    "BOOM600",
+    "BOOM900",
+    "CRASH500",
+    "CRASH600",
+    "CRASH900"
+  ],
+  "counters": {
+    "ticks_total": 8598,
+    "decisions_total": 2197,
+    "orders_sent": 5,
+    "orders_ok": 5,
+    "orders_failed": 0
+  },
+  "dynamic_enabled": true,
+  "dynamic_last_refresh": "2026-05-27T19:10:34.079746+00:00",
+  "dynamic_symbols_loaded": 8,
+  "open_contracts_live": 3,
+  "last_decisions_len": 500,
+  "decisions_by_symbol": {
+    "CRASH600": 150,
+    "CRASH500": 209,
+    "CRASH900": 6,
+    "BOOM900": 68,
+    "BOOM500": 18,
+    "BOOM600": 49
+  },
+  "top_reason_prefixes": [
+    [
+      "REGIME_SCORE_GATE_DYNAMIC",
+      435
+    ],
+    [
+      "ENTRY_BLOCKED",
+      56
+    ],
+    [
+      "DYNAMIC_INACTIVE",
+      6
+    ],
+    [
+      "GO ai=0.85 H=0.498 score=7.16 regime=calm",
+      1
+    ],
+    [
+      "GO ai=0.85 H=0.502 score=9.04 regime=calm",
+      1
+    ],
+    [
+      "GO ai=0.85 H=0.449 score=7.23 regime=trending",
+      1
+    ]
+  ],
+  "dynamic_inactive_decisions": 6,
+  "dynamic_active": [
+    {
+      "symbol": "BOOM500",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 8.0,
+      "spike_pre_filter_target": 90,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "BOOM600",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.199999999999999,
+      "spike_pre_filter_target": 360,
+      "zero_peak_grace_sec": 120,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "BOOM900",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.6000000000000005,
+      "spike_pre_filter_target": 196,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "CRASH500",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 8.0,
+      "spike_pre_filter_target": 300,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    },
+    {
+      "symbol": "CRASH600",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.75,
+      "spike_pre_filter_target": 162,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    }
+  ],
+  "dynamic_inactive": [
+    {
+      "symbol": "BOOM1000",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 149,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "CRASH1000",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 242,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    },
+    {
+      "symbol": "CRASH900",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 251,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    }
+  ],
+  "closed_24h": {
+    "BOOM1000": {
+      "trades_24h": 1,
+      "wins_24h": 0,
+      "win_rate_24h_pct": 0.0,
+      "pnl_24h": -1.64,
+      "top_exit_reasons": [
+        [
+          "broker_sl_hit",
+          1
+        ]
+      ]
+    },
+    "BOOM600": {
+      "trades_24h": 36,
+      "wins_24h": 19,
+      "win_rate_24h_pct": 52.8,
+      "pnl_24h": 1.85,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          16
+        ],
+        [
+          "ratchet_hit",
+          3
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.2700<=0.0200|atr_ratio=0.074|cycle=0.80",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.092|cycle=0.78",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.2300<=0.0200|atr_ratio=0.081|cycle=0.82",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.218<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.502|cycle=1.10",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.214<=0.220|pnl=-0.3200<=0.0200|atr_ratio=0.562|cycle=1.27",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.4200<=0.0200|atr_ratio=0.062|cycle=0.78",
+          1
+        ]
+      ]
+    },
+    "BOOM900": {
+      "trades_24h": 65,
+      "wins_24h": 32,
+      "win_rate_24h_pct": 49.2,
+      "pnl_24h": 0.27,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          29
+        ],
+        [
+          "broker_sl_hit",
+          5
+        ],
+        [
+          "ratchet_hit",
+          3
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.2600<=0.0200|atr_ratio=0.603|cycle=1.39",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.626|cycle=1.71",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.3700<=0.0200|atr_ratio=0.599|cycle=1.35",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.5200<=0.0200|atr_ratio=0.296|cycle=0.77",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.3700<=0.0200|atr_ratio=0.618|cycle=1.40",
+          1
+        ]
+      ]
+    },
+    "CRASH1000": {
+      "trades_24h": 6,
+      "wins_24h": 2,
+      "win_rate_24h_pct": 33.3,
+      "pnl_24h": -1.93,
+      "top_exit_reasons": [
+        [
+          "broker_sl_hit",
+          4
+        ],
+        [
+          "timeout_multispike",
+          2
+        ]
+      ]
+    },
+    "CRASH500": {
+      "trades_24h": 94,
+      "wins_24h": 49,
+      "win_rate_24h_pct": 52.1,
+      "pnl_24h": -3.49,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          35
+        ],
+        [
+          "broker_sl_hit",
+          10
+        ],
+        [
+          "ratchet_hit",
+          4
+        ],
+        [
+          "open_prob_exit:prob=0.206<=0.220|pnl=0.0200<=0.0200|atr_ratio=0.532|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.1600<=0.0200|atr_ratio=0.570|cycle=1.52",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.616|cycle=1.72",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.215<=0.220|pnl=-0.4700<=0.0200|atr_ratio=0.615|cycle=1.82",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.115<=0.220|pnl=-0.3400<=0.0200|atr_ratio=0.472|cycle=1.95",
+          1
+        ]
+      ]
+    },
+    "CRASH600": {
+      "trades_24h": 23,
+      "wins_24h": 13,
+      "win_rate_24h_pct": 56.5,
+      "pnl_24h": 1.46,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          11
+        ],
+        [
+          "broker_sl_hit",
+          2
+        ],
+        [
+          "ratchet_hit",
+          2
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.1300<=0.0200|atr_ratio=0.036|cycle=0.87",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.2400<=0.0200|atr_ratio=0.593|cycle=1.73",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.2200<=0.0200|atr_ratio=0.589|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.3400<=0.0200|atr_ratio=0.057|cycle=0.79",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.218<=0.220|pnl=-0.1900<=0.0200|atr_ratio=0.588|cycle=1.40",
+          1
+        ]
+      ]
+    },
+    "CRASH900": {
+      "trades_24h": 30,
+      "wins_24h": 17,
+      "win_rate_24h_pct": 56.7,
+      "pnl_24h": 1.42,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          17
+        ],
+        [
+          "broker_sl_hit",
+          2
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.4100<=0.0200|atr_ratio=0.618|cycle=1.42",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.595|cycle=1.37",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.612|cycle=1.39",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.2200<=0.0200|atr_ratio=0.589|cycle=1.88",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.215<=0.220|pnl=-0.3100<=0.0200|atr_ratio=0.597|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.2000<=0.0200|atr_ratio=0.584|cycle=2.00",
+          1
+        ]
+      ]
+    }
+  },
+  "spikes_live": {
+    "1h": {
+      "BOOM500": {
+        "spikes": 10,
+        "entered": 0,
+        "rate_h": 10.0
+      },
+      "BOOM600": {
+        "spikes": 4,
+        "entered": 0,
+        "rate_h": 4.0
+      },
+      "BOOM900": {
+        "spikes": 5,
+        "entered": 0,
+        "rate_h": 5.0
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 8,
+        "entered": 0,
+        "rate_h": 8.0
+      },
+      "CRASH600": {
+        "spikes": 11,
+        "entered": 0,
+        "rate_h": 11.0
+      },
+      "CRASH900": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    },
+    "3h": {
+      "BOOM500": {
+        "spikes": 26,
+        "entered": 0,
+        "rate_h": 8.67
+      },
+      "BOOM600": {
+        "spikes": 18,
+        "entered": 0,
+        "rate_h": 6.0
+      },
+      "BOOM900": {
+        "spikes": 23,
+        "entered": 0,
+        "rate_h": 7.67
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 23,
+        "entered": 0,
+        "rate_h": 7.67
+      },
+      "CRASH600": {
+        "spikes": 41,
+        "entered": 0,
+        "rate_h": 13.67
+      },
+      "CRASH900": {
+        "spikes": 10,
+        "entered": 0,
+        "rate_h": 3.33
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    },
+    "6h": {
+      "BOOM500": {
+        "spikes": 35,
+        "entered": 0,
+        "rate_h": 5.83
+      },
+      "BOOM600": {
+        "spikes": 48,
+        "entered": 0,
+        "rate_h": 8.0
+      },
+      "BOOM900": {
+        "spikes": 38,
+        "entered": 0,
+        "rate_h": 6.33
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 63,
+        "entered": 0,
+        "rate_h": 10.5
+      },
+      "CRASH600": {
+        "spikes": 60,
+        "entered": 0,
+        "rate_h": 10.0
+      },
+      "CRASH900": {
+        "spikes": 26,
+        "entered": 0,
+        "rate_h": 4.33
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    }
+  }
+}
+=== ENV_SANITIZED_APP ===

@@ -1,0 +1,8 @@
+BOOM1000|trades=1|wins=0|wr=0.0%|pnl=-1.64|top=[('broker_sl_hit', 1)]
+BOOM500|trades=3|wins=3|wr=100.0%|pnl=1.33|top=[('timeout_multispike', 3)]
+BOOM600|trades=38|wins=20|wr=52.6%|pnl=1.94|top=[('timeout_multispike', 17), ('ratchet_hit', 3), ('open_prob_exit:prob=0.220<=0.220|pnl=-0.2700<=0.0200|atr_ratio=0.074|cycle=0.80', 1)]
+BOOM900|trades=65|wins=32|wr=49.2%|pnl=0.38|top=[('timeout_multispike', 29), ('broker_sl_hit', 5), ('ratchet_hit', 3)]
+CRASH1000|trades=6|wins=2|wr=33.3%|pnl=-1.93|top=[('broker_sl_hit', 4), ('timeout_multispike', 2)]
+CRASH500|trades=93|wins=49|wr=52.7%|pnl=-2.72|top=[('timeout_multispike', 35), ('broker_sl_hit', 9), ('ratchet_hit', 4)]
+CRASH600|trades=21|wins=12|wr=57.1%|pnl=1.92|top=[('timeout_multispike', 10), ('ratchet_hit', 2), ('broker_sl_hit', 1)]
+CRASH900|trades=28|wins=16|wr=57.1%|pnl=1.80|top=[('timeout_multispike', 16), ('broker_sl_hit', 1), ('open_prob_exit:prob=0.219<=0.220|pnl=-0.4100<=0.0200|atr_ratio=0.618|cycle=1.42', 1)]

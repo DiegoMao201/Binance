@@ -707,16 +707,16 @@ class DerivTradeExecutor:
         dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
         tier_floor = peak_profit * (1.0 - tier_pct)
 
-        # 2026-05-30 "wait_for_quota v3": reglas explícitas del usuario.
-        # CASO A: peak < $1 → NADA cierra por tier/giveback.  Sólo el SL
-        # broker (−$1) puede cerrar.  El bot ESPERA spikes que vienen.
+        # 2026-05-30 "wait_for_quota v4": reglas explícitas del usuario.
+        # CASO A: peak < $1 → tier % BASE (30%) actúa sobre el peak para
+        # darle respiración pero proteger capital.  Sin dollar_floor.
         # CASO B: peak ≥ $1 + cuota pendiente → SOLO dollar_floor protege
-        # (escalón duro).  Tier % sigue OFF.
+        # (escalón duro).  Tier % sigue OFF para esperar más spikes.
         # CASO C: peak ≥ $1 + cuota cumplida → tier % + dollar_floor.
         if peak_profit < 1.0:
-            out["wait_for_quota"] = True
-            out["tier_active"] = False
-            out["sl_floor"] = None          # no ratchet → ningún cierre por tier
+            out["wait_for_quota"] = False
+            out["tier_active"] = True
+            out["sl_floor"] = round(tier_floor, 4)   # ratchet 30% bajo $1
             out["dollar_floor"] = 0.0
             out["tier_floor"] = round(tier_floor, 4)
             return out

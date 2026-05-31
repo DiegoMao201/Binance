@@ -1,0 +1,957 @@
+=== LIVE_NOW_UTC ===
+2026-05-27T19:14:20Z
+=== CONTAINERS ===
+name=o4w1ns4cceccmn2ozqt7sol2-ai status=Up 26 minutes (healthy) image=o4w1ns4cceccmn2ozqt7sol2:172c4f4f5262a8254cc3b0aa644c5f267573dc34
+name=o4w1ns4cceccmn2ozqt7sol2 status=Up 27 minutes (healthy) image=o4w1ns4cceccmn2ozqt7sol2:172c4f4f5262a8254cc3b0aa644c5f267573dc34
+name=z9nciejyvxqat1gg8r94tw9i status=Up 23 hours image=ghcr.io/coollabsio/coolify-helper:1.0.13
+name=coolify-proxy status=Up 2 weeks (healthy) image=traefik:v3.6
+name=coolify-sentinel status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/sentinel:0.0.21
+name=coolify status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/coolify:latest
+name=coolify-realtime status=Up 2 weeks (healthy) image=ghcr.io/coollabsio/coolify-realtime:1.0.13
+name=coolify-redis status=Up 2 weeks (healthy) image=redis:7-alpine
+name=coolify-db status=Up 2 weeks (healthy) image=postgres:15-alpine
+=== STATUS_SUMMARY ===
+{
+  "status_exists": true,
+  "status": "running",
+  "connected": true,
+  "updated_at": "2026-05-27T19:14:18.385500+00:00",
+  "heartbeat_at": "2026-05-27T19:14:18.385511+00:00",
+  "symbols": [
+    "BOOM500",
+    "BOOM600",
+    "BOOM900",
+    "CRASH500",
+    "CRASH600",
+    "CRASH900"
+  ],
+  "counters": {
+    "ticks_total": 9864,
+    "decisions_total": 2444,
+    "orders_sent": 7,
+    "orders_ok": 7,
+    "orders_failed": 0
+  },
+  "dynamic_enabled": true,
+  "dynamic_last_refresh": "2026-05-27T19:14:05.438415+00:00",
+  "dynamic_symbols_loaded": 8,
+  "open_contracts_live": 3,
+  "last_decisions_len": 500,
+  "decisions_by_symbol": {
+    "CRASH600": 40,
+    "CRASH500": 100,
+    "BOOM900": 245,
+    "BOOM500": 42,
+    "CRASH900": 8,
+    "BOOM600": 65
+  },
+  "top_reason_prefixes": [
+    [
+      "REGIME_SCORE_GATE_DYNAMIC",
+      423
+    ],
+    [
+      "ENTRY_BLOCKED",
+      63
+    ],
+    [
+      "DYNAMIC_INACTIVE",
+      8
+    ],
+    [
+      "GO ai=0.85 H=0.498 score=7.16 regime=calm",
+      1
+    ],
+    [
+      "GO ai=0.85 H=0.502 score=9.04 regime=calm",
+      1
+    ],
+    [
+      "GO ai=0.85 H=0.449 score=7.23 regime=trending",
+      1
+    ],
+    [
+      "GO ai=0.75 H=0.489 score=7.29 regime=trending",
+      1
+    ],
+    [
+      "GO ai=0.85 H=0.503 score=9.14 regime=trending",
+      1
+    ],
+    [
+      "GO ai=0.90 H=0.483 score=8.64 regime=trending",
+      1
+    ]
+  ],
+  "dynamic_inactive_decisions": 8,
+  "dynamic_active": [
+    {
+      "symbol": "BOOM500",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 8.0,
+      "spike_pre_filter_target": 90,
+      "zero_peak_grace_sec": 120,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "BOOM600",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.6,
+      "spike_pre_filter_target": 360,
+      "zero_peak_grace_sec": 120,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "BOOM900",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.6000000000000005,
+      "spike_pre_filter_target": 196,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "CRASH500",
+      "is_active": true,
+      "market_regime": "NORMAL",
+      "score_min_override": 8.0,
+      "spike_pre_filter_target": 300,
+      "zero_peak_grace_sec": 60,
+      "dep_exit_policy": "PASSIVE"
+    },
+    {
+      "symbol": "CRASH600",
+      "is_active": true,
+      "market_regime": "SLOW",
+      "score_min_override": 7.75,
+      "spike_pre_filter_target": 162,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    }
+  ],
+  "dynamic_inactive": [
+    {
+      "symbol": "BOOM1000",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 149,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "SHADOW"
+    },
+    {
+      "symbol": "CRASH1000",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 242,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    },
+    {
+      "symbol": "CRASH900",
+      "is_active": false,
+      "market_regime": "SLOW",
+      "score_min_override": 7.8,
+      "spike_pre_filter_target": 251,
+      "zero_peak_grace_sec": 90,
+      "dep_exit_policy": "PASSIVE"
+    }
+  ],
+  "closed_24h": {
+    "BOOM1000": {
+      "trades_24h": 1,
+      "wins_24h": 0,
+      "win_rate_24h_pct": 0.0,
+      "pnl_24h": -1.64,
+      "top_exit_reasons": [
+        [
+          "broker_sl_hit",
+          1
+        ]
+      ]
+    },
+    "BOOM600": {
+      "trades_24h": 37,
+      "wins_24h": 20,
+      "win_rate_24h_pct": 54.1,
+      "pnl_24h": 2.48,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          17
+        ],
+        [
+          "ratchet_hit",
+          3
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.2700<=0.0200|atr_ratio=0.074|cycle=0.80",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.092|cycle=0.78",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.2300<=0.0200|atr_ratio=0.081|cycle=0.82",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.218<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.502|cycle=1.10",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.214<=0.220|pnl=-0.3200<=0.0200|atr_ratio=0.562|cycle=1.27",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.4200<=0.0200|atr_ratio=0.062|cycle=0.78",
+          1
+        ]
+      ]
+    },
+    "BOOM900": {
+      "trades_24h": 65,
+      "wins_24h": 32,
+      "win_rate_24h_pct": 49.2,
+      "pnl_24h": 0.27,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          29
+        ],
+        [
+          "broker_sl_hit",
+          5
+        ],
+        [
+          "ratchet_hit",
+          3
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.2600<=0.0200|atr_ratio=0.603|cycle=1.39",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.626|cycle=1.71",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.3700<=0.0200|atr_ratio=0.599|cycle=1.35",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.5200<=0.0200|atr_ratio=0.296|cycle=0.77",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.3700<=0.0200|atr_ratio=0.618|cycle=1.40",
+          1
+        ]
+      ]
+    },
+    "CRASH1000": {
+      "trades_24h": 6,
+      "wins_24h": 2,
+      "win_rate_24h_pct": 33.3,
+      "pnl_24h": -1.93,
+      "top_exit_reasons": [
+        [
+          "broker_sl_hit",
+          4
+        ],
+        [
+          "timeout_multispike",
+          2
+        ]
+      ]
+    },
+    "CRASH500": {
+      "trades_24h": 95,
+      "wins_24h": 50,
+      "win_rate_24h_pct": 52.6,
+      "pnl_24h": -2.98,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          36
+        ],
+        [
+          "broker_sl_hit",
+          10
+        ],
+        [
+          "ratchet_hit",
+          4
+        ],
+        [
+          "open_prob_exit:prob=0.206<=0.220|pnl=0.0200<=0.0200|atr_ratio=0.532|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.1600<=0.0200|atr_ratio=0.570|cycle=1.52",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.616|cycle=1.72",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.215<=0.220|pnl=-0.4700<=0.0200|atr_ratio=0.615|cycle=1.82",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.115<=0.220|pnl=-0.3400<=0.0200|atr_ratio=0.472|cycle=1.95",
+          1
+        ]
+      ]
+    },
+    "CRASH600": {
+      "trades_24h": 23,
+      "wins_24h": 13,
+      "win_rate_24h_pct": 56.5,
+      "pnl_24h": 1.46,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          11
+        ],
+        [
+          "broker_sl_hit",
+          2
+        ],
+        [
+          "ratchet_hit",
+          2
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.1300<=0.0200|atr_ratio=0.036|cycle=0.87",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.2400<=0.0200|atr_ratio=0.593|cycle=1.73",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.213<=0.220|pnl=-0.2200<=0.0200|atr_ratio=0.589|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.3400<=0.0200|atr_ratio=0.057|cycle=0.79",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.218<=0.220|pnl=-0.1900<=0.0200|atr_ratio=0.588|cycle=1.40",
+          1
+        ]
+      ]
+    },
+    "CRASH900": {
+      "trades_24h": 30,
+      "wins_24h": 17,
+      "win_rate_24h_pct": 56.7,
+      "pnl_24h": 1.42,
+      "top_exit_reasons": [
+        [
+          "timeout_multispike",
+          17
+        ],
+        [
+          "broker_sl_hit",
+          2
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.4100<=0.0200|atr_ratio=0.618|cycle=1.42",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.216<=0.220|pnl=-0.3600<=0.0200|atr_ratio=0.595|cycle=1.37",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.217<=0.220|pnl=-0.4500<=0.0200|atr_ratio=0.612|cycle=1.39",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.220<=0.220|pnl=-0.2200<=0.0200|atr_ratio=0.589|cycle=1.88",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.215<=0.220|pnl=-0.3100<=0.0200|atr_ratio=0.597|cycle=2.00",
+          1
+        ],
+        [
+          "open_prob_exit:prob=0.219<=0.220|pnl=-0.2000<=0.0200|atr_ratio=0.584|cycle=2.00",
+          1
+        ]
+      ]
+    }
+  },
+  "spikes_live": {
+    "1h": {
+      "BOOM500": {
+        "spikes": 11,
+        "entered": 0,
+        "rate_h": 11.0
+      },
+      "BOOM600": {
+        "spikes": 5,
+        "entered": 0,
+        "rate_h": 5.0
+      },
+      "BOOM900": {
+        "spikes": 5,
+        "entered": 0,
+        "rate_h": 5.0
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 8,
+        "entered": 0,
+        "rate_h": 8.0
+      },
+      "CRASH600": {
+        "spikes": 12,
+        "entered": 0,
+        "rate_h": 12.0
+      },
+      "CRASH900": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    },
+    "3h": {
+      "BOOM500": {
+        "spikes": 27,
+        "entered": 0,
+        "rate_h": 9.0
+      },
+      "BOOM600": {
+        "spikes": 18,
+        "entered": 0,
+        "rate_h": 6.0
+      },
+      "BOOM900": {
+        "spikes": 22,
+        "entered": 0,
+        "rate_h": 7.33
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 22,
+        "entered": 0,
+        "rate_h": 7.33
+      },
+      "CRASH600": {
+        "spikes": 42,
+        "entered": 0,
+        "rate_h": 14.0
+      },
+      "CRASH900": {
+        "spikes": 10,
+        "entered": 0,
+        "rate_h": 3.33
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    },
+    "6h": {
+      "BOOM500": {
+        "spikes": 36,
+        "entered": 0,
+        "rate_h": 6.0
+      },
+      "BOOM600": {
+        "spikes": 48,
+        "entered": 0,
+        "rate_h": 8.0
+      },
+      "BOOM900": {
+        "spikes": 37,
+        "entered": 0,
+        "rate_h": 6.17
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      },
+      "CRASH500": {
+        "spikes": 62,
+        "entered": 0,
+        "rate_h": 10.33
+      },
+      "CRASH600": {
+        "spikes": 61,
+        "entered": 0,
+        "rate_h": 10.17
+      },
+      "CRASH900": {
+        "spikes": 26,
+        "entered": 0,
+        "rate_h": 4.33
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "entered": 0,
+        "rate_h": 0.0
+      }
+    }
+  }
+}
+=== ENV_SANITIZED_APP ===
+=== ENV_SANITIZED_SIDECAR ===
+=== DYNAMIC_DB_SNAPSHOT ===
+=== BOT_LOG_TAIL_KEY_LINES_45M ===
+2026-05-27 19:13:26 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:26 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:26 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010276 required_p30=0.009793 pass=True score=4.07 atr_bypassed=False hist_n=500
+2026-05-27 19:13:26 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.07 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.80 atr=1.82 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.531}
+2026-05-27 19:13:27 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=6.00 (grade_c=False high_spread=False) atr_bypassed=False
+2026-05-27 19:13:27 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010379 required_p30=0.009793 pass=True score=4.15 atr_bypassed=False hist_n=500
+2026-05-27 19:13:27 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.15 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.79 atr=1.91 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.478}
+2026-05-27 19:13:27 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:28 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:28 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:28 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010690 required_p30=0.009793 pass=True score=3.98 atr_bypassed=False hist_n=500
+2026-05-27 19:13:28 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.98 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.76 atr=1.77 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.426}
+2026-05-27 19:13:29 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:29 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010690 required_p30=0.009793 pass=True score=3.99 atr_bypassed=False hist_n=500
+2026-05-27 19:13:29 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.99 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.78 atr=1.76 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.528}
+2026-05-27 19:13:29 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:30 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=6.00 (grade_c=False high_spread=False) atr_bypassed=False
+2026-05-27 19:13:30 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010552 required_p30=0.009793 pass=True score=4.13 atr_bypassed=False hist_n=500
+2026-05-27 19:13:30 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.13 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.82 atr=1.86 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.598}
+2026-05-27 19:13:30 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:31 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:31 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011069 required_p30=0.009793 pass=True score=4.11 atr_bypassed=False hist_n=500
+2026-05-27 19:13:31 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.11 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.82 atr=1.24 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.504}
+2026-05-27 19:13:31 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:32 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:32 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:32 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011103 required_p30=0.009793 pass=True score=3.97 atr_bypassed=False hist_n=500
+2026-05-27 19:13:32 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.97 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.76 atr=1.16 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.585}
+2026-05-27 19:13:33 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:33 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011414 required_p30=0.009793 pass=True score=4.05 atr_bypassed=True hist_n=500
+2026-05-27 19:13:33 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.05 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.00 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.521}
+2026-05-27 19:13:33 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:34 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:34 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011586 required_p30=0.009793 pass=True score=4.13 atr_bypassed=True hist_n=500
+2026-05-27 19:13:34 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.13 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.08 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.499}
+2026-05-27 19:13:34 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:35 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:35 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:35 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011138 required_p30=0.009793 pass=True score=4.08 atr_bypassed=False hist_n=500
+2026-05-27 19:13:35 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.08 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.94 atr=1.09 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.549}
+2026-05-27 19:13:36 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:36 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:36 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011483 required_p30=0.009793 pass=True score=3.93 atr_bypassed=True hist_n=500
+2026-05-27 19:13:36 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.93 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.88 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.506}
+2026-05-27 19:13:37 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:37 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:37 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011241 required_p30=0.009793 pass=True score=3.92 atr_bypassed=False hist_n=500
+2026-05-27 19:13:37 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.92 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.86 atr=1.01 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.515}
+2026-05-27 19:13:38 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:38 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:38 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011655 required_p30=0.009793 pass=True score=3.96 atr_bypassed=True hist_n=500
+2026-05-27 19:13:38 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.96 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.91 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.473}
+2026-05-27 19:13:39 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:39 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:39 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.011172 required_p30=0.009793 pass=True score=4.17 atr_bypassed=False hist_n=500
+2026-05-27 19:13:39 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.17 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.06 atr=1.05 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.492}
+2026-05-27 19:13:40 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:40 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=6.00 (grade_c=False high_spread=False) atr_bypassed=False
+2026-05-27 19:13:40 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010414 required_p30=0.009793 pass=True score=4.37 atr_bypassed=False hist_n=500
+2026-05-27 19:13:40 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.37 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.98 atr=1.94 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.564}
+2026-05-27 19:13:41 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=6.00 (grade_c=False high_spread=False) atr_bypassed=False
+2026-05-27 19:13:41 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010379 required_p30=0.009793 pass=True score=4.16 atr_bypassed=False hist_n=500
+2026-05-27 19:13:41 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.16 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.94 atr=1.92 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.624}
+2026-05-27 19:13:41 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:42 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=6.00 (grade_c=False high_spread=False) atr_bypassed=False
+2026-05-27 19:13:42 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010655 required_p30=0.009793 pass=True score=4.13 atr_bypassed=False hist_n=500
+2026-05-27 19:13:42 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.13 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.91 atr=1.77 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.590}
+2026-05-27 19:13:42 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:43 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:43 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010276 required_p30=0.009793 pass=True score=4.10 atr_bypassed=False hist_n=500
+2026-05-27 19:13:43 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.10 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.82 atr=1.83 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.578}
+2026-05-27 19:13:43 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:44 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:44 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:44 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009966 required_p30=0.009793 pass=True score=3.50 atr_bypassed=False hist_n=500
+2026-05-27 19:13:44 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.50 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.82 atr=1.38 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.628}
+2026-05-27 19:13:45 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:45 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009690 required_p30=0.009793 pass=False score=3.10 atr_bypassed=True hist_n=500
+2026-05-27 19:13:45 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.10 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.80 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.698}
+2026-05-27 19:13:45 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:46 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:46 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:46 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009862 required_p30=0.009793 pass=True score=3.42 atr_bypassed=False hist_n=500
+2026-05-27 19:13:46 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.42 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.91 atr=1.21 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.622}
+2026-05-27 19:13:47 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:47 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:47 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009483 required_p30=0.009793 pass=False score=3.21 atr_bypassed=True hist_n=500
+2026-05-27 19:13:47 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.21 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.91 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.630}
+2026-05-27 19:13:48 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:48 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009552 required_p30=0.009793 pass=False score=3.07 atr_bypassed=True hist_n=500
+2026-05-27 19:13:48 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.07 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.77 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.659}
+2026-05-27 19:13:48 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:49 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:49 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:49 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009483 required_p30=0.009759 pass=False score=3.08 atr_bypassed=True hist_n=500
+2026-05-27 19:13:49 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.08 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.78 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.676}
+2026-05-27 19:13:50 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:50 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:50 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009517 required_p30=0.009759 pass=False score=3.32 atr_bypassed=True hist_n=500
+2026-05-27 19:13:50 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.32 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.02 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.652}
+2026-05-27 19:13:51 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:51 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009586 required_p30=0.009759 pass=False score=4.08 atr_bypassed=True hist_n=500
+2026-05-27 19:13:51 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.08 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.04 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.587}
+2026-05-27 19:13:51 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:52 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:52 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010000 required_p30=0.009759 pass=True score=4.03 atr_bypassed=False hist_n=500
+2026-05-27 19:13:52 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.03 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.11 atr=1.47 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.544}
+2026-05-27 19:13:52 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:53 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:53 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.010000 required_p30=0.009759 pass=True score=4.09 atr_bypassed=False hist_n=500
+2026-05-27 19:13:53 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.09 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.15 atr=1.49 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.573}
+2026-05-27 19:13:53 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:55 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009759 required_p30=0.009759 pass=False score=3.50 atr_bypassed=False hist_n=500
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=ATR_VOLATILITY_FILTER | score=3.50 effective_min=5.80 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.17 atr=1.03 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.621}
+2026-05-27 19:13:55 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009517 required_p30=0.009724 pass=False score=3.56 atr_bypassed=True hist_n=500
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.56 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.26 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.618}
+2026-05-27 19:13:55 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:56 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:56 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009207 required_p30=0.009724 pass=False score=3.39 atr_bypassed=True hist_n=500
+2026-05-27 19:13:56 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.39 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.09 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.656}
+2026-05-27 19:13:56 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:57 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:57 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009034 required_p30=0.009690 pass=False score=3.50 atr_bypassed=True hist_n=500
+2026-05-27 19:13:57 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.50 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.21 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.653}
+2026-05-27 19:13:57 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:58 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:58 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009276 required_p30=0.009690 pass=False score=3.51 atr_bypassed=True hist_n=500
+2026-05-27 19:13:58 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.51 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.21 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.680}
+2026-05-27 19:13:58 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:59 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:13:59 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:13:59 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009276 required_p30=0.009690 pass=False score=3.31 atr_bypassed=True hist_n=500
+2026-05-27 19:13:59 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.31 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.01 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.748}
+2026-05-27 19:14:00 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:00 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:00 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009034 required_p30=0.009690 pass=False score=3.17 atr_bypassed=True hist_n=500
+2026-05-27 19:14:00 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.17 effective_min=7.00 | side=MULTUP | regime=calm | H=0.520 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.87 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.723}
+2026-05-27 19:14:01 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:01 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:14:01 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009897 required_p30=0.009690 pass=True score=4.46 atr_bypassed=False hist_n=500
+2026-05-27 19:14:01 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.46 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.99 atr=1.42 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.544}
+2026-05-27 19:14:02 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:14:02 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009862 required_p30=0.009690 pass=True score=4.43 atr_bypassed=False hist_n=500
+2026-05-27 19:14:02 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.43 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.04 atr=1.34 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.490}
+2026-05-27 19:14:02 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:03 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:03 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:03 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009621 required_p30=0.009690 pass=False score=4.07 atr_bypassed=True hist_n=500
+2026-05-27 19:14:03 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.07 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.02 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.539}
+2026-05-27 19:14:04 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=False
+2026-05-27 19:14:04 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009862 required_p30=0.009690 pass=True score=4.42 atr_bypassed=False hist_n=500
+2026-05-27 19:14:04 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.42 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.02 atr=1.35 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.516}
+2026-05-27 19:14:04 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:05 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:05 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009586 required_p30=0.009690 pass=False score=4.15 atr_bypassed=True hist_n=500
+2026-05-27 19:14:05 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.15 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.10 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.555}
+2026-05-27 19:14:05 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:06 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:06 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:06 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009483 required_p30=0.009655 pass=False score=4.14 atr_bypassed=True hist_n=500
+2026-05-27 19:14:06 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=4.14 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.09 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-1.5 geo_pos=0.594}
+2026-05-27 19:14:07 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:07 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:07 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009172 required_p30=0.009655 pass=False score=3.33 atr_bypassed=True hist_n=500
+2026-05-27 19:14:07 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.33 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.03 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.643}
+2026-05-27 19:14:08 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:08 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009138 required_p30=0.009655 pass=False score=3.39 atr_bypassed=True hist_n=500
+2026-05-27 19:14:08 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.39 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.09 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.670}
+2026-05-27 19:14:08 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:09 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:09 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:09 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009034 required_p30=0.009655 pass=False score=3.11 atr_bypassed=True hist_n=500
+2026-05-27 19:14:09 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.11 effective_min=7.00 | side=MULTUP | regime=calm | H=0.519 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.06 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.770}
+2026-05-27 19:14:10 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:10 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:10 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009069 required_p30=0.009655 pass=False score=2.87 atr_bypassed=True hist_n=500
+2026-05-27 19:14:10 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.87 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.82 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.817}
+2026-05-27 19:14:11 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:11 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:11 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008655 required_p30=0.009655 pass=False score=2.09 atr_bypassed=True hist_n=500
+2026-05-27 19:14:11 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.09 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.54 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.904}
+2026-05-27 19:14:12 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:12 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:12 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008517 required_p30=0.009655 pass=False score=2.07 atr_bypassed=True hist_n=500
+2026-05-27 19:14:12 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.07 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.52 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.928}
+2026-05-27 19:14:13 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:13 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:13 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008586 required_p30=0.009655 pass=False score=2.01 atr_bypassed=True hist_n=500
+2026-05-27 19:14:13 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.01 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.46 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.951}
+2026-05-27 19:14:14 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:14 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008483 required_p30=0.009655 pass=False score=1.94 atr_bypassed=True hist_n=500
+2026-05-27 19:14:14 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=1.94 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.39 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=1.046}
+2026-05-27 19:14:14 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:15 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:15 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008310 required_p30=0.009655 pass=False score=2.00 atr_bypassed=True hist_n=500
+2026-05-27 19:14:15 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.00 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.45 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=1.016}
+2026-05-27 19:14:15 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:16 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:16 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008379 required_p30=0.009621 pass=False score=2.09 atr_bypassed=True hist_n=500
+2026-05-27 19:14:16 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=2.09 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.54 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.996}
+2026-05-27 19:14:16 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:17 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:17 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008621 required_p30=0.009621 pass=False score=1.43 atr_bypassed=True hist_n=500
+2026-05-27 19:14:17 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=1.43 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.63 atr=1.00 spread=0.50 stab=0.00 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.946}
+2026-05-27 19:14:17 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:18 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:18 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:18 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008724 required_p30=0.009621 pass=False score=1.52 atr_bypassed=True hist_n=500
+2026-05-27 19:14:18 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=1.52 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=0.72 atr=1.00 spread=0.50 stab=0.00 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.928}
+2026-05-27 19:14:19 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:19 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.009034 required_p30=0.009621 pass=False score=3.06 atr_bypassed=True hist_n=500
+2026-05-27 19:14:19 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.06 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.01 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.808}
+2026-05-27 19:14:19 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+2026-05-27 19:14:20 | INFO    | src.safety.deriv_risk | [PIPELINE] [REGIME_SCORE_GATE_calm] BOOM900 regime=calm effective_min=5.80 (grade_c=True high_spread=False) atr_bypassed=True
+2026-05-27 19:14:20 | INFO    | deriv.daemon | [ATR_FILTER_DETAIL] BOOM900 atr_abs=0.008724 required_p30=0.009621 pass=False score=3.52 atr_bypassed=True hist_n=500
+2026-05-27 19:14:20 | INFO    | deriv.daemon | [PIPELINE] ENTRY_BLOCKED BOOM900 | reason=REGIME_SCORE_GATE_calm_dynamic | score=3.52 effective_min=7.00 | side=MULTUP | regime=calm | H=0.518 | ai_veto=False ai_conf=0.00 ai_reason=— | cooldown=False elapsed=0s/0s | score_breakdown={trend=1.50 mom=1.48 atr=1.00 spread=0.50 stab=0.75 streak=-0.20 cd=0.50 hd=0.00 smc=— geo=-2.0 geo_pos=0.833}
+2026-05-27 19:14:20 | INFO    | deriv.daemon | [PIPELINE] SYMBOL_DYNAMIC_INACTIVE CRASH900 — skipping
+=== SIDECAR_LOG_TAIL_KEY_LINES_45M ===
+2026-05-27 18:48:05 | INFO    | dynamic_ai_orchestrator | [market-phase] baseline loaded path=/data/logs/deriv_session_baseline.json window=1800s alpha=0.15 thresholds(accel=1.30 caution=0.75 decel=0.55 dead=0.25) confirm(decel=2 dead=3)
+2026-05-27 18:48:05 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] starting loop interval=180s logs_dir=/data/logs lookback=21600s strict_disable=[] force_active=[] min_contracts=4 recovery_cycles=5 stabilization_cycles=5 spike_reenable_cycles=3 spike_reenable_min_spikes(15m=2,3h=6,6h=8) spike_reenable_min_rate_1h=2.00/h spike_reenable_min_ratio_1h3h=0.80 spike_reenable_min_inactive=300s disable_slow_market(rate1h<=1.00/h spikes3h<=3 require_guard=False) cadence_fast>=3.50/h cadence_slow<=1.60/h feedback24h_enabled=True feedback24h_interval=86400s
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_DISABLE] BOOM1000 reasons=slow_market contracts=0 spikes15m=0 spikes1h=0 spikes3h=0 rate1h=0.00/h ratio1h3h=n/a cadence=SLOW guard=True
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_POLICY] BOOM1000 is_active True -> False | contracts=0 wr=0.0 ev=0.000 late120=0.0 lag_med=n/a spikes15m=0 spikes3h=0 rate1h=0.00/h cadence=SLOW
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] BOOM500 streak=1/3 | spikes15m=6 spikes1h=14 spikes3h=23 spikes6h=37 rate1h=14.00/h rate3h=7.67/h ratio1h3h=1.83 cadence=FAST regime=FAST ticks_since_spike=410 inactive_for=4878s mode=legacy+cadence
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_DISABLE] CRASH1000 reasons=slow_market contracts=0 spikes15m=0 spikes1h=0 spikes3h=0 rate1h=0.00/h ratio1h3h=n/a cadence=SLOW guard=False
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_POLICY] CRASH1000 is_active True -> False | contracts=0 wr=0.0 ev=0.000 late120=0.0 lag_med=n/a spikes15m=0 spikes3h=0 rate1h=0.00/h cadence=SLOW
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] CRASH600 streak=1/3 | spikes15m=5 spikes1h=11 spikes3h=39 spikes6h=61 rate1h=11.00/h rate3h=13.00/h ratio1h3h=0.85 cadence=FAST regime=FAST ticks_since_spike=79 inactive_for=4878s mode=legacy+cadence
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.50->7.80 regime SLOW->SLOW
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=24 rate1h=6.00/h rate3h=8.00/h ratio1h3h=0.75 score 7.20->6.95 regime NORMAL->NORMAL
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM600 cadence=SLOW spikes3h=17 rate1h=1.00/h rate3h=5.67/h ratio1h3h=0.18 score 8.00->7.10 regime SLOW->SLOW
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=39 rate1h=11.00/h rate3h=13.00/h ratio1h3h=0.85 score 8.00->7.25 regime SLOW->FAST
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=24 rate1h=8.00/h rate3h=8.00/h ratio1h3h=1.00 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=ACCEL ratio=1.26 recent=0.100 base=0.079 samples=17 streak=3 -> regime=NORMAL score=6.80 grace=60 active=True
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=ACCEL ratio=1.52 recent=0.233 base=0.153 samples=17 streak=1 -> regime=SLOW score=8.30 grace=60 active=False
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH600 phase=ACCEL ratio=1.10 recent=0.167 base=0.151 samples=17 streak=3 -> regime=FAST score=7.05 grace=60 active=False
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=ACCEL ratio=2.88 recent=0.233 base=0.081 samples=17 streak=1 -> regime=NORMAL score=7.55 grace=60 active=True
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM1000 score hold 7.50 -> 7.80 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM900 score hold 7.20 -> 6.80 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM500 score hold 8.00 -> 8.30 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH1000 score hold 7.60 -> 7.80 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH900 score hold 7.20 -> 6.80 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH500 score hold 8.00 -> 7.55 (age=17s force=0.65)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH500 rejected regime flip SLOW -> NORMAL (cooldown=500s)
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM1000 modified | zero_peak_grace_sec: 60 -> 90 | is_active: True -> False
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | zero_peak_grace_sec: 60 -> 90 | score_min_override: 8.0 -> 7.6
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH1000 modified | zero_peak_grace_sec: 60 -> 90 | is_active: True -> False
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH600 modified | zero_peak_grace_sec: 90 -> 60 | score_min_override: 8.0 -> 7.6 | regime: SLOW -> FAST
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=4 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 60, 'score_min_override': 8.0, 'is_active': False}, 'CRASH900': {'regime': 'NORMAL', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 60, 'score_min_override': 7.199999999999999, 'is_active': False}}
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 0.8010204081632653, 'p50_2h': 235.5, 'p50_6h': 294.0}, 'CRASH500': {'ratio': 1.3935091277890466, 'p50_2h': 687.0, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 0.818118948824343, 'p50_2h': 591.5, 'p50_6h': 723.0}, 'CRASH900': {'ratio': 0.8960970464135021, 'p50_2h': 849.5, 'p50_6h': 948.0}}
+2026-05-27 18:48:23 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=6 sample={'BOOM500': {'rate_1h': 14.0, 'rate_3h': 7.666666666666667, 'ratio_1h_3h': 1.826086956521739, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 1.0, 'rate_3h': 5.666666666666667, 'ratio_1h_3h': 0.1764705882352941, 'cadence': 'SLOW'}, 'CRASH600': {'rate_1h': 11.0, 'rate_3h': 13.0, 'ratio_1h_3h': 0.8461538461538461, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 2.0, 'rate_3h': 3.6666666666666665, 'ratio_1h_3h': 0.5454545454545455, 'cadence': 'NORMAL'}}
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.50->7.80 regime SLOW->SLOW
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM600 cadence=SLOW spikes3h=17 rate1h=1.00/h rate3h=5.67/h ratio1h3h=0.18 score 7.60->7.10 regime SLOW->SLOW
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=39 rate1h=11.00/h rate3h=13.00/h ratio1h3h=0.85 score 7.60->7.25 regime FAST->FAST
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=23 rate1h=8.00/h rate3h=7.67/h ratio1h3h=1.04 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=ACCEL ratio=1.21 recent=0.100 base=0.082 samples=18 streak=3 -> regime=NORMAL score=6.80 grace=60 active=True
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=ACCEL ratio=1.41 recent=0.233 base=0.165 samples=18 streak=2 -> regime=SLOW score=8.30 grace=60 active=False
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH600 phase=ACCEL ratio=1.09 recent=0.167 base=0.153 samples=18 streak=3 -> regime=FAST score=7.05 grace=60 active=False
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=ACCEL ratio=2.25 recent=0.233 base=0.104 samples=18 streak=2 -> regime=NORMAL score=7.55 grace=60 active=True
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM1000 score hold 7.50 -> 7.80 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM900 score hold 7.20 -> 6.80 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM600 score hold 7.60 -> 7.10 (age=168s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM500 score hold 8.00 -> 8.30 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH1000 score hold 7.60 -> 7.80 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH900 score hold 7.20 -> 6.80 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 score hold 7.60 -> 7.05 (age=168s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH500 score hold 8.00 -> 7.55 (age=186s force=0.65)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH500 rejected regime flip SLOW -> NORMAL (cooldown=500s)
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=0 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 60, 'score_min_override': 8.0, 'is_active': False}, 'CRASH900': {'regime': 'NORMAL', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 60, 'score_min_override': 7.199999999999999, 'is_active': False}}
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 1.0, 'p50_2h': 307.0, 'p50_6h': 307.0}, 'CRASH500': {'ratio': 1.4371196754563895, 'p50_2h': 708.5, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 0.818118948824343, 'p50_2h': 591.5, 'p50_6h': 723.0}, 'CRASH900': {'ratio': 0.8960970464135021, 'p50_2h': 849.5, 'p50_6h': 948.0}}
+2026-05-27 18:51:12 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=5 sample={'BOOM500': {'rate_1h': 14.0, 'rate_3h': 8.0, 'ratio_1h_3h': 1.75, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 1.0, 'rate_3h': 5.666666666666667, 'ratio_1h_3h': 0.1764705882352941, 'cadence': 'SLOW'}, 'CRASH600': {'rate_1h': 11.0, 'rate_3h': 13.0, 'ratio_1h_3h': 0.8461538461538461, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 2.0, 'rate_3h': 3.6666666666666665, 'ratio_1h_3h': 0.5454545454545455, 'cadence': 'NORMAL'}}
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] BOOM500 streak=3/3 | spikes15m=6 spikes1h=12 spikes3h=24 spikes6h=35 rate1h=12.00/h rate3h=8.00/h ratio1h3h=1.50 cadence=FAST regime=SLOW ticks_since_spike=274 inactive_for=5230s mode=legacy+cadence
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_RECOVERY] BOOM500 re-enabled via spikes | stabilize_cycles=5 strict_bonus=0.80
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_POLICY] BOOM500 is_active False -> True | contracts=0 wr=0.0 ev=0.000 late120=0.0 lag_med=n/a spikes15m=6 spikes3h=24 rate1h=12.00/h cadence=FAST
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] CRASH600 streak=3/3 | spikes15m=4 spikes1h=11 spikes3h=39 spikes6h=61 rate1h=11.00/h rate3h=13.00/h ratio1h3h=0.85 cadence=FAST regime=SLOW ticks_since_spike=439 inactive_for=5230s mode=legacy+cadence
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_RECOVERY] CRASH600 re-enabled via spikes | stabilize_cycles=5 strict_bonus=0.80
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_POLICY] CRASH600 is_active False -> True | contracts=0 wr=0.0 ev=0.000 late120=0.0 lag_med=n/a spikes15m=4 spikes3h=39 rate1h=11.00/h cadence=FAST
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.50->7.80 regime SLOW->SLOW
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=25 rate1h=7.00/h rate3h=8.33/h ratio1h3h=0.84 score 7.20->6.95 regime NORMAL->NORMAL
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM600 cadence=SLOW spikes3h=17 rate1h=1.00/h rate3h=5.67/h ratio1h3h=0.18 score 7.60->7.90 regime SLOW->SLOW
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=1.00/h rate3h=3.33/h ratio1h3h=0.30 score 7.20->7.10 regime NORMAL->SLOW
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=39 rate1h=11.00/h rate3h=13.00/h ratio1h3h=0.85 score 7.60->7.35 regime FAST->FAST
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=23 rate1h=8.00/h rate3h=7.67/h ratio1h3h=1.04 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=ACCEL ratio=1.57 recent=0.133 base=0.085 samples=19 streak=4 -> regime=NORMAL score=6.80 grace=60 active=True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=ACCEL ratio=1.33 recent=0.233 base=0.176 samples=19 streak=3 -> regime=SLOW score=8.30 grace=90 active=True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH600 phase=DECEL ratio=1.07 recent=0.167 base=0.155 samples=19 streak=3 -> regime=SLOW score=8.20 grace=120 active=True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=1.89 recent=0.233 base=0.123 samples=19 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM1000 score hold 7.50 -> 7.80 (age=369s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM900 score hold 7.20 -> 6.80 (age=369s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM600 score hold 7.60 -> 7.90 (age=351s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM500 score hold 8.00 -> 8.30 (age=369s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH1000 score hold 7.60 -> 7.80 (age=369s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 score hold 7.60 -> 8.20 (age=351s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 rejected regime flip FAST -> SLOW (cooldown=500s)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH500 score hold 8.00 -> 8.60 (age=369s force=0.65)
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM500 modified | zero_peak_grace_sec: 60 -> 90 | is_active: False -> True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH900 modified | zero_peak_grace_sec: 60 -> 90 | regime: NORMAL -> SLOW
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH600 modified | zero_peak_grace_sec: 60 -> 120 | is_active: False -> True
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH500 modified | zero_peak_grace_sec: 60 -> 90
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=4 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 90, 'score_min_override': 8.0, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.199999999999999, 'is_active': False}}
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 0.893740902474527, 'p50_2h': 307.0, 'p50_6h': 343.5}, 'CRASH500': {'ratio': 1.4371196754563895, 'p50_2h': 708.5, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 0.8376623376623377, 'p50_2h': 645.0, 'p50_6h': 770.0}, 'CRASH900': {'ratio': 0.8960970464135021, 'p50_2h': 849.5, 'p50_6h': 948.0}}
+2026-05-27 18:54:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=7 sample={'BOOM500': {'rate_1h': 12.0, 'rate_3h': 8.0, 'ratio_1h_3h': 1.5, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 1.0, 'rate_3h': 5.666666666666667, 'ratio_1h_3h': 0.1764705882352941, 'cadence': 'SLOW'}, 'CRASH600': {'rate_1h': 11.0, 'rate_3h': 13.0, 'ratio_1h_3h': 0.8461538461538461, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 1.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.3, 'cadence': 'SLOW'}}
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] BOOM600 streak=1/3 | spikes15m=2 spikes1h=3 spikes3h=18 spikes6h=49 rate1h=3.00/h rate3h=6.00/h ratio1h3h=0.50 cadence=NORMAL regime=NORMAL ticks_since_spike=21 inactive_for=5417s mode=legacy
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.50->7.80 regime SLOW->SLOW
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=25 rate1h=7.00/h rate3h=8.33/h ratio1h3h=0.84 score 7.20->6.95 regime NORMAL->NORMAL
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=1.00/h rate3h=3.33/h ratio1h3h=0.30 score 7.20->7.80 regime SLOW->SLOW
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=40 rate1h=12.00/h rate3h=13.33/h ratio1h3h=0.90 score 7.60->7.35 regime FAST->FAST
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=23 rate1h=8.00/h rate3h=7.67/h ratio1h3h=1.04 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=ACCEL ratio=1.45 recent=0.133 base=0.092 samples=20 streak=5 -> regime=NORMAL score=6.80 grace=60 active=True
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=DECEL ratio=1.27 recent=0.233 base=0.184 samples=20 streak=3 -> regime=SLOW score=9.20 grace=120 active=True
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=1.67 recent=0.233 base=0.140 samples=20 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM1000 modified | score_min_override: 7.5 -> 7.8
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM900 modified | score_min_override: 7.2 -> 6.8
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | zero_peak_grace_sec: 90 -> 60 | score_min_override: 7.6 -> 8.0
+2026-05-27 18:57:22 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM500 modified | zero_peak_grace_sec: 90 -> 120
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH1000 modified | score_min_override: 7.6 -> 7.8
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH900 modified | score_min_override: 7.2 -> 7.6
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH600 modified | zero_peak_grace_sec: 120 -> 90 | score_min_override: 7.6 -> 7.35
+2026-05-27 18:57:22 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] CRASH500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=8 blocked_flips=0 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 120, 'score_min_override': 8.4, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.6, 'is_active': False}}
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 0.893740902474527, 'p50_2h': 307.0, 'p50_6h': 343.5}, 'CRASH500': {'ratio': 1.4371196754563895, 'p50_2h': 708.5, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 0.8493506493506493, 'p50_2h': 654.0, 'p50_6h': 770.0}, 'CRASH900': {'ratio': 1.2183544303797469, 'p50_2h': 1155.0, 'p50_6h': 948.0}}
+2026-05-27 18:57:22 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=6 sample={'BOOM500': {'rate_1h': 10.0, 'rate_3h': 8.0, 'ratio_1h_3h': 1.25, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 3.0, 'rate_3h': 6.0, 'ratio_1h_3h': 0.5, 'cadence': 'NORMAL'}, 'CRASH600': {'rate_1h': 12.0, 'rate_3h': 13.333333333333334, 'ratio_1h_3h': 0.8999999999999999, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 1.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.3, 'cadence': 'SLOW'}}
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=25 rate1h=7.00/h rate3h=8.33/h ratio1h3h=0.84 score 6.80->6.95 regime NORMAL->NORMAL
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=1.00/h rate3h=3.33/h ratio1h3h=0.30 score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=41 rate1h=13.00/h rate3h=13.67/h ratio1h3h=0.95 score 7.35->7.20 regime FAST->FAST
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=22 rate1h=8.00/h rate3h=7.33/h ratio1h3h=1.09 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=DECEL ratio=n/a recent=0.133 base=0.033 samples=1 streak=3 -> regime=SLOW score=7.80 grace=90 active=True
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM600 phase=ACCEL ratio=n/a recent=0.100 base=0.183 samples=1 streak=3 -> regime=NORMAL score=6.80 grace=60 active=False
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=DECEL ratio=n/a recent=0.233 base=0.083 samples=1 streak=3 -> regime=SLOW score=9.20 grace=120 active=True
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH600 phase=ACCEL ratio=n/a recent=0.233 base=0.100 samples=1 streak=3 -> regime=FAST score=7.00 grace=90 active=True
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=n/a recent=0.200 base=0.233 samples=1 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH900 score hold 7.60 -> 7.80 (age=185s force=0.65)
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 score hold 7.35 -> 7.00 (age=185s force=0.65)
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM900 modified | zero_peak_grace_sec: 60 -> 90 | score_min_override: 6.8 -> 7.2 | regime: NORMAL -> SLOW
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | score_min_override: 8.0 -> 7.6 | regime: SLOW -> NORMAL
+2026-05-27 19:00:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.80 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:00:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] CRASH500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=4 blocked_flips=0 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 120, 'score_min_override': 8.8, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.6, 'is_active': False}}
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 0.893740902474527, 'p50_2h': 307.0, 'p50_6h': 343.5}, 'CRASH500': {'ratio': 1.4371196754563895, 'p50_2h': 708.5, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 0.8493506493506493, 'p50_2h': 654.0, 'p50_6h': 770.0}, 'CRASH900': {'ratio': 1.2183544303797469, 'p50_2h': 1155.0, 'p50_6h': 948.0}}
+2026-05-27 19:00:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=6 sample={'BOOM500': {'rate_1h': 10.0, 'rate_3h': 8.0, 'ratio_1h_3h': 1.25, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 4.0, 'rate_3h': 6.333333333333333, 'ratio_1h_3h': 0.6315789473684211, 'cadence': 'FAST'}, 'CRASH600': {'rate_1h': 13.0, 'rate_3h': 13.666666666666666, 'ratio_1h_3h': 0.951219512195122, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 1.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.3, 'cadence': 'SLOW'}}
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_RECOVERY_PROGRESS] BOOM600 streak=3/3 | spikes15m=3 spikes1h=3 spikes3h=18 spikes6h=49 rate1h=3.00/h rate3h=6.00/h ratio1h3h=0.50 cadence=NORMAL regime=NORMAL ticks_since_spike=283 inactive_for=5782s mode=legacy
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_RECOVERY] BOOM600 re-enabled via spikes | stabilize_cycles=5 strict_bonus=0.80
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][ACTIVITY_POLICY] BOOM600 is_active False -> True | contracts=0 wr=0.0 ev=0.000 late120=0.0 lag_med=n/a spikes15m=3 spikes3h=18 rate1h=3.00/h cadence=NORMAL
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=24 rate1h=6.00/h rate3h=8.00/h ratio1h3h=0.75 score 7.20->6.95 regime SLOW->NORMAL
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=0.00/h rate3h=3.33/h ratio1h3h=0.00 score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=41 rate1h=13.00/h rate3h=13.67/h ratio1h3h=0.95 score 7.35->7.20 regime FAST->FAST
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=22 rate1h=8.00/h rate3h=7.33/h ratio1h3h=1.09 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=DECEL ratio=n/a recent=0.133 base=0.083 samples=2 streak=3 -> regime=SLOW score=7.80 grace=90 active=True
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM600 phase=DECEL ratio=n/a recent=0.100 base=0.142 samples=2 streak=3 -> regime=SLOW score=7.65 grace=120 active=True
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=DECEL ratio=n/a recent=0.233 base=0.158 samples=2 streak=3 -> regime=SLOW score=9.20 grace=120 active=True
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=n/a recent=0.167 base=0.217 samples=2 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM900 score hold 7.20 -> 7.80 (age=180s force=0.65)
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM600 rejected regime flip NORMAL -> SLOW (cooldown=500s)
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM500 score hold 8.80 -> 9.20 (age=180s force=0.65)
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH900 score hold 7.60 -> 7.80 (age=365s force=0.65)
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | zero_peak_grace_sec: 60 -> 120 | is_active: False -> True
+2026-05-27 19:03:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.80 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:03:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] CRASH500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=3 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 120, 'score_min_override': 8.8, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.6, 'is_active': False}}
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 0.893740902474527, 'p50_2h': 307.0, 'p50_6h': 343.5}, 'CRASH500': {'ratio': 1.4807302231237323, 'p50_2h': 730.0, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 1.0, 'p50_2h': 770.0, 'p50_6h': 770.0}, 'CRASH900': {'ratio': 1.2183544303797469, 'p50_2h': 1155.0, 'p50_6h': 948.0}}
+2026-05-27 19:03:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=6 sample={'BOOM500': {'rate_1h': 10.0, 'rate_3h': 8.0, 'ratio_1h_3h': 1.25, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 3.0, 'rate_3h': 6.0, 'ratio_1h_3h': 0.5, 'cadence': 'NORMAL'}, 'CRASH600': {'rate_1h': 13.0, 'rate_3h': 13.666666666666666, 'ratio_1h_3h': 0.951219512195122, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 0.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.0, 'cadence': 'SLOW'}}
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=23 rate1h=5.00/h rate3h=7.67/h ratio1h3h=0.65 score 7.20->6.95 regime SLOW->NORMAL
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM600 cadence=FAST spikes3h=19 rate1h=4.00/h rate3h=6.33/h ratio1h3h=0.63 score 7.60->6.95 regime NORMAL->NORMAL
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=0.00/h rate3h=3.33/h ratio1h3h=0.00 score 7.60->7.80 regime SLOW->SLOW
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=41 rate1h=12.00/h rate3h=13.67/h ratio1h3h=0.88 score 7.35->7.20 regime FAST->FAST
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=22 rate1h=8.00/h rate3h=7.33/h ratio1h3h=1.09 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=DECEL ratio=n/a recent=0.133 base=0.100 samples=3 streak=3 -> regime=SLOW score=7.80 grace=90 active=True
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM600 phase=ACCEL ratio=n/a recent=0.133 base=0.128 samples=3 streak=3 -> regime=NORMAL score=6.80 grace=90 active=True
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=ACCEL ratio=n/a recent=0.267 base=0.183 samples=3 streak=3 -> regime=SLOW score=8.30 grace=90 active=True
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH600 phase=DECEL ratio=n/a recent=0.200 base=0.178 samples=3 streak=3 -> regime=SLOW score=8.05 grace=120 active=True
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=n/a recent=0.167 base=0.200 samples=3 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM900 score hold 7.20 -> 7.80 (age=360s force=0.65)
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM500 score hold 8.80 -> 8.30 (age=360s force=0.65)
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | zero_peak_grace_sec: 120 -> 90 | score_min_override: 7.6 -> 7.2
+2026-05-27 19:06:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.80 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM500 modified | zero_peak_grace_sec: 120 -> 90
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH900 modified | score_min_override: 7.6 -> 7.8
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH600 modified | zero_peak_grace_sec: 90 -> 120 | score_min_override: 7.35 -> 7.75 | regime: FAST -> SLOW
+2026-05-27 19:06:27 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] CRASH500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=5 blocked_flips=0 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 90, 'score_min_override': 8.8, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.8, 'is_active': False}}
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 1.0, 'p50_2h': 307.0, 'p50_6h': 307.0}, 'CRASH500': {'ratio': 1.4807302231237323, 'p50_2h': 730.0, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 1.0650069156293223, 'p50_2h': 770.0, 'p50_6h': 723.0}, 'CRASH900': {'ratio': 1.3275862068965518, 'p50_2h': 1155.0, 'p50_6h': 870.0}}
+2026-05-27 19:06:27 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=7 sample={'BOOM500': {'rate_1h': 12.0, 'rate_3h': 8.666666666666666, 'ratio_1h_3h': 1.3846153846153848, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 4.0, 'rate_3h': 6.333333333333333, 'ratio_1h_3h': 0.6315789473684211, 'cadence': 'FAST'}, 'CRASH600': {'rate_1h': 12.0, 'rate_3h': 13.666666666666666, 'ratio_1h_3h': 0.8780487804878049, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 0.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.0, 'cadence': 'SLOW'}}
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=0.00/h rate3h=3.33/h ratio1h3h=0.00 score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=41 rate1h=12.00/h rate3h=13.67/h ratio1h3h=0.88 score 7.75->7.20 regime SLOW->FAST
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=22 rate1h=8.00/h rate3h=7.33/h ratio1h3h=1.09 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=DECEL ratio=n/a recent=0.100 base=0.108 samples=4 streak=3 -> regime=SLOW score=7.65 grace=90 active=True
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM600 phase=DECEL ratio=n/a recent=0.133 base=0.129 samples=4 streak=3 -> regime=SLOW score=7.65 grace=120 active=True
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [market-phase] CRASH500 phase=DECEL ratio=n/a recent=0.167 base=0.192 samples=4 streak=3 -> regime=SLOW score=8.60 grace=90 active=True
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] BOOM600 score hold 7.20 -> 7.65 (age=173s force=0.65)
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 score hold 7.75 -> 7.20 (age=173s force=0.65)
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 rejected regime flip SLOW -> FAST (cooldown=500s)
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM900 modified | score_min_override: 7.2 -> 7.6
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | zero_peak_grace_sec: 90 -> 120 | regime: NORMAL -> SLOW
+2026-05-27 19:09:21 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.50 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH600 modified | spike_pre_filter_target: 127 -> 162 | zero_peak_grace_sec: 120 -> 90
+2026-05-27 19:09:21 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] CRASH500 score 8.40 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=5 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 90, 'score_min_override': 8.5, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.8, 'is_active': False}}
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=1 sample={'BOOM500': {'ratio': 1.0, 'p50_2h': 307.0, 'p50_6h': 307.0}, 'CRASH500': {'ratio': 1.4807302231237323, 'p50_2h': 730.0, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 1.0650069156293223, 'p50_2h': 770.0, 'p50_6h': 723.0}, 'CRASH900': {'ratio': 1.3275862068965518, 'p50_2h': 1155.0, 'p50_6h': 870.0}}
+2026-05-27 19:09:21 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=5 sample={'BOOM500': {'rate_1h': 11.0, 'rate_3h': 8.666666666666666, 'ratio_1h_3h': 1.2692307692307694, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 4.0, 'rate_3h': 6.0, 'ratio_1h_3h': 0.6666666666666666, 'cadence': 'FAST'}, 'CRASH600': {'rate_1h': 12.0, 'rate_3h': 13.666666666666666, 'ratio_1h_3h': 0.8780487804878049, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 0.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.0, 'cadence': 'SLOW'}}
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM900 cadence=FAST spikes3h=23 rate1h=5.00/h rate3h=7.67/h ratio1h3h=0.65 score 7.60->6.95 regime SLOW->NORMAL
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] BOOM600 cadence=FAST spikes3h=18 rate1h=4.00/h rate3h=6.00/h ratio1h3h=0.67 score 7.20->7.85 regime SLOW->NORMAL
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH1000 cadence=SLOW spikes3h=0 rate1h=0.00/h rate3h=0.00/h ratio1h3h=n/a score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH900 cadence=SLOW spikes3h=10 rate1h=0.00/h rate3h=3.33/h ratio1h3h=0.00 score 7.80->7.80 regime SLOW->SLOW
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH600 cadence=FAST spikes3h=41 rate1h=11.00/h rate3h=13.67/h ratio1h3h=0.80 score 7.75->7.20 regime SLOW->FAST
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE] CRASH500 cadence=FAST spikes3h=23 rate1h=8.00/h rate3h=7.67/h ratio1h3h=1.04 score 8.00->7.75 regime SLOW->NORMAL
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM900 phase=DECEL ratio=0.94 recent=0.100 base=0.107 samples=5 streak=3 -> regime=SLOW score=7.80 grace=90 active=True
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM600 phase=DECEL ratio=1.03 recent=0.133 base=0.130 samples=5 streak=3 -> regime=SLOW score=8.70 grace=120 active=True
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [market-phase] BOOM500 phase=DECEL ratio=1.08 recent=0.233 base=0.217 samples=5 streak=3 -> regime=SLOW score=9.20 grace=120 active=True
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 score hold 7.75 -> 7.20 (age=347s force=0.65)
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][HYSTERESIS] CRASH600 rejected regime flip SLOW -> FAST (cooldown=500s)
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM600 modified | score_min_override: 7.2 -> 7.6
+2026-05-27 19:12:15 | WARNING | dynamic_ai_orchestrator | [dynamic-ai][DB_COMPAT] BOOM500 score 8.90 -> 8.00 due to DB constraint (max=8.00)
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] BOOM500 modified | zero_peak_grace_sec: 90 -> 120
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][DIFF] CRASH500 modified | zero_peak_grace_sec: 90 -> 60 | regime: SLOW -> NORMAL
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai] applied config source=llm symbols=8 db_updates=3 blocked_flips=1 sample={'BOOM500': {'regime': 'SLOW', 'spike_pre_filter_target': 90, 'zero_peak_grace_sec': 120, 'score_min_override': 8.9, 'is_active': True}, 'CRASH900': {'regime': 'SLOW', 'spike_pre_filter_target': 251, 'zero_peak_grace_sec': 90, 'score_min_override': 7.8, 'is_active': False}}
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][TICK_WINDOW_ACCEL] spike_pre_filter_updates=0 sample={'BOOM500': {'ratio': 0.893740902474527, 'p50_2h': 307.0, 'p50_6h': 343.5}, 'CRASH500': {'ratio': 1.513184584178499, 'p50_2h': 746.0, 'p50_6h': 493.0}, 'BOOM900': {'ratio': 1.0650069156293223, 'p50_2h': 770.0, 'p50_6h': 723.0}, 'CRASH900': {'ratio': 1.3275862068965518, 'p50_2h': 1155.0, 'p50_6h': 870.0}}
+2026-05-27 19:12:15 | INFO    | dynamic_ai_orchestrator | [dynamic-ai][SPIKE_CADENCE_POLICY] score_regime_updates=7 sample={'BOOM500': {'rate_1h': 10.0, 'rate_3h': 8.666666666666666, 'ratio_1h_3h': 1.153846153846154, 'cadence': 'FAST'}, 'BOOM600': {'rate_1h': 4.0, 'rate_3h': 6.0, 'ratio_1h_3h': 0.6666666666666666, 'cadence': 'FAST'}, 'CRASH600': {'rate_1h': 11.0, 'rate_3h': 13.666666666666666, 'ratio_1h_3h': 0.8048780487804879, 'cadence': 'FAST'}, 'CRASH900': {'rate_1h': 0.0, 'rate_3h': 3.3333333333333335, 'ratio_1h_3h': 0.0, 'cadence': 'SLOW'}}

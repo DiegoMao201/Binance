@@ -1,0 +1,967 @@
+{
+  "window": {
+    "hours": 7,
+    "cutoff_ts": 1779904398.8522663,
+    "cutoff_iso": "2026-05-27T17:53:18.852266+00:00",
+    "now_ts": 1779929598.8522663,
+    "now_iso": "2026-05-28T00:53:18.852266+00:00"
+  },
+  "containers": {
+    "bot": "o4w1ns4cceccmn2ozqt7sol2",
+    "ai_sidecar": "o4w1ns4cceccmn2ozqt7sol2-ai"
+  },
+  "overall_trade_metrics_7h": {
+    "trades": 89,
+    "wins": 58,
+    "losses": 31,
+    "win_rate_pct": 65.17,
+    "pnl_total": 4.03,
+    "avg_pnl": 0.0453,
+    "median_pnl": 0.22,
+    "profit_factor": 1.216,
+    "avg_hold_sec": 977.09,
+    "median_hold_sec": 847.7,
+    "close_le_120_pct": 5.68,
+    "close_le_180_pct": 10.23,
+    "sl_avg_hold_sec": 1324.07,
+    "timeout_avg_hold_sec": 801.09,
+    "exit_reasons_top10": [
+      [
+        "timeout_multispike",
+        52
+      ],
+      [
+        "broker_sl_hit",
+        31
+      ],
+      [
+        "ratchet_hit",
+        6
+      ]
+    ]
+  },
+  "per_symbol_trade_metrics_7h": {
+    "BOOM500": {
+      "trades": 13,
+      "wins": 10,
+      "losses": 3,
+      "flat": 0,
+      "win_rate_pct": 76.92,
+      "pnl_total": 2.12,
+      "avg_pnl": 0.1631,
+      "median_pnl": 0.24,
+      "gross_profit": 3.86,
+      "gross_loss_abs": 1.74,
+      "profit_factor": 2.2184,
+      "sl_hits": 3,
+      "sl_rate_pct": 23.08,
+      "avg_hold_sec": 1244.13,
+      "median_hold_sec": 867.2,
+      "hold_p25_sec": 769.1,
+      "hold_p75_sec": 1277.9,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 0.0,
+      "sl_avg_hold_sec": 875.0,
+      "timeout_avg_hold_sec": 1199.12,
+      "exit_reasons_top10": [
+        [
+          "timeout_multispike",
+          9
+        ],
+        [
+          "broker_sl_hit",
+          3
+        ],
+        [
+          "ratchet_hit",
+          1
+        ]
+      ]
+    },
+    "BOOM600": {
+      "trades": 14,
+      "wins": 8,
+      "losses": 6,
+      "flat": 0,
+      "win_rate_pct": 57.14,
+      "pnl_total": -0.18,
+      "avg_pnl": -0.0129,
+      "median_pnl": 0.175,
+      "gross_profit": 3.06,
+      "gross_loss_abs": 3.24,
+      "profit_factor": 0.9444,
+      "sl_hits": 6,
+      "sl_rate_pct": 42.86,
+      "avg_hold_sec": 947.84,
+      "median_hold_sec": 1024.2,
+      "hold_p25_sec": 303.2,
+      "hold_p75_sec": 1416.1,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 7.14,
+      "sl_avg_hold_sec": 1328.17,
+      "timeout_avg_hold_sec": 662.6,
+      "exit_reasons_top10": [
+        [
+          "timeout_multispike",
+          8
+        ],
+        [
+          "broker_sl_hit",
+          6
+        ]
+      ]
+    },
+    "BOOM900": {
+      "trades": 12,
+      "wins": 8,
+      "losses": 4,
+      "flat": 0,
+      "win_rate_pct": 66.67,
+      "pnl_total": 0.42,
+      "avg_pnl": 0.035,
+      "median_pnl": 0.305,
+      "gross_profit": 2.58,
+      "gross_loss_abs": 2.16,
+      "profit_factor": 1.1944,
+      "sl_hits": 4,
+      "sl_rate_pct": 33.33,
+      "avg_hold_sec": 1571.99,
+      "median_hold_sec": 1600.3,
+      "hold_p25_sec": 1019.8,
+      "hold_p75_sec": 1830.2,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 0.0,
+      "sl_avg_hold_sec": 1725.63,
+      "timeout_avg_hold_sec": 1514.38,
+      "exit_reasons_top10": [
+        [
+          "timeout_multispike",
+          8
+        ],
+        [
+          "broker_sl_hit",
+          4
+        ]
+      ]
+    },
+    "BOOM1000": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "flat": 0,
+      "win_rate_pct": 0.0,
+      "pnl_total": 0.0,
+      "avg_pnl": 0.0,
+      "median_pnl": 0.0,
+      "gross_profit": 0.0,
+      "gross_loss_abs": 0.0,
+      "profit_factor": 0.0,
+      "sl_hits": 0,
+      "sl_rate_pct": 0.0,
+      "avg_hold_sec": 0.0,
+      "median_hold_sec": 0.0,
+      "hold_p25_sec": 0.0,
+      "hold_p75_sec": 0.0,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 0.0,
+      "sl_avg_hold_sec": 0.0,
+      "timeout_avg_hold_sec": 0.0,
+      "exit_reasons_top10": []
+    },
+    "CRASH500": {
+      "trades": 22,
+      "wins": 12,
+      "losses": 10,
+      "flat": 0,
+      "win_rate_pct": 54.55,
+      "pnl_total": -0.11,
+      "avg_pnl": -0.005,
+      "median_pnl": 0.17,
+      "gross_profit": 7.09,
+      "gross_loss_abs": 7.2,
+      "profit_factor": 0.9847,
+      "sl_hits": 10,
+      "sl_rate_pct": 45.45,
+      "avg_hold_sec": 633.15,
+      "median_hold_sec": 449.0,
+      "hold_p25_sec": 137.0,
+      "hold_p75_sec": 858.5,
+      "close_le_120_pct": 22.73,
+      "close_le_180_pct": 31.82,
+      "sl_avg_hold_sec": 1173.14,
+      "timeout_avg_hold_sec": 197.27,
+      "exit_reasons_top10": [
+        [
+          "timeout_multispike",
+          11
+        ],
+        [
+          "broker_sl_hit",
+          10
+        ],
+        [
+          "ratchet_hit",
+          1
+        ]
+      ]
+    },
+    "CRASH600": {
+      "trades": 20,
+      "wins": 16,
+      "losses": 4,
+      "flat": 0,
+      "win_rate_pct": 80.0,
+      "pnl_total": 2.38,
+      "avg_pnl": 0.119,
+      "median_pnl": 0.18,
+      "gross_profit": 4.54,
+      "gross_loss_abs": 2.16,
+      "profit_factor": 2.1019,
+      "sl_hits": 4,
+      "sl_rate_pct": 20.0,
+      "avg_hold_sec": 682.04,
+      "median_hold_sec": 535.6,
+      "hold_p25_sec": 302.6,
+      "hold_p75_sec": 810.9,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 5.0,
+      "sl_avg_hold_sec": 1269.97,
+      "timeout_avg_hold_sec": 561.73,
+      "exit_reasons_top10": [
+        [
+          "timeout_multispike",
+          12
+        ],
+        [
+          "broker_sl_hit",
+          4
+        ],
+        [
+          "ratchet_hit",
+          4
+        ]
+      ]
+    },
+    "CRASH900": {
+      "trades": 8,
+      "wins": 4,
+      "losses": 4,
+      "flat": 0,
+      "win_rate_pct": 50.0,
+      "pnl_total": -0.6,
+      "avg_pnl": -0.075,
+      "median_pnl": -0.14,
+      "gross_profit": 1.56,
+      "gross_loss_abs": 2.16,
+      "profit_factor": 0.7222,
+      "sl_hits": 4,
+      "sl_rate_pct": 50.0,
+      "avg_hold_sec": 1459.76,
+      "median_hold_sec": 1551.65,
+      "hold_p25_sec": 1368.0,
+      "hold_p75_sec": 1591.3,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 0.0,
+      "sl_avg_hold_sec": 1785.0,
+      "timeout_avg_hold_sec": 1134.53,
+      "exit_reasons_top10": [
+        [
+          "broker_sl_hit",
+          4
+        ],
+        [
+          "timeout_multispike",
+          4
+        ]
+      ]
+    },
+    "CRASH1000": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "flat": 0,
+      "win_rate_pct": 0.0,
+      "pnl_total": 0.0,
+      "avg_pnl": 0.0,
+      "median_pnl": 0.0,
+      "gross_profit": 0.0,
+      "gross_loss_abs": 0.0,
+      "profit_factor": 0.0,
+      "sl_hits": 0,
+      "sl_rate_pct": 0.0,
+      "avg_hold_sec": 0.0,
+      "median_hold_sec": 0.0,
+      "hold_p25_sec": 0.0,
+      "hold_p75_sec": 0.0,
+      "close_le_120_pct": 0.0,
+      "close_le_180_pct": 0.0,
+      "sl_avg_hold_sec": 0.0,
+      "timeout_avg_hold_sec": 0.0,
+      "exit_reasons_top10": []
+    }
+  },
+  "spike_capture_7h": {
+    "overall_spikes": 246,
+    "overall_bot_entered": 0,
+    "overall_entry_rate_pct": 0.0,
+    "per_symbol": {
+      "BOOM500": {
+        "spikes": 63,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "trade_cooldown",
+            17
+          ],
+          [
+            "dynamic_symbol_inactive",
+            13
+          ],
+          [
+            "post_spike_chase_guard:299t<300t",
+            11
+          ],
+          [
+            "post_spike_chase_guard:84t<300t",
+            2
+          ],
+          [
+            "post_spike_chase_guard:102t<180t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:121t<180t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:70t<180t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:163t<180t",
+            1
+          ]
+        ]
+      },
+      "BOOM600": {
+        "spikes": 39,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "post_spike_chase_guard:299t<360t",
+            17
+          ],
+          [
+            "dynamic_symbol_inactive",
+            7
+          ],
+          [
+            "post_spike_chase_guard:177t<360t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:108t<360t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:180t<360t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:174t<360t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:284t<360t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:300t<360t",
+            1
+          ]
+        ]
+      },
+      "BOOM900": {
+        "spikes": 32,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "trade_cooldown",
+            15
+          ],
+          [
+            "post_spike_chase_guard:299t<540t",
+            4
+          ],
+          [
+            "dynamic_symbol_inactive",
+            3
+          ],
+          [
+            "post_spike_chase_guard:153t<476t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:256t<476t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:154t<540t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:300t<540t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:257t<540t",
+            1
+          ]
+        ]
+      },
+      "BOOM1000": {
+        "spikes": 0,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": []
+      },
+      "CRASH500": {
+        "spikes": 42,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "post_spike_chase_guard:299t<300t",
+            12
+          ],
+          [
+            "trade_cooldown",
+            11
+          ],
+          [
+            "post_spike_chase_guard:261t<262t",
+            5
+          ],
+          [
+            "post_spike_chase_guard:274t<300t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:84t<300t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:94t<300t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:107t<300t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:117t<300t",
+            1
+          ]
+        ]
+      },
+      "CRASH600": {
+        "spikes": 48,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "trade_cooldown",
+            12
+          ],
+          [
+            "post_spike_chase_guard:299t<343t",
+            12
+          ],
+          [
+            "dynamic_symbol_inactive",
+            11
+          ],
+          [
+            "post_spike_chase_guard:300t<343t",
+            2
+          ],
+          [
+            "AI_VETO: The trade signal has a strong mathematical score of 7.53, a Hurst exponent of 0.4868 which is above the 0.43 threshold for spike markets, and the volatility regime is 'compressing' (not 'volatile'), meeting all approval criteria. | tail_veto:n=5 wr=0.0% avg=-0.3760 | adaptive:baseline",
+            1
+          ],
+          [
+            "AI_VETO: The mathematical score of 6.01 is below the required threshold of 6.2 for approval, despite the Hurst exponent being within an acceptable range and the regime not being 'volatile'. | adaptive:accel_relax=-0.05 [cached]",
+            1
+          ],
+          [
+            "post_spike_chase_guard:110t<180t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:179t<180t",
+            1
+          ]
+        ]
+      },
+      "CRASH900": {
+        "spikes": 22,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": [
+          [
+            "dynamic_symbol_inactive",
+            5
+          ],
+          [
+            "post_spike_chase_guard:299t<540t",
+            5
+          ],
+          [
+            "post_spike_chase_guard:227t<228t",
+            2
+          ],
+          [
+            "post_spike_chase_guard:216t<217t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:248t<249t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:154t<228t",
+            1
+          ],
+          [
+            "post_spike_chase_guard:7t<228t",
+            1
+          ],
+          [
+            "trade_cooldown",
+            1
+          ]
+        ]
+      },
+      "CRASH1000": {
+        "spikes": 0,
+        "bot_entered": 0,
+        "entry_rate_pct": 0.0,
+        "block_reasons_top8": []
+      }
+    }
+  },
+  "ai_gate_metrics_7h": {
+    "evaluated_total": 366,
+    "approved": 337,
+    "rejected": 29,
+    "skipped": 0,
+    "approval_rate_pct_excl_skips": 92.08,
+    "avg_confidence": 0.0,
+    "top_ai_reasons": [],
+    "per_symbol": {
+      "BOOM500": {
+        "total": 55,
+        "approved": 54,
+        "rejected": 1,
+        "skipped": 0,
+        "approval_rate_pct": 98.18,
+        "avg_conf": 0.0
+      },
+      "BOOM600": {
+        "total": 50,
+        "approved": 46,
+        "rejected": 4,
+        "skipped": 0,
+        "approval_rate_pct": 92.0,
+        "avg_conf": 0.0
+      },
+      "BOOM900": {
+        "total": 76,
+        "approved": 75,
+        "rejected": 1,
+        "skipped": 0,
+        "approval_rate_pct": 98.68,
+        "avg_conf": 0.0
+      },
+      "CRASH500": {
+        "total": 67,
+        "approved": 57,
+        "rejected": 10,
+        "skipped": 0,
+        "approval_rate_pct": 85.07,
+        "avg_conf": 0.0
+      },
+      "CRASH600": {
+        "total": 70,
+        "approved": 59,
+        "rejected": 11,
+        "skipped": 0,
+        "approval_rate_pct": 84.29,
+        "avg_conf": 0.0
+      },
+      "CRASH900": {
+        "total": 48,
+        "approved": 46,
+        "rejected": 2,
+        "skipped": 0,
+        "approval_rate_pct": 95.83,
+        "avg_conf": 0.0
+      }
+    },
+    "rolling_last20": {
+      "total": 0,
+      "approved": 0,
+      "rejected": 0,
+      "skipped": 0,
+      "approval_rate_pct_excl_skips": 0.0
+    }
+  },
+  "dynamic_ai_changes_7h": {
+    "diff_rows": 579,
+    "source_counts": {
+      "llm": 579
+    },
+    "changes_by_kind": {
+      "score_min_override": 236,
+      "spike_pre_filter_target": 52,
+      "regime": 140,
+      "zero_peak_grace_sec": 234,
+      "is_active": 14
+    },
+    "active_flips": 14,
+    "regime_flips": 140,
+    "score_changes": 236,
+    "spf_changes": 52,
+    "zpg_changes": 234,
+    "top_symbols_by_changes": [
+      [
+        "CRASH600",
+        78
+      ],
+      [
+        "BOOM600",
+        73
+      ],
+      [
+        "CRASH500",
+        72
+      ],
+      [
+        "CRASH900",
+        69
+      ],
+      [
+        "BOOM900",
+        63
+      ],
+      [
+        "BOOM500",
+        59
+      ],
+      [
+        "BOOM1000",
+        13
+      ],
+      [
+        "CRASH1000",
+        12
+      ]
+    ]
+  },
+  "bot_log_patterns_7h": {
+    "counts": {
+      "ENTRY_BLOCKED": 23835,
+      "ATR_VOLATILITY_FILTER": 2519,
+      "ENTRY_ALLOWED": 175,
+      "ORDER_BLOCKED_symbol_already_open": 105,
+      "ORDER_LINES": 151,
+      "AI_VETO": 60,
+      "SYMBOL_DYNAMIC_INACTIVE": 3733
+    },
+    "top_block_reasons": [
+      [
+        "REGIME_SCORE_GATE_trending_dynamic",
+        12318
+      ],
+      [
+        "REGIME_SCORE_GATE_calm_dynamic",
+        8475
+      ],
+      [
+        "ATR_VOLATILITY_FILTER",
+        2519
+      ],
+      [
+        "AI_VETO",
+        60
+      ],
+      [
+        "POST_SPIKE_STRENGTH_VETO",
+        3
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); geo: neutral_extended_down: pos=-1.01 penalty=-1.00; boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -1.012≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.128≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.440≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.408≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.506≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.459≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.117≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.040≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.578≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.569≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.574≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.565≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTUP (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: BOOM600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.515≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); boom_crash_bc_escape_blocked_by_profile: CRASH600 no active FVG + block_bc_escape_env=True; geo_optimal: -0.007≤0.000 →+1.0",
+        2
+      ],
+      [
+        "spike_forced_dir: MULTDOWN (Hurst/trend bypassed); geo: neutral_extended_down: pos=-0.61 penalty=-0.25; boom_crash_bc_escape_blocked_by_profile: CRASH500 no active FVG + block_bc_escape_env=True; geo_optimal: -0.610≤0.000 →+1.0",
+        2
+      ]
+    ],
+    "top_allowed_symbols": [
+      [
+        "BOOM900",
+        35
+      ],
+      [
+        "CRASH500",
+        34
+      ],
+      [
+        "CRASH900",
+        34
+      ],
+      [
+        "BOOM600",
+        30
+      ],
+      [
+        "CRASH600",
+        28
+      ],
+      [
+        "BOOM500",
+        14
+      ]
+    ],
+    "top_blocked_symbols": [
+      [
+        "CRASH500",
+        5317
+      ],
+      [
+        "BOOM500",
+        5169
+      ],
+      [
+        "CRASH900",
+        4168
+      ],
+      [
+        "CRASH600",
+        3807
+      ],
+      [
+        "BOOM900",
+        2784
+      ],
+      [
+        "BOOM600",
+        2590
+      ]
+    ]
+  },
+  "sidecar_log_patterns_7h": {
+    "counts": {
+      "ACTIVITY_DISABLE": 2,
+      "SPIKE_RECOVERY_PROGRESS": 18,
+      "HYSTERESIS": 359,
+      "applied_config": 122,
+      "TICK_WINDOW_ACCEL": 122,
+      "SPIKE_CADENCE_POLICY": 122,
+      "ACTIVITY_RECOVERY": 8,
+      "DB_COMPAT": 168
+    },
+    "source_counts": {
+      "llm": 122
+    },
+    "avg_db_updates_per_apply": 3.795,
+    "avg_blocked_flips_per_apply": 0.615,
+    "activity_recovery_symbols": [
+      [
+        "BOOM600",
+        2
+      ],
+      [
+        "CRASH900",
+        2
+      ],
+      [
+        "BOOM500",
+        1
+      ],
+      [
+        "CRASH600",
+        1
+      ],
+      [
+        "CRASH500",
+        1
+      ],
+      [
+        "BOOM900",
+        1
+      ]
+    ],
+    "activity_disable_symbols": [
+      [
+        "BOOM1000",
+        1
+      ],
+      [
+        "CRASH1000",
+        1
+      ]
+    ]
+  },
+  "status_snapshot_now": {
+    "updated_at": "2026-05-28T00:53:19.089686+00:00",
+    "heartbeat_at": "2026-05-28T00:53:19.089692+00:00",
+    "connected": true,
+    "status": "running",
+    "symbols": [
+      "BOOM500",
+      "BOOM600",
+      "BOOM900",
+      "CRASH500",
+      "CRASH600",
+      "CRASH900"
+    ],
+    "counters": {
+      "ticks_total": 131904,
+      "decisions_total": 43839,
+      "orders_sent": 112,
+      "orders_ok": 87,
+      "orders_failed": 25
+    },
+    "open_contracts_live": 5,
+    "last_decisions_len": 500,
+    "last_decisions_top_reasons": [
+      [
+        "REGIME_SCORE_GATE_DYNAMIC",
+        446
+      ],
+      [
+        "ENTRY_BLOCKED",
+        42
+      ],
+      [
+        "spike_forced_dir",
+        5
+      ],
+      [
+        "DYNAMIC_INACTIVE",
+        3
+      ],
+      [
+        "GO ai=0.85 H=0.466 score=7.06 regime=calm",
+        1
+      ],
+      [
+        "GO ai=0.85 H=0.500 score=7.23 regime=calm",
+        1
+      ],
+      [
+        "GO ai=0.85 H=0.474 score=7.11 regime=trending",
+        1
+      ],
+      [
+        "GO ai=0.85 H=0.466 score=7.39 regime=calm",
+        1
+      ]
+    ],
+    "last_decisions_top_symbols": [
+      [
+        "BOOM500",
+        211
+      ],
+      [
+        "CRASH600",
+        136
+      ],
+      [
+        "CRASH900",
+        60
+      ],
+      [
+        "BOOM900",
+        55
+      ],
+      [
+        "CRASH500",
+        35
+      ],
+      [
+        "BOOM600",
+        3
+      ]
+    ],
+    "dynamic_active_symbols": [
+      "BOOM500",
+      "BOOM600",
+      "BOOM900",
+      "CRASH500",
+      "CRASH600",
+      "CRASH900"
+    ],
+    "dynamic_inactive_symbols": [
+      "BOOM1000",
+      "CRASH1000"
+    ]
+  }
+}

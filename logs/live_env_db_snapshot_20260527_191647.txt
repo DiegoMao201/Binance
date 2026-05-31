@@ -1,0 +1,20 @@
+=== LIVE_NOW_UTC ===
+2026-05-27T19:16:49Z
+=== APP_AND_SIDE ===
+APP_NAME=o4w1ns4cceccmn2ozqt7sol2
+SIDE_NAME=o4w1ns4cceccmn2ozqt7sol2-ai
+=== ENV_SANITIZED_APP ===
+DATABASE_URL=<redacted:73>
+LOGS_DIR=/data/logs
+OPENAI_API_KEY=<redacted:164>
+OPENROUTER_API_KEY=<redacted:73>
+PAMM_WEBHOOK_URL=<redacted:70>
+TELEGRAM_BOT_TOKEN=<redacted:46>
+TELEGRAM_CHAT_ID=8563357085
+WEBHOOK_SECRET=<redacted:64>
+=== ENV_SANITIZED_SIDECAR ===
+DATABASE_URL=<redacted:73>
+LOGS_DIR=/data/logs
+OPENAI_API_KEY=<redacted:164>
+OPENROUTER_API_KEY=<redacted:73>
+=== DYNAMIC_DB_SNAPSHOT ===

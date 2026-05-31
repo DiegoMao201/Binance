@@ -1,0 +1,24 @@
+{
+  "window_start_utc": "2026-05-26T14:12:02.642000+00:00",
+  "window_end_utc": "2026-05-27T14:12:02.642000+00:00",
+  "trades_24h": 289,
+  "wins": 149,
+  "losses": 140,
+  "flats": 0,
+  "win_rate": 0.5155709342560554,
+  "pnl_total_usdt": -3.3699999999999997,
+  "avg_pnl_per_trade": -0.011660899653979238,
+  "spikes_24h": 1240,
+  "ai_decisions_24h": 500,
+  "context_points_24h": 9448,
+  "symbols_traded": [
+    "BOOM1000",
+    "BOOM500",
+    "BOOM600",
+    "BOOM900",
+    "CRASH1000",
+    "CRASH500",
+    "CRASH600",
+    "CRASH900"
+  ]
+}

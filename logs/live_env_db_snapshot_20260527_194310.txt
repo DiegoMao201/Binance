@@ -1,0 +1,126 @@
+=== LIVE_NOW_UTC ===
+2026-05-27T19:43:11Z
+=== APP_AND_SIDE ===
+APP_NAME=o4w1ns4cceccmn2ozqt7sol2
+SIDE_NAME=o4w1ns4cceccmn2ozqt7sol2-ai
+=== ENV_SANITIZED_APP ===
+DATABASE_URL=<redacted:73>
+LOGS_DIR=/data/logs
+OPENAI_API_KEY=<redacted:164>
+OPENROUTER_API_KEY=<redacted:73>
+PAMM_WEBHOOK_URL=<redacted:70>
+TELEGRAM_BOT_TOKEN=<redacted:46>
+TELEGRAM_CHAT_ID=8563357085
+WEBHOOK_SECRET=<redacted:64>
+=== ENV_SANITIZED_SIDECAR ===
+DATABASE_URL=<redacted:73>
+LOGS_DIR=/data/logs
+OPENAI_API_KEY=<redacted:164>
+OPENROUTER_API_KEY=<redacted:73>
+=== DYNAMIC_DB_SNAPSHOT ===
+[
+  {
+    "symbol": "BOOM1000",
+    "market_regime": "SLOW",
+    "spike_pre_filter_target": 149,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 7.8,
+    "is_active": false,
+    "dep_exit_policy": "SHADOW",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T18:57:22.315832+00:00"
+  },
+  {
+    "symbol": "BOOM500",
+    "market_regime": "SLOW",
+    "spike_pre_filter_target": 90,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 8.0,
+    "is_active": true,
+    "dep_exit_policy": "SHADOW",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:42:17.683733+00:00"
+  },
+  {
+    "symbol": "BOOM600",
+    "market_regime": "NORMAL",
+    "spike_pre_filter_target": 360,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 7.249999999999999,
+    "is_active": true,
+    "dep_exit_policy": "SHADOW",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:39:17.420733+00:00"
+  },
+  {
+    "symbol": "BOOM900",
+    "market_regime": "NORMAL",
+    "spike_pre_filter_target": 336,
+    "zero_peak_grace_sec": 60,
+    "score_min_override": 7.2,
+    "is_active": true,
+    "dep_exit_policy": "SHADOW",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:42:17.683733+00:00"
+  },
+  {
+    "symbol": "CRASH1000",
+    "market_regime": "SLOW",
+    "spike_pre_filter_target": 242,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 7.8,
+    "is_active": false,
+    "dep_exit_policy": "PASSIVE",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T18:57:22.315832+00:00"
+  },
+  {
+    "symbol": "CRASH500",
+    "market_regime": "NORMAL",
+    "spike_pre_filter_target": 300,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 7.6,
+    "is_active": true,
+    "dep_exit_policy": "PASSIVE",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:39:17.420733+00:00"
+  },
+  {
+    "symbol": "CRASH600",
+    "market_regime": "FAST",
+    "spike_pre_filter_target": 133,
+    "zero_peak_grace_sec": 90,
+    "score_min_override": 7.649999999999999,
+    "is_active": true,
+    "dep_exit_policy": "PASSIVE",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:42:17.683733+00:00"
+  },
+  {
+    "symbol": "CRASH900",
+    "market_regime": "SLOW",
+    "spike_pre_filter_target": 251,
+    "zero_peak_grace_sec": 60,
+    "score_min_override": 7.5,
+    "is_active": false,
+    "dep_exit_policy": "PASSIVE",
+    "dep_min_hold_sec": 120,
+    "dep_atr_decay_ratio": 0.7,
+    "dep_loss_floor_usdt": -0.05,
+    "last_updated": "2026-05-27T19:42:17.683733+00:00"
+  }
+]
