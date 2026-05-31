@@ -109,6 +109,30 @@ _TIER_QUOTA_TIGHTEN_PP = max(
 _SPIKE_QUOTA_LOOKBACK_HOURS = max(
     1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "12") or 12), 24)
 )
+# 2026-05-30 "post-entry no-confirmation exit": once we enter on a spike, the
+# math has done its job. If within WINDOW_SEC no new spike fires AND we never
+# went positive, holding longer is just hoping for a miracle — we exit early
+# instead of letting the position bleed to broker SL.
+_POST_ENTRY_CONF_WINDOW_SEC = max(
+    20.0,
+    min(
+        float(os.getenv("DERIV_POST_ENTRY_CONFIRMATION_WINDOW_SEC", "90") or 90.0),
+        600.0,
+    ),
+)
+_POST_ENTRY_CONF_REQUIRE_NEGATIVE = _env_flag(
+    "DERIV_POST_ENTRY_CONFIRMATION_REQUIRE_NEGATIVE", "true"
+)
+_POST_ENTRY_CONF_MIN_LOSS = max(
+    -5.0,
+    min(
+        float(os.getenv("DERIV_POST_ENTRY_CONFIRMATION_MIN_LOSS", "-0.10") or -0.10),
+        0.0,
+    ),
+)
+_POST_ENTRY_CONF_ENABLE = _env_flag(
+    "DERIV_POST_ENTRY_CONFIRMATION_ENABLE", "true"
+)
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
 # (dollar_floor) cierra antes de cuota.  Esto evita ganancias chicas en
@@ -748,6 +772,59 @@ class DerivTradeExecutor:
 
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
+
+        # ─── POST-ENTRY NO-CONFIRMATION EXIT (2026-05-30) ───────────────────
+        # If WINDOW_SEC has elapsed since entry AND no new spike has fired
+        # AND we never went positive (peak_profit <= 0) AND current PnL is
+        # below the loss threshold → close early.  The math made its call at
+        # entry; without a fresh confirmation, riding to broker SL is just
+        # hoping for a miracle.
+        if (
+            _POST_ENTRY_CONF_ENABLE
+            and cid not in self._closing
+            and oc.peak_profit <= 0.0
+        ):
+            _age = time.time() - float(oc.opened_at_ts or 0.0)
+            if _age >= _POST_ENTRY_CONF_WINDOW_SEC:
+                _last_spike = 0.0
+                with suppress(Exception):
+                    _last_spike = float(
+                        self._risk.get_last_spike_ts(oc.symbol) or 0.0
+                    )
+                _no_new_spike = _last_spike <= float(oc.opened_at_ts or 0.0)
+                _is_negative = (
+                    current_profit <= _POST_ENTRY_CONF_MIN_LOSS
+                    if _POST_ENTRY_CONF_REQUIRE_NEGATIVE
+                    else True
+                )
+                if _no_new_spike and _is_negative:
+                    self._closing.add(cid)
+                    oc.pending_close_reason = "post_entry_no_confirmation"
+                    _LOGGER.info(
+                        "[POST-ENTRY-NO-CONF] %s cid=%s sym=%s age=%.1fs "
+                        "pnl=%.4f peak=%.4f last_spike_age=%.1fs window=%.0fs "
+                        "min_loss=%.2f → close (no fresh confirmation since entry)",
+                        source,
+                        cid,
+                        oc.symbol,
+                        _age,
+                        current_profit,
+                        float(oc.peak_profit),
+                        (time.time() - _last_spike) if _last_spike > 0 else -1.0,
+                        _POST_ENTRY_CONF_WINDOW_SEC,
+                        _POST_ENTRY_CONF_MIN_LOSS,
+                    )
+                    try:
+                        await self._client.sell(cid)
+                        return True
+                    except DerivClientError as exc:
+                        _LOGGER.warning(
+                            "[POST-ENTRY-NO-CONF] %s sell failed cid=%s: %s",
+                            source, cid, exc,
+                        )
+                        self._closing.discard(cid)
+                        oc.pending_close_reason = None
+                        # fall through to tier logic
 
         state = self._spike_tier_dynamic_state(
             oc.symbol,
