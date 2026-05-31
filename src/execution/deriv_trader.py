@@ -109,29 +109,53 @@ _TIER_QUOTA_TIGHTEN_PP = max(
 _SPIKE_QUOTA_LOOKBACK_HOURS = max(
     1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "12") or 12), 24)
 )
-# 2026-05-30 "post-entry no-confirmation exit": once we enter on a spike, the
-# math has done its job. If within WINDOW_SEC no new spike fires AND we never
-# went positive, holding longer is just hoping for a miracle — we exit early
-# instead of letting the position bleed to broker SL.
-_POST_ENTRY_CONF_WINDOW_SEC = max(
+# 2026-05-30 v2 "wait-for-spike, exit-on-echoes":
+# After entry we WAIT for the real spike to materialize (peak > 0). The bot
+# keeps detecting spikes; each new spike on the same symbol post-entry counts
+# as a "confirmation". Two exit rules:
+#
+#   (A) ECHO EXIT: if N confirmations accumulate but peak stayed near 0 →
+#       they are just echoes of the original setup, the real move never came.
+#
+#   (B) SMALL-SPIKE DEGRADE EXIT: if peak was small (caught a weak spike)
+#       AND price is degrading AND no NEW confirmations since the peak → the
+#       spike "happened" and didn't have follow-through, exit before broker SL.
+#
+# Tier <$1 modifier: when peak < $1.0, only arm the 30% ratchet if there are
+# NO post-entry confirmations. With confirmations, the spike is still building
+# → give it room (don't lock the floor yet).
+_POST_ENTRY_ENABLE = _env_flag("DERIV_POST_ENTRY_ENABLE", "true")
+# Rule A — Echo exit
+_POST_ENTRY_ECHO_THRESHOLD = max(
+    1, min(int(os.getenv("DERIV_POST_ENTRY_ECHO_THRESHOLD", "2") or 2), 10)
+)
+_POST_ENTRY_ECHO_PEAK_MAX = max(
+    0.0,
+    min(float(os.getenv("DERIV_POST_ENTRY_ECHO_PEAK_MAX", "0.15") or 0.15), 1.0),
+)
+_POST_ENTRY_ECHO_MIN_AGE_SEC = max(
     20.0,
     min(
-        float(os.getenv("DERIV_POST_ENTRY_CONFIRMATION_WINDOW_SEC", "90") or 90.0),
+        float(os.getenv("DERIV_POST_ENTRY_ECHO_MIN_AGE_SEC", "60") or 60.0),
         600.0,
     ),
 )
-_POST_ENTRY_CONF_REQUIRE_NEGATIVE = _env_flag(
-    "DERIV_POST_ENTRY_CONFIRMATION_REQUIRE_NEGATIVE", "true"
-)
-_POST_ENTRY_CONF_MIN_LOSS = max(
-    -5.0,
+# Rule B — Small-spike degrade exit
+_POST_ENTRY_SMALLSPIKE_PEAK_MIN = max(
+    0.05,
     min(
-        float(os.getenv("DERIV_POST_ENTRY_CONFIRMATION_MIN_LOSS", "-0.10") or -0.10),
-        0.0,
+        float(os.getenv("DERIV_POST_ENTRY_SMALLSPIKE_PEAK_MIN", "0.10") or 0.10),
+        1.0,
     ),
 )
-_POST_ENTRY_CONF_ENABLE = _env_flag(
-    "DERIV_POST_ENTRY_CONFIRMATION_ENABLE", "true"
+_POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO = max(
+    0.10,
+    min(
+        float(
+            os.getenv("DERIV_POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO", "0.30") or 0.30
+        ),
+        0.90,
+    ),
 )
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
@@ -325,6 +349,15 @@ class DerivOpenContract:
     # Keys: tier_pct, dollar_floor, tier_floor, sl_floor, spikes_1h,
     #       spikes_avg_h, samples, quota_done, profit_lock_usdt.
     tier_state: dict[str, Any] = field(default_factory=dict)
+    # 2026-05-30 post-entry confirmation tracking:
+    # Count of NEW spikes detected on this symbol after opened_at_ts.
+    # Used to: (a) close on echo accumulation w/o real move; (b) gate the
+    # tier <$1 ratchet so it only locks when no fresh confirmation is building.
+    post_entry_confirmations: int = field(default=0)
+    # Last spike ts seen (epoch sec) — to detect new confirmations only once.
+    last_seen_spike_ts: float = field(default=0.0)
+    # Confirmations count at the moment peak_profit was last updated.
+    confirmations_at_peak: int = field(default=0)
 
 
 class DerivTradeExecutor:
@@ -770,67 +803,127 @@ class DerivTradeExecutor:
         if not (self._spike_sl_only_mode and is_spike_market(oc.symbol)):
             return False
 
+        # Track peak BEFORE confirmations update so we know if a fresh spike
+        # contributed to the new peak (used by Rule B).
+        _prev_peak = float(oc.peak_profit)
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
 
-        # ─── POST-ENTRY NO-CONFIRMATION EXIT (2026-05-30) ───────────────────
-        # If WINDOW_SEC has elapsed since entry AND no new spike has fired
-        # AND we never went positive (peak_profit <= 0) AND current PnL is
-        # below the loss threshold → close early.  The math made its call at
-        # entry; without a fresh confirmation, riding to broker SL is just
-        # hoping for a miracle.
+        # ─── POST-ENTRY CONFIRMATION TRACKING (2026-05-30 v2) ───────────────
+        # Count NEW spikes detected on this symbol after opened_at_ts.
+        # The entry itself was triggered by the first spike, so confirmations
+        # ≥ 1 means we've seen additional spikes during the wait.
+        _last_spike_ts = 0.0
+        with suppress(Exception):
+            _last_spike_ts = float(
+                self._risk.get_last_spike_ts(oc.symbol) or 0.0
+            )
         if (
-            _POST_ENTRY_CONF_ENABLE
+            _last_spike_ts > 0.0
+            and _last_spike_ts > float(oc.opened_at_ts or 0.0)
+            and _last_spike_ts > float(oc.last_seen_spike_ts or 0.0)
+        ):
+            oc.post_entry_confirmations = int(oc.post_entry_confirmations) + 1
+            oc.last_seen_spike_ts = _last_spike_ts
+
+        # Record confirmations snapshot at new-peak time (for Rule B).
+        if oc.peak_profit > _prev_peak:
+            oc.confirmations_at_peak = int(oc.post_entry_confirmations)
+
+        # ─── RULE A — ECHO EXIT ─────────────────────────────────────────────
+        # If N confirmations accumulated but peak never moved → the new spikes
+        # are echoes of the same setup, the real move never came. Exit.
+        if (
+            _POST_ENTRY_ENABLE
             and cid not in self._closing
-            and oc.peak_profit <= 0.0
+            and int(oc.post_entry_confirmations) >= _POST_ENTRY_ECHO_THRESHOLD
+            and float(oc.peak_profit) <= _POST_ENTRY_ECHO_PEAK_MAX
         ):
             _age = time.time() - float(oc.opened_at_ts or 0.0)
-            if _age >= _POST_ENTRY_CONF_WINDOW_SEC:
-                _last_spike = 0.0
-                with suppress(Exception):
-                    _last_spike = float(
-                        self._risk.get_last_spike_ts(oc.symbol) or 0.0
-                    )
-                _no_new_spike = _last_spike <= float(oc.opened_at_ts or 0.0)
-                _is_negative = (
-                    current_profit <= _POST_ENTRY_CONF_MIN_LOSS
-                    if _POST_ENTRY_CONF_REQUIRE_NEGATIVE
-                    else True
+            if _age >= _POST_ENTRY_ECHO_MIN_AGE_SEC:
+                self._closing.add(cid)
+                oc.pending_close_reason = "post_entry_echo_exit"
+                _LOGGER.info(
+                    "[POST-ENTRY-ECHO] %s cid=%s sym=%s age=%.1fs conf=%d "
+                    "peak=%.4f pnl=%.4f thr=%d peak_max=%.2f → close "
+                    "(echoes accumulated, real spike never materialized)",
+                    source, cid, oc.symbol, _age,
+                    int(oc.post_entry_confirmations),
+                    float(oc.peak_profit), current_profit,
+                    _POST_ENTRY_ECHO_THRESHOLD, _POST_ENTRY_ECHO_PEAK_MAX,
                 )
-                if _no_new_spike and _is_negative:
-                    self._closing.add(cid)
-                    oc.pending_close_reason = "post_entry_no_confirmation"
-                    _LOGGER.info(
-                        "[POST-ENTRY-NO-CONF] %s cid=%s sym=%s age=%.1fs "
-                        "pnl=%.4f peak=%.4f last_spike_age=%.1fs window=%.0fs "
-                        "min_loss=%.2f → close (no fresh confirmation since entry)",
-                        source,
-                        cid,
-                        oc.symbol,
-                        _age,
-                        current_profit,
-                        float(oc.peak_profit),
-                        (time.time() - _last_spike) if _last_spike > 0 else -1.0,
-                        _POST_ENTRY_CONF_WINDOW_SEC,
-                        _POST_ENTRY_CONF_MIN_LOSS,
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[POST-ENTRY-ECHO] %s sell failed cid=%s: %s",
+                        source, cid, exc,
                     )
-                    try:
-                        await self._client.sell(cid)
-                        return True
-                    except DerivClientError as exc:
-                        _LOGGER.warning(
-                            "[POST-ENTRY-NO-CONF] %s sell failed cid=%s: %s",
-                            source, cid, exc,
-                        )
-                        self._closing.discard(cid)
-                        oc.pending_close_reason = None
-                        # fall through to tier logic
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
+
+        # ─── RULE B — SMALL-SPIKE DEGRADE EXIT ──────────────────────────────
+        # Peak reached but small AND price is degrading AND no NEW
+        # confirmations since the peak → the spike happened but had no
+        # follow-through. Exit before broker SL.
+        if (
+            _POST_ENTRY_ENABLE
+            and cid not in self._closing
+            and _POST_ENTRY_SMALLSPIKE_PEAK_MIN
+            <= float(oc.peak_profit)
+            < 1.0
+        ):
+            _degrade_floor = float(oc.peak_profit) * (
+                1.0 - _POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO
+            )
+            _no_new_since_peak = (
+                int(oc.post_entry_confirmations)
+                <= int(oc.confirmations_at_peak)
+            )
+            if current_profit <= _degrade_floor and _no_new_since_peak:
+                self._closing.add(cid)
+                oc.pending_close_reason = "post_entry_small_spike_degraded"
+                _LOGGER.info(
+                    "[POST-ENTRY-SMALLSPIKE] %s cid=%s sym=%s peak=%.4f "
+                    "cur=%.4f degrade_floor=%.4f (ratio=%.2f) conf=%d "
+                    "conf_at_peak=%d → close (small spike, no follow-through)",
+                    source, cid, oc.symbol, float(oc.peak_profit),
+                    current_profit, _degrade_floor,
+                    _POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO,
+                    int(oc.post_entry_confirmations),
+                    int(oc.confirmations_at_peak),
+                )
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[POST-ENTRY-SMALLSPIKE] %s sell failed cid=%s: %s",
+                        source, cid, exc,
+                    )
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
 
         state = self._spike_tier_dynamic_state(
             oc.symbol,
             float(oc.peak_profit),
             float(oc.stake_usdt),
         )
+        # ─── TIER <$1 GATE (2026-05-30 v2) ──────────────────────────────────
+        # If peak is below $1 AND there are post-entry confirmations, the
+        # spike is still building — do NOT lock the 30% floor yet; give it
+        # room. Only arm the tier when no fresh confirmation is in flight.
+        if (
+            _POST_ENTRY_ENABLE
+            and float(oc.peak_profit) < 1.0
+            and int(oc.post_entry_confirmations) >= 1
+        ):
+            state = dict(state)
+            state["sl_floor"] = None
+            state["tier_active"] = False
+            state["tier_gated_by_confirmations"] = True
+            state["post_entry_confirmations"] = int(oc.post_entry_confirmations)
         # Always publish live telemetry so the frontend cards reflect the
         # current tier/floor even before any close trigger fires.
         oc.tier_state = state
