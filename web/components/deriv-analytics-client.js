@@ -468,6 +468,8 @@ function DpmTierPanel({ c }) {
   const quotaDone    = Boolean(ts.quota_done);
   const waitForQuota = Boolean(ts.wait_for_quota);
   const tierActive   = Boolean(ts.tier_active);
+  const tierGatedBy  = String(ts.tier_gated_by ?? "");
+  const postSpikeConf = Number(ts.post_spike_confirmations ?? 0);
   const lookbackHrs  = Number(ts.lookback_hours ?? 12);
   const profitLock   = Number(ts.profit_lock_usdt ?? 2);
   const profitLockedUntil = Number(c.profit_lock_unlock_at ?? 0);
@@ -669,8 +671,18 @@ function DpmTierPanel({ c }) {
           background: "rgba(255,255,255,0.02)", padding: "4px 6px", borderRadius: 4,
           border: `1px dashed ${T.border}`,
         }}>
-          {peak < 1.0 && (
-            <span>📊 Esperando peak ≥ $1 para activar protección.</span>
+          {peak < 1.0 && !tierActive && tierGatedBy === "post_spike_confirmation_in_flight" && (
+            <span>🔄 Spike llegó, pero hay <b style={{ color: T.cyan }}>{postSpikeConf} confirmación{postSpikeConf===1?"":"es"} post-spike</b> en vuelo — esperando otro pico antes de armar tier.</span>
+          )}
+          {peak < 1.0 && !tierActive && tierGatedBy !== "post_spike_confirmation_in_flight" && (
+            <span>📊 Esperando que llegue el spike (peak aún bajo el umbral).</span>
+          )}
+          {peak < 1.0 && tierActive && slFloorVal != null && (
+            <span>
+              🛡️ <b style={{ color: T.green }}>Tier {Math.round(tierPct*1000)/10}% activo</b> (sin confirmaciones post-spike) — protegiendo peak
+              {" "}<b style={{ color: T.green }}>+${n(peak, 2)}</b>. Cerrará si PnL cae bajo
+              {" "}<b style={{ color: T.green }}>${n(slFloorVal, 2)}</b>.
+            </span>
           )}
           {peak >= 1.0 && waitForQuota && (
             <span>

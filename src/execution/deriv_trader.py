@@ -903,13 +903,19 @@ class DerivTradeExecutor:
             float(oc.peak_profit),
             float(oc.stake_usdt),
         )
-        # ─── TIER <$1 GATE (v3) ─────────────────────────────────────────────
-        # Two gates:
-        #  (a) If the entry's spike hasn't arrived yet → NO tier ratchet.
-        #      Pre-spike confirmations are part of the SAME pending spike;
-        #      we wait. Broker SL is the only protection here.
-        #  (b) If spike arrived AND peak < $1 AND post-spike confirmations
-        #      >= 1 → another spike is coming, keep waiting (no tier lock).
+        # ─── TIER <$1 GATE (v3 — restored) ──────────────────────────────────
+        # Two reasons to disarm the 30% ratchet when peak < $1:
+        #   (a) Spike for this entry hasn't arrived yet → pre-spike confs
+        #       are the SAME pending spike; wait. Broker SL is the only
+        #       protection (accepted loss per user contract).
+        #   (b) Spike arrived AND post-spike confirmations >= 1 → another
+        #       spike is coming, keep waiting for it (don't lock the floor
+        #       prematurely; it might pop above $1 with the next one).
+        # Otherwise (spike arrived + ZERO post-spike confirmations + peak<$1)
+        # the tier 30% from _spike_tier_dynamic_state IS armed and protects
+        # the position with sl_floor = peak * 0.70. This is exactly the user
+        # contract: "si no hay confirmaciones post spike el tier debe
+        # proteger el capital".
         _gate_reason: str | None = None
         if _POST_ENTRY_ENABLE and float(oc.peak_profit) < 1.0:
             if float(oc.spike_arrived_ts or 0.0) == 0.0:
