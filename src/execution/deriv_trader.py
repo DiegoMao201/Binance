@@ -109,51 +109,41 @@ _TIER_QUOTA_TIGHTEN_PP = max(
 _SPIKE_QUOTA_LOOKBACK_HOURS = max(
     1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "12") or 12), 24)
 )
-# 2026-05-30 v2 "wait-for-spike, exit-on-echoes":
-# After entry we WAIT for the real spike to materialize (peak > 0). The bot
-# keeps detecting spikes; each new spike on the same symbol post-entry counts
-# as a "confirmation". Two exit rules:
+# 2026-05-30 v3 "pre-spike vs post-spike":
+# Confirmations BEFORE the spike arrives all belong to the SAME expected
+# spike (the bot keeps detecting the same setup) — they are NOT a reason to
+# close. If broker SL hits while we're still waiting for the spike with N
+# pre-spike confirmations pending, we accept the loss.
 #
-#   (A) ECHO EXIT: if N confirmations accumulate but peak stayed near 0 →
-#       they are just echoes of the original setup, the real move never came.
+# Confirmations AFTER the spike arrived mean ANOTHER spike is coming →
+# we wait for it. "Spike arrived" is defined as the first time
+# peak_profit >= _SPIKE_ARRIVED_PEAK_MIN (default $0.10).
 #
-#   (B) SMALL-SPIKE DEGRADE EXIT: if peak was small (caught a weak spike)
-#       AND price is degrading AND no NEW confirmations since the peak → the
-#       spike "happened" and didn't have follow-through, exit before broker SL.
-#
-# Tier <$1 modifier: when peak < $1.0, only arm the 30% ratchet if there are
-# NO post-entry confirmations. With confirmations, the spike is still building
-# → give it room (don't lock the floor yet).
+# Rules:
+#   (1) POST-SPIKE NO-FOLLOWUP EXIT: after the spike arrived, if peak < $1,
+#       we wait _POST_SPIKE_WAIT_SEC for a NEW (post-spike) confirmation. If
+#       it does not appear AND price degraded by >= _POST_SPIKE_DEGRADE_RATIO
+#       from peak → close.
+#   (2) TIER <$1 GATE: only arm the 30% ratchet AFTER the spike has arrived.
+#       If post-spike confirmations >= 1, keep waiting (another spike coming),
+#       so don't lock the floor.
 _POST_ENTRY_ENABLE = _env_flag("DERIV_POST_ENTRY_ENABLE", "true")
-# Rule A — Echo exit
-_POST_ENTRY_ECHO_THRESHOLD = max(
-    1, min(int(os.getenv("DERIV_POST_ENTRY_ECHO_THRESHOLD", "2") or 2), 10)
+# Threshold to consider the spike has materialized.
+_SPIKE_ARRIVED_PEAK_MIN = max(
+    0.02,
+    min(float(os.getenv("DERIV_SPIKE_ARRIVED_PEAK_MIN", "0.10") or 0.10), 1.0),
 )
-_POST_ENTRY_ECHO_PEAK_MAX = max(
-    0.0,
-    min(float(os.getenv("DERIV_POST_ENTRY_ECHO_PEAK_MAX", "0.15") or 0.15), 1.0),
+# How long after spike arrival to wait for a post-spike confirmation
+# before evaluating the no-followup close.
+_POST_SPIKE_WAIT_SEC = max(
+    5.0,
+    min(float(os.getenv("DERIV_POST_SPIKE_WAIT_SEC", "30") or 30.0), 300.0),
 )
-_POST_ENTRY_ECHO_MIN_AGE_SEC = max(
-    20.0,
-    min(
-        float(os.getenv("DERIV_POST_ENTRY_ECHO_MIN_AGE_SEC", "60") or 60.0),
-        600.0,
-    ),
-)
-# Rule B — Small-spike degrade exit
-_POST_ENTRY_SMALLSPIKE_PEAK_MIN = max(
-    0.05,
-    min(
-        float(os.getenv("DERIV_POST_ENTRY_SMALLSPIKE_PEAK_MIN", "0.10") or 0.10),
-        1.0,
-    ),
-)
-_POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO = max(
+# Required degrade from peak (peak < $1 only) to trigger no-followup close.
+_POST_SPIKE_DEGRADE_RATIO = max(
     0.10,
     min(
-        float(
-            os.getenv("DERIV_POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO", "0.30") or 0.30
-        ),
+        float(os.getenv("DERIV_POST_SPIKE_DEGRADE_RATIO", "0.30") or 0.30),
         0.90,
     ),
 )
@@ -349,14 +339,25 @@ class DerivOpenContract:
     # Keys: tier_pct, dollar_floor, tier_floor, sl_floor, spikes_1h,
     #       spikes_avg_h, samples, quota_done, profit_lock_usdt.
     tier_state: dict[str, Any] = field(default_factory=dict)
-    # 2026-05-30 post-entry confirmation tracking:
-    # Count of NEW spikes detected on this symbol after opened_at_ts.
-    # Used to: (a) close on echo accumulation w/o real move; (b) gate the
-    # tier <$1 ratchet so it only locks when no fresh confirmation is building.
-    post_entry_confirmations: int = field(default=0)
+    # 2026-05-30 v3 post-entry confirmation tracking (pre-spike vs post-spike):
+    # pre_spike_confirmations: NEW spikes detected on this symbol AFTER
+    #   opened_at_ts but BEFORE the entry's own spike has materialized
+    #   (peak < _SPIKE_ARRIVED_PEAK_MIN). These are part of the SAME spike
+    #   we are waiting for, do NOT trigger any close.
+    # post_spike_confirmations: NEW spikes detected on this symbol AFTER
+    #   the entry's spike has materialized. Each one means ANOTHER spike is
+    #   coming → keep waiting (gate the tier <$1 ratchet).
+    # spike_arrived_ts: timestamp at which peak_profit first crossed
+    #   _SPIKE_ARRIVED_PEAK_MIN (i.e. the entry's spike has arrived).
+    pre_spike_confirmations: int = field(default=0)
+    post_spike_confirmations: int = field(default=0)
+    spike_arrived_ts: float = field(default=0.0)
     # Last spike ts seen (epoch sec) — to detect new confirmations only once.
     last_seen_spike_ts: float = field(default=0.0)
-    # Confirmations count at the moment peak_profit was last updated.
+    # Legacy/total counter kept for telemetry compatibility (frontend cards).
+    # post_entry_confirmations = pre_spike_confirmations + post_spike_confirmations
+    post_entry_confirmations: int = field(default=0)
+    # Confirmations count at the moment peak_profit was last updated (informative).
     confirmations_at_peak: int = field(default=0)
 
 
@@ -803,16 +804,28 @@ class DerivTradeExecutor:
         if not (self._spike_sl_only_mode and is_spike_market(oc.symbol)):
             return False
 
-        # Track peak BEFORE confirmations update so we know if a fresh spike
-        # contributed to the new peak (used by Rule B).
-        _prev_peak = float(oc.peak_profit)
+        # Update peak first.
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
 
-        # ─── POST-ENTRY CONFIRMATION TRACKING (2026-05-30 v2) ───────────────
-        # Count NEW spikes detected on this symbol after opened_at_ts.
-        # The entry itself was triggered by the first spike, so confirmations
-        # ≥ 1 means we've seen additional spikes during the wait.
+        # ─── SPIKE-ARRIVED DETECTION (2026-05-30 v3) ────────────────────────
+        # The entry's own spike is considered "arrived" the first time
+        # peak_profit crosses _SPIKE_ARRIVED_PEAK_MIN. Before that, every
+        # extra spike detected on the same symbol is just the SAME setup
+        # repeating itself; after that, extras are NEW spikes coming.
+        if (
+            float(oc.spike_arrived_ts or 0.0) == 0.0
+            and float(oc.peak_profit) >= _SPIKE_ARRIVED_PEAK_MIN
+        ):
+            oc.spike_arrived_ts = time.time()
+            _LOGGER.info(
+                "[POST-ENTRY-SPIKE-ARRIVED] %s cid=%s sym=%s peak=%.4f "
+                "pre_spike_conf=%d → switching to post-spike mode",
+                source, cid, oc.symbol, float(oc.peak_profit),
+                int(oc.pre_spike_confirmations),
+            )
+
+        # ─── CONFIRMATION TRACKING (pre-spike vs post-spike) ────────────────
         _last_spike_ts = 0.0
         with suppress(Exception):
             _last_spike_ts = float(
@@ -823,83 +836,63 @@ class DerivTradeExecutor:
             and _last_spike_ts > float(oc.opened_at_ts or 0.0)
             and _last_spike_ts > float(oc.last_seen_spike_ts or 0.0)
         ):
-            oc.post_entry_confirmations = int(oc.post_entry_confirmations) + 1
             oc.last_seen_spike_ts = _last_spike_ts
-
-        # Record confirmations snapshot at new-peak time (for Rule B).
-        if oc.peak_profit > _prev_peak:
+            if float(oc.spike_arrived_ts or 0.0) == 0.0:
+                # Spike for THIS entry hasn't materialized yet — same setup.
+                oc.pre_spike_confirmations = (
+                    int(oc.pre_spike_confirmations) + 1
+                )
+            else:
+                # Entry's spike already arrived — this is ANOTHER spike.
+                oc.post_spike_confirmations = (
+                    int(oc.post_spike_confirmations) + 1
+                )
+            # Maintain legacy total counter for telemetry.
+            oc.post_entry_confirmations = (
+                int(oc.pre_spike_confirmations)
+                + int(oc.post_spike_confirmations)
+            )
             oc.confirmations_at_peak = int(oc.post_entry_confirmations)
 
-        # ─── RULE A — ECHO EXIT ─────────────────────────────────────────────
-        # If N confirmations accumulated but peak never moved → the new spikes
-        # are echoes of the same setup, the real move never came. Exit.
+        # ─── RULE 1 — POST-SPIKE NO-FOLLOWUP EXIT ───────────────────────────
+        # Only AFTER the entry's own spike materialized AND it was small
+        # (peak < $1) AND we waited _POST_SPIKE_WAIT_SEC for a new (post-spike)
+        # confirmation AND it didn't show up AND price degraded → close.
+        # If broker SL hits before this (because the spike never arrived),
+        # accept the loss — that's the explicit user contract.
         if (
             _POST_ENTRY_ENABLE
             and cid not in self._closing
-            and int(oc.post_entry_confirmations) >= _POST_ENTRY_ECHO_THRESHOLD
-            and float(oc.peak_profit) <= _POST_ENTRY_ECHO_PEAK_MAX
+            and float(oc.spike_arrived_ts or 0.0) > 0.0
+            and float(oc.peak_profit) < 1.0
+            and int(oc.post_spike_confirmations) == 0
         ):
-            _age = time.time() - float(oc.opened_at_ts or 0.0)
-            if _age >= _POST_ENTRY_ECHO_MIN_AGE_SEC:
-                self._closing.add(cid)
-                oc.pending_close_reason = "post_entry_echo_exit"
-                _LOGGER.info(
-                    "[POST-ENTRY-ECHO] %s cid=%s sym=%s age=%.1fs conf=%d "
-                    "peak=%.4f pnl=%.4f thr=%d peak_max=%.2f → close "
-                    "(echoes accumulated, real spike never materialized)",
-                    source, cid, oc.symbol, _age,
-                    int(oc.post_entry_confirmations),
-                    float(oc.peak_profit), current_profit,
-                    _POST_ENTRY_ECHO_THRESHOLD, _POST_ENTRY_ECHO_PEAK_MAX,
-                )
-                try:
-                    await self._client.sell(cid)
-                    return True
-                except DerivClientError as exc:
-                    _LOGGER.warning(
-                        "[POST-ENTRY-ECHO] %s sell failed cid=%s: %s",
-                        source, cid, exc,
-                    )
-                    self._closing.discard(cid)
-                    oc.pending_close_reason = None
-
-        # ─── RULE B — SMALL-SPIKE DEGRADE EXIT ──────────────────────────────
-        # Peak reached but small AND price is degrading AND no NEW
-        # confirmations since the peak → the spike happened but had no
-        # follow-through. Exit before broker SL.
-        if (
-            _POST_ENTRY_ENABLE
-            and cid not in self._closing
-            and _POST_ENTRY_SMALLSPIKE_PEAK_MIN
-            <= float(oc.peak_profit)
-            < 1.0
-        ):
+            _time_since_spike = time.time() - float(oc.spike_arrived_ts)
             _degrade_floor = float(oc.peak_profit) * (
-                1.0 - _POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO
+                1.0 - _POST_SPIKE_DEGRADE_RATIO
             )
-            _no_new_since_peak = (
-                int(oc.post_entry_confirmations)
-                <= int(oc.confirmations_at_peak)
-            )
-            if current_profit <= _degrade_floor and _no_new_since_peak:
+            if (
+                _time_since_spike >= _POST_SPIKE_WAIT_SEC
+                and current_profit <= _degrade_floor
+            ):
                 self._closing.add(cid)
-                oc.pending_close_reason = "post_entry_small_spike_degraded"
+                oc.pending_close_reason = "post_spike_no_followup"
                 _LOGGER.info(
-                    "[POST-ENTRY-SMALLSPIKE] %s cid=%s sym=%s peak=%.4f "
-                    "cur=%.4f degrade_floor=%.4f (ratio=%.2f) conf=%d "
-                    "conf_at_peak=%d → close (small spike, no follow-through)",
+                    "[POST-SPIKE-NO-FOLLOWUP] %s cid=%s sym=%s peak=%.4f "
+                    "cur=%.4f degrade_floor=%.4f wait=%.1fs/%.0fs "
+                    "pre_conf=%d post_conf=0 → close "
+                    "(small spike, no new spike coming, price degraded)",
                     source, cid, oc.symbol, float(oc.peak_profit),
                     current_profit, _degrade_floor,
-                    _POST_ENTRY_SMALLSPIKE_DEGRADE_RATIO,
-                    int(oc.post_entry_confirmations),
-                    int(oc.confirmations_at_peak),
+                    _time_since_spike, _POST_SPIKE_WAIT_SEC,
+                    int(oc.pre_spike_confirmations),
                 )
                 try:
                     await self._client.sell(cid)
                     return True
                 except DerivClientError as exc:
                     _LOGGER.warning(
-                        "[POST-ENTRY-SMALLSPIKE] %s sell failed cid=%s: %s",
+                        "[POST-SPIKE-NO-FOLLOWUP] %s sell failed cid=%s: %s",
                         source, cid, exc,
                     )
                     self._closing.discard(cid)
@@ -910,20 +903,27 @@ class DerivTradeExecutor:
             float(oc.peak_profit),
             float(oc.stake_usdt),
         )
-        # ─── TIER <$1 GATE (2026-05-30 v2) ──────────────────────────────────
-        # If peak is below $1 AND there are post-entry confirmations, the
-        # spike is still building — do NOT lock the 30% floor yet; give it
-        # room. Only arm the tier when no fresh confirmation is in flight.
-        if (
-            _POST_ENTRY_ENABLE
-            and float(oc.peak_profit) < 1.0
-            and int(oc.post_entry_confirmations) >= 1
-        ):
+        # ─── TIER <$1 GATE (v3) ─────────────────────────────────────────────
+        # Two gates:
+        #  (a) If the entry's spike hasn't arrived yet → NO tier ratchet.
+        #      Pre-spike confirmations are part of the SAME pending spike;
+        #      we wait. Broker SL is the only protection here.
+        #  (b) If spike arrived AND peak < $1 AND post-spike confirmations
+        #      >= 1 → another spike is coming, keep waiting (no tier lock).
+        _gate_reason: str | None = None
+        if _POST_ENTRY_ENABLE and float(oc.peak_profit) < 1.0:
+            if float(oc.spike_arrived_ts or 0.0) == 0.0:
+                _gate_reason = "waiting_for_spike"
+            elif int(oc.post_spike_confirmations) >= 1:
+                _gate_reason = "post_spike_confirmation_in_flight"
+        if _gate_reason is not None:
             state = dict(state)
             state["sl_floor"] = None
             state["tier_active"] = False
-            state["tier_gated_by_confirmations"] = True
-            state["post_entry_confirmations"] = int(oc.post_entry_confirmations)
+            state["tier_gated_by"] = _gate_reason
+            state["pre_spike_confirmations"] = int(oc.pre_spike_confirmations)
+            state["post_spike_confirmations"] = int(oc.post_spike_confirmations)
+            state["spike_arrived_ts"] = float(oc.spike_arrived_ts or 0.0)
         # Always publish live telemetry so the frontend cards reflect the
         # current tier/floor even before any close trigger fires.
         oc.tier_state = state
