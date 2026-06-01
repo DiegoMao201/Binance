@@ -389,6 +389,7 @@ function TopBar({ status, live, setLive, lastUpdate, loading, error, onRefresh, 
         <Stat lbl="WIN%"     val={pct(kpi.winrate)} color={kpi.winrate >= 0.5 ? T.green : T.red} />
         <Stat lbl="PF"       val={kpi.pf != null ? n(kpi.pf, 2) : "–"} color={T.violet} />
         <Stat lbl="TRADES"   val={kpi.trades || 0} />
+        <a href="/deriv/operar" style={{ ...btnStyle(T.violet), textDecoration: "none", padding: "5px 12px", fontWeight: 800 }} title="Consola de operación manual: todas las señales en una pantalla">🎯 OPERAR MANUAL</a>
         <button onClick={() => setLive(!live)} style={btnStyle(live ? T.green : T.amber)}>{live ? "● LIVE" : "❚❚ PAUSED"}</button>
         <button onClick={onRefresh} style={btnStyle(T.cyan)}>↻ SYNC</button>
         {/* Phase 32: session reset — resets visual KPIs only, bot keeps running */}
