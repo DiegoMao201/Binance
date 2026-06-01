@@ -2709,73 +2709,146 @@ class DerivDaemon:
         _geo_pos = snap.score_breakdown.get("geo_channel_pos")
         if _geo_pos is not None:
             _geo_val  = float(_geo_pos)
-            _geo_min  = _asset_profile_early.get("geo_entry_min")
-            _geo_max  = _asset_profile_early.get("geo_entry_max")
             _geo_gate = 0.0
             _geo_gate_label = ""
-            # Per-symbol geo tolerance: soft→hard penalty boundary (default 0.30).
-            # CRASH500 uses 0.25 to tighten overshoot zone (Muestra3).
-            _geo_tol = float(_asset_profile_early.get("geo_penalty_tolerance", 0.30))
-            # Per-symbol extended-down veto: when geo_pos < this floor, CRASH entries
-            # that would normally receive geo_optimal +1.0 bonus are hard-vetoed (-2.0).
-            # Fixes Grade A WR 14% issue where deeply negative geo positions were getting
-            # bonus score and entering as Grade A despite poor empirical WR (Muestra3).
-            _geo_veto_min = _asset_profile_early.get("geo_extended_veto_min")
+            # 2026-06-01 DIRECTION-AWARE GEO GATE for spike markets.
+            # ───────────────────────────────────────────────────────────────
+            # BUG (confirmed): the old min/max gate penalised geo_pos>geo_entry_max
+            # with -2.0. CRASH symbols (geo_entry_max=0.30) live at geo_pos 0.7-1.2
+            # → -2.0 every tick → symbol dead. But that was mean-reversion logic
+            # mis-applied to forced-direction spike entries.
+            # TRADING REALITY:
+            #   CRASH (MULTDOWN): price DRIFTS UP between crashes, then spikes DOWN.
+            #     High geo_pos = price extended UP in its channel = LOADED for the
+            #     down-spike = favourable, NOT a disqualifier. The exhaustion side
+            #     is geo_pos very NEGATIVE (the crash ALREADY fired → late entry).
+            #   BOOM (MULTUP): mirror — price drifts DOWN, spikes UP. Low geo_pos =
+            #     loaded; the exhaustion side is geo_pos very POSITIVE.
+            # So we penalise ONLY the side OPPOSITE the entry direction.
+            _geo_dir_aware = str(
+                os.getenv("DERIV_GEO_DIR_AWARE_SPIKE", "true") or "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            _is_spike_geo = is_spike_market(tick.symbol)
+            _entry_dir = str(
+                _asset_profile_early.get("forced_side") or snap.side or ""
+            ).upper()
+            if _geo_dir_aware and _is_spike_geo and _entry_dir in ("MULTUP", "MULTDOWN"):
+                # Exhaustion thresholds on the WRONG side of the entry.
+                _geo_late   = float(os.getenv("DERIV_GEO_SPIKE_LATE_THRESHOLD", "0.80") or 0.80)
+                _geo_exhaust = float(os.getenv("DERIV_GEO_SPIKE_EXHAUST_THRESHOLD", "1.20") or 1.20)
+                # Optional mild bonus on the loaded side (default 0.0 = neutral,
+                # to avoid double-counting with the imminence bonus).
+                _geo_loaded_bonus = float(os.getenv("DERIV_GEO_SPIKE_LOADED_BONUS", "0.0") or 0.0)
+                _geo_loaded_min   = float(os.getenv("DERIV_GEO_SPIKE_LOADED_MIN", "0.80") or 0.80)
+                if _entry_dir == "MULTDOWN":
+                    # CRASH: penalise extended-DOWN (crash already fired = late).
+                    if _geo_val <= -_geo_exhaust:
+                        _geo_gate = -2.0
+                        _geo_gate_label = (
+                            f"geo_spike_exhausted_down: {_geo_val:.3f}≤-{_geo_exhaust:.2f} "
+                            f"(crash already fired) →-2.0"
+                        )
+                    elif _geo_val <= -_geo_late:
+                        _geo_gate = -1.0
+                        _geo_gate_label = (
+                            f"geo_spike_late_down: {_geo_val:.3f}≤-{_geo_late:.2f} →-1.0"
+                        )
+                    elif _geo_loaded_bonus > 0.0 and _geo_val >= _geo_loaded_min:
+                        _geo_gate = _geo_loaded_bonus
+                        _geo_gate_label = (
+                            f"geo_spike_loaded_down: {_geo_val:.3f}≥{_geo_loaded_min:.2f} "
+                            f"(extended up, crash loaded) →+{_geo_loaded_bonus:.2f}"
+                        )
+                    else:
+                        _geo_gate = 0.0
+                        _geo_gate_label = f"geo_spike_neutral_down: {_geo_val:.3f} →0.0"
+                else:  # MULTUP — BOOM
+                    if _geo_val >= _geo_exhaust:
+                        _geo_gate = -2.0
+                        _geo_gate_label = (
+                            f"geo_spike_exhausted_up: {_geo_val:.3f}≥{_geo_exhaust:.2f} "
+                            f"(boom already fired) →-2.0"
+                        )
+                    elif _geo_val >= _geo_late:
+                        _geo_gate = -1.0
+                        _geo_gate_label = (
+                            f"geo_spike_late_up: {_geo_val:.3f}≥{_geo_late:.2f} →-1.0"
+                        )
+                    elif _geo_loaded_bonus > 0.0 and _geo_val <= -_geo_loaded_min:
+                        _geo_gate = _geo_loaded_bonus
+                        _geo_gate_label = (
+                            f"geo_spike_loaded_up: {_geo_val:.3f}≤-{_geo_loaded_min:.2f} "
+                            f"(extended down, boom loaded) →+{_geo_loaded_bonus:.2f}"
+                        )
+                    else:
+                        _geo_gate = 0.0
+                        _geo_gate_label = f"geo_spike_neutral_up: {_geo_val:.3f} →0.0"
+                snap.score_breakdown["geo_dir_aware"] = _entry_dir
+            else:
+                # ── Legacy min/max gate (R_* and any non-directional symbol) ──
+                _geo_min  = _asset_profile_early.get("geo_entry_min")
+                _geo_max  = _asset_profile_early.get("geo_entry_max")
+                # Per-symbol geo tolerance: soft→hard penalty boundary (default 0.30).
+                # CRASH500 uses 0.25 to tighten overshoot zone (Muestra3).
+                _geo_tol = float(_asset_profile_early.get("geo_penalty_tolerance", 0.30))
+                # Per-symbol extended-down veto: when geo_pos < this floor, CRASH entries
+                # that would normally receive geo_optimal +1.0 bonus are hard-vetoed (-2.0).
+                _geo_veto_min = _asset_profile_early.get("geo_extended_veto_min")
 
-            if _geo_max is not None:
-                _gmax     = float(_geo_max)
-                _overshoot = _geo_val - _gmax
-                if _geo_veto_min is not None and _geo_val < float(_geo_veto_min):
-                    _geo_gate = -2.0
-                    _geo_gate_label = (
-                        f"geo_extended_down_veto: {_geo_val:.3f}<{float(_geo_veto_min):.3f} →-2.0"
-                    )
-                elif _overshoot <= -0.30:
-                    _geo_gate = +1.0
-                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
-                elif _overshoot <= 0.0:
-                    _geo_gate = 0.0
-                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
-                elif _overshoot <= _geo_tol:
-                    _geo_gate = -1.5
-                    _geo_gate_label = (
-                        f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
-                        f"(overshoot={_overshoot:.2f}) →-1.5"
-                    )
-                else:
-                    _geo_gate = -2.0
-                    _geo_gate_label = (
-                        f"geo_hard_penalty: {_geo_val:.3f}>>{_gmax:.3f} "
-                        f"(overshoot={_overshoot:.2f}) →-2.0"
-                    )
+                if _geo_max is not None:
+                    _gmax     = float(_geo_max)
+                    _overshoot = _geo_val - _gmax
+                    if _geo_veto_min is not None and _geo_val < float(_geo_veto_min):
+                        _geo_gate = -2.0
+                        _geo_gate_label = (
+                            f"geo_extended_down_veto: {_geo_val:.3f}<{float(_geo_veto_min):.3f} →-2.0"
+                        )
+                    elif _overshoot <= -0.30:
+                        _geo_gate = +1.0
+                        _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≤{_gmax-0.30:.3f} →+1.0"
+                    elif _overshoot <= 0.0:
+                        _geo_gate = 0.0
+                        _geo_gate_label = f"geo_border: {_geo_val:.3f}≤{_gmax:.3f} →0.0"
+                    elif _overshoot <= _geo_tol:
+                        _geo_gate = -1.5
+                        _geo_gate_label = (
+                            f"geo_penalty: {_geo_val:.3f}>{_gmax:.3f} "
+                            f"(overshoot={_overshoot:.2f}) →-1.5"
+                        )
+                    else:
+                        _geo_gate = -2.0
+                        _geo_gate_label = (
+                            f"geo_hard_penalty: {_geo_val:.3f}>>{_gmax:.3f} "
+                            f"(overshoot={_overshoot:.2f}) →-2.0"
+                        )
 
-            elif _geo_min is not None:
-                _gmin       = float(_geo_min)
-                _undershoot = _gmin - _geo_val
-                if _undershoot <= -0.30:
-                    _geo_gate = +1.0
-                    _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≥{_gmin+0.30:.3f} →+1.0"
-                elif _undershoot <= 0.0:
-                    _geo_gate = 0.0
-                    _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
-                elif _undershoot <= _geo_tol:
-                    _geo_gate = -1.5
-                    _geo_gate_label = (
-                        f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "
-                        f"(undershoot={_undershoot:.2f}) →-1.5"
-                    )
-                else:
-                    _geo_gate = -2.0
-                    _geo_gate_label = (
-                        f"geo_hard_penalty: {_geo_val:.3f}<<{_gmin:.3f} "
-                        f"(undershoot={_undershoot:.2f}) →-2.0"
-                    )
+                elif _geo_min is not None:
+                    _gmin       = float(_geo_min)
+                    _undershoot = _gmin - _geo_val
+                    if _undershoot <= -0.30:
+                        _geo_gate = +1.0
+                        _geo_gate_label = f"geo_optimal: {_geo_val:.3f}≥{_gmin+0.30:.3f} →+1.0"
+                    elif _undershoot <= 0.0:
+                        _geo_gate = 0.0
+                        _geo_gate_label = f"geo_border: {_geo_val:.3f}≥{_gmin:.3f} →0.0"
+                    elif _undershoot <= _geo_tol:
+                        _geo_gate = -1.5
+                        _geo_gate_label = (
+                            f"geo_penalty: {_geo_val:.3f}<{_gmin:.3f} "
+                            f"(undershoot={_undershoot:.2f}) →-1.5"
+                        )
+                    else:
+                        _geo_gate = -2.0
+                        _geo_gate_label = (
+                            f"geo_hard_penalty: {_geo_val:.3f}<<{_gmin:.3f} "
+                            f"(undershoot={_undershoot:.2f}) →-2.0"
+                        )
 
             snap.score_breakdown["geo_gate"] = round(_geo_gate, 1)
             if _geo_gate != 0.0:
                 snap.score = round(min(10.0, max(0.0, snap.score + _geo_gate)), 3)
                 snap.reasons.append(_geo_gate_label)
-                _LOGGER.debug(
+                _LOGGER.info(
                     "[PIPELINE] GEO_GATE %s | %s | score→%.2f",
                     tick.symbol, _geo_gate_label, snap.score,
                 )
