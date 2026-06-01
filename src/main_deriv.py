@@ -2961,15 +2961,39 @@ class DerivDaemon:
         # hard in TRENDING (only A++ setups survive) and keep CALM permissive.
         _risk_regime_bias = str(snap.regime or "").strip().lower()
         _is_bc_bias = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        # Compute spike imminence ONCE here so it can both (a) modulate the
+        # trending penalty below and (b) feed the score bonus further down.
+        _imm = {}
+        if _is_bc_bias:
+            try:
+                _imm = self._risk.get_spike_imminence_state(tick.symbol)
+            except Exception:
+                _imm = {}
+        _imm_state_early = str(_imm.get("state") or "")
         if _is_bc_bias:
             if _risk_regime_bias == "trending":
                 _trend_pen = max(
                     0.0,
                     float(os.getenv("DERIV_REGIME_TRENDING_SCORE_PENALTY", "1.3") or 1.3),
                 )
-                if _trend_pen > 0.0:
-                    _regime_min = min(10.0, _regime_min + _trend_pen)
-                    snap.score_breakdown["regime_trending_penalty"] = round(_trend_pen, 3)
+                # 2026-06-01 TRADING INTELLIGENCE: a TRENDING symbol that is
+                # statistically LOADED to fire (imminence RIPE/BUILDING) is the
+                # good case (normal drift right before the spike), not the
+                # losing case. Soften the penalty so a loaded spike can enter;
+                # keep the full penalty when NOT loaded (FRESH/OVERDUE/DRY =
+                # the trending trap that bled -$38.59).
+                _pen_mult = 1.0
+                if _imm_state_early == "RIPE":
+                    _pen_mult = float(os.getenv("DERIV_REGIME_TREND_PEN_RIPE_MULT", "0.25") or 0.25)
+                elif _imm_state_early == "BUILDING":
+                    _pen_mult = float(os.getenv("DERIV_REGIME_TREND_PEN_BUILDING_MULT", "0.60") or 0.60)
+                _trend_pen_eff = round(_trend_pen * max(0.0, min(1.0, _pen_mult)), 3)
+                if _trend_pen_eff > 0.0:
+                    _regime_min = min(10.0, _regime_min + _trend_pen_eff)
+                    snap.score_breakdown["regime_trending_penalty"] = _trend_pen_eff
+                    snap.score_breakdown["regime_trending_penalty_base"] = round(_trend_pen, 3)
+                    if _imm_state_early:
+                        snap.score_breakdown["regime_trending_imm_state"] = _imm_state_early
             elif _risk_regime_bias == "calm":
                 _calm_bon = max(
                     0.0,
@@ -3058,10 +3082,8 @@ class DerivDaemon:
         # grant a readiness bonus in BUILDING/RIPE so a high-probability spike
         # setup is NOT missed just because the regime label says trending.
         if _is_bc_bias:
-            try:
-                _imm = self._risk.get_spike_imminence_state(tick.symbol)
-            except Exception:
-                _imm = {}
+            # _imm already computed above (regime-penalty modulation); reuse it
+            # to avoid a second get_spike_imminence_state() call per tick.
             _imm_state = str(_imm.get("state") or "")
             _imm_score = float(_imm.get("score") or 0.0)
             if _imm_state and _imm_state != "UNKNOWN":

@@ -164,6 +164,12 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      480,    # Muestra02-fix: profile max_hold=450 + 30s buffer (was 720)
+        # 2026-06-01: no-spike early exit. Forensic: 87% of score>=8 losers never
+        # went green (max_pnl~0) and bled to full $2 SL. If after 140s never green
+        # (peak<$0.05) and already <= -$1.20, cut — the spike window dried up.
+        "early_exit_seconds":    140,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.20,
     },
     "BOOM500": {
         "sl_inicial_pct":        1.00,   # was 0.25 — corrected to match spike profile
@@ -172,6 +178,10 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      480,    # profile max_hold=450 + 30s buffer
+        # 2026-06-01: no-spike early exit (67% of score>=8 losers never went green).
+        "early_exit_seconds":    140,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.20,
     },
     # ── NEW: BOOM/CRASH 900 ─────────────────────────────────────────────────
     "BOOM900": {
@@ -181,6 +191,10 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      630,    # Muestra02-fix: 450→630 (profile max_hold=600 + 30s). DPM was firing at 451s instead of letting profile 600s fire
+        # 2026-06-01: no-spike early exit (more patient — 900 spikes are sparser).
+        "early_exit_seconds":    200,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.30,
     },
     "CRASH900": {
         "sl_inicial_pct":        1.00,
@@ -189,6 +203,10 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      630,    # Muestra02-fix: 350→630 (profile max_hold=600 + 30s). DPM was cutting at 351s, missing spikes 351-600s
+        # 2026-06-01: no-spike early exit (more patient — 900 spikes are sparser).
+        "early_exit_seconds":    200,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.30,
     },
     # ── NEW: BOOM/CRASH 600 ─────────────────────────────────────────────────
     "BOOM600": {
@@ -198,6 +216,10 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
         "max_duration_seg":      380,    # Muestra02-CRITICAL-fix: 250→380 (profile max_hold=350 + 30s). DPM at 250 cut 27 trades early, 8 spikes arrived between 270-338s
+        # 2026-06-01: no-spike early exit.
+        "early_exit_seconds":    160,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.20,
     },
     "CRASH600": {
         "sl_inicial_pct":        1.00,
@@ -206,6 +228,11 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
         "momentum_window":       25,
         "agotamiento_threshold": 0.38,
         "max_duration_seg":      630,    # Muestra02-fix: 450→630 (profile max_hold=600 + 30s buffer; 8 missed spikes at 468-749s from entry)
+        # 2026-06-01: no-spike early exit. Forensic: 97% of score>=8 losers never
+        # went green and bled to full SL.
+        "early_exit_seconds":    160,
+        "early_exit_min_pnl":    0.05,
+        "early_exit_loss_usd":   1.20,
     },
     # ── NEW: BOOM/CRASH 300 (defined but inactive until data confirms edge) ──
     "BOOM300": {
