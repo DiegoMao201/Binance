@@ -744,6 +744,46 @@ class DerivDaemon:
 
         return resolved
 
+    # 2026-06-01 SNIPER MAX-WINDOW: empirical p75-p90 of ticks_between_spikes
+    # per symbol (24h forensic 2026-06-01). Beyond this, statistical
+    # probability of a near-term spike collapses → block entry to preserve $2 SL.
+    _SPIKE_MAX_WINDOW_DEFAULTS: dict[str, float] = {
+        "BOOM500":  700.0,   # p75=677
+        "CRASH500": 700.0,   # p75=649
+        "CRASH600": 950.0,   # p75=913
+        "CRASH900": 1200.0,  # p75=1104
+        "CRASH300": 420.0,   # conservative (no current data, ~75% of cycle 600)
+        "BOOM600":  950.0,
+        "BOOM900":  1200.0,
+        "BOOM1000": 1300.0,
+        "CRASH1000": 1300.0,
+    }
+
+    def _post_spike_max_ticks_for_symbol(self, symbol: str) -> float:
+        """Resolve per-symbol max-window (sniper) — env override + defaults.
+
+        Env: DERIV_POST_SPIKE_MAX_TICKS_MAP=BOOM500:700,CRASH900:1200
+             DERIV_POST_SPIKE_MAX_TICKS_<SYMBOL>=N (single override)
+             DERIV_POST_SPIKE_MAX_TICKS_DISABLE=true → returns 0 (off)
+        Returns 0 to disable the gate.
+        """
+        sym = str(symbol or "").upper()
+        if str(os.getenv("DERIV_POST_SPIKE_MAX_TICKS_DISABLE", "false") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return 0.0
+        # Env single override has highest priority.
+        env_single = os.getenv(f"DERIV_POST_SPIKE_MAX_TICKS_{sym}")
+        if env_single:
+            try:
+                return max(0.0, float(env_single))
+            except (TypeError, ValueError):
+                pass
+        # Env map second priority.
+        env_map = self._parse_post_spike_map(os.getenv("DERIV_POST_SPIKE_MAX_TICKS_MAP", ""))
+        if sym in env_map:
+            return max(0.0, float(env_map[sym]))
+        # Hard-coded defaults.
+        return float(self._SPIKE_MAX_WINDOW_DEFAULTS.get(sym, 0.0))
+
     def _passes_post_spike_strength_gate(
         self,
         *,
@@ -780,6 +820,22 @@ class DerivDaemon:
             return (
                 False,
                 f"post_spike_chase_guard:{_elapsed:.0f}t<{_chase_block:.0f}t",
+            )
+
+        # 2026-06-01 SNIPER MAX-WINDOW (user directive: "spike-timing math"):
+        # Beyond p75-p90 of the symbol's empirical ticks-between-spikes
+        # distribution, the statistical probability of a near-term spike
+        # decays sharply. Entering in that "dry zone" wastes a $2 SL on a
+        # setup that will likely just bleed via degrade. Block it.
+        # Map source: env DERIV_POST_SPIKE_MAX_TICKS_MAP=SYM:N,SYM:M
+        # (per-symbol). Hard-coded fallbacks derived from 24h forensic
+        # 2026-06-01: BOOM500=700, CRASH500=700, CRASH600=950, CRASH900=1200,
+        # CRASH300=420. Disabled if env var missing AND symbol not in defaults.
+        _max_window_ticks = self._post_spike_max_ticks_for_symbol(symbol)
+        if _max_window_ticks > 0 and _elapsed > _max_window_ticks:
+            return (
+                False,
+                f"post_spike_window_expired:{_elapsed:.0f}t>{_max_window_ticks:.0f}t",
             )
 
         _window_default = max(180.0, _chase_block * 3.0)

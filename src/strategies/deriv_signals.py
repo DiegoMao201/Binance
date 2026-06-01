@@ -586,21 +586,24 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_min_post_sec": 200,
     },
     "CRASH900": {
+        # 2026-06-01 REACTIVADO con puntería matemática: 107 spikes/24h,
+        # mean ratio=222.9 (más fuerte de todos), max jump=$62. Reactivado con
+        # sniper-window 240-1050t (p25-p90 empíricos) y score 7.0 estricto.
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
         "max_hold_ticks": 18,
-        # 2026-05-27 quality-overhaul:
-        # - min_score 4.5→6.80 (profile-level true gate, not just risk-engine).
-        # - cooldown unified at 240s.
-        # - max_hold 600→820s to give late CRASH900 spikes (526-576s observed) room.
+        # max_hold 820s ajustado a empirics: p75 ticks-btw=1104, equivale ~620s
+        # a 1.7s/tick. 820s cubre p75+10% margen.
         "max_hold_seconds": 820,
         "ema_distance_pct": 0.04,
-        # 2026-05-29 user directive: CRASH900 sin FVG, score más bajo, must trade.
         "require_fvg_mitigation": False,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        "min_score": 4.80,
+        # 2026-06-01: score 4.80→7.00 (estricto, igual que BOOM500/CRASH500).
+        # CRASH900 spikes son mucho menos frecuentes (107 vs 168-183) → cada
+        # entrada cuesta más oportunidad; solo tomar las de máxima convicción.
+        "min_score": 7.00,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "sl_multiplier": 3.0,
@@ -609,9 +612,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
+        "stake_max_usdt": 5.00,
+        "stake_target_usdt": 5.00,
+        "stop_loss_pct_override": 0.40, # SL=$2.00 fijo (igual familia).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
@@ -621,7 +624,9 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "cooldown_sec": 240,
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        "spike_min_post_sec": 200,
+        # 2026-06-01 sniper-window: p25 empírico=204t → 240s (~140t a 1.7s/tick).
+        # Garantiza que el ciclo del spike anterior se haya "vaciado" antes de entrar.
+        "spike_min_post_sec": 240,
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
