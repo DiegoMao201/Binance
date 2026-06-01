@@ -2853,6 +2853,89 @@ class DerivDaemon:
                     tick.symbol, _geo_gate_label, snap.score,
                 )
 
+        # ── 2026-06-01 SNIPER "LOADED" GATE (data-mined on 1240 CRASH trades) ──
+        # Winners entered LOADED for the forced spike direction: price elevated
+        # over EMA200 (ema200_dev_pct ↑) and — for CRASH500 — geo_channel_pos ↑.
+        # In-sample backtest: ema200_dev_pct>=0.008 flips combined PnL -27→-2.4
+        # (CRASH600 +12.2, CRASH900 +4.2); CRASH500 also needs geo>=0.10.
+        # Hard-block entries NOT loaded in the entry direction → cuts the
+        # never-green tail (the ~half of trades that never touch green).
+        # All thresholds env-driven; per-symbol geo override supported.
+        if (
+            str(os.getenv("DERIV_SPIKE_LOADED_GATE", "true") or "true").strip().lower()
+            in {"1", "true", "yes", "on"}
+            and is_spike_market(tick.symbol)
+        ):
+            _ld_dir = str(
+                get_asset_profile(tick.symbol).get("forced_side") or snap.side or ""
+            ).upper()
+            if _ld_dir in ("MULTUP", "MULTDOWN"):
+                _ld_sym = tick.symbol.upper()
+                _ld_min_dev = float(
+                    os.getenv("DERIV_SPIKE_LOADED_MIN_DEV_PCT", "0.008") or 0.008
+                )
+                _ld_min_geo = float(
+                    os.getenv(
+                        f"DERIV_SPIKE_LOADED_MIN_GEO_{_ld_sym}",
+                        os.getenv("DERIV_SPIKE_LOADED_MIN_GEO", "-999") or "-999",
+                    )
+                    or "-999"
+                )
+                _ld_sb = snap.score_breakdown
+                _ld_dev = _ld_sb.get("ema200_dev_pct")
+                if _ld_dev is None and _ld_sb.get("ema200_distance_pct") is not None:
+                    _ld_dev = float(_ld_sb["ema200_distance_pct"]) * 100.0
+                _ld_geo = _ld_sb.get("geo_channel_pos")
+                _ld_ok = True
+                _ld_reason = ""
+                if _ld_dir == "MULTDOWN":  # CRASH: loaded = price ABOVE ema200, geo ↑
+                    if (
+                        _ld_min_dev > 0
+                        and _ld_dev is not None
+                        and float(_ld_dev) < _ld_min_dev
+                    ):
+                        _ld_ok = False
+                        _ld_reason = (
+                            f"ema200_dev={float(_ld_dev):.4f}<{_ld_min_dev:.4f} "
+                            f"(not loaded up for CRASH)"
+                        )
+                    elif _ld_geo is not None and float(_ld_geo) < _ld_min_geo:
+                        _ld_ok = False
+                        _ld_reason = (
+                            f"geo={float(_ld_geo):.3f}<{_ld_min_geo:.3f} (not loaded)"
+                        )
+                else:  # MULTUP — BOOM mirror: loaded = price BELOW ema200, geo ↓
+                    if (
+                        _ld_min_dev > 0
+                        and _ld_dev is not None
+                        and float(_ld_dev) > -_ld_min_dev
+                    ):
+                        _ld_ok = False
+                        _ld_reason = (
+                            f"ema200_dev={float(_ld_dev):.4f}>-{_ld_min_dev:.4f} "
+                            f"(not loaded down for BOOM)"
+                        )
+                    elif _ld_geo is not None and float(_ld_geo) > -_ld_min_geo:
+                        _ld_ok = False
+                        _ld_reason = (
+                            f"geo={float(_ld_geo):.3f}>-{_ld_min_geo:.3f} (not loaded)"
+                        )
+                snap.score_breakdown["spike_loaded_ok"] = _ld_ok
+                if not _ld_ok:
+                    self._log_entry_block(
+                        tick.symbol, "SPIKE_NOT_LOADED",
+                        score=snap.score, side=snap.side,
+                        regime=snap.regime,
+                        score_breakdown=snap.score_breakdown,
+                    )
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score,
+                        reason=f"SPIKE_NOT_LOADED: {_ld_reason}",
+                        extra={"spike_loaded": False},
+                    )
+                    return
+
         # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 6.0) ──────
         # evaluate() sets effective_min=6.0 for mean_rev setups (+3.0 bonus
         # applied inside evaluate).  This outer gate mirrors that floor so that
