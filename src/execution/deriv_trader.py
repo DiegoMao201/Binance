@@ -818,11 +818,20 @@ class DerivTradeExecutor:
             and float(oc.peak_profit) >= _SPIKE_ARRIVED_PEAK_MIN
         ):
             oc.spike_arrived_ts = time.time()
+            # 2026-05-31 USER DIRECTIVE: cuando el spike llega, las confirmaciones
+            # pre-spike (1, 2 o 3) ya cumplieron su rol (estaban ligadas a ESE spike
+            # pendiente). Deben limpiarse para que el bot/LLM no las recicle como
+            # "información válida" para el siguiente movimiento — debe buscar
+            # confirmaciones nuevas post-spike desde cero.
+            _stale_pre = int(oc.pre_spike_confirmations)
+            oc.pre_spike_confirmations = 0
+            oc.post_entry_confirmations = int(oc.post_spike_confirmations)
+            oc.confirmations_at_peak = int(oc.post_entry_confirmations)
             _LOGGER.info(
                 "[POST-ENTRY-SPIKE-ARRIVED] %s cid=%s sym=%s peak=%.4f "
-                "pre_spike_conf=%d → switching to post-spike mode",
-                source, cid, oc.symbol, float(oc.peak_profit),
-                int(oc.pre_spike_confirmations),
+                "pre_spike_conf_cleared=%d → switching to post-spike mode "
+                "(stale confirmations dropped, bot must hunt fresh signals)",
+                source, cid, oc.symbol, float(oc.peak_profit), _stale_pre,
             )
 
         # ─── CONFIRMATION TRACKING (pre-spike vs post-spike) ────────────────
@@ -903,33 +912,19 @@ class DerivTradeExecutor:
             float(oc.peak_profit),
             float(oc.stake_usdt),
         )
-        # ─── TIER <$1 GATE (v3 — restored) ──────────────────────────────────
-        # Two reasons to disarm the 30% ratchet when peak < $1:
-        #   (a) Spike for this entry hasn't arrived yet → pre-spike confs
-        #       are the SAME pending spike; wait. Broker SL is the only
-        #       protection (accepted loss per user contract).
-        #   (b) Spike arrived AND post-spike confirmations >= 1 → another
-        #       spike is coming, keep waiting for it (don't lock the floor
-        #       prematurely; it might pop above $1 with the next one).
-        # Otherwise (spike arrived + ZERO post-spike confirmations + peak<$1)
-        # the tier 30% from _spike_tier_dynamic_state IS armed and protects
-        # the position with sl_floor = peak * 0.70. This is exactly the user
-        # contract: "si no hay confirmaciones post spike el tier debe
-        # proteger el capital".
-        _gate_reason: str | None = None
-        if _POST_ENTRY_ENABLE and float(oc.peak_profit) < 1.0:
-            if float(oc.spike_arrived_ts or 0.0) == 0.0:
-                _gate_reason = "waiting_for_spike"
-            elif int(oc.post_spike_confirmations) >= 1:
-                _gate_reason = "post_spike_confirmation_in_flight"
-        if _gate_reason is not None:
-            state = dict(state)
-            state["sl_floor"] = None
-            state["tier_active"] = False
-            state["tier_gated_by"] = _gate_reason
-            state["pre_spike_confirmations"] = int(oc.pre_spike_confirmations)
-            state["post_spike_confirmations"] = int(oc.post_spike_confirmations)
-            state["spike_arrived_ts"] = float(oc.spike_arrived_ts or 0.0)
+        # ─── TIER <$1 GATE (2026-05-31 USER DIRECTIVE — ALWAYS-ARMED) ───────
+        # User contract: "cuando esté positivo debajo de 1 sí o sí aplique la
+        # ley del 30% tier — no quiero que el bot se quede esperando spikes
+        # que tal vez no llegan y degraden la operación hasta tocar el SL".
+        # → Removed the prior gates (waiting_for_spike, post_spike_conf_in_flight)
+        #   that were disabling the 30% ratchet below $1. Now ANY peak > 0
+        #   arms tier 30% (sl_floor = peak * 0.70 below $1), so price degrade
+        #   protects capital BEFORE broker SL ($2) is hit.
+        # spike_arrived_ts and confirmation counters are still tracked for
+        # `post_spike_no_followup` (independent rule) and telemetry only.
+        state["pre_spike_confirmations"] = int(oc.pre_spike_confirmations)
+        state["post_spike_confirmations"] = int(oc.post_spike_confirmations)
+        state["spike_arrived_ts"] = float(oc.spike_arrived_ts or 0.0)
         # Always publish live telemetry so the frontend cards reflect the
         # current tier/floor even before any close trigger fires.
         oc.tier_state = state

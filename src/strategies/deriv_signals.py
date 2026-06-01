@@ -363,7 +363,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": 0.50,          # cap geo — previous batch failed at geo+1.48; 0.50 blocks those
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80). Limita pérdida del tail.
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00 → 67% broker_sl_hit, 85% sin cruzar $0.10).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
@@ -449,7 +449,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "block_bc_escape_env": False,
         "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
         "stake_target_usdt": 5.00,      # 2026-05-29: user directive — CRASH fixed stake target
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80). Limita pérdida del tail.
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00). Limita whipsaw temprano.
     },
     "CRASH500": {
         "type": "spike_crash",
@@ -485,7 +485,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80).
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00). Limita whipsaw temprano.
         "min_score": 4.5,              # Phase 32: profile gate, let risk engine gate
         # 2026-05-29 user directive: CRASH puede entrar sin FVG (block_bc_escape_env=False).
         "block_bc_escape_env": False,
@@ -534,7 +534,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "fvg_tier_minimo": "any",
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80).
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
         # 2026-05-29 user directive: bajar score para que opere y permitir entradas sin FVG.
         "min_score": 4.8,
         "block_bc_escape_env": False,
@@ -611,7 +611,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": 0.30,
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80).
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
@@ -692,7 +692,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "geo_entry_max": 0.30,
         "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
         "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
-        "stop_loss_pct_override": 0.20, # 2026-05-29 v2: 0.36→0.20 — SL=$1.00 (era $1.80).
+        "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
         "spike_family": "boom_crash_new",
