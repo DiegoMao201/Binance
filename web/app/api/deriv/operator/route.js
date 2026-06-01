@@ -50,6 +50,33 @@ function readiness(ratio) {
   return { state: "SECO", level: 5 };                          // muy pasado / mercado lento
 }
 
+// Classify a bot decision into a human-readable confirmation signal.
+// The bot's `reason` strings carry the live setup state per symbol.
+function classifyDecision(d) {
+  const reason = String(d?.reason || "");
+  const score = Number(d?.score);
+  let gate = null;
+  const gm = reason.match(/requires?≥?\s*([\d.]+)/i) || reason.match(/≥\s*([\d.]+)/);
+  if (gm) gate = parseFloat(gm[1]);
+
+  let kind, label, level; // level: 0 idle .. 4 confirmed
+  if (d?.allowed === true || /^GO\b/.test(reason)) {
+    kind = "CONFIRMADO"; label = "CONFIRMADO — el bot entró"; level = 4;
+  } else if (/spike_forced_dir|spike_forced/i.test(reason)) {
+    kind = "SPIKE"; label = "SPIKE detectado"; level = 3;
+  } else if (/REGIME_SCORE_GATE|SCORE_TOO_LOW|SCORE_GATE/i.test(reason)) {
+    kind = "SCORE"; label = "Setup formándose (score)"; level = 2;
+  } else if (/SPIKE_NOT_LOADED/i.test(reason)) {
+    kind = "CARGANDO"; label = "Cargando (aún no listo)"; level = 1;
+  } else if (/ENTRY_BLOCKED|BLOCK/i.test(reason)) {
+    kind = "BLOQUEADO"; label = "Bloqueado"; level = 1;
+  } else {
+    kind = "INFO"; label = reason.split(":")[0] || "—"; level = 0;
+  }
+  const gap = gate != null && Number.isFinite(score) ? +(gate - score).toFixed(2) : null;
+  return { kind, label, level, gate, gap };
+}
+
 export async function GET() {
   const nowSec = Date.now() / 1000;
 
@@ -69,11 +96,38 @@ export async function GET() {
   const openContracts = Array.isArray(openRaw) ? openRaw : [];
   const closedContracts = Array.isArray(closedRaw) ? closedRaw : [];
 
-  // Discover symbols dynamically from live data (spikes + open + recent closed).
+  // Live decision stream + tick/analyst context from the bot's status file.
+  const lastDecisions = Array.isArray(status?.last_decisions) ? status.last_decisions : [];
+  const tickContext = status?.symbol_tick_context || {};
+  const analystSummary = status?.analyst_summary || {};
+  const activeSymbols = Array.isArray(status?.symbols) ? status.symbols : [];
+
+  // Index decisions per symbol (chronological).
+  const decisionsBySymbol = new Map();
+  const decoratedDecisions = [];
+  for (const d of lastDecisions) {
+    if (!d?.symbol) continue;
+    const ts = d.ts ? Date.parse(d.ts) / 1000 : null;
+    const cls = classifyDecision(d);
+    const rec = {
+      symbol: d.symbol, ts, iso: d.ts, score: Number(d.score),
+      side: d.side, regime: d.regime, allowed: d.allowed === true,
+      reason: d.reason, ...cls,
+    };
+    decoratedDecisions.push(rec);
+    if (!decisionsBySymbol.has(d.symbol)) decisionsBySymbol.set(d.symbol, []);
+    decisionsBySymbol.get(d.symbol).push(rec);
+  }
+
+  // Restrict to the symbols the bot is actively trading (drops stale BOOM500 etc).
+  // Discover symbols from active list first, fall back to live data.
   const symbolSet = new Set();
-  for (const s of spikes) if (s.symbol) symbolSet.add(s.symbol);
+  if (activeSymbols.length) {
+    for (const s of activeSymbols) symbolSet.add(s);
+  } else {
+    for (const s of spikes) if (s.symbol) symbolSet.add(s.symbol);
+  }
   for (const c of openContracts) if (c.symbol) symbolSet.add(c.symbol);
-  for (const c of closedContracts) if (c.symbol) symbolSet.add(c.symbol);
 
   const openBySymbol = new Map();
   for (const c of openContracts) {
@@ -83,15 +137,9 @@ export async function GET() {
   const symbols = [];
   for (const symbol of symbolSet) {
     const sym = spikes.filter((s) => s.symbol === symbol);
-    if (!sym.length && !openBySymbol.has(symbol)) continue;
 
     const last = sym.length ? sym[sym.length - 1] : null;
     const secsSince = last ? nowSec - last.ts : null;
-
-    // Hide stale symbols (no spike in 24h and no open position) to keep the
-    // console focused on what the bot is actually trading right now.
-    const active24 = sym.some((s) => nowSec - s.ts <= 24 * HOUR);
-    if (!active24 && !openBySymbol.has(symbol)) continue;
 
     const count = (winSec) => sym.filter((s) => nowSec - s.ts <= winSec).length;
     const c1 = count(1 * HOUR);
@@ -123,8 +171,45 @@ export async function GET() {
       .slice(0, 4)
       .map(([reason, n]) => ({ reason, n }));
 
+    // ── Live confirmation/score state from the bot's decision stream ──────
+    const symDecisions = decisionsBySymbol.get(symbol) || [];
+    const liveDecision = symDecisions.length ? symDecisions[symDecisions.length - 1] : null;
+    // Latest known score gate (parse from any recent gated decision).
+    let liveGate = null;
+    for (let i = symDecisions.length - 1; i >= 0 && i >= symDecisions.length - 30; i--) {
+      if (symDecisions[i].gate != null) { liveGate = symDecisions[i].gate; break; }
+    }
+    const liveScore = liveDecision && Number.isFinite(liveDecision.score) ? liveDecision.score : null;
+    const scoreGap = liveGate != null && liveScore != null ? +(liveGate - liveScore).toFixed(2) : null;
+    // Recent confirmations: meaningful detections (spike / score forming / confirmed).
+    const confirmations = symDecisions
+      .filter((d) => d.level >= 2)
+      .slice(-8)
+      .reverse()
+      .map((d) => ({
+        ts: d.ts, score: d.score, side: d.side, regime: d.regime,
+        kind: d.kind, label: d.label, gate: d.gate, gap: d.gap, allowed: d.allowed,
+      }));
+    const ctx = tickContext[symbol] || {};
+    const an = analystSummary[symbol] || {};
+
     symbols.push({
       symbol,
+      live: {
+        score: liveScore,
+        gate: liveGate,
+        scoreGap,
+        regime: liveDecision?.regime || null,
+        kind: liveDecision?.kind || null,
+        label: liveDecision?.label || null,
+        side: liveDecision?.side || null,
+        ts: liveDecision?.ts || null,
+        ticksSinceSpike: ctx.ticks_since_last_spike ?? last?.ticks_since_last_spike ?? null,
+        hurst: an.hurst ?? null,
+        volRegime: an.vol_regime ?? null,
+        lastPrice: an.last_price ?? null,
+      },
+      confirmations,
       lastSpike: last
         ? {
             ts: last.ts,
@@ -169,43 +254,25 @@ export async function GET() {
     return b.counts.h24 - a.counts.h24;
   });
 
-  // Recent entries (bot operations) — open + last closed, with timestamps.
-  const recentEntries = [];
-  for (const c of openContracts) {
-    recentEntries.push({
-      status: "OPEN",
-      symbol: c.symbol,
-      side: c.side,
-      stake: c.stake_usdt,
-      entry_price: c.entry_price,
-      opened_at_ts: c.opened_at_ts,
-      floating_pnl: c.floating_pnl,
-      peak_profit: c.peak_profit,
-      duration_sec: c.duration_sec,
-      contract_id: c.contract_id,
-    });
-  }
-  const closedSorted = [...closedContracts]
-    .filter((c) => Number.isFinite(Number(c.closed_at_ts)))
-    .sort((a, b) => Number(b.closed_at_ts) - Number(a.closed_at_ts))
-    .slice(0, 25);
-  for (const c of closedSorted) {
-    recentEntries.push({
-      status: "CLOSED",
-      symbol: c.symbol,
-      side: c.side,
-      stake: c.stake_usdt,
-      entry_price: c.entry_price,
-      exit_price: c.exit_price,
-      opened_at_ts: c.opened_at_ts,
-      closed_at_ts: c.closed_at_ts,
-      realized_pnl: c.realized_pnl_usdt,
-      exit_reason: c.exit_reason,
-      duration_sec: c.duracion_real_seg,
-      grade: c.execution_grade,
-      contract_id: c.contract_id,
-    });
-  }
+  // Global confirmation feed — the bot's meaningful detections across all symbols,
+  // newest first. This is what the manual operator watches to decide.
+  const confirmationFeed = decoratedDecisions
+    .filter((d) => d.level >= 2 && d.ts)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 50)
+    .map((d) => ({
+      ts: d.ts,
+      symbol: d.symbol,
+      score: d.score,
+      gate: d.gate,
+      gap: d.gap,
+      side: d.side,
+      regime: d.regime,
+      kind: d.kind,
+      label: d.label,
+      allowed: d.allowed,
+      secsAgo: nowSec - d.ts,
+    }));
 
   // Global spike feed (newest first).
   const spikeFeed = spikes.slice(-40).reverse().map((s) => ({
@@ -220,6 +287,37 @@ export async function GET() {
     had_open_pos: s.had_open_pos,
     secsAgo: nowSec - s.ts,
   }));
+
+  // Enriched spike table — per spike: ordinal within the rolling last hour,
+  // gap since previous spike of the same symbol, ticks-since-prev-spike.
+  // Only symbols the bot is actively trading.
+  const prevTsBySym = new Map();
+  const enriched = spikes.map((s) => {
+    const prevTs = prevTsBySym.get(s.symbol) ?? null;
+    prevTsBySym.set(s.symbol, s.ts);
+    const seqInHour = spikes.filter(
+      (x) => x.symbol === s.symbol && x.ts <= s.ts && x.ts > s.ts - HOUR
+    ).length;
+    return {
+      ts: s.ts,
+      symbol: s.symbol,
+      direction: s.direction,
+      ratio: s.ratio,
+      atr: s.atr,
+      price: s.price,
+      ticks_since_last_spike: s.ticks_since_last_spike,
+      gapPrevSec: prevTs != null ? +(s.ts - prevTs).toFixed(1) : null,
+      seqInHour,
+      bot_entered: s.bot_entered,
+      block_reason: s.block_reason,
+      had_open_pos: s.had_open_pos,
+    };
+  });
+  const spikeTable = enriched
+    .filter((s) => symbolSet.has(s.symbol))
+    .slice(-150)
+    .reverse()
+    .map((s) => ({ ...s, secsAgo: nowSec - s.ts }));
 
   // Session-level realized PnL (today) for the header.
   let sinceSec = 0;
@@ -259,8 +357,9 @@ export async function GET() {
       },
       symbols,
       openContracts,
-      recentEntries,
+      confirmationFeed,
       spikeFeed,
+      spikeTable,
     },
     { headers: { "Cache-Control": "no-store, max-age=0" } }
   );

@@ -3,10 +3,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSOLA DE OPERACIÓN MANUAL — Deriv CRASH
-   Reúne en una sola pantalla todo lo que el bot calcula para que el
-   operador humano decida en caliente: spikes en vivo, tiempo desde el
-   último spike, cadencia (1h/6h/12h/24h), semáforo "loaded gun" por
-   símbolo, operaciones abiertas del bot y log de entradas/salidas.
+   Todo lo que el bot calcula en una pantalla para operar a mano:
+   confirmaciones de posibles spikes (hora · score · por qué), tiempo y
+   ticks desde el último spike, cadencia, semáforo "loaded gun" y la tabla
+   de spikes enriquecida (ratio · atr · nº en la hora · gap · ticks).
    ════════════════════════════════════════════════════════════════════════ */
 
 const T = {
@@ -28,8 +28,19 @@ const READY_LABEL = {
   SECO: "Seco / lento", SIN_DATOS: "Sin datos",
 };
 
+// Confirmation kind → color/label.
+const KIND = {
+  CONFIRMADO: { color: T.green, label: "CONFIRMADO" },
+  SPIKE: { color: T.red, label: "SPIKE" },
+  SCORE: { color: T.amber, label: "SCORE" },
+  CARGANDO: { color: T.cyan, label: "CARGANDO" },
+  BLOQUEADO: { color: T.mute, label: "BLOQUEADO" },
+  INFO: { color: T.mute, label: "INFO" },
+};
+
 /* ── helpers ─────────────────────────────────────────────── */
 const num = (v, d = 2) => (v == null || !Number.isFinite(Number(v)) ? "–" : Number(v).toFixed(d));
+const intC = (v) => (v == null || !Number.isFinite(Number(v)) ? "–" : Number(v).toLocaleString());
 const fmtClock = (ts) => {
   if (!ts) return "–";
   const d = new Date(ts > 1e12 ? ts : ts * 1000);
@@ -53,6 +64,7 @@ const sideLabel = (side) =>
   side === "MULTDOWN" ? "CRASH↓" : side === "MULTUP" ? "BOOM↑" : side || "–";
 const sideColor = (side) => (side === "MULTDOWN" ? T.red : side === "MULTUP" ? T.green : T.textD);
 const pnlColor = (v) => (Number(v) > 0 ? T.green : Number(v) < 0 ? T.red : T.textD);
+const ord = (n) => (n == null ? "–" : `#${n}`);
 
 /* ── primitives ──────────────────────────────────────────── */
 function Panel({ title, right, children, accent }) {
@@ -64,8 +76,7 @@ function Panel({ title, right, children, accent }) {
       {(title || right) && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "9px 12px", borderBottom: `1px solid ${T.border}`,
-          background: T.panel2,
+          padding: "9px 12px", borderBottom: `1px solid ${T.border}`, background: T.panel2,
         }}>
           <span style={{
             fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 800, letterSpacing: "0.12em",
@@ -88,6 +99,55 @@ function Stat({ label, value, color }) {
   );
 }
 
+/* ── live confirmation strip inside a symbol card ────────── */
+function LiveScore({ live }) {
+  if (!live) return null;
+  const k = KIND[live.kind] || KIND.INFO;
+  const score = live.score;
+  const gate = live.gate;
+  const gap = live.scoreGap; // gate - score; <=0 means confirmed
+  const pctToGate = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
+  const barColor = gap != null && gap <= 0 ? T.green : gap != null && gap < 0.4 ? T.amber : T.cyan;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: "9px 12px", background: T.bg2, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Confirmación en vivo</span>
+        <span style={{
+          fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 800, color: k.color,
+          background: k.color + "18", border: `1px solid ${k.color}44`, borderRadius: 4, padding: "2px 7px",
+        }}>{k.label}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
+        <div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Score</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: barColor, lineHeight: 1 }}>{num(score)}</div>
+        </div>
+        <div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>≥ {num(gate)}</div>
+        </div>
+        <div style={{ marginLeft: "auto", textAlign: "right" }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Falta</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: gap != null && gap <= 0 ? T.green : T.amber }}>
+            {gap == null ? "–" : gap <= 0 ? "LISTO ✓" : `+${num(gap)}`}
+          </div>
+        </div>
+      </div>
+      {pctToGate != null && (
+        <div style={{ height: 5, borderRadius: 3, background: T.bg, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${pctToGate}%`, background: barColor, transition: "width 500ms ease" }} />
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>régimen <b style={{ color: T.text }}>{live.regime || "–"}</b></span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>dir <b style={{ color: sideColor(live.side) }}>{sideLabel(live.side)}</b></span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>Hurst <b style={{ color: T.text }}>{num(live.hurst, 3)}</b></span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>vol <b style={{ color: T.text }}>{live.volRegime || "–"}</b></span>
+      </div>
+    </div>
+  );
+}
+
 /* ── symbol card ─────────────────────────────────────────── */
 function SymbolCard({ s }) {
   const ready = s.readiness || { state: "SIN_DATOS", level: 0 };
@@ -95,6 +155,7 @@ function SymbolCard({ s }) {
   const dir = s.lastSpike?.direction;
   const dirColor = dir === "DOWN" ? T.red : dir === "UP" ? T.green : T.textD;
   const hasOpen = !!s.openContract;
+  const ticks = s.live?.ticksSinceSpike ?? s.lastSpike?.ticks_since_last_spike ?? null;
 
   return (
     <div style={{
@@ -135,22 +196,25 @@ function SymbolCard({ s }) {
         </div>
       )}
 
-      {/* last spike + elapsed */}
+      {/* LIVE confirmation/score */}
+      <LiveScore live={s.live} />
+
+      {/* last spike — TIME + TICKS */}
       <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
           <div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Último spike</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: rc, lineHeight: 1.1 }}>
-              hace {ago(s.secsSinceLastSpike)}
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Sin spike hace</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: rc, lineHeight: 1.1 }}>
+              {ago(s.secsSinceLastSpike)}
             </div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD, marginTop: 2 }}>
-              {fmtClock(s.lastSpike?.ts)} · <span style={{ color: dirColor }}>{dir || "–"}</span> · ratio {num(s.lastSpike?.ratio, 1)}x
+              último {fmtClock(s.lastSpike?.ts)} · <span style={{ color: dirColor }}>{dir || "–"}</span> · {num(s.lastSpike?.ratio, 0)}x
             </div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Intervalo típico</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>{dur(s.medianGapSec)}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>p75 {dur(s.p75GapSec)}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Ticks sin spike</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: T.cyan, lineHeight: 1.1 }}>{intC(ticks)}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: 2 }}>típico {dur(s.medianGapSec)} · p75 {dur(s.p75GapSec)}</div>
           </div>
         </div>
 
@@ -176,16 +240,7 @@ function SymbolCard({ s }) {
           <Stat label="prom/h 24h" value={num(s.ratePerHour?.h24, 1)} color={T.cyan} />
         </div>
 
-        {/* bot capture stats */}
-        <div style={{ display: "flex", gap: 14, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.green }}>● {s.entered24} tomados</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.red }}>● {s.blocked24} bloqueados</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD, marginLeft: "auto" }}>
-            captura {s.catchRate24 == null ? "–" : `${Math.round(s.catchRate24 * 100)}%`}
-          </span>
-        </div>
-
-        {/* notes per symbol (top block reasons) */}
+        {/* notes per symbol */}
         {s.topReasons?.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Notas (por qué el bot no entró)</span>
@@ -211,6 +266,7 @@ export default function DerivOperatorConsole() {
   const [err, setErr] = useState(null);
   const [paused, setPaused] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [symFilter, setSymFilter] = useState("ALL");
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -234,10 +290,14 @@ export default function DerivOperatorConsole() {
   }, [load, paused]);
 
   const symbols = data?.symbols || [];
-  const entries = data?.recentEntries || [];
-  const feed = data?.spikeFeed || [];
+  const confFeed = data?.confirmationFeed || [];
+  const spikeTable = data?.spikeTable || [];
   const sess = data?.session || {};
   const totals = data?.totals || {};
+  const symNames = symbols.map((s) => s.symbol);
+
+  const tableRows = symFilter === "ALL" ? spikeTable : spikeTable.filter((s) => s.symbol === symFilter);
+  const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: FONT_MONO, padding: "16px 18px" }}>
@@ -253,14 +313,13 @@ export default function DerivOperatorConsole() {
             CONSOLA DE OPERACIÓN MANUAL <span style={{ color: T.cyan }}>· CRASH</span>
           </h1>
           <p style={{ margin: "3px 0 0", fontSize: 10.5, color: T.mute }}>
-            Todas las señales del bot en una pantalla. Tú operas. {" "}
+            Confirmaciones, scores y spikes en vivo. Tú operas. {" "}
             {lastUpdate && <span style={{ color: T.green }}>● en vivo · {fmtClock(lastUpdate / 1000)}</span>}
             {err && <span style={{ color: T.red }}> ● {err}</span>}
           </p>
         </div>
         <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
           <Stat label="Sesión PnL" value={`${sess.realizedPnl >= 0 ? "+" : ""}${num(sess.realizedPnl)}`} color={pnlColor(sess.realizedPnl)} />
-          <Stat label="Trades" value={sess.trades ?? "–"} color={T.text} />
           <Stat label="Win%" value={sess.winRate == null ? "–" : `${Math.round(sess.winRate * 100)}%`} color={T.cyan} />
           <Stat label="Abiertas" value={totals.openPositions ?? "–"} color={T.amber} />
           <Stat label="Spikes 24h" value={totals.spikes24h ?? "–"} color={T.textD} />
@@ -284,91 +343,101 @@ export default function DerivOperatorConsole() {
 
       {/* SYMBOL GRID */}
       <div style={{
-        display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+        display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
       </div>
 
-      {/* BOTTOM: spike feed + operations log */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.25fr", gap: 12 }}>
-        {/* LIVE SPIKE FEED */}
-        <Panel title="Feed de spikes en vivo" accent={T.cyan}
-          right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>{feed.length} recientes</span>}>
-          <div style={{ maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 5 }}>
-            {feed.length === 0 && <div style={{ color: T.mute, textAlign: "center", padding: 20 }}>Sin spikes</div>}
-            {feed.map((f, i) => {
-              const dc = f.direction === "DOWN" ? T.red : T.green;
-              const ok = f.bot_entered === true;
+      {/* CONFIRMATION FEED */}
+      <div style={{ marginBottom: 14 }}>
+        <Panel title="Confirmaciones de posibles spikes · en vivo" accent={T.amber}
+          right={
+            <div style={{ display: "flex", gap: 5 }}>
+              {["ALL", ...symNames].map((sn) => (
+                <button key={sn} onClick={() => setSymFilter(sn)} style={{
+                  background: symFilter === sn ? T.amber + "22" : "transparent",
+                  color: symFilter === sn ? T.amber : T.mute,
+                  border: `1px solid ${symFilter === sn ? T.amber + "55" : T.border}`,
+                  borderRadius: 4, padding: "3px 8px", cursor: "pointer",
+                  fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700,
+                }}>{sn}</button>
+              ))}
+            </div>
+          }>
+          <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+            {feedRows.length === 0 && <div style={{ color: T.mute, textAlign: "center", padding: 18 }}>Sin confirmaciones recientes</div>}
+            {feedRows.map((f, i) => {
+              const k = KIND[f.kind] || KIND.INFO;
               return (
                 <div key={i} style={{
-                  display: "flex", alignItems: "center", gap: 9, padding: "6px 8px",
-                  background: T.bg2, borderRadius: 6, borderLeft: `3px solid ${dc}`,
+                  display: "flex", alignItems: "center", gap: 10, padding: "6px 9px",
+                  background: T.bg2, borderRadius: 6, borderLeft: `3px solid ${k.color}`,
                 }}>
                   <span style={{ fontSize: 10, color: T.mute, width: 64 }}>{fmtClock(f.ts)}</span>
                   <span style={{ fontSize: 11, fontWeight: 800, color: T.text, width: 78 }}>{f.symbol}</span>
-                  <span style={{ fontSize: 10, color: dc, width: 46 }}>{f.direction}</span>
-                  <span style={{ fontSize: 10, color: T.amber, width: 52 }}>{num(f.ratio, 0)}x</span>
+                  <span style={{ fontSize: 9, fontWeight: 800, color: k.color, background: k.color + "16", borderRadius: 4, padding: "2px 7px", width: 92, textAlign: "center" }}>{k.label}</span>
+                  <span style={{ fontSize: 11, color: T.text, width: 96 }}>score <b style={{ color: f.gap != null && f.gap <= 0 ? T.green : T.amber }}>{num(f.score)}</b>{f.gate ? <span style={{ color: T.mute }}> /{num(f.gate)}</span> : null}</span>
+                  <span style={{ fontSize: 10, color: T.textD, width: 110 }}>
+                    {f.gap == null ? "" : f.gap <= 0 ? "✓ supera gate" : `falta +${num(f.gap)}`}
+                  </span>
+                  <span style={{ fontSize: 10, color: sideColor(f.side), width: 64 }}>{sideLabel(f.side)}</span>
+                  <span style={{ fontSize: 10, color: T.mute }}>{f.regime || ""}</span>
                   <span style={{ fontSize: 9.5, color: T.mute, marginLeft: "auto" }}>hace {ago(f.secsAgo)}</span>
-                  <span style={{
-                    fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
-                    color: ok ? T.green : T.red, background: (ok ? T.green : T.red) + "16",
-                    minWidth: 64, textAlign: "center",
-                  }}>{ok ? "TOMADO" : "no entró"}</span>
                 </div>
               );
             })}
           </div>
         </Panel>
-
-        {/* OPERATIONS LOG */}
-        <Panel title="Operaciones del bot · entradas y salidas" accent={T.violet}
-          right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>{entries.length}</span>}>
-          <div style={{ maxHeight: 360, overflowY: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-              <thead>
-                <tr style={{ color: T.mute, textAlign: "left" }}>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Estado</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Símbolo</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Lado</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Entró</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Dur</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase" }}>Motivo salida</th>
-                  <th style={{ padding: "4px 6px", fontSize: 9, textTransform: "uppercase", textAlign: "right" }}>PnL</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entries.length === 0 && (
-                  <tr><td colSpan={7} style={{ color: T.mute, textAlign: "center", padding: 20 }}>Sin operaciones</td></tr>
-                )}
-                {entries.map((e, i) => {
-                  const isOpen = e.status === "OPEN";
-                  const pnl = isOpen ? e.floating_pnl : e.realized_pnl;
-                  return (
-                    <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }}>
-                      <td style={{ padding: "5px 6px" }}>
-                        <span style={{
-                          fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
-                          color: isOpen ? T.cyan : T.textD,
-                          background: (isOpen ? T.cyan : T.mute) + "18",
-                        }}>{isOpen ? "ABIERTA" : "cerrada"}</span>
-                      </td>
-                      <td style={{ padding: "5px 6px", fontWeight: 700, color: T.text }}>{e.symbol}</td>
-                      <td style={{ padding: "5px 6px", color: sideColor(e.side) }}>{sideLabel(e.side)}</td>
-                      <td style={{ padding: "5px 6px", color: T.textD }}>{fmtClock(e.opened_at_ts)}</td>
-                      <td style={{ padding: "5px 6px", color: T.textD }}>{dur(e.duration_sec)}</td>
-                      <td style={{ padding: "5px 6px", color: T.mute, fontSize: 10 }}>{isOpen ? "—" : (e.exit_reason || "–")}</td>
-                      <td style={{ padding: "5px 6px", textAlign: "right", fontWeight: 800, color: pnlColor(pnl) }}>
-                        {pnl == null ? "–" : `${Number(pnl) >= 0 ? "+" : ""}${num(pnl)}`}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
       </div>
+
+      {/* SPIKE TABLE — enriched */}
+      <Panel title={`Eventos de spike · ${tableRows.length}`} accent={T.cyan}
+        right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>ratio · atr · nº en la hora · gap · ticks</span>}>
+        <div style={{ maxHeight: 460, overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead style={{ position: "sticky", top: 0, background: T.panel }}>
+              <tr style={{ color: T.mute, textAlign: "left" }}>
+                {["Hora", "Símbolo", "Dir", "Ratio", "ATR", "Nº hora", "Gap previo", "Ticks", "Entró", "Hace"].map((h) => (
+                  <th key={h} style={{ padding: "5px 8px", fontSize: 9, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {tableRows.length === 0 && (
+                <tr><td colSpan={10} style={{ color: T.mute, textAlign: "center", padding: 22 }}>Sin spikes</td></tr>
+              )}
+              {tableRows.map((s, i) => {
+                const dc = s.direction === "DOWN" ? T.red : T.green;
+                const entered = s.bot_entered === true;
+                const ratioColor = s.ratio >= 500 ? T.red : s.ratio >= 100 ? T.amber : T.textD;
+                return (
+                  <tr key={i} style={{ borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: "5px 8px", color: T.textD, whiteSpace: "nowrap" }}>{fmtClock(s.ts)}</td>
+                    <td style={{ padding: "5px 8px", fontWeight: 700, color: T.text }}>{s.symbol}</td>
+                    <td style={{ padding: "5px 8px", color: dc, fontWeight: 700 }}>{s.direction === "DOWN" ? "▼ DOWN" : "▲ UP"}</td>
+                    <td style={{ padding: "5px 8px", fontWeight: 800, color: ratioColor }}>{num(s.ratio, 0)}x</td>
+                    <td style={{ padding: "5px 8px", color: T.textD }}>{num(s.atr, 4)}</td>
+                    <td style={{ padding: "5px 8px" }}>
+                      <span style={{ fontWeight: 800, color: s.seqInHour >= 5 ? T.orange : s.seqInHour >= 3 ? T.amber : T.cyan }}>{ord(s.seqInHour)}</span>
+                      <span style={{ color: T.mute }}> /h</span>
+                    </td>
+                    <td style={{ padding: "5px 8px", color: T.textD }}>{s.gapPrevSec == null ? "–" : dur(s.gapPrevSec)}</td>
+                    <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700 }}>{intC(s.ticks_since_last_spike)}</td>
+                    <td style={{ padding: "5px 8px" }}>
+                      <span style={{
+                        fontSize: 9, fontWeight: 800, padding: "2px 6px", borderRadius: 4,
+                        color: entered ? T.green : T.red, background: (entered ? T.green : T.red) + "16",
+                      }}>{entered ? "✓ SÍ" : "no"}</span>
+                    </td>
+                    <td style={{ padding: "5px 8px", color: T.mute, whiteSpace: "nowrap" }}>{ago(s.secsAgo)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
     </div>
   );
 }
