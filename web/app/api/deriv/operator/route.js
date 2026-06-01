@@ -88,6 +88,11 @@ export async function GET() {
     const last = sym.length ? sym[sym.length - 1] : null;
     const secsSince = last ? nowSec - last.ts : null;
 
+    // Hide stale symbols (no spike in 24h and no open position) to keep the
+    // console focused on what the bot is actually trading right now.
+    const active24 = sym.some((s) => nowSec - s.ts <= 24 * HOUR);
+    if (!active24 && !openBySymbol.has(symbol)) continue;
+
     const count = (winSec) => sym.filter((s) => nowSec - s.ts <= winSec).length;
     const c1 = count(1 * HOUR);
     const c6 = count(6 * HOUR);
