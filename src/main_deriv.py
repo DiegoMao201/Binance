@@ -815,6 +815,30 @@ class DerivDaemon:
             dyn_active,
         )
 
+        # ── 2026-06-01 SPIKE-CLUSTER OVERRIDE ("se alinearon las estrellas") ──
+        # Forensic over 1102 spikes: when >=3 spikes hit in the last 300s, the
+        # NEXT spike's median gap collapses to 57-76s (vs 294-466s normal) =
+        # 4-8x faster. In that state the chase_guard (180-250t) would block the
+        # ONE moment we most want to position for the 4th spike. So when a
+        # cluster is active we collapse the chase_block to a small floor — this
+        # is the user's "cazar el 4to spike" and is NOT butterfly-chasing
+        # (the spike is statistically imminent, not random).
+        try:
+            _cl_win = float(os.getenv("DERIV_SPIKE_CLUSTER_WINDOW_SEC", "300") or 300)
+            _cl_min = int(float(os.getenv("DERIV_SPIKE_CLUSTER_MIN_SPIKES", "3") or 3))
+            _cl_n = int(self._risk.get_spike_count_recent(symbol, _cl_win))
+        except Exception:
+            _cl_n, _cl_min = 0, 3
+        if _cl_n >= _cl_min:
+            _cl_floor = float(os.getenv("DERIV_SPIKE_CLUSTER_CHASE_FLOOR_TICKS", "25") or 25)
+            if _cl_floor < _chase_block:
+                _LOGGER.info(
+                    "[PIPELINE] SPIKE_CLUSTER_CHASE_RELAX %s | n=%d/%ds chase_block %.0ft→%.0ft "
+                    "(4th spike imminent)",
+                    symbol, _cl_n, int(_cl_win), _chase_block, _cl_floor,
+                )
+                _chase_block = _cl_floor
+
         # Keep safety invariant even if caller path changes in the future.
         if _elapsed < _chase_block:
             return (
@@ -2906,6 +2930,65 @@ class DerivDaemon:
         )
         if _sym_bleed_bonus > 0.0:
             _regime_min = min(10.0, _regime_min + _sym_bleed_bonus)
+
+        # ── 2026-06-01 REGIME EDGE BIAS (full-history forensic, 439 trades) ──
+        # TRENDING regime = -$38.59 realized (wr 32%); CALM = +$0.30 (wr 33%).
+        # Per-symbol confirms across both closed contracts AND the LLM pattern
+        # memory (n>700): BOOM500 CALM wr=64-65% vs TRENDING 31-43%; CRASH500
+        # CALM 64% vs TRENDING 44%; CRASH600 CALM win vs TRENDING -$13. The
+        # bot's #1 leak is entering during TRENDING. → raise the required score
+        # hard in TRENDING (only A++ setups survive) and keep CALM permissive.
+        _risk_regime_bias = str(snap.regime or "").strip().lower()
+        _is_bc_bias = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        if _is_bc_bias:
+            if _risk_regime_bias == "trending":
+                _trend_pen = max(
+                    0.0,
+                    float(os.getenv("DERIV_REGIME_TRENDING_SCORE_PENALTY", "1.3") or 1.3),
+                )
+                if _trend_pen > 0.0:
+                    _regime_min = min(10.0, _regime_min + _trend_pen)
+                    snap.score_breakdown["regime_trending_penalty"] = round(_trend_pen, 3)
+            elif _risk_regime_bias == "calm":
+                _calm_bon = max(
+                    0.0,
+                    float(os.getenv("DERIV_REGIME_CALM_SCORE_BONUS", "0.3") or 0.3),
+                )
+                if _calm_bon > 0.0:
+                    _regime_min = max(0.0, _regime_min - _calm_bon)
+                    snap.score_breakdown["regime_calm_bonus"] = round(_calm_bon, 3)
+
+        # ── 2026-06-01 SPIKE-CLUSTER ALIGNMENT BONUS ("stars aligned") ──────
+        # Same 1102-spike forensic: >=3 spikes in last 300s → next spike median
+        # 57-76s away (4-8x faster than normal). Grant a score bonus so a
+        # borderline A-/B+ setup can pass the gate to position for the 4th
+        # spike. Scales mildly with cluster size (cap 2x). BOOM/CRASH only.
+        if _is_bc_bias:
+            _cl_win2 = float(os.getenv("DERIV_SPIKE_CLUSTER_WINDOW_SEC", "300") or 300)
+            _cl_min2 = int(float(os.getenv("DERIV_SPIKE_CLUSTER_MIN_SPIKES", "3") or 3))
+            try:
+                _cl_n2 = int(self._risk.get_spike_count_recent(tick.symbol, _cl_win2))
+            except Exception:
+                _cl_n2 = 0
+            if _cl_n2 >= _cl_min2:
+                _cl_base = max(
+                    0.0,
+                    float(os.getenv("DERIV_SPIKE_CLUSTER_SCORE_BONUS", "1.0") or 1.0),
+                )
+                _cl_scale = min(2.0, 1.0 + 0.25 * (_cl_n2 - _cl_min2))
+                _cl_boost = round(_cl_base * _cl_scale, 2)
+                if _cl_boost > 0.0:
+                    snap.score = round(min(10.0, snap.score + _cl_boost), 3)
+                    snap.score_breakdown["spike_cluster_n"] = _cl_n2
+                    snap.score_breakdown["spike_cluster_bonus"] = _cl_boost
+                    snap.reasons.append(
+                        f"spike_cluster_aligned: {_cl_n2} spikes/{_cl_win2:.0f}s → +{_cl_boost:.2f}"
+                    )
+                    _LOGGER.info(
+                        "[PIPELINE] SPIKE_CLUSTER_ALIGNED %s | n=%d/%ds → +%.2f score→%.2f "
+                        "(4th spike imminent ~57-76s)",
+                        tick.symbol, _cl_n2, int(_cl_win2), _cl_boost, snap.score,
+                    )
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
