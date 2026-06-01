@@ -1054,6 +1054,95 @@ class DerivRiskManager:
         "CRASH1000": 6.0,
     }
 
+    # Per-symbol empirical ticks_since_last_spike percentiles AT the spike
+    # moment (forensic 2026-06-01, 1159 spikes). This is the "loaded gun"
+    # signature: when the live gap approaches p50-p75 the symbol is statistically
+    # RIPE to fire — the trader's "lleva rato sin salir y tiene numeros de cuando
+    # tira". Tuple = (p25, p50, p75, p90). Override via DERIV_SPIKE_GAP_PCTL_MAP.
+    _SPIKE_GAP_PCTL: dict[str, tuple[float, float, float, float]] = {
+        "CRASH500": (203.0, 322.0, 524.0, 959.0),
+        "CRASH600": (197.0, 460.0, 792.0, 1258.0),
+        "CRASH900": (164.0, 461.0, 859.0, 1518.0),
+        "BOOM500": (129.0, 318.0, 595.0, 1021.0),
+        "CRASH300": (120.0, 300.0, 480.0, 720.0),
+    }
+
+    def get_spike_imminence_state(self, symbol: str) -> dict[str, Any]:
+        """Spike-IMMINENCE predictor ("malicia": ¿esta cargado para tirar?).
+
+        Uses the live ticks_since_last_spike vs the symbol's empirical gap
+        distribution (p25/p50/p75/p90 at the spike moment) to estimate how
+        "ripe" the symbol is to fire its next spike RIGHT NOW. This is the
+        trading instinct the user described: a symbol that has been quiet for a
+        while and now sits in the same tick-gap zone where it usually fires is
+        statistically loaded.
+
+        Returns dict:
+          state: FRESH | BUILDING | RIPE | OVERDUE | DRY | UNKNOWN
+          score: 0.0-1.0 imminence (peaks in the RIPE zone p50..p75)
+          ticks_since_last: live gap in ticks
+          pctl: {p25,p50,p75,p90}
+        """
+        key = str(symbol or "").upper()
+        pctl = self._SPIKE_GAP_PCTL.get(key)
+        # Optional env override: DERIV_SPIKE_GAP_PCTL_MAP=SYM:p25/p50/p75/p90,...
+        raw_map = os.getenv("DERIV_SPIKE_GAP_PCTL_MAP", "") or ""
+        if raw_map:
+            for part in raw_map.split(","):
+                part = part.strip()
+                if not part or ":" not in part:
+                    continue
+                sym_k, _, vals = part.partition(":")
+                if sym_k.strip().upper() != key:
+                    continue
+                try:
+                    nums = [float(x) for x in vals.replace("/", " ").replace("|", " ").split()]
+                    if len(nums) >= 4:
+                        pctl = (nums[0], nums[1], nums[2], nums[3])
+                except (TypeError, ValueError):
+                    pass
+        last_tick = int(self._last_spike_tick.get(symbol, self._last_spike_tick.get(key, 0)) or 0)
+        cur_tick = int(self._ingest_tick_count.get(symbol, self._ingest_tick_count.get(key, 0)) or 0)
+        gap = max(0, cur_tick - last_tick) if (last_tick > 0 and cur_tick > 0) else 0
+        if not pctl or gap <= 0:
+            return {
+                "state": "UNKNOWN",
+                "score": 0.0,
+                "ticks_since_last": gap,
+                "pctl": None,
+            }
+        p25, p50, p75, p90 = pctl
+
+        def _interp(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
+            if x1 <= x0:
+                return y1
+            t = (x - x0) / (x1 - x0)
+            t = max(0.0, min(1.0, t))
+            return y0 + t * (y1 - y0)
+
+        # Imminence curve peaks (=1.0) across the modal firing band [p50, p75].
+        if gap < p25:
+            state = "FRESH"
+            score = _interp(gap, 0.0, p25, 0.10, 0.45)
+        elif gap < p50:
+            state = "BUILDING"
+            score = _interp(gap, p25, p50, 0.45, 0.85)
+        elif gap <= p75:
+            state = "RIPE"
+            score = _interp(gap, p50, p75, 0.85, 1.0)
+        elif gap <= p90:
+            state = "OVERDUE"
+            score = _interp(gap, p75, p90, 1.0, 0.45)
+        else:
+            state = "DRY"
+            score = max(0.10, _interp(gap, p90, p90 * 1.6, 0.45, 0.10))
+        return {
+            "state": state,
+            "score": round(float(score), 3),
+            "ticks_since_last": gap,
+            "pctl": {"p25": p25, "p50": p50, "p75": p75, "p90": p90},
+        }
+
     def get_spike_pace_state(
         self, symbol: str, window_sec: float = 1200.0
     ) -> dict[str, Any]:

@@ -2222,6 +2222,11 @@ class DerivDaemon:
                     _pace_sd = self._risk.get_spike_pace_state(_sym_sd, 1200.0)
                 except Exception:
                     _pace_sd = {}
+                _imm_sd = {}
+                try:
+                    _imm_sd = self._risk.get_spike_imminence_state(_sym_sd)
+                except Exception:
+                    _imm_sd = {}
                 _mem_entry = {
                     "ts": _now_sd,
                     "iso": datetime.fromtimestamp(_now_sd, tz=timezone.utc).isoformat(),
@@ -2239,6 +2244,10 @@ class DerivDaemon:
                     "pace_spikes_20m": _pace_sd.get("spikes_window"),
                     "pace_expected_20m": _pace_sd.get("expected_window"),
                     "pace_rate_per_hour": _pace_sd.get("rate_per_hour"),
+                    # 2026-06-01 imminence ("malicia"): is the symbol loaded to fire?
+                    "imminence_state": _imm_sd.get("state"),
+                    "imminence_score": _imm_sd.get("score"),
+                    "ticks_since_last_spike": _imm_sd.get("ticks_since_last"),
                     "last_spike_age_sec": (
                         round(_last_spike_age, 1) if _last_spike_age is not None else None
                     ),
@@ -3039,6 +3048,44 @@ class DerivDaemon:
                         tick.symbol, _pace.get("spikes_window"),
                         _pace.get("expected_window"), _pace.get("ratio"),
                         _hot_bon, snap.score,
+                    )
+
+        # ── 2026-06-01 SPIKE-IMMINENCE ("malicia": ¿esta cargado para tirar?) ─
+        # Predictive layer: when the live ticks_since_last_spike sits in the
+        # modal firing band (RIPE p50..p75) the symbol is statistically loaded.
+        # This is the trader instinct "lleva rato sin salir y tiene numeros de
+        # cuando tira". We surface it to the LLM (prompt + score_breakdown) and
+        # grant a readiness bonus in BUILDING/RIPE so a high-probability spike
+        # setup is NOT missed just because the regime label says trending.
+        if _is_bc_bias:
+            try:
+                _imm = self._risk.get_spike_imminence_state(tick.symbol)
+            except Exception:
+                _imm = {}
+            _imm_state = str(_imm.get("state") or "")
+            _imm_score = float(_imm.get("score") or 0.0)
+            if _imm_state and _imm_state != "UNKNOWN":
+                snap.score_breakdown["spike_imminence_state"] = _imm_state
+                snap.score_breakdown["spike_imminence_score"] = round(_imm_score, 3)
+                snap.score_breakdown["spike_ticks_since_last"] = _imm.get("ticks_since_last")
+            if _imm_state in ("RIPE", "BUILDING") and "spike_cluster_bonus" not in snap.score_breakdown:
+                _imm_max = max(
+                    0.0,
+                    float(os.getenv("DERIV_SPIKE_IMMINENCE_MAX_BONUS", "0.8") or 0.8),
+                )
+                # Scale by imminence score; RIPE (≈1.0) gets the full bonus.
+                _imm_boost = round(_imm_max * _imm_score, 2)
+                if _imm_boost > 0.0:
+                    snap.score = round(min(10.0, snap.score + _imm_boost), 3)
+                    snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
+                    snap.reasons.append(
+                        f"spike_imminence_{_imm_state}: gap={_imm.get('ticks_since_last')}t "
+                        f"score={_imm_score:.2f} → +{_imm_boost:.2f}"
+                    )
+                    _LOGGER.info(
+                        "[PIPELINE] SPIKE_IMMINENCE %s | %s gap=%st imm=%.2f → +%.2f score→%.2f",
+                        tick.symbol, _imm_state, _imm.get("ticks_since_last"),
+                        _imm_score, _imm_boost, snap.score,
                     )
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──

@@ -1518,6 +1518,11 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
                     "pace_spikes_20m": _last.get("pace_spikes_20m"),
                     "pace_expected_20m": _last.get("pace_expected_20m"),
                     "pace_rate_per_hour": _last.get("pace_rate_per_hour"),
+                    # 2026-06-01 imminence ("malicia"): is the symbol loaded to
+                    # fire its next spike right now (RIPE p50..p75 = highest prob).
+                    "imminence_state": _last.get("imminence_state"),
+                    "imminence_score": _last.get("imminence_score"),
+                    "ticks_since_last_spike": _last.get("ticks_since_last_spike"),
                 }
         except Exception:  # noqa: BLE001
             pass
