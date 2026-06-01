@@ -2217,6 +2217,11 @@ class DerivDaemon:
             # Persist memory snapshot for AI sidecar to learn from
             with suppress(Exception):
                 _now_sd = time.time()
+                _pace_sd = {}
+                try:
+                    _pace_sd = self._risk.get_spike_pace_state(_sym_sd, 1200.0)
+                except Exception:
+                    _pace_sd = {}
                 _mem_entry = {
                     "ts": _now_sd,
                     "iso": datetime.fromtimestamp(_now_sd, tz=timezone.utc).isoformat(),
@@ -2227,6 +2232,13 @@ class DerivDaemon:
                     "baseline_used": round(_baseline, 3),
                     "ratio": round(_ratio, 3),
                     "samples": _samples,
+                    # 2026-06-01 cadence awareness: where are we in the per-symbol
+                    # 20-min hot-window rhythm right now (HOT/NORMAL/COLD).
+                    "pace_state": _pace_sd.get("state"),
+                    "pace_ratio": _pace_sd.get("ratio"),
+                    "pace_spikes_20m": _pace_sd.get("spikes_window"),
+                    "pace_expected_20m": _pace_sd.get("expected_window"),
+                    "pace_rate_per_hour": _pace_sd.get("rate_per_hour"),
                     "last_spike_age_sec": (
                         round(_last_spike_age, 1) if _last_spike_age is not None else None
                     ),
@@ -2988,6 +3000,45 @@ class DerivDaemon:
                         "[PIPELINE] SPIKE_CLUSTER_ALIGNED %s | n=%d/%ds → +%.2f score→%.2f "
                         "(4th spike imminent ~57-76s)",
                         tick.symbol, _cl_n2, int(_cl_win2), _cl_boost, snap.score,
+                    )
+
+        # ── 2026-06-01 SPIKE-PACE / HOT-WINDOW AWARENESS ────────────────────
+        # Forensic: ~50-60% of an hour's spikes land in one 20-min window, then
+        # the market goes dry. CRASH500/600 deliver ~5-7/h, CRASH900 ~2-5/h,
+        # BOOM500 is erratic (2-45/h). We track WHERE we are in that rhythm and
+        # surface it to the LLM via score_breakdown + spike_density_memory.json.
+        # During a HOT window we grant a small readiness bonus so the bot does
+        # NOT miss the burst; during a COLD/dry zone we stay patient (the
+        # sniper MAX-window + chase-guard already block dry-zone butterflies).
+        if _is_bc_bias:
+            try:
+                _pace = self._risk.get_spike_pace_state(tick.symbol, 1200.0)
+            except Exception:
+                _pace = {}
+            _pace_state = str(_pace.get("state") or "")
+            if _pace_state:
+                snap.score_breakdown["spike_pace_state"] = _pace_state
+                snap.score_breakdown["spike_pace_ratio"] = _pace.get("ratio")
+                snap.score_breakdown["spike_pace_20m"] = _pace.get("spikes_window")
+                snap.score_breakdown["spike_pace_expected_20m"] = _pace.get("expected_window")
+            if _pace_state == "HOT":
+                _hot_bon = max(
+                    0.0,
+                    float(os.getenv("DERIV_SPIKE_PACE_HOT_BONUS", "0.5") or 0.5),
+                )
+                # Avoid double-rewarding when the tighter cluster bonus already fired.
+                if _hot_bon > 0.0 and "spike_cluster_bonus" not in snap.score_breakdown:
+                    snap.score = round(min(10.0, snap.score + _hot_bon), 3)
+                    snap.score_breakdown["spike_pace_hot_bonus"] = round(_hot_bon, 3)
+                    snap.reasons.append(
+                        f"spike_pace_HOT: {_pace.get('spikes_window')}/20m "
+                        f"(exp {_pace.get('expected_window')}) → +{_hot_bon:.2f}"
+                    )
+                    _LOGGER.info(
+                        "[PIPELINE] SPIKE_PACE_HOT %s | %s/20m exp=%s ratio=%s → +%.2f score→%.2f",
+                        tick.symbol, _pace.get("spikes_window"),
+                        _pace.get("expected_window"), _pace.get("ratio"),
+                        _hot_bon, snap.score,
                     )
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──

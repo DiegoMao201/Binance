@@ -1040,6 +1040,87 @@ class DerivRiskManager:
             return 0
         return sum(1 for ts in raw if ts >= cutoff)
 
+    # Per-symbol baseline spikes/hour (forensic 2026-06-01, ~30h, 1102 spikes):
+    # CRASH900 median 5, CRASH600 6, CRASH500 7, BOOM500 8 (erratic 2-45),
+    # CRASH300 ~4. Used as the expected-pace denominator when not enough live
+    # history exists yet (cold start). Override via env DERIV_SPIKE_BASELINE_PER_HOUR_MAP.
+    _SPIKE_BASELINE_PER_HOUR: dict[str, float] = {
+        "BOOM500": 8.0,
+        "CRASH500": 7.0,
+        "CRASH600": 6.0,
+        "CRASH900": 5.0,
+        "CRASH300": 4.0,
+        "BOOM1000": 6.0,
+        "CRASH1000": 6.0,
+    }
+
+    def get_spike_pace_state(
+        self, symbol: str, window_sec: float = 1200.0
+    ) -> dict[str, Any]:
+        """Real-time per-symbol spike CADENCE awareness ("franja caliente").
+
+        Forensic 2026-06-01 (1102 spikes): within each hour ~50-60% of that
+        hour's spikes land inside a single 20-min window, then the market goes
+        dry. Symbols also have very different rates (CRASH500/600 ~5-7/h,
+        CRASH900 ~5/h, BOOM500 erratic 2-45/h). This method tells the entry
+        pipeline AND the AI sidecar where we are in that rhythm RIGHT NOW so the
+        bot stays ready during hot windows and patient during dry zones — never
+        missing the 5 CRASH500/600 or 2 CRASH900 spikes the hour will deliver.
+
+        Returns dict with:
+          state: "HOT" | "NORMAL" | "COLD"
+          spikes_window: spikes seen in the last `window_sec`
+          expected_window: expected spikes in that window from the per-symbol rate
+          ratio: spikes_window / max(expected_window, eps)
+          rate_per_hour: live rolling rate (falls back to baseline on cold start)
+          window_sec: the window used
+        """
+        key = str(symbol or "").upper()
+        try:
+            w = max(60.0, float(window_sec))
+        except (TypeError, ValueError):
+            w = 1200.0
+        spikes_window = int(self.get_spike_count_recent(symbol, w))
+
+        # Live rolling rate from the hourly buckets (avg over lookback);
+        # fall back to forensic baseline when there is no/low history.
+        try:
+            _curr, _avg_full, _samples = self.get_hourly_spike_buckets(symbol, 6)
+        except Exception:
+            _curr, _avg_full, _samples = (0, 0.0, 0)
+        baseline = float(self._SPIKE_BASELINE_PER_HOUR.get(key, 5.0))
+        if _samples >= 2 and _avg_full > 0.0:
+            rate_per_hour = max(0.5, float(_avg_full))
+        else:
+            rate_per_hour = baseline
+        expected_window = rate_per_hour * (w / 3600.0)
+        ratio = spikes_window / expected_window if expected_window > 0 else 0.0
+
+        # Thresholds: HOT when running clearly above pace (burst window),
+        # COLD when clearly below (dry zone). Env-tunable.
+        try:
+            hot_ratio = float(os.getenv("DERIV_SPIKE_PACE_HOT_RATIO", "1.4") or 1.4)
+        except (TypeError, ValueError):
+            hot_ratio = 1.4
+        try:
+            cold_ratio = float(os.getenv("DERIV_SPIKE_PACE_COLD_RATIO", "0.5") or 0.5)
+        except (TypeError, ValueError):
+            cold_ratio = 0.5
+        if ratio >= hot_ratio:
+            state = "HOT"
+        elif ratio <= cold_ratio:
+            state = "COLD"
+        else:
+            state = "NORMAL"
+        return {
+            "state": state,
+            "spikes_window": spikes_window,
+            "expected_window": round(expected_window, 3),
+            "ratio": round(ratio, 3),
+            "rate_per_hour": round(rate_per_hour, 3),
+            "window_sec": int(w),
+        }
+
     def get_hourly_spike_buckets(
         self, symbol: str, lookback_hours: int = 6
     ) -> tuple[int, float, int]:

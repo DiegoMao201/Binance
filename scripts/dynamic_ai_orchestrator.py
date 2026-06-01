@@ -1511,6 +1511,13 @@ def _build_telemetry_from_logs(logs_dir: Path, lookback_sec: int = TELEMETRY_LOO
                     "current_block_reason": _last.get("block_reason"),
                     "elevated": _last.get("elevated"),
                     "recent_block_events": _events[-10:],
+                    # 2026-06-01 cadence/hot-window awareness: tells the LLM where
+                    # we are in the per-symbol 20-min spike rhythm right now.
+                    "pace_state": _last.get("pace_state"),
+                    "pace_ratio": _last.get("pace_ratio"),
+                    "pace_spikes_20m": _last.get("pace_spikes_20m"),
+                    "pace_expected_20m": _last.get("pace_expected_20m"),
+                    "pace_rate_per_hour": _last.get("pace_rate_per_hour"),
                 }
         except Exception:  # noqa: BLE001
             pass
