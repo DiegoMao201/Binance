@@ -829,15 +829,29 @@ class DerivDaemon:
             _cl_n = int(self._risk.get_spike_count_recent(symbol, _cl_win))
         except Exception:
             _cl_n, _cl_min = 0, 3
-        if _cl_n >= _cl_min:
+        # 2026-06-01 ANTI-BUTTERFLY recency gate (user directive): the cluster
+        # "4th spike imminent" edge is ONLY valid while the LAST spike is still
+        # recent. _elapsed is ticks-since-last-spike. If the burst already went
+        # quiet for > FRESH_TICKS the spikes "ya salieron" — relaxing the chase
+        # guard now would just let the bot enter 3-4 min later chasing
+        # butterflies. Beyond the fresh window we KEEP the full chase guard so
+        # the bot waits for a genuinely NEW setup (fresh imminence on a new gap).
+        _cl_fresh = float(os.getenv("DERIV_SPIKE_CLUSTER_FRESH_TICKS", "150") or 150)
+        if _cl_n >= _cl_min and _elapsed <= _cl_fresh:
             _cl_floor = float(os.getenv("DERIV_SPIKE_CLUSTER_CHASE_FLOOR_TICKS", "25") or 25)
             if _cl_floor < _chase_block:
                 _LOGGER.info(
-                    "[PIPELINE] SPIKE_CLUSTER_CHASE_RELAX %s | n=%d/%ds chase_block %.0ft→%.0ft "
-                    "(4th spike imminent)",
-                    symbol, _cl_n, int(_cl_win), _chase_block, _cl_floor,
+                    "[PIPELINE] SPIKE_CLUSTER_CHASE_RELAX %s | n=%d/%ds since_last=%.0ft<=%.0ft "
+                    "chase_block %.0ft→%.0ft (4th spike imminent, fresh)",
+                    symbol, _cl_n, int(_cl_win), _elapsed, _cl_fresh, _chase_block, _cl_floor,
                 )
                 _chase_block = _cl_floor
+        elif _cl_n >= _cl_min and _elapsed > _cl_fresh:
+            _LOGGER.info(
+                "[PIPELINE] SPIKE_CLUSTER_STALE %s | n=%d/%ds since_last=%.0ft>%.0ft "
+                "→ keep chase_guard (spikes already fired, no butterfly chasing)",
+                symbol, _cl_n, int(_cl_win), _elapsed, _cl_fresh,
+            )
 
         # Keep safety invariant even if caller path changes in the future.
         if _elapsed < _chase_block:
@@ -3015,7 +3029,30 @@ class DerivDaemon:
                 _cl_n2 = int(self._risk.get_spike_count_recent(tick.symbol, _cl_win2))
             except Exception:
                 _cl_n2 = 0
-            if _cl_n2 >= _cl_min2:
+            # 2026-06-01 ANTI-BUTTERFLY recency gate (user directive): the
+            # cluster bonus represents an IMMINENT 4th spike ONLY while the last
+            # spike is recent. Once the burst has been quiet for > FRESH_TICKS
+            # the spikes "ya salieron" and this bonus would just be chasing
+            # butterflies. Drop it and let the forward-looking imminence
+            # predictor (which self-resets to FRESH after each spike) decide.
+            _cl_fresh2 = float(os.getenv("DERIV_SPIKE_CLUSTER_FRESH_TICKS", "150") or 150)
+            _cl_last_tick2 = int(self._risk.get_last_spike_tick_count(tick.symbol) or 0)
+            try:
+                _cl_since2 = max(
+                    0.0,
+                    float(self._risk.get_tick_count(tick.symbol) - _cl_last_tick2),
+                )
+            except Exception:
+                _cl_since2 = 0.0
+            _cl_fresh_ok2 = (_cl_last_tick2 > 0 and _cl_since2 <= _cl_fresh2)
+            if _cl_n2 >= _cl_min2 and not _cl_fresh_ok2:
+                snap.score_breakdown["spike_cluster_stale"] = round(_cl_since2, 0)
+                _LOGGER.info(
+                    "[PIPELINE] SPIKE_CLUSTER_STALE %s | n=%d/%ds since_last=%.0ft>%.0ft "
+                    "→ no bonus (spikes already fired, waiting fresh setup)",
+                    tick.symbol, _cl_n2, int(_cl_win2), _cl_since2, _cl_fresh2,
+                )
+            if _cl_n2 >= _cl_min2 and _cl_fresh_ok2:
                 _cl_base = max(
                     0.0,
                     float(os.getenv("DERIV_SPIKE_CLUSTER_SCORE_BONUS", "1.0") or 1.0),

@@ -692,6 +692,24 @@ def _build_ai_prompt(
         f"If symbol_bleed_bonus>0, only approve when score>={_effective_floor:.2f} "
         f"and confidence>={max(_min_conf, 0.75):.2f}."
     )
+    # 2026-06-01 ANTI-BUTTERFLY (user directive): the edge is the spike that has
+    # NOT happened yet. Confirmations are spent once the spike fires — then the
+    # bot must wait for a NEW setup, not chase the burst that already played out.
+    _spike_timing_rule = ""
+    if _is_spike:
+        _spike_timing_rule = (
+            "\nSPIKE-TIMING DISCIPLINE (this is a BOOM/CRASH spike market): the only edge is the\n"
+            "spike that has NOT fired yet. Read score_breakdown timing fields:\n"
+            " - spike_imminence_state=RIPE or BUILDING => loaded to fire soon (good entry window).\n"
+            " - spike_imminence_state=FRESH => a spike JUST fired and the move is spent; do NOT chase, "
+            "approved=false unless brand-new independent momentum is explicit.\n"
+            " - spike_imminence_state=OVERDUE or DRY => statistically late; lower confidence.\n"
+            " - spike_cluster_stale present (any value) => the recent burst already fired and went quiet; "
+            "entering now is 'chasing butterflies' 3-4 min after the seguidilla. Do NOT approve on the basis "
+            "of spike_cluster_n alone when spike_cluster_stale is set.\n"
+            "Never approve an entry justified only by spikes that ALREADY occurred. Confirmations are for the "
+            "NEXT spike; if the spike already passed, wait for another.\n"
+        )
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -721,6 +739,7 @@ Respond ONLY with a JSON object:
 
 {_approve_cond}
 {_bleed_rule}
+{_spike_timing_rule}
 Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict."""
 
 
