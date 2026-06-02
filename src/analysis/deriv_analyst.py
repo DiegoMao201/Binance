@@ -246,6 +246,12 @@ _CACHE_SCORE_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_SCORE_DRIFT", "0.5
 _CACHE_HURST_DRIFT_THRESHOLD   = float(os.getenv("DERIV_CACHE_HURST_DRIFT", "0.03"))  # |ΔH| > 0.03
 _CACHE_ATR_DRIFT_THRESHOLD     = float(os.getenv("DERIV_CACHE_ATR_DRIFT", "0.15"))    # |ΔATRpct| > 15%
 _CACHE_VETO_SCORE_IMPROVE      = float(os.getenv("DERIV_CACHE_VETO_IMPROVE", "0.5"))  # stale veto threshold
+# 2026-06-02 operator directive: a cached confirmation generated BEFORE a spike
+# is stale once the spike fires (the ticks-since-last-spike counter resets from
+# a large value to ~0). When the live gap drops by more than this many ticks vs
+# the cached snapshot, a NEW spike happened → invalidate so the bot must hunt a
+# fresh post-spike confirmation instead of entering on the pre-spike one.
+_CACHE_SPIKE_GAP_RESET_MIN     = int(os.getenv("DERIV_CACHE_SPIKE_GAP_RESET_MIN", "30"))
 
 # Model preference order (all via OpenRouter — verified production model IDs)
 # google/gemini-2.5-flash               — fastest, cheapest (~$0.15/M); stable ID (preview-05-20 is deprecated)
@@ -573,6 +579,11 @@ def _build_cache_snapshot(
     atr_pct = float(score_breakdown.get("atr_pct") or score_breakdown.get("atr") or 0.0)
     regime = str(score_breakdown.get("regime") or "unknown")
     setup_type = _setup_type_from_breakdown(score_breakdown)
+    _spike_gap_raw = score_breakdown.get("spike_ticks_since_last")
+    try:
+        spike_gap = int(_spike_gap_raw) if _spike_gap_raw is not None else None
+    except (TypeError, ValueError):
+        spike_gap = None
     return {
         "score": round(float(score), 3),
         "score_bucket": round(float(score) * 2) / 2,   # nearest 0.5 bucket
@@ -582,6 +593,7 @@ def _build_cache_snapshot(
         "regime": regime,
         "setup_type": setup_type,
         "atr_pct": round(atr_pct, 5),
+        "spike_gap": spike_gap,
     }
 
 
@@ -643,6 +655,24 @@ def _should_invalidate_cache(
                 f"live_score={cs['score']:.2f} Δ={cs['score']-ps['score']:+.2f} "
                 f"(crossed threshold +{_CACHE_VETO_SCORE_IMPROVE})"
             )
+
+    # 8. SPIKE FIRED since the cached confirmation (2026-06-02 operator directive):
+    #    the ticks-since-last-spike counter RESET (live gap dropped sharply vs the
+    #    cached snapshot). The cached confirmation belonged to the PRE-spike setup
+    #    and is now spent — invalidate so the bot re-evaluates from scratch and
+    #    only enters on a genuinely NEW post-spike confirmation.
+    cur_gap = cs.get("spike_gap")
+    prev_gap = ps.get("spike_gap")
+    if (
+        cur_gap is not None
+        and prev_gap is not None
+        and prev_gap > 0
+        and cur_gap < prev_gap - _CACHE_SPIKE_GAP_RESET_MIN
+    ):
+        return True, (
+            f"SPIKE_FIRED: gap reset {prev_gap}t→{cur_gap}t "
+            f"(pre-spike confirmation spent, hunt fresh post-spike signal)"
+        )
 
     return False, ""  # cache still valid
 

@@ -3303,6 +3303,50 @@ class DerivDaemon:
                         _imm_score, _imm_boost, snap.score,
                     )
 
+        # ── 2026-06-02 SCARCITY (DRY) ENTRY GATE — operator directive ───────
+        # Observed live: when a symbol stays ~1h without a single spike (the
+        # imminence DRY zone = ticks-since-last-spike beyond p90) the bot kept
+        # entering on every "good score" and just bled to the SL waiting for a
+        # spike that was not coming. While the symbol is statistically DRY we
+        # BLOCK all entries — the symbol does NOT leave this state until a real
+        # spike resets the gap to FRESH, so this also prevents re-entry during
+        # the drought. The ONE exception the operator asked for: a near-perfect
+        # score (>=9) is allowed to take that rare "slow spike" that finally
+        # loads. In DRY no imminence/cluster/pace bonus fires, so a >=9 here is
+        # a genuinely exceptional setup.
+        if _is_bc_bias and _imm_state_early == "DRY":
+            _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "9.0") or 9.0)
+            if snap.score < _dry_override:
+                snap.score_breakdown["scarcity_dry_block"] = True
+                snap.score_breakdown["scarcity_dry_override_score"] = _dry_override
+                snap.score_breakdown["scarcity_dry_gap"] = _imm.get("ticks_since_last")
+                self._log_entry_block(
+                    tick.symbol, "SCARCITY_DRY_GATE",
+                    score=snap.score, effective_min_score=_dry_override,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason=(
+                        f"SCARCITY_DRY_GATE: symbol dry (gap={_imm.get('ticks_since_last')}t>p90) "
+                        f"requires score≥{_dry_override:.1f} got={snap.score:.2f}"
+                    ),
+                    extra={"regime": snap.regime, "imminence_state": "DRY"},
+                )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason="scarcity_dry_gate", score=snap.score,
+                )
+                return
+            snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
+            _LOGGER.info(
+                "[PIPELINE] SCARCITY_DRY_OVERRIDE %s | score=%.2f≥%.1f gap=%st "
+                "→ taking the slow spike",
+                tick.symbol, snap.score, _dry_override, _imm.get("ticks_since_last"),
+            )
+
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
         # AND the macro Higher-Direction is aligned (+1.5 hd_bonus already in score),

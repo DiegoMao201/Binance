@@ -147,6 +147,19 @@ _POST_SPIKE_DEGRADE_RATIO = max(
         0.90,
     ),
 )
+# 2026-06-02 SCARCITY (DRY) EXIT — operator directive: if a held position's
+# symbol goes statistically DRY (imminence DRY = ticks-since-last-spike beyond
+# p90) the spike we were waiting for is NOT coming. Cut the position now instead
+# of bleeding to the broker SL. Winners are protected: we only cut when peak
+# never reached PEAK_GUARD ($1) AND current PnL is below MAX_PROFIT ($0.30) — the
+# tier/trailing logic still owns anything that actually caught a spike.
+_SCARCITY_EXIT_ENABLE = _env_flag("DERIV_SCARCITY_EXIT_ENABLE", "true")
+_SCARCITY_EXIT_MAX_PROFIT = float(
+    os.getenv("DERIV_SCARCITY_EXIT_MAX_PROFIT", "0.30") or 0.30
+)
+_SCARCITY_EXIT_PEAK_GUARD = float(
+    os.getenv("DERIV_SCARCITY_EXIT_PEAK_GUARD", "1.0") or 1.0
+)
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
 # (dollar_floor) cierra antes de cuota.  Esto evita ganancias chicas en
@@ -807,6 +820,43 @@ class DerivTradeExecutor:
         # Update peak first.
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
+
+        # ─── RULE 0 — SCARCITY (DRY) EXIT (2026-06-02 operator directive) ───
+        # If the symbol has gone statistically dry (imminence DRY = ticks since
+        # last spike beyond p90) while we hold a NON-winning position, the spike
+        # we entered for is not coming. Cut it now — don't bleed to the broker
+        # SL. Winners (peak>=PEAK_GUARD or current>=MAX_PROFIT) are left to the
+        # tier/trailing logic below.
+        if (
+            _SCARCITY_EXIT_ENABLE
+            and cid not in self._closing
+            and self._risk is not None
+            and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
+            and current_profit < _SCARCITY_EXIT_MAX_PROFIT
+        ):
+            _imm_dry = ""
+            with suppress(Exception):
+                _imm_dry = str(
+                    self._risk.get_spike_imminence_state(oc.symbol).get("state") or ""
+                )
+            if _imm_dry == "DRY":
+                self._closing.add(cid)
+                oc.pending_close_reason = "scarcity_dry_exit"
+                _LOGGER.info(
+                    "[SCARCITY-DRY-EXIT] %s cid=%s sym=%s pnl=%.4f peak=%.4f "
+                    "imminence=DRY → close (spike not coming, don't bleed to SL)",
+                    source, cid, oc.symbol, current_profit, float(oc.peak_profit),
+                )
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[SCARCITY-DRY-EXIT] %s sell failed cid=%s: %s",
+                        source, cid, exc,
+                    )
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
 
         # ─── SPIKE-ARRIVED DETECTION (2026-05-30 v3) ────────────────────────
         # The entry's own spike is considered "arrived" the first time
