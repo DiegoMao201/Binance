@@ -147,6 +147,37 @@ _POST_SPIKE_DEGRADE_RATIO = max(
         0.90,
     ),
 )
+# 2026-06-02 SPIKE-FIRED RED CUT — operator directive ("timing confirmacion vs
+# entrada"). The bot often enters slightly EARLY: by the time the awaited spike
+# fires the position is already deep red, the spike is SMALL and never lifts PnL
+# to green (peak never crosses _SPIKE_ARRIVED_PEAK_MIN, so RULE 1 never arms),
+# and it bleeds the full -$2 broker SL. Forensic 2026-06-02: 22/53 SL losers
+# (42%) had >=1 spike fire DURING the hold yet still hit the SL.
+# Operator rule (verbatim): "llegó el spike, pequeño, sigue en rojo y NO salen
+# más confirmaciones post-spike → ciérrala de una; PERO si 1-3 min después llega
+# otra confirmación, espérala (puede empujar a verde)".
+# Mechanism: the entry's spike is "fired" once pre_spike_confirmations >= N.
+# We then wait FOLLOWUP_SEC for a NEW confirmation; the window RESETS every time
+# a fresh spike is seen (last_seen_spike_ts updates). Only when confirmations
+# DRY UP (no new spike within the window) AND we are already at a controlled
+# loss do we cut — saving the gap between the controlled floor and the -$2 SL.
+_POST_SPIKE_RED_CUT_ENABLE = _env_flag("DERIV_POST_SPIKE_RED_CUT_ENABLE", "true")
+# Min spikes that must have fired since entry to consider "the spike came".
+_POST_SPIKE_RED_MIN_FIRED = max(
+    1, min(int(os.getenv("DERIV_POST_SPIKE_RED_MIN_FIRED", "1") or 1), 10)
+)
+# Window (sec) to wait for ANOTHER confirmation after the last spike before
+# cutting. Resets on each new spike → "espero el siguiente spike 1-3 min".
+_POST_SPIKE_RED_FOLLOWUP_SEC = max(
+    20.0,
+    min(float(os.getenv("DERIV_POST_SPIKE_RED_FOLLOWUP_SEC", "120") or 120.0), 600.0),
+)
+# Only cut once the loss is at/below this controlled floor (negative). Cuts
+# BEFORE the -$2 broker SL but gives the position room first (not premature).
+_POST_SPIKE_RED_MAX_LOSS = min(
+    -0.20,
+    float(os.getenv("DERIV_POST_SPIKE_RED_MAX_LOSS", "-1.0") or -1.0),
+)
 # 2026-06-02 SCARCITY (DRY) EXIT — operator directive: if a held position's
 # symbol goes statistically DRY (imminence DRY = ticks-since-last-spike beyond
 # p90) the spike we were waiting for is NOT coming. Cut the position now instead
@@ -956,6 +987,47 @@ class DerivTradeExecutor:
                 except DerivClientError as exc:
                     _LOGGER.warning(
                         "[POST-SPIKE-NO-FOLLOWUP] %s sell failed cid=%s: %s",
+                        source, cid, exc,
+                    )
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
+
+        # ─── RULE 1B — SPIKE-FIRED RED CUT (2026-06-02 operator) ────────────
+        # The "entré muy temprano / muy rojo" case: the awaited spike already
+        # FIRED (pre_spike_confirmations >= MIN_FIRED) but it was small and never
+        # lifted PnL to green (spike_arrived_ts == 0, so RULE 1 above never
+        # arms). Operator contract: cut it small ONLY if no NEW confirmation
+        # arrives within the follow-up window — and the window RESETS on every
+        # fresh spike (last_seen_spike_ts), so while spikes keep coming we KEEP
+        # HOLDING (the next one may push green: "1-2-3 min llega el otro y pum").
+        # We only cut once confirmations dry up AND we're already at a
+        # controlled loss, saving the gap to the -$2 broker SL.
+        if (
+            _POST_SPIKE_RED_CUT_ENABLE
+            and cid not in self._closing
+            and float(oc.spike_arrived_ts or 0.0) == 0.0
+            and int(oc.pre_spike_confirmations) >= _POST_SPIKE_RED_MIN_FIRED
+            and float(oc.last_seen_spike_ts or 0.0) > 0.0
+            and current_profit <= _POST_SPIKE_RED_MAX_LOSS
+        ):
+            _since_last_conf = time.time() - float(oc.last_seen_spike_ts)
+            if _since_last_conf >= _POST_SPIKE_RED_FOLLOWUP_SEC:
+                self._closing.add(cid)
+                oc.pending_close_reason = "post_spike_red_cut"
+                _LOGGER.info(
+                    "[POST-SPIKE-RED-CUT] %s cid=%s sym=%s cur=%.4f peak=%.4f "
+                    "pre_conf=%d since_last_conf=%.0fs/%.0fs max_loss=%.2f → cut "
+                    "(spike fired but stayed red, no new confirmation, don't bleed to SL)",
+                    source, cid, oc.symbol, current_profit, float(oc.peak_profit),
+                    int(oc.pre_spike_confirmations), _since_last_conf,
+                    _POST_SPIKE_RED_FOLLOWUP_SEC, _POST_SPIKE_RED_MAX_LOSS,
+                )
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[POST-SPIKE-RED-CUT] %s sell failed cid=%s: %s",
                         source, cid, exc,
                     )
                     self._closing.discard(cid)
