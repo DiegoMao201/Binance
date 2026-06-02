@@ -815,6 +815,62 @@ class DerivDaemon:
             dyn_active,
         )
 
+        # ── 2026-06-02 HOT RE-ENTRY OVERRIDE (operator directive) ────────────
+        # "esa reentrada con una buena confirmación score 8+ debería entrar: el
+        # símbolo está calientico tirando spike y ya tenemos protecciones al SL".
+        # When a HIGH-score (>=8) fresh post-spike confirmation appears while the
+        # symbol is HOT (last spike very recent AND it just fired), we bypass the
+        # anti-chase guard and the max-window expiry. This is a genuinely NEW
+        # post-spike signal, not butterfly-chasing: the symbol is actively firing.
+        # Safe because exits now protect capital (tier 30% <$1, post_spike_red_cut,
+        # post_spike_no_followup, scarcity_dry_exit) — a bad re-entry is cut small,
+        # not bled to the -$2 SL.
+        _hot_reentry_enable = str(
+            os.getenv("DERIV_HOT_REENTRY_ENABLE", "true") or "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if _hot_reentry_enable:
+            _hot_min_score = float(
+                os.getenv("DERIV_HOT_REENTRY_MIN_SCORE", "8.0") or 8.0
+            )
+            # Symbol is "hot" only while the last spike is still fresh in ticks
+            # (it just fired) — beyond that the move already played out.
+            _hot_fresh_ticks = float(
+                os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "200") or 200
+            )
+            _hot_win_sec = float(
+                os.getenv("DERIV_HOT_REENTRY_WINDOW_SEC", "300") or 300
+            )
+            try:
+                _hot_recent_spikes = int(
+                    self._risk.get_spike_count_recent(symbol, _hot_win_sec)
+                )
+            except Exception:
+                _hot_recent_spikes = 0
+            _hot_min_spikes = max(
+                1, int(float(os.getenv("DERIV_HOT_REENTRY_MIN_SPIKES", "1") or 1))
+            )
+            if (
+                float(snap.score or 0.0) >= _hot_min_score
+                and _elapsed <= _hot_fresh_ticks
+                and _hot_recent_spikes >= _hot_min_spikes
+            ):
+                _sb_hot = (
+                    snap.score_breakdown
+                    if isinstance(snap.score_breakdown, dict)
+                    else {}
+                )
+                _sb_hot["hot_reentry_fired"] = round(float(snap.score or 0.0), 2)
+                _sb_hot["hot_reentry_elapsed_ticks"] = round(_elapsed, 1)
+                _sb_hot["hot_reentry_recent_spikes"] = int(_hot_recent_spikes)
+                _LOGGER.info(
+                    "[PIPELINE] HOT_REENTRY %s | score=%.2f≥%.1f since_last=%.0ft≤%.0ft "
+                    "spikes=%d/%ds → bypass chase_guard (símbolo calientico, "
+                    "protecciones SL activas)",
+                    symbol, float(snap.score or 0.0), _hot_min_score,
+                    _elapsed, _hot_fresh_ticks, _hot_recent_spikes, int(_hot_win_sec),
+                )
+                return True, ""
+
         # ── 2026-06-01 SPIKE-CLUSTER OVERRIDE ("se alinearon las estrellas") ──
         # Forensic over 1102 spikes: when >=3 spikes hit in the last 300s, the
         # NEXT spike's median gap collapses to 57-76s (vs 294-466s normal) =
@@ -2594,23 +2650,46 @@ class DerivDaemon:
             if _last_spike_tick > 0:
                 _elapsed_post_spike = float(self._risk.get_tick_count(tick.symbol) - _last_spike_tick)
                 if 0 <= _elapsed_post_spike < _post_spike_block_sec:
-                    _block_reason = (
-                        "post_spike_chase_guard:"
-                        f"{_elapsed_post_spike:.0f}t<"
-                        f"{_post_spike_block_sec:.0f}t"
-                    )
-                    _LOGGER.debug(
-                        "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.0ft < %.0ft",
-                        tick.symbol,
-                        _elapsed_post_spike,
-                        _post_spike_block_sec,
-                    )
-                    self._spike_enrich(
-                        tick.symbol,
-                        bot_entered=False,
-                        block_reason=_block_reason,
-                    )
-                    return
+                    # ── 2026-06-02 HOT RE-ENTRY bypass (operator directive) ──
+                    # If the symbol is HOT (just fired AND firing recently), do
+                    # NOT hard-block pre-scoring. Defer to scoring + the post-
+                    # spike strength gate, which only lets score>=8 fresh
+                    # confirmations through (weak scores still get the chase
+                    # guard there). SL protections cut any bad re-entry small.
+                    _hot_ok = False
+                    if str(os.getenv("DERIV_HOT_REENTRY_ENABLE", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
+                        _hot_fresh = float(os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "200") or 200)
+                        _hot_win = float(os.getenv("DERIV_HOT_REENTRY_WINDOW_SEC", "300") or 300)
+                        _hot_min_sp = max(1, int(float(os.getenv("DERIV_HOT_REENTRY_MIN_SPIKES", "1") or 1)))
+                        try:
+                            _hot_n = int(self._risk.get_spike_count_recent(tick.symbol, _hot_win))
+                        except Exception:
+                            _hot_n = 0
+                        if _elapsed_post_spike <= _hot_fresh and _hot_n >= _hot_min_sp:
+                            _hot_ok = True
+                            _LOGGER.info(
+                                "[POST_SPIKE_CHASE_GUARD] %s HOT bypass: elapsed=%.0ft "
+                                "spikes=%d/%ds → defer to score>=8 strength gate",
+                                tick.symbol, _elapsed_post_spike, _hot_n, int(_hot_win),
+                            )
+                    if not _hot_ok:
+                        _block_reason = (
+                            "post_spike_chase_guard:"
+                            f"{_elapsed_post_spike:.0f}t<"
+                            f"{_post_spike_block_sec:.0f}t"
+                        )
+                        _LOGGER.debug(
+                            "[POST_SPIKE_CHASE_GUARD] %s blocked: elapsed=%.0ft < %.0ft",
+                            tick.symbol,
+                            _elapsed_post_spike,
+                            _post_spike_block_sec,
+                        )
+                        self._spike_enrich(
+                            tick.symbol,
+                            bot_entered=False,
+                            block_reason=_block_reason,
+                        )
+                        return
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
