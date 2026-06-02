@@ -821,12 +821,14 @@ class DerivTradeExecutor:
         if current_profit > oc.peak_profit:
             oc.peak_profit = float(current_profit)
 
-        # ─── RULE 0 — SCARCITY (DRY) EXIT (2026-06-02 operator directive) ───
-        # If the symbol has gone statistically dry (imminence DRY = ticks since
-        # last spike beyond p90) while we hold a NON-winning position, the spike
-        # we entered for is not coming. Cut it now — don't bleed to the broker
-        # SL. Winners (peak>=PEAK_GUARD or current>=MAX_PROFIT) are left to the
-        # tier/trailing logic below.
+        # ─── RULE 0 — SCARCITY (seco/lento) EXIT (2026-06-02 operator) ─────
+        # If the symbol turns live-SECO ("seco/lento" purple card — elapsed >2.2×
+        # its own recent median inter-spike gap, ~10 min, NOT the 1h historical
+        # p90) while we hold a NON-winning position, the spike we entered for is
+        # not coming. Cut it now — don't bleed to the broker SL. Winners
+        # (peak>=PEAK_GUARD or current>=MAX_PROFIT) are left to the tier/trailing
+        # logic below. This is the operator's exact rule: "se puso morado → la
+        # cierro de una".
         if (
             _SCARCITY_EXIT_ENABLE
             and cid not in self._closing
@@ -834,18 +836,20 @@ class DerivTradeExecutor:
             and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
             and current_profit < _SCARCITY_EXIT_MAX_PROFIT
         ):
-            _imm_dry = ""
+            _is_dry = False
+            _scar_ratio = None
             with suppress(Exception):
-                _imm_dry = str(
-                    self._risk.get_spike_imminence_state(oc.symbol).get("state") or ""
-                )
-            if _imm_dry == "DRY":
+                _scar = self._risk.get_scarcity_state(oc.symbol)
+                _is_dry = bool(_scar.get("dry"))
+                _scar_ratio = _scar.get("ratio")
+            if _is_dry:
                 self._closing.add(cid)
                 oc.pending_close_reason = "scarcity_dry_exit"
                 _LOGGER.info(
                     "[SCARCITY-DRY-EXIT] %s cid=%s sym=%s pnl=%.4f peak=%.4f "
-                    "imminence=DRY → close (spike not coming, don't bleed to SL)",
+                    "seco/lento ratio=%s× → close (spike not coming, don't bleed to SL)",
                     source, cid, oc.symbol, current_profit, float(oc.peak_profit),
+                    _scar_ratio,
                 )
                 try:
                     await self._client.sell(cid)

@@ -3303,49 +3303,59 @@ class DerivDaemon:
                         _imm_score, _imm_boost, snap.score,
                     )
 
-        # ── 2026-06-02 SCARCITY (DRY) ENTRY GATE — operator directive ───────
-        # Observed live: when a symbol stays ~1h without a single spike (the
-        # imminence DRY zone = ticks-since-last-spike beyond p90) the bot kept
-        # entering on every "good score" and just bled to the SL waiting for a
-        # spike that was not coming. While the symbol is statistically DRY we
-        # BLOCK all entries — the symbol does NOT leave this state until a real
-        # spike resets the gap to FRESH, so this also prevents re-entry during
-        # the drought. The ONE exception the operator asked for: a near-perfect
-        # score (>=9) is allowed to take that rare "slow spike" that finally
-        # loads. In DRY no imminence/cluster/pace bonus fires, so a >=9 here is
-        # a genuinely exceptional setup.
-        if _is_bc_bias and _imm_state_early == "DRY":
-            _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "9.0") or 9.0)
-            if snap.score < _dry_override:
-                snap.score_breakdown["scarcity_dry_block"] = True
-                snap.score_breakdown["scarcity_dry_override_score"] = _dry_override
-                snap.score_breakdown["scarcity_dry_gap"] = _imm.get("ticks_since_last")
-                self._log_entry_block(
-                    tick.symbol, "SCARCITY_DRY_GATE",
-                    score=snap.score, effective_min_score=_dry_override,
-                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                    score_breakdown=snap.score_breakdown,
+        # ── 2026-06-02 SCARCITY (seco/lento) ENTRY GATE — operator directive ─
+        # Use the SAME live read as the manual-operator card (purple "seco/lento"
+        # at ~2.2× the symbol's own recent median inter-spike gap — typically
+        # ~10 min, NOT the 1h that the historical p90 would require). When the
+        # symbol is live-SECO the bot kept entering on every "good score" and
+        # bled to the SL waiting for a spike that was not coming. While SECO we
+        # require a near-perfect score (>=8) to enter — the operator's exact
+        # rule: "se puso morado, mejor espero un buen score". The symbol does
+        # NOT leave SECO until a real spike resets the ratio, so this also
+        # blocks re-entry through the whole drought. A >=8 setup arriving in
+        # SECO is the rare case where the signal lands WITH the slow spike.
+        if _is_bc_bias:
+            try:
+                _scar = self._risk.get_scarcity_state(tick.symbol)
+            except Exception:
+                _scar = {}
+            _scar_state = str(_scar.get("state") or "")
+            if _scar_state:
+                snap.score_breakdown["scarcity_state"] = _scar_state
+                snap.score_breakdown["scarcity_ratio"] = _scar.get("ratio")
+            if _scar.get("dry"):
+                _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.0") or 8.0)
+                if snap.score < _dry_override:
+                    snap.score_breakdown["scarcity_dry_block"] = True
+                    snap.score_breakdown["scarcity_dry_override_score"] = _dry_override
+                    self._log_entry_block(
+                        tick.symbol, "SCARCITY_DRY_GATE",
+                        score=snap.score, effective_min_score=_dry_override,
+                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                        score_breakdown=snap.score_breakdown,
+                    )
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score,
+                        reason=(
+                            f"SCARCITY_DRY_GATE: seco/lento (ratio={_scar.get('ratio')}× "
+                            f"elapsed={_scar.get('elapsed_s')}s) requires score≥{_dry_override:.1f} "
+                            f"got={snap.score:.2f}"
+                        ),
+                        extra={"regime": snap.regime, "scarcity_state": "SECO"},
+                    )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason="scarcity_dry_gate", score=snap.score,
+                    )
+                    return
+                snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
+                _LOGGER.info(
+                    "[PIPELINE] SCARCITY_DRY_OVERRIDE %s | score=%.2f≥%.1f ratio=%s× "
+                    "elapsed=%ss → taking the slow spike",
+                    tick.symbol, snap.score, _dry_override,
+                    _scar.get("ratio"), _scar.get("elapsed_s"),
                 )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score,
-                    reason=(
-                        f"SCARCITY_DRY_GATE: symbol dry (gap={_imm.get('ticks_since_last')}t>p90) "
-                        f"requires score≥{_dry_override:.1f} got={snap.score:.2f}"
-                    ),
-                    extra={"regime": snap.regime, "imminence_state": "DRY"},
-                )
-                self._spike_enrich(
-                    tick.symbol, bot_entered=False,
-                    block_reason="scarcity_dry_gate", score=snap.score,
-                )
-                return
-            snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
-            _LOGGER.info(
-                "[PIPELINE] SCARCITY_DRY_OVERRIDE %s | score=%.2f≥%.1f gap=%st "
-                "→ taking the slow spike",
-                tick.symbol, snap.score, _dry_override, _imm.get("ticks_since_last"),
-            )
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration

@@ -998,6 +998,84 @@ class DerivRiskManager:
         """
         return self._last_spike_ts.get(symbol, 0.0)
 
+    # ── 2026-06-02 LIVE SCARCITY ("seco/lento") — operator directive ────────
+    # Mirrors EXACTLY the manual-operator card (web/app/api/deriv/operator):
+    #   ratio = seconds_since_last_spike / median(recent inter-spike gaps in s)
+    #   FRESCO <0.5 · CARGANDO <0.9 · LISTO <1.4 · VENCIDO <2.2 · SECO ≥2.2
+    # This is a LIVE, self-adapting read (NOT a fixed historical percentile):
+    # when a symbol that normally fires every ~3 min has been quiet for >2.2×
+    # that, the card turns purple ("seco/lento") in ~10 min and so does this.
+    # The bot consumes the SAME signal so it acts like the operator's eyes.
+    _SCARCITY_RATIO_SECO = max(
+        1.4, float(os.getenv("DERIV_SCARCITY_RATIO_SECO", "2.2") or 2.2)
+    )
+    _SCARCITY_RATIO_VENCIDO = max(
+        1.1, float(os.getenv("DERIV_SCARCITY_RATIO_VENCIDO", "1.4") or 1.4)
+    )
+
+    def get_scarcity_state(self, symbol: str) -> dict[str, Any]:
+        """Live "seco/lento" detector — the manual-card readiness, in the bot.
+
+        Returns dict:
+          state: FRESCO | CARGANDO | LISTO | VENCIDO | SECO | SIN_DATOS
+          ratio: elapsed_s / median_gap_s (None if no data)
+          elapsed_s: seconds since the last spike
+          median_gap_s: median recent inter-spike interval in seconds
+          dry: True when state == SECO (the purple card → restrict/cut)
+        """
+        key = str(symbol or "").upper()
+        last_ts = float(self._last_spike_ts.get(symbol, self._last_spike_ts.get(key, 0.0)) or 0.0)
+        if last_ts <= 0.0:
+            return {"state": "SIN_DATOS", "ratio": None, "elapsed_s": None,
+                    "median_gap_s": None, "dry": False}
+        elapsed = max(0.0, time.time() - last_ts)
+
+        # Median of consecutive gaps among recent spike timestamps (wall-clock),
+        # exactly like the card's `gaps`. Window = _spike_count_window_sec (1h).
+        recent = sorted(
+            float(t) for t in (
+                self._spike_recent_ts.get(symbol)
+                or self._spike_recent_ts.get(key)
+                or []
+            )
+            if t
+        )
+        gaps = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+        median_gap: float | None = None
+        if gaps:
+            _s = sorted(gaps)
+            _m = len(_s) // 2
+            median_gap = _s[_m] if len(_s) % 2 else (_s[_m - 1] + _s[_m]) / 2.0
+        else:
+            # Cold-start fallback: expected gap from the per-symbol baseline rate
+            # so a freshly-restarted bot still recognises a dry symbol.
+            _rate = float(self._SPIKE_BASELINE_PER_HOUR.get(key, 5.0))
+            if _rate > 0:
+                median_gap = 3600.0 / _rate
+
+        if not median_gap or median_gap <= 0:
+            return {"state": "SIN_DATOS", "ratio": None, "elapsed_s": round(elapsed, 1),
+                    "median_gap_s": None, "dry": False}
+
+        ratio = elapsed / median_gap
+        if ratio < 0.5:
+            state = "FRESCO"
+        elif ratio < 0.9:
+            state = "CARGANDO"
+        elif ratio < self._SCARCITY_RATIO_VENCIDO:
+            state = "LISTO"
+        elif ratio < self._SCARCITY_RATIO_SECO:
+            state = "VENCIDO"
+        else:
+            state = "SECO"
+        return {
+            "state": state,
+            "ratio": round(ratio, 2),
+            "elapsed_s": round(elapsed, 1),
+            "median_gap_s": round(median_gap, 1),
+            "dry": state == "SECO",
+        }
+
     def get_last_spike_tick_count(self, symbol: str) -> int:
         """Return the ingest-tick count at which the last spike for *symbol* was detected.
 
