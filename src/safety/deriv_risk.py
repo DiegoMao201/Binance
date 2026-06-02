@@ -562,6 +562,28 @@ class DerivRiskManager:
             600.0,
             min(float(os.getenv("DERIV_SPIKE_COUNT_WINDOW_SEC", "3600") or 3600), 72 * 3600.0),
         )
+        # 2026-06-02 SCARCITY MEDIAN FIX — the manual card computes its "típico"
+        # median over a LONG window (~24h, 79-187 samples) so it is stable. The
+        # 1h _spike_recent_ts window (3-8 samples) collapses after a fast burst
+        # (→ false SECO) or inflates during a slowdown (→ never SECO), inverting
+        # the card. Keep a SEPARATE long-retention timestamp list ONLY for the
+        # scarcity median so spikes_1h counts stay on the 1h window untouched.
+        self._spike_scar_ts: dict[str, list[float]] = {}
+        self._scar_window_sec = max(
+            3600.0,
+            min(float(os.getenv("DERIV_SCARCITY_WINDOW_SEC", "86400") or 86400), 72 * 3600.0),
+        )
+        # Minimum inter-spike gaps required before trusting the LIVE median.
+        # Below this we fall back to the per-symbol baseline rate so a sparse
+        # window (e.g. just after a restart, or n=3) cannot fabricate a SECO.
+        self._scar_min_gaps = max(
+            5, int(float(os.getenv("DERIV_SCARCITY_MIN_GAPS", "12") or 12))
+        )
+        # Seed the scarcity history from the persisted spike-event log so that
+        # right after a restart/deploy the bot's median already matches the
+        # manual card (which reads the same ~24h JSON) instead of waiting hours
+        # to re-accumulate enough live samples.
+        self._seed_scarcity_history_from_disk()
         _entry_tick_only_raw = os.getenv("DERIV_ENTRY_TICK_ONLY", "true").strip().lower()
         # Tick-only entry mode: spike events remain for telemetry and dynamic tuning,
         # but cannot directly gate or force entry decisions.
@@ -916,6 +938,12 @@ class DerivRiskManager:
                         _recent.append(_spike_ts)
                         _cutoff = _spike_ts - self._spike_count_window_sec
                         self._spike_recent_ts[symbol] = [ts for ts in _recent if ts >= _cutoff]
+                        # Long-retention list for the scarcity median (mirrors the
+                        # card's ~24h window so the median is stable, not 1h-noisy).
+                        _scar = self._spike_scar_ts.setdefault(symbol, [])
+                        _scar.append(_spike_ts)
+                        _scar_cutoff = _spike_ts - self._scar_window_sec
+                        self._spike_scar_ts[symbol] = [ts for ts in _scar if ts >= _scar_cutoff]
                         # Persist inter-spike intervals for adaptive pre-filter.
                         # Ignore ultra-short clusters (same impulse burst).
                         _min_real_interval = int(os.getenv("DERIV_SPIKE_INTERVAL_MIN_TICKS", "25"))
@@ -1013,6 +1041,68 @@ class DerivRiskManager:
         1.1, float(os.getenv("DERIV_SCARCITY_RATIO_VENCIDO", "1.4") or 1.4)
     )
 
+    def _seed_scarcity_history_from_disk(self) -> None:
+        """Pre-fill the scarcity timestamp history from the persisted spike log.
+
+        The manual-operator card computes its "típico" median over the last ~24h
+        of `deriv_spike_events.json`. After a restart the bot's in-memory history
+        is empty, so without seeding it would fall back to the baseline rate for
+        hours. Loading the same JSON here makes the bot's scarcity median match
+        the card immediately. Best-effort: any failure leaves history empty and
+        the min-gaps guard keeps behaviour safe (baseline fallback).
+        """
+        try:
+            _state_dir = Path(
+                os.environ.get(
+                    "BOT_STATE_DIR",
+                    os.environ.get(
+                        "LOGS_DIR", Path(__file__).parents[2] / "logs"
+                    ),
+                )
+            )
+            _spike_file = _state_dir / "deriv_spike_events.json"
+            if not _spike_file.exists():
+                return
+            with open(_spike_file, encoding="utf-8") as _fh:
+                _events = json.load(_fh)
+            if not isinstance(_events, list):
+                return
+            _now = time.time()
+            _scar_cut = _now - self._scar_window_sec
+            _recent_cut = _now - self._spike_count_window_sec
+            _scar: dict[str, list[float]] = {}
+            _recent: dict[str, list[float]] = {}
+            for _ev in _events:
+                if not isinstance(_ev, dict):
+                    continue
+                _sym = str(_ev.get("symbol") or "").strip()
+                _ts = _ev.get("ts")
+                if not _sym or not isinstance(_ts, (int, float)):
+                    continue
+                _ts = float(_ts)
+                if _ts >= _scar_cut:
+                    _scar.setdefault(_sym, []).append(_ts)
+                if _ts >= _recent_cut:
+                    _recent.setdefault(_sym, []).append(_ts)
+            for _sym, _lst in _scar.items():
+                _lst.sort()
+                self._spike_scar_ts[_sym] = _lst
+                # Also seed last-spike ts so scarcity elapsed is correct at boot.
+                if _lst:
+                    self._last_spike_ts.setdefault(_sym, _lst[-1])
+            for _sym, _lst in _recent.items():
+                _lst.sort()
+                self._spike_recent_ts.setdefault(_sym, _lst)
+            if _scar:
+                _LOGGER.info(
+                    "[SCARCITY_SEED] loaded spike history for %d symbols from %s "
+                    "(scar samples: %s)",
+                    len(_scar), _spike_file.name,
+                    {k: len(v) for k, v in _scar.items()},
+                )
+        except Exception as _exc:  # best-effort only
+            _LOGGER.debug("[SCARCITY_SEED] skipped: %s", _exc)
+
     def get_scarcity_state(self, symbol: str) -> dict[str, Any]:
         """Live "seco/lento" detector — the manual-card readiness, in the bot.
 
@@ -1031,24 +1121,31 @@ class DerivRiskManager:
         elapsed = max(0.0, time.time() - last_ts)
 
         # Median of consecutive gaps among recent spike timestamps (wall-clock),
-        # exactly like the card's `gaps`. Window = _spike_count_window_sec (1h).
+        # exactly like the card's `gaps`. Uses the LONG scarcity window (~24h)
+        # NOT the 1h count window: the 1h window has only 3-8 samples and its
+        # median collapses after a fast burst (false SECO) or inflates during a
+        # slowdown (never SECO), inverting the card. The long window matches the
+        # card's stable "típico" median (79-187 samples).
         recent = sorted(
             float(t) for t in (
-                self._spike_recent_ts.get(symbol)
-                or self._spike_recent_ts.get(key)
+                self._spike_scar_ts.get(symbol)
+                or self._spike_scar_ts.get(key)
                 or []
             )
             if t
         )
         gaps = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
         median_gap: float | None = None
-        if gaps:
+        _median_source = "live"
+        if len(gaps) >= self._scar_min_gaps:
             _s = sorted(gaps)
             _m = len(_s) // 2
             median_gap = _s[_m] if len(_s) % 2 else (_s[_m - 1] + _s[_m]) / 2.0
         else:
-            # Cold-start fallback: expected gap from the per-symbol baseline rate
-            # so a freshly-restarted bot still recognises a dry symbol.
+            # Sparse data (fresh restart, burst, or n<min): DO NOT trust the live
+            # median (it fabricates false SECO from n=3). Fall back to the
+            # per-symbol baseline expected gap so we stay conservative.
+            _median_source = "baseline"
             _rate = float(self._SPIKE_BASELINE_PER_HOUR.get(key, 5.0))
             if _rate > 0:
                 median_gap = 3600.0 / _rate
@@ -1073,6 +1170,8 @@ class DerivRiskManager:
             "ratio": round(ratio, 2),
             "elapsed_s": round(elapsed, 1),
             "median_gap_s": round(median_gap, 1),
+            "median_source": _median_source,
+            "samples": len(gaps),
             "dry": state == "SECO",
         }
 
