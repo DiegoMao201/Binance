@@ -16,6 +16,7 @@
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.14.0",
     "next": "16.2.6",
+    "pg": "^8.21.0",
     "plotly.js-dist-min": "3.0.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "prisma": "^6.8.2",
