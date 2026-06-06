@@ -1,6 +1,5 @@
 "use client";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { AnalyticsGrid, Probabilidad, ZScore, Desglose } from "./analytics-widgets";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ResponsiveContainer, AreaChart, Area, LineChart, Line, BarChart, Bar,
