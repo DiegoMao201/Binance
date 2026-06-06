@@ -2507,15 +2507,15 @@ class DerivTradeExecutor:
         _sb = record.get("score_breakdown") or {}
         record.setdefault("execution_grade", _sb.get("execution_grade", "?"))
         _fvg_tier = str(_sb.get("fvg_tier", ""))
+        # Direct assignment — setdefault would silently leave a stale/None value in place.
+        record["fvg_tier"]   = _fvg_tier if _fvg_tier else "none"
+        record["setup_type"] = str(_sb.get("setup_type", "none"))
         record.setdefault("fvg_bypassed", _fvg_tier in ("no_fvg_escape_valve", "no_fvg_penalized"))
         record.setdefault("hurst_penalty_applied", "neutral_zone_penalty" in _sb)
         # ── Rich telemetry injected at close time ─────────────────────────
         # These fields enable per-trade forensics without reprocessing score_breakdown.
         record.setdefault("spread_at_entry", round(float(_sb.get("spread_pct_at_entry", 0)), 5))
         record.setdefault("ema200_distance_at_entry_pct", _sb.get("ema200_dev_pct"))
-        # 2026-06-06: surface key categorization fields at top level for direct CSV/SQL analysis
-        record.setdefault("fvg_tier", _fvg_tier if _fvg_tier else "none")
-        record.setdefault("setup_type", str(_sb.get("setup_type", "none")))
         # For binary CRASH/BOOM contracts, broker floating_pnl is ≤ 0 until settlement,
         # so oc.peak_profit (DPM intracontract tracker) stays at 0.  Use max_pnl_alcanzado
         # (= max(state.peak_profit, final_pnl)) which correctly captures the win profit at
