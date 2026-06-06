@@ -338,7 +338,6 @@ export default function DerivAnalyticsClient({ initialState }) {
   color: T.text, fontFamily: FONT_MONO, padding: "16px 18px",
   display: "flex", flexDirection: "column", gap: 14,
 }}>
-  <AnalyticsGrid />
       <TopBar status={data?.status} live={live} setLive={setLive} lastUpdate={lastUpdate} loading={loading} error={err} onRefresh={fetchOnce} kpi={kpiTop} />
       <TabBar tabs={TABS} active={tab} onChange={setTab} />
       <AnimatePresence mode="wait">
@@ -741,6 +740,56 @@ function OpenContractCard({ c }) {
   const aiApproved = c.ai_approved ?? scoreBreakdown.ai_approved ?? null;
   const aiConfidence = c.ai_confidence ?? scoreBreakdown.ai_confidence ?? null;
   const aiModel = c.ai_model ?? scoreBreakdown.ai_model ?? null;
+
+  // New state for analytics data
+  const [spikeProbData, setSpikeProbData] = useState(null);
+  const [waitZScoreData, setWaitZScoreData] = useState(null);
+  const [rarityPercentileData, setRarityPercentileData] = useState(null);
+
+  const fetchAnalyticsData = useCallback(async () => {
+    if (!sym || sym === "–") return;
+    try {
+      const [spikeProbRes, waitZScoreRes, rarityPercentileRes] = await Promise.all([
+        fetch(`/api/deriv/analytics/spike-probability?symbol=${sym}&window=100,200,500`),
+        fetch(`/api/deriv/analytics/wait-zscore?symbol=${sym}`),
+        fetch(`/api/deriv/analytics/rarity-percentile?symbol=${sym}&lookback=72`),
+      ]);
+
+      if (spikeProbRes.ok) {
+        const json = await spikeProbRes.json();
+        setSpikeProbData(json);
+      } else {
+        console.error(`Error fetching spike probability for ${sym}: ${spikeProbRes.status}`);
+      }
+
+      if (waitZScoreRes.ok) {
+        const json = await waitZScoreRes.json();
+        setWaitZScoreData(json);
+      } else {
+        console.error(`Error fetching wait z-score for ${sym}: ${waitZScoreRes.status}`);
+      }
+
+      if (rarityPercentileRes.ok) {
+        const json = await rarityPercentileRes.json();
+        setRarityPercentileData(json);
+      } else {
+        console.error(`Error fetching rarity percentile for ${sym}: ${rarityPercentileRes.status}`);
+      }
+    } catch (err) {
+      console.error(`Error fetching analytics data for ${sym}: ${err}`);
+    }
+  }, [sym]);
+
+  useEffect(() => {
+    fetchAnalyticsData();
+    const interval = setInterval(fetchAnalyticsData, 10000); // Poll every 10 seconds
+    return () => clearInterval(interval);
+  }, [fetchAnalyticsData]);
+
+  const maxProb = Math.max(...Object.values(spikeProbData?.probabilities || {}).filter(v => v != null));
+  const zscore = waitZScoreData?.zscore;
+  const rarity = rarityPercentileData?.metrics?.price_change_percentile;
+
   return (
     <div style={{
       background: T.panel2, borderRadius: 10,
@@ -805,6 +854,24 @@ function OpenContractCard({ c }) {
           <MicroStat lbl="REGIME" val={regimeVal || "–"} color={REGIME_COLORS[regimeVal] || T.cyan} />
         </div>
       )}
+      {/* New analytics data injection */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+        <MicroStat
+          lbl={<>PROB. SPIKE <TooltipHint tip="Probabilidad de que ocurra un spike en las próximas ventanas de ticks." /></>}
+          val={maxProb != null ? pct(maxProb) : "–"}
+          color={maxProb > 0.7 ? T.green : maxProb > 0.5 ? T.amber : T.textD}
+        />
+        <MicroStat
+          lbl={<>Z-SCORE <TooltipHint tip="Medida de cuán inusual es el tiempo de espera actual para un spike." /></>}
+          val={zscore != null ? n(zscore, 2) : "–"}
+          color={zscore > 2 || zscore < -2 ? T.red : zscore > 1 || zscore < -1 ? T.amber : T.green}
+        />
+        <MicroStat
+          lbl={<>RARITY % <TooltipHint tip="Percentil de rareza del movimiento de precio actual en comparación con el historial." /></>}
+          val={rarity != null ? pct(rarity, 0) : "–"}
+          color={rarity > 0.9 ? T.red : rarity > 0.75 ? T.amber : T.textD}
+        />
+      </div>
       {aiApproved != null && (
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <Pill color={aiApproved ? T.green : T.red} size="sm">

@@ -31,13 +31,16 @@ export async function GET(request: NextRequest) {
     for (const windowSize of windows) {
       const query = `
         SELECT 
-          COUNT(*) FILTER (WHERE score > 7.0) as spike_count,
+          SUM(CASE WHEN score > 7.0 THEN 1 ELSE 0 END) as spike_count,
           COUNT(*) as total_count
-        FROM deriv_tick_snapshots 
-        WHERE symbol = $1 
-          AND captured_at > NOW() - INTERVAL '24 hours'
-        ORDER BY captured_at DESC
-        LIMIT $2
+        FROM (
+          SELECT score
+          FROM deriv_tick_snapshots 
+          WHERE symbol = $1 
+            AND captured_at > NOW() - INTERVAL '24 hours'
+          ORDER BY captured_at DESC
+          LIMIT $2
+        ) as subquery
       `;
       
       const result = await queryDerivAnalytics(query, [symbol, windowSize]);

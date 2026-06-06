@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
           CASE 
             WHEN price > LAG(price) OVER (ORDER BY captured_at) THEN price - LAG(price) OVER (ORDER BY captured_at)
             WHEN price < LAG(price) OVER (ORDER BY captured_at) THEN LAG(price) OVER (ORDER BY captured_at) - price
-n            ELSE 0
+            ELSE 0
           END as price_change,
           EXTRACT(EPOCH FROM (captured_at - LAG(captured_at) OVER (ORDER BY captured_at))) as time_diff_sec
         FROM deriv_tick_snapshots 
