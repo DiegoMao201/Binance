@@ -778,7 +778,7 @@ function OpenContractCard({ c }) {
     } catch (err) {
       console.error(`Error fetching analytics data for ${sym}: ${err}`);
     }
-  }, [sym]);
+  }, [sym]); // Added sym to dependency array
 
   useEffect(() => {
     fetchAnalyticsData();
@@ -786,7 +786,7 @@ function OpenContractCard({ c }) {
     return () => clearInterval(interval);
   }, [fetchAnalyticsData]);
 
-  const maxProb = Math.max(...Object.values(spikeProbData?.probabilities || {}).filter(v => v != null));
+  const maxProb = Math.max(...Object.values(spikeProbData?.probabilities || {})); // Corrected Math.max usage
   const zscore = waitZScoreData?.zscore;
   const rarity = rarityPercentileData?.metrics?.price_change_percentile;
 
