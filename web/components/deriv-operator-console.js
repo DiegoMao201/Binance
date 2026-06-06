@@ -99,64 +99,26 @@ function Stat({ label, value, color }) {
   );
 }
 
-/* ── live confirmation strip inside a symbol card ────────── */
-function LiveScore({ live }) {
-  if (!live) return null;
-  const k = KIND[live.kind] || KIND.INFO;
-  const score = live.score;
-  const gate = live.gate;
-  const gap = live.scoreGap; // gate - score; <=0 means confirmed
-  const pctToGate = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
-  const barColor = gap != null && gap <= 0 ? T.green : gap != null && gap < 0.4 ? T.amber : T.cyan;
+/* ── Q&A row (human language stat) ──────────────────────── */
+function QARow({ q, a, aColor }) {
+  const col = aColor || "#374151";
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: "9px 12px", background: T.bg2, borderTop: `1px solid ${T.border}`, borderBottom: `1px solid ${T.border}` }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Confirmación en vivo</span>
-        <span style={{
-          fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 800, color: k.color,
-          background: k.color + "18", border: `1px solid ${k.color}44`, borderRadius: 4, padding: "2px 7px",
-        }}>{k.label}</span>
-      </div>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
-        <div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Score</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: barColor, lineHeight: 1 }}>{num(score)}</div>
-        </div>
-        <div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>≥ {num(gate)}</div>
-        </div>
-        <div style={{ marginLeft: "auto", textAlign: "right" }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Falta</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: gap != null && gap <= 0 ? T.green : T.amber }}>
-            {gap == null ? "–" : gap <= 0 ? "LISTO ✓" : `+${num(gap)}`}
-          </div>
-        </div>
-      </div>
-      {pctToGate != null && (
-        <div style={{ height: 5, borderRadius: 3, background: T.bg, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${pctToGate}%`, background: barColor, transition: "width 500ms ease" }} />
-        </div>
-      )}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>régimen <b style={{ color: T.text }}>{live.regime || "–"}</b></span>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>dir <b style={{ color: sideColor(live.side) }}>{sideLabel(live.side)}</b></span>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>Hurst <b style={{ color: T.text }}>{num(live.hurst, 3)}</b></span>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD }}>vol <b style={{ color: T.text }}>{live.volRegime || "–"}</b></span>
-      </div>
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+      gap: 8, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)",
+    }}>
+      <span style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.3 }}>{q}</span>
+      <span style={{
+        fontSize: 12, fontWeight: 700, color: col, whiteSpace: "nowrap",
+        background: col + "18", border: `1px solid ${col}33`,
+        borderRadius: 20, padding: "3px 10px",
+      }}>{a}</span>
     </div>
   );
 }
 
 /* ── symbol card ─────────────────────────────────────────── */
 function SymbolCard({ s }) {
-  const ready = s.readiness || { state: "SIN_DATOS", level: 0 };
-  const rc = READY_COLOR[ready.state] || T.mute;
-  const dir = s.lastSpike?.direction;
-  const dirColor = dir === "DOWN" ? T.red : dir === "UP" ? T.green : T.textD;
-  const hasOpen = !!s.openContract;
-  const ticks = s.live?.ticksSinceSpike ?? s.lastSpike?.ticks_since_last_spike ?? null;
-
   const [analytics, setAnalytics] = useState(null);
   useEffect(() => {
     const sym = s.symbol;
@@ -175,152 +137,217 @@ function SymbolCard({ s }) {
     return () => { active = false; clearInterval(id); };
   }, [s.symbol]);
 
+  /* ─ data ─ */
+  const secs    = Number(s.secsSinceLastSpike) || 0;
+  const p75Sec  = Number(s.p75GapSec) || null;
+  const medSec  = Number(s.medianGapSec) || null;
+  const ticks   = s.live?.ticksSinceSpike ?? s.lastSpike?.ticks_since_last_spike ?? null;
+  const recent  = Number(s.counts?.h1) || 0;
+  const cluster = analytics?.snapshot?.spike_cluster_active ?? false;
+  const hasOpen = !!s.openContract;
+
+  const isInactive     = s.topReasons?.some(r => r.reason === "dynamic_symbol_inactive")
+                       || s.readiness?.state === "SIN_DATOS";
+  const hasChaseGuard  = s.topReasons?.some(r =>
+    r.reason?.includes("chase") || r.reason?.includes("post_spike_chase"));
+  const clusterDone    = recent >= 3 && !cluster;
+
+  /* ─ semáforo (user spec) ─
+     Rojo: cluster agotado (3+ seguidos) OR inactivo
+     Verde: ticks > p75 histórico + sin chase_guard
+     Amarillo: todo lo demás (spike reciente <120t OR acumulando) */
+  let sem;
+  if (isInactive || clusterDone) sem = "red";
+  else if (secs > 0 && p75Sec && secs > p75Sec && !hasChaseGuard) sem = "green";
+  else sem = "amber";
+
+  const SEM = {
+    green: {
+      label: "Lista para entrar", dot: "#22d3a3",
+      boxBg: "#f0fdf9", boxBorder: "#86efac", boxText: "#065f46",
+    },
+    amber: {
+      label: "Observar", dot: "#f59e0b",
+      boxBg: "#fffbeb", boxBorder: "#fcd34d", boxText: "#92400e",
+    },
+    red: {
+      label: isInactive ? "Pausado" : "No entrar ahora",
+      dot: isInactive ? "#9ca3af" : "#ef4444",
+      boxBg: isInactive ? "#f9fafb" : "#fff5f5",
+      boxBorder: isInactive ? "#d1d5db" : "#fca5a5",
+      boxText: isInactive ? "#374151" : "#991b1b",
+    },
+  };
+  const S = SEM[sem];
+
+  /* ─ main message ─ */
+  const minsSince = secs > 0 ? Math.round(secs / 60) : null;
+  const medMins   = medSec ? Math.round(medSec / 60) : null;
+  let msgEmoji, msgTitle, msgBody;
+
+  if (isInactive) {
+    msgEmoji = "⛔";
+    msgTitle = "El bot lo tiene pausado";
+    msgBody  = "El sistema automático decidió pausar este símbolo temporalmente. Puedes operar manual, pero las condiciones no son favorables ahora mismo.";
+  } else if (clusterDone) {
+    msgEmoji = "🚨";
+    msgTitle = "Demasiado pronto — el mercado se agotó";
+    msgBody  = `Cayó ${recent} veces seguidas hace poco. Cuando pasa eso, el mercado descansa y las siguientes caídas tardan el doble de lo normal. Espera${medMins ? ` al menos ${medMins} minutos` : " un buen rato"} antes de entrar.`;
+  } else if (sem === "amber" && ticks !== null && ticks < 120) {
+    msgEmoji = "⏳";
+    msgTitle = "Acaba de caer — espera un momento";
+    msgBody  = "Hace apenas unos segundos ocurrió una caída fuerte. Cuando pasa esto, a veces viene otra rápido. Espera 2 minutos viendo la pantalla. Si el precio sube un poco y vuelve a bajar fuerte, ese es el momento de entrar.";
+  } else if (sem === "green") {
+    msgEmoji = "✅";
+    msgTitle = "Buena ventana — está cargada";
+    msgBody  = `Llevan${minsSince != null ? ` casi ${minsSince} minutos` : " un buen rato"} sin caída y hay mucha energía acumulada. Esta es la zona donde más frecuentemente ocurre la siguiente caída. Las probabilidades estadísticas están a tu favor.`;
+  } else {
+    const pct = p75Sec && secs ? Math.round((secs / p75Sec) * 100) : null;
+    msgEmoji = "⏳";
+    msgTitle = "Acumulando energía";
+    msgBody  = `El mercado está acumulando energía.${pct != null ? ` Ya pasó el ${pct}% del tiempo típico entre caídas.` : ""} En unos minutos podría estar lista la próxima oportunidad. Mantente atenta.`;
+  }
+
+  /* ─ Q&A answers ─ */
+  const z = analytics?.spike_stats?.z_score;
+  let energyLabel, energyColor;
+  if (clusterDone)      { energyLabel = "No · se agotó";      energyColor = "#ef4444"; }
+  else if (z == null)   { energyLabel = "Calculando…";         energyColor = "#9ca3af"; }
+  else if (z > 1.2)     { energyLabel = "Sí, hay energía";    energyColor = "#22d3a3"; }
+  else if (z > 0.2)     { energyLabel = "Puede que sí";       energyColor = "#f59e0b"; }
+  else                  { energyLabel = "Todavía poca";        energyColor = "#9ca3af"; }
+
+  let botLabel, botColor;
+  if (isInactive)                                                    { botLabel = "No · desactivado";  botColor = "#9ca3af"; }
+  else if (hasChaseGuard)                                            { botLabel = "No · esperando";    botColor = "#f59e0b"; }
+  else if (s.live?.kind === "CONFIRMADO" || s.live?.scoreGap <= 0)  { botLabel = "¡Sí! · entrando";   botColor = "#22d3a3"; }
+  else if (s.live?.scoreGap != null && s.live.scoreGap < 1)         { botLabel = `Casi · falta ${num(s.live.scoreGap, 1)}`; botColor = "#f59e0b"; }
+  else if (s.live)                                                   { botLabel = "No · falta score";  botColor = "#ef4444"; }
+  else                                                               { botLabel = "Evaluando…";         botColor = "#9ca3af"; }
+
+  /* ─ progress bar ─ */
+  const acumPct  = medSec && secs ? Math.min(100, Math.round((secs / medSec) * 100)) : 0;
+  const barColor = sem === "green" ? "#22d3a3" : sem === "red" ? "#ef4444" : "#f59e0b";
+  const barText  = ticks !== null && ticks < 120
+    ? "Ventana de oportunidad: primeros minutos después de la caída"
+    : clusterDone
+    ? `Solo el ${acumPct}% del tiempo típico ha pasado desde el cluster`
+    : `Acumulación: ${acumPct}% del tiempo típico entre caídas ya pasó`;
+
+  /* ─ dots (últimas caídas seguidas) ─ */
+  const TOTAL = 5;
+  const filled = Math.min(Math.max(0, recent), TOTAL);
+  const hasPossible = sem !== "red" && filled < TOTAL;
+  const dots = Array.from({ length: TOTAL }, (_, i) => {
+    if (i < filled)                    return "filled";
+    if (i === filled && hasPossible)   return "possible";
+    return "empty";
+  });
+  const dotText = filled === 0         ? "Sin caídas recientes en esta hora"
+    : filled === 1                     ? "Caída sola · la siguiente se acerca"
+    : clusterDone                      ? `${filled} seguidas · ya se descargó`
+    : `${filled} seguidas · posible una más`;
+
+  const symDisplay = (s.symbol || "").replace(/^CRASH/, "CRASH ");
+  const SANS = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+
   return (
     <div style={{
-      background: T.panel, borderRadius: 10,
-      border: `1px solid ${hasOpen ? T.cyan + "66" : rc + "44"}`,
-      boxShadow: ready.level >= 4 ? `0 0 22px ${rc}22` : "none",
-      display: "flex", flexDirection: "column", overflow: "hidden",
+      background: "#ffffff", borderRadius: 20,
+      border: `1.5px solid ${S.dot}44`,
+      boxShadow: `0 4px 24px ${S.dot}18, 0 1px 6px rgba(0,0,0,0.10)`,
+      overflow: "hidden", fontFamily: SANS,
     }}>
-      {/* header */}
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "10px 12px", background: T.panel2, borderBottom: `1px solid ${T.border}`,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-          <span style={{ width: 9, height: 9, borderRadius: "50%", background: rc,
-            boxShadow: `0 0 8px ${rc}`, animation: ready.level >= 4 ? "pulse 1.1s infinite" : "none" }} />
-          <span style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 15, color: T.text, letterSpacing: "0.04em" }}>{s.symbol}</span>
-        </div>
-        <span style={{
-          fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 800, color: rc,
-          background: rc + "18", border: `1px solid ${rc}44`, borderRadius: 5,
-          padding: "3px 7px", letterSpacing: "0.06em",
-        }}>{READY_LABEL[ready.state]}</span>
-      </div>
 
-      {/* open position banner */}
+      {/* posición abierta */}
       {hasOpen && (
         <div style={{
-          padding: "7px 12px", background: T.cyan + "10", borderBottom: `1px solid ${T.cyan}33`,
+          padding: "8px 18px", background: "#eff6ff", borderBottom: "1px solid #bfdbfe",
           display: "flex", justifyContent: "space-between", alignItems: "center",
         }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.cyan, fontWeight: 700 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#1d4ed8" }}>
             ● POSICIÓN ABIERTA · {sideLabel(s.openContract.side)} · {dur(s.openContract.duration_sec)}
           </span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: pnlColor(s.openContract.floating_pnl) }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: pnlColor(s.openContract.floating_pnl) }}>
             {Number(s.openContract.floating_pnl) >= 0 ? "+" : ""}{num(s.openContract.floating_pnl)} USDT
           </span>
         </div>
       )}
 
-      {/* LIVE confirmation/score */}
-      <LiveScore live={s.live} />
+      {/* header — nombre + badge */}
+      <div style={{
+        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+        padding: "18px 20px 12px",
+      }}>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 24, color: "#111827", letterSpacing: "-0.02em", lineHeight: 1 }}>
+            {symDisplay}
+          </div>
+          <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 3 }}>Índice sintético · baja</div>
+        </div>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          background: S.dot + "18", border: `1px solid ${S.dot}44`,
+          borderRadius: 20, padding: "5px 13px",
+        }}>
+          <div style={{
+            width: 8, height: 8, borderRadius: "50%", background: S.dot,
+            boxShadow: sem === "green" ? `0 0 6px ${S.dot}` : "none",
+          }} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: S.dot }}>{S.label}</span>
+        </div>
+      </div>
 
-      {/* last spike — TIME + TICKS */}
-      <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-          <div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Sin spike hace</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: rc, lineHeight: 1.1 }}>
-              {ago(s.secsSinceLastSpike)}
-            </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD, marginTop: 2 }}>
-              último {fmtClock(s.lastSpike?.ts)} · <span style={{ color: dirColor }}>{dir || "–"}</span> · {num(s.lastSpike?.ratio, 0)}x
-            </div>
+      {/* caja principal con la explicación en lenguaje humano */}
+      <div style={{
+        margin: "0 16px 14px",
+        background: S.boxBg, border: `1px solid ${S.boxBorder}`,
+        borderRadius: 12, padding: "13px 15px",
+      }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, color: S.boxText, marginBottom: 5 }}>
+          {msgEmoji} {msgTitle}
+        </div>
+        <div style={{ fontSize: 13, lineHeight: 1.55, color: "#4b5563" }}>{msgBody}</div>
+      </div>
+
+      {/* 3 preguntas clave */}
+      <div style={{ padding: "0 16px" }}>
+        <QARow q="¿Cuánto tiempo sin caída?" a={secs > 0 ? ago(secs) : "–"} />
+        <QARow q="¿Tiene energía el mercado?" a={energyLabel} aColor={energyColor} />
+        <QARow q="¿Puede entrar el bot ahora?" a={botLabel} aColor={botColor} />
+      </div>
+
+      {/* puntitos — últimas caídas seguidas */}
+      <div style={{ padding: "14px 16px 6px" }}>
+        <div style={{
+          fontSize: 10, fontWeight: 700, color: "#9ca3af",
+          letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8,
+        }}>
+          Últimas caídas seguidas
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 5 }}>
+            {dots.map((d, i) => (
+              <div key={i} style={{
+                width: 14, height: 14, borderRadius: "50%",
+                background: d === "filled" ? S.dot : "transparent",
+                border: `2px ${d === "possible" ? "dashed" : "solid"} ${
+                  d === "filled" ? S.dot : d === "possible" ? S.dot + "99" : "#d1d5db"
+                }`,
+              }} />
+            ))}
           </div>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Ticks sin spike</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: T.cyan, lineHeight: 1.1 }}>{intC(ticks)}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: 2 }}>típico {dur(s.medianGapSec)} · p75 {dur(s.p75GapSec)}</div>
-          </div>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>{dotText}</span>
         </div>
 
-        {/* readiness bar */}
-        <div style={{ height: 6, borderRadius: 4, background: T.bg, overflow: "hidden" }}>
+        {/* barra de acumulación */}
+        <div style={{ height: 7, borderRadius: 99, background: "#f3f4f6", overflow: "hidden" }}>
           <div style={{
-            height: "100%", borderRadius: 4, background: rc,
-            width: `${Math.min(100, ((s.secsSinceLastSpike || 0) / (s.medianGapSec || 1)) * 60)}%`,
-            transition: "width 600ms ease",
+            height: "100%", borderRadius: 99, background: barColor,
+            width: `${acumPct}%`, transition: "width 600ms ease",
           }} />
         </div>
-
-        {/* cadence grid */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginTop: 2 }}>
-          <Stat label="1h" value={s.counts?.h1 ?? "–"} color={T.text} />
-          <Stat label="6h" value={s.counts?.h6 ?? "–"} color={T.textD} />
-          <Stat label="12h" value={s.counts?.h12 ?? "–"} color={T.textD} />
-          <Stat label="24h" value={s.counts?.h24 ?? "–"} color={T.textD} />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-          <Stat label="prom/h 6h" value={num(s.ratePerHour?.h6, 1)} color={T.cyan} />
-          <Stat label="prom/h 12h" value={num(s.ratePerHour?.h12, 1)} color={T.cyan} />
-          <Stat label="prom/h 24h" value={num(s.ratePerHour?.h24, 1)} color={T.cyan} />
-        </div>
-
-        {/* notes per symbol */}
-        {s.topReasons?.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Notas (por qué el bot no entró)</span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-              {s.topReasons.map((r) => (
-                <span key={r.reason} style={{
-                  fontFamily: FONT_MONO, fontSize: 9.5, color: T.amber,
-                  background: T.amber + "12", border: `1px solid ${T.amber}33`,
-                  borderRadius: 4, padding: "2px 6px",
-                }}>{r.reason} ×{r.n}</span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* inline analytics — datos vivos de deriv_market_context.json */}
-        {analytics?.snapshot && (
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
-            {/* ATR + EMA200 + cluster */}
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-              {"ATR "}
-              <span style={{ color: T.text }}>{analytics.snapshot.atr != null ? analytics.snapshot.atr.toFixed(4) : "–"}</span>
-              {" Pct "}
-              <span style={{ color: (analytics.snapshot.atr_percentile ?? 50) > 75 ? T.red : (analytics.snapshot.atr_percentile ?? 50) > 40 ? T.amber : T.green }}>
-                {analytics.snapshot.atr_percentile ?? "–"}%
-              </span>
-              {" · EMA200 "}
-              <span style={{ color: (analytics.snapshot.ema200_distance_pct ?? 0) > 0 ? T.green : T.red }}>
-                {analytics.snapshot.ema200_distance_pct != null ? ((analytics.snapshot.ema200_distance_pct) * 100).toFixed(3) + "%" : "–"}
-              </span>
-              {" · CLSTR "}
-              <span style={{ color: analytics.snapshot.spike_cluster_active ? T.red : T.textD }}>
-                {analytics.snapshot.spike_cluster_active ? "●ON" : "○OFF"}
-              </span>
-            </span>
-            {/* tick rate + rolling range */}
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-              {"TICK "}
-              <span style={{ color: T.cyan }}>{analytics.snapshot.tick_rate_5s != null ? analytics.snapshot.tick_rate_5s.toFixed(2) : "–"}/5s</span>
-              {" · RANGE60s "}
-              <span style={{ color: T.cyan }}>{analytics.snapshot.range_rolling_pct_60s != null ? (analytics.snapshot.range_rolling_pct_60s * 100).toFixed(2) + "%" : "–"}</span>
-            </span>
-            {/* Z-score + spike probabilities computed from file */}
-            {analytics.spike_stats && (() => {
-              const st = analytics.spike_stats;
-              const zColor = st.z_score > 2 ? T.red : st.z_score > 1 ? T.amber : st.z_score < -0.5 ? T.green : T.textD;
-              return (
-                <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-                  {"Z "}
-                  <span style={{ color: zColor }}>{st.z_score > 0 ? "+" : ""}{st.z_score.toFixed(2)}</span>
-                  {" · PROB "}
-                  <span style={{ color: st.prob_100 > 0.65 ? T.green : st.prob_100 > 0.35 ? T.amber : T.textD }}>100t:{(st.prob_100 * 100).toFixed(0)}%</span>
-                  {" "}
-                  <span style={{ color: st.prob_200 > 0.65 ? T.green : st.prob_200 > 0.35 ? T.amber : T.textD }}>200t:{(st.prob_200 * 100).toFixed(0)}%</span>
-                  {" "}
-                  <span style={{ color: st.prob_500 > 0.65 ? T.green : st.prob_500 > 0.35 ? T.amber : T.textD }}>500t:{(st.prob_500 * 100).toFixed(0)}%</span>
-                  <span style={{ color: T.mute }}>{" ·n="}{st.sample_size}</span>
-                </span>
-              );
-            })()}
-          </div>
-        )}
+        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5, paddingBottom: 14 }}>{barText}</div>
       </div>
     </div>
   );
