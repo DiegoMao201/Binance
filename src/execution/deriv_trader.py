@@ -2513,6 +2513,14 @@ class DerivTradeExecutor:
         # These fields enable per-trade forensics without reprocessing score_breakdown.
         record.setdefault("spread_at_entry", round(float(_sb.get("spread_pct_at_entry", 0)), 5))
         record.setdefault("ema200_distance_at_entry_pct", _sb.get("ema200_dev_pct"))
+        # 2026-06-06: surface key categorization fields at top level for direct CSV/SQL analysis
+        record.setdefault("fvg_tier", _fvg_tier if _fvg_tier else "none")
+        record.setdefault("setup_type", str(_sb.get("setup_type", "none")))
+        record.setdefault("peak_profit", round(float(oc.peak_profit if oc is not None else 0.0), 4))
+        record.setdefault("hurst_at_entry", round(float(_sb.get("hurst", 0.5) or 0.5), 4))
+        record.setdefault("imminence_state_at_entry", str(_sb.get("spike_imminence_state", "")))
+        record.setdefault("imminence_score_at_entry", float(_sb.get("spike_imminence_score", 0.0) or 0.0))
+        record.setdefault("hurst_mr_bonus_at_entry", float(_sb.get("crash_hurst_mr_bonus", 0.0) or 0.0))
         # ticks_held: entry_tick_count is stored in score_breakdown by main_deriv;
         # close_tick_count is fetched from risk manager if available.
         _entry_ticks = int(_sb.get("entry_tick_count", 0))

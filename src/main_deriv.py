@@ -3362,13 +3362,17 @@ class DerivDaemon:
                 snap.score_breakdown["spike_imminence_state"] = _imm_state
                 snap.score_breakdown["spike_imminence_score"] = round(_imm_score, 3)
                 snap.score_breakdown["spike_ticks_since_last"] = _imm.get("ticks_since_last")
-            if _imm_state in ("RIPE", "BUILDING") and "spike_cluster_bonus" not in snap.score_breakdown:
+            if _imm_state in ("RIPE", "BUILDING", "OVERDUE") and "spike_cluster_bonus" not in snap.score_breakdown:
+                # 2026-06-06: raised default 0.8→1.5 (calibrado sobre gaps reales);
+                # OVERDUE añadido: gap > p75 sigue siendo zona válida de entrada
                 _imm_max = max(
                     0.0,
-                    float(os.getenv("DERIV_SPIKE_IMMINENCE_MAX_BONUS", "0.8") or 0.8),
+                    float(os.getenv("DERIV_SPIKE_IMMINENCE_MAX_BONUS", "1.5") or 1.5),
                 )
+                # OVERDUE recibe bonus reducido (el spike ya debería haber ocurrido)
+                _imm_max_adj = _imm_max * (0.60 if _imm_state == "OVERDUE" else 1.0)
                 # Scale by imminence score; RIPE (≈1.0) gets the full bonus.
-                _imm_boost = round(_imm_max * _imm_score, 2)
+                _imm_boost = round(_imm_max_adj * _imm_score, 2)
                 if _imm_boost > 0.0:
                     snap.score = round(min(10.0, snap.score + _imm_boost), 3)
                     snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
@@ -3380,6 +3384,36 @@ class DerivDaemon:
                         "[PIPELINE] SPIKE_IMMINENCE %s | %s gap=%st imm=%.2f → +%.2f score→%.2f",
                         tick.symbol, _imm_state, _imm.get("ticks_since_last"),
                         _imm_score, _imm_boost, snap.score,
+                    )
+
+        # ── 2026-06-06 HURST × IMMINENCIA — bonus mean-reversion para CRASH ─
+        # Insight cuantitativo: cuando Hurst < 0.42 el mercado es mean-reverting
+        # fuerte — el precio NO puede seguir subiendo indefinidamente y un spike
+        # CRASH (bajada) es cada vez más probable.  Combinado con el estado de
+        # imminencia (≥ BUILDING), esto es la señal de "cañón cargado": baja
+        # volatilidad direccional + muchos ticks acumulados = spike inminente.
+        # El bonus escala linealmente: H=0.42 → 0, H=0.30 → máximo.
+        # Controlable vía env: DERIV_CRASH_HURST_MR_BONUS_MAX (default 1.2)
+        if _is_bc_bias and "CRASH" in tick.symbol.upper():
+            _h_local = float(_eval_hurst if _eval_hurst is not None else 0.5)
+            _h_threshold = float(os.getenv("DERIV_CRASH_HURST_MR_THRESHOLD", "0.42"))
+            if _h_local < _h_threshold and _imm_state not in ("", "UNKNOWN", "FRESH"):
+                _h_mr_max = float(os.getenv("DERIV_CRASH_HURST_MR_BONUS_MAX", "1.2"))
+                # Escala 0→1 entre threshold y 0.30 (Hurst muy bajo = señal fuerte)
+                _h_mr_factor = min(1.0, max(0.0, (_h_threshold - _h_local) / (_h_threshold - 0.30)))
+                _h_mr_boost = round(_h_mr_max * _h_mr_factor, 2)
+                if _h_mr_boost >= 0.1:
+                    snap.score = round(min(10.0, snap.score + _h_mr_boost), 3)
+                    snap.score_breakdown["crash_hurst_mr_bonus"] = _h_mr_boost
+                    snap.score_breakdown["crash_hurst_mr_h"] = round(_h_local, 3)
+                    snap.reasons.append(
+                        f"crash_hurst_mr: H={_h_local:.3f}<{_h_threshold} + {_imm_state} "
+                        f"→ +{_h_mr_boost:.2f}"
+                    )
+                    _LOGGER.info(
+                        "[PIPELINE] CRASH_HURST_MR %s | H=%.3f<%s + %s gap=%st → +%.2f score→%.2f",
+                        tick.symbol, _h_local, _h_threshold, _imm_state,
+                        _imm.get("ticks_since_last", 0), _h_mr_boost, snap.score,
                     )
 
         # ── 2026-06-02 SCARCITY (seco/lento) ENTRY GATE — operator directive ─

@@ -1232,15 +1232,19 @@ class DerivRiskManager:
     }
 
     # Per-symbol empirical ticks_since_last_spike percentiles AT the spike
-    # moment (forensic 2026-06-01, 1159 spikes). This is the "loaded gun"
-    # signature: when the live gap approaches p50-p75 the symbol is statistically
-    # RIPE to fire — the trader's "lleva rato sin salir y tiene numeros de cuando
-    # tira". Tuple = (p25, p50, p75, p90). Override via DERIV_SPIKE_GAP_PCTL_MAP.
+    # moment. Calibrados 2026-06-06 sobre 668 spikes reales del live feed
+    # (PASO 5 del análisis cuantitativo: deriv_spike_events.json).
+    # CRASH500: gaps reales p50=199s, p90=915s (antes usábamos p50=322 — error)
+    # CRASH600: gaps reales p50=301s, p90=1097s (antes p50=460 — muy tarde)
+    # CRASH900: gaps reales p50=380s, p90=1593s (antes p50=461 — ligeramente tarde)
+    # Esta corrección hace que RIPE/BUILDING se activen en el momento real,
+    # no 60-160 ticks después del pico estadístico de spikes.
+    # Tuple = (p25, p50, p75, p90). Override via DERIV_SPIKE_GAP_PCTL_MAP.
     _SPIKE_GAP_PCTL: dict[str, tuple[float, float, float, float]] = {
-        "CRASH500": (203.0, 322.0, 524.0, 959.0),
-        "CRASH600": (197.0, 460.0, 792.0, 1258.0),
-        "CRASH900": (164.0, 461.0, 859.0, 1518.0),
-        "BOOM500": (129.0, 318.0, 595.0, 1021.0),
+        "CRASH500": (100.0, 199.0, 500.0, 915.0),
+        "CRASH600": (150.0, 301.0, 650.0, 1097.0),
+        "CRASH900": (190.0, 380.0, 900.0, 1593.0),
+        "BOOM500":  (129.0, 318.0, 595.0, 1021.0),
         "CRASH300": (120.0, 300.0, 480.0, 720.0),
     }
 
