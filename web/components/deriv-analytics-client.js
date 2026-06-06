@@ -1,12 +1,13 @@
 "use client";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { AnalyticsGrid, Probabilidad, ZScore, Desglose } from "./analytics-widgets";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ResponsiveContainer, AreaChart, Area, LineChart, Line, BarChart, Bar,
   ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine,
   Cell, Legend,
 } from "recharts";
-import { AnalyticsGrid } from "./analytics-widgets";
+import { AnalyticsGrid, Probabilidad, ZScore, Desglose } from "./analytics-widgets";
 
 /* ════════════════════════════════════════════════════════════════════════
    DESIGN TOKENS — premium quant terminal
@@ -333,11 +334,12 @@ export default function DerivAnalyticsClient({ initialState }) {
   };
 
   return (
-    <div style={{
-      minHeight: "100vh", background: `radial-gradient(ellipse at top, ${T.bg2} 0%, ${T.bg} 60%)`,
-      color: T.text, fontFamily: FONT_MONO, padding: "16px 18px",
-      display: "flex", flexDirection: "column", gap: 14,
-    }}>
+<div style={{
+  minHeight: "100vh", background: `radial-gradient(ellipse at top, ${T.bg2} 0%, ${T.bg} 60%)`,
+  color: T.text, fontFamily: FONT_MONO, padding: "16px 18px",
+  display: "flex", flexDirection: "column", gap: 14,
+}}>
+  <AnalyticsGrid />
       <TopBar status={data?.status} live={live} setLive={setLive} lastUpdate={lastUpdate} loading={loading} error={err} onRefresh={fetchOnce} kpi={kpiTop} />
       <TabBar tabs={TABS} active={tab} onChange={setTab} />
       <AnimatePresence mode="wait">
@@ -346,7 +348,8 @@ export default function DerivAnalyticsClient({ initialState }) {
           transition={{ duration: 0.18 }}>
           {tab === "operaciones" && <OperacionesTab data={data} />}
           {tab === "overview"  && <OverviewTab data={data} />}
-          {tab === "analytics" && <AnalyticsTab data={data} />}
+          {tab === "analytics" && (
+  <div style={{ display: "flex", flexDirection:
           {tab === "telemetry" && <TelemetryTab data={data} />}
           {tab === "decisions" && <DecisionsTab data={data} />}
           {tab === "symbols"   && <SymbolsTab data={data} />}
