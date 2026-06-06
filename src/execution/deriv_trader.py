@@ -2516,7 +2516,13 @@ class DerivTradeExecutor:
         # 2026-06-06: surface key categorization fields at top level for direct CSV/SQL analysis
         record.setdefault("fvg_tier", _fvg_tier if _fvg_tier else "none")
         record.setdefault("setup_type", str(_sb.get("setup_type", "none")))
-        record.setdefault("peak_profit", round(float(oc.peak_profit if oc is not None else 0.0), 4))
+        # For binary CRASH/BOOM contracts, broker floating_pnl is ≤ 0 until settlement,
+        # so oc.peak_profit (DPM intracontract tracker) stays at 0.  Use max_pnl_alcanzado
+        # (= max(state.peak_profit, final_pnl)) which correctly captures the win profit at
+        # settlement.  This gives the LLM orquestador a non-zero signal for winning trades.
+        _oc_peak = float(oc.peak_profit if oc is not None else 0.0)
+        _dpm_peak = float(record.get("max_pnl_alcanzado") or 0.0)
+        record.setdefault("peak_profit", round(max(_oc_peak, _dpm_peak if _dpm_peak > 0 else 0.0), 4))
         record.setdefault("hurst_at_entry", round(float(_sb.get("hurst", 0.5) or 0.5), 4))
         record.setdefault("imminence_state_at_entry", str(_sb.get("spike_imminence_state", "")))
         record.setdefault("imminence_score_at_entry", float(_sb.get("spike_imminence_score", 0.0) or 0.0))
