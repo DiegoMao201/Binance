@@ -524,7 +524,7 @@ export function LiveBacktestWidget({ symbol = "CRASH500" }) {
   if (loading) return <WidgetSkeleton title="Live Backtest" />;
   if (error) return <WidgetError title="Live Backtest" error={error} />;
 
-  const { metrics = {} } = data || {};
+  const metrics = data?.metrics ?? {};
   const upPct = metrics.up_percentage || 0;
   const downPct = metrics.down_percentage || 0;
   const biasColor = upPct > downPct ? T.green : upPct < downPct ? T.red : T.amber;
@@ -675,7 +675,7 @@ export function RarityPercentileWidget({ symbol = "CRASH500" }) {
   if (loading) return <WidgetSkeleton title="Rarity Percentile" />;
   if (error) return <WidgetError title="Rarity Percentile" error={error} />;
 
-  const { metrics = {} } = data || {};
+  const metrics = data?.metrics ?? {};
   const percentile = metrics.price_change_percentile || 0;
   const rarity = metrics.rarity_category || "UNKNOWN";
   
