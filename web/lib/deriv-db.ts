@@ -12,15 +12,13 @@ const pool = new Pool({
 export async function queryDerivAnalytics(sql: string, params: any[] = []) {
   const trimmedSql = sql.trim().toUpperCase();
   
-  // Validate that it's a SELECT query
-  if (!trimmedSql.startsWith('SELECT')) {
-    throw new Error('Only SELECT queries are allowed for analytics');
+  // Validate that it's a read-only query (SELECT or CTE starting with WITH)
+  if (!trimmedSql.startsWith('SELECT') && !trimmedSql.startsWith('WITH')) {
+    throw new Error('Only SELECT/WITH queries are allowed for analytics');
   }
-  
+
   // Validate that it only queries deriv_* tables
-  if (!trimmedSql.includes('DERIV_') && 
-      !trimmedSql.includes('V_DERIV_') &&
-      !trimmedSql.includes('FROM deriv_')) {
+  if (!trimmedSql.includes('DERIV_') && !trimmedSql.includes('V_DERIV_')) {
     throw new Error('Only deriv_* tables and views are allowed for analytics');
   }
   

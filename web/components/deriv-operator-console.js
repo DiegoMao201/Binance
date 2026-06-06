@@ -1,6 +1,5 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { AnalyticsGrid } from "./analytics-widgets";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSOLA DE OPERACIÓN MANUAL — Deriv CRASH
@@ -158,6 +157,28 @@ function SymbolCard({ s }) {
   const hasOpen = !!s.openContract;
   const ticks = s.live?.ticksSinceSpike ?? s.lastSpike?.ticks_since_last_spike ?? null;
 
+  const [analytics, setAnalytics] = useState(null);
+  useEffect(() => {
+    const sym = s.symbol;
+    if (!sym) return;
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const [probRes, zRes] = await Promise.all([
+          fetch(`/api/deriv/analytics/spike-probability?symbol=${sym}&window=100,200,500`),
+          fetch(`/api/deriv/analytics/wait-zscore?symbol=${sym}`),
+        ]);
+        if (!active) return;
+        const prob = probRes.ok ? await probRes.json() : null;
+        const z = zRes.ok ? await zRes.json() : null;
+        setAnalytics({ prob, z });
+      } catch { /* noop — analytics are decorative */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 15000);
+    return () => { active = false; clearInterval(id); };
+  }, [s.symbol]);
+
   return (
     <div style={{
       background: T.panel, borderRadius: 10,
@@ -256,6 +277,35 @@ function SymbolCard({ s }) {
             </div>
           </div>
         )}
+
+        {/* inline analytics — PROB·SPIKE y Z·SCORE como texto compacto */}
+        {analytics && (
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 2 }}>
+            {analytics.prob?.probabilities && (() => {
+              const probs = analytics.prob.probabilities;
+              const entries = Object.entries(probs).filter(([, v]) => Number.isFinite(v));
+              if (entries.length === 0) return null;
+              return (
+                <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
+                  PROB·SPIKE{entries.map(([w, p]) => (
+                    <span key={w} style={{ marginLeft: 5, color: p > 0.7 ? T.green : p > 0.5 ? T.amber : T.textD }}>
+                      {w}t:{(p * 100).toFixed(0)}%
+                    </span>
+                  ))}
+                </span>
+              );
+            })()}
+            {analytics.z?.z_score != null && (
+              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
+                Z·SCORE{" "}
+                <span style={{ color: Math.abs(analytics.z.z_score) > 2 ? T.red : Math.abs(analytics.z.z_score) > 1 ? T.amber : T.green }}>
+                  {analytics.z.z_score > 0 ? "+" : ""}{analytics.z.z_score.toFixed(2)}
+                </span>
+                {" · "}{analytics.z.classification}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -345,14 +395,6 @@ export default function DerivOperatorConsole() {
       )}
 
       {/* SYMBOL GRID */}
-      {data && (
-        <div style={{ marginBottom: 14 }}>
-          <Panel title={`Analytics · ${selectedSymbol}`} accent={T.cyan}
-            right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>{selectedSymbol}</span>}>
-            <AnalyticsGrid symbol={selectedSymbol} />
-          </Panel>
-        </div>
-      )}
       <div style={{
         display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
         gap: 12, marginBottom: 14,

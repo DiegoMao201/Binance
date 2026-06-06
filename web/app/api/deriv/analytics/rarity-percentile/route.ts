@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryDerivAnalytics } from '../../../../../lib/deriv-db';
 
+export const runtime = 'nodejs';
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -28,11 +30,11 @@ export async function GET(request: NextRequest) {
     const query = `
       WITH tick_stats AS (
         SELECT 
-          price,
-          LAG(price) OVER (ORDER BY captured_at) as prev_price,
-          CASE 
-            WHEN price > LAG(price) OVER (ORDER BY captured_at) THEN price - LAG(price) OVER (ORDER BY captured_at)
-            WHEN price < LAG(price) OVER (ORDER BY captured_at) THEN LAG(price) OVER (ORDER BY captured_at) - price
+          last_price,
+          LAG(last_price) OVER (ORDER BY captured_at) as prev_price,
+          CASE
+            WHEN last_price > LAG(last_price) OVER (ORDER BY captured_at) THEN last_price - LAG(last_price) OVER (ORDER BY captured_at)
+            WHEN last_price < LAG(last_price) OVER (ORDER BY captured_at) THEN LAG(last_price) OVER (ORDER BY captured_at) - last_price
             ELSE 0
           END as price_change,
           EXTRACT(EPOCH FROM (captured_at - LAG(captured_at) OVER (ORDER BY captured_at))) as time_diff_sec

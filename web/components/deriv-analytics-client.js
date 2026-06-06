@@ -6,7 +6,6 @@ import {
   ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine,
   Cell, Legend,
 } from "recharts";
-import { SpikeProbabilityWidget, WaitZScoreWidget, RarityPercentileWidget, AnalyticsGrid } from "./analytics-widgets";
 
 /* ════════════════════════════════════════════════════════════════════════
    DESIGN TOKENS — premium quant terminal
@@ -786,8 +785,9 @@ function OpenContractCard({ c }) {
     return () => clearInterval(interval);
   }, [fetchAnalyticsData]);
 
-  const maxProb = Math.max(...Object.values(spikeProbData?.probabilities || {})); // Corrected Math.max usage
-  const zscore = waitZScoreData?.zscore;
+  const probValues = Object.values(spikeProbData?.probabilities || {}).filter(v => Number.isFinite(v));
+  const maxProb = probValues.length > 0 ? Math.max(...probValues) : null;
+  const zscore = waitZScoreData?.z_score;
   const rarity = rarityPercentileData?.metrics?.price_change_percentile;
 
   return (
