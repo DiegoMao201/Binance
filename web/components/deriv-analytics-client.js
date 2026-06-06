@@ -349,7 +349,10 @@ export default function DerivAnalyticsClient({ initialState }) {
           {tab === "operaciones" && <OperacionesTab data={data} />}
           {tab === "overview"  && <OverviewTab data={data} />}
           {tab === "analytics" && (
-  <div style={{ display: "flex", flexDirection:
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+               <AnalyticsGrid data={data} />
+            </div>
+          )}
           {tab === "telemetry" && <TelemetryTab data={data} />}
           {tab === "decisions" && <DecisionsTab data={data} />}
           {tab === "symbols"   && <SymbolsTab data={data} />}
