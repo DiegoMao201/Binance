@@ -7,7 +7,7 @@ import {
   ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine,
   Cell, Legend,
 } from "recharts";
-import { AnalyticsGrid, Probabilidad, ZScore, Desglose } from "./analytics-widgets";
+import { AnalyticsGrid, SpikeProbabilityWidget, WaitZScoreWidget, RarityPercentileWidget } from "./analytics-widgets";
 
 /* ════════════════════════════════════════════════════════════════════════
    DESIGN TOKENS — premium quant terminal
