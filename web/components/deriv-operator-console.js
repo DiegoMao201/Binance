@@ -164,15 +164,11 @@ function SymbolCard({ s }) {
     let active = true;
     const doFetch = async () => {
       try {
-        const [probRes, zRes] = await Promise.all([
-          fetch(`/api/deriv/analytics/spike-probability?symbol=${sym}&window=100,200,500`),
-          fetch(`/api/deriv/analytics/wait-zscore?symbol=${sym}`),
-        ]);
+        const res = await fetch(`/api/deriv/analytics/market-context?symbol=${sym}`);
         if (!active) return;
-        const prob = probRes.ok ? await probRes.json() : null;
-        const z = zRes.ok ? await zRes.json() : null;
-        setAnalytics({ prob, z });
-      } catch { /* noop — analytics are decorative */ }
+        const data = res.ok ? await res.json() : null;
+        setAnalytics(data);
+      } catch { /* noop */ }
     };
     doFetch();
     const id = setInterval(doFetch, 15000);
@@ -278,32 +274,51 @@ function SymbolCard({ s }) {
           </div>
         )}
 
-        {/* inline analytics — PROB·SPIKE y Z·SCORE como texto compacto */}
-        {analytics && (
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 2 }}>
-            {analytics.prob?.probabilities && (() => {
-              const probs = analytics.prob.probabilities;
-              const entries = Object.entries(probs).filter(([, v]) => Number.isFinite(v));
-              if (entries.length === 0) return null;
+        {/* inline analytics — datos vivos de deriv_market_context.json */}
+        {analytics?.snapshot && (
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
+            {/* ATR + EMA200 + cluster */}
+            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
+              {"ATR "}
+              <span style={{ color: T.text }}>{analytics.snapshot.atr != null ? analytics.snapshot.atr.toFixed(4) : "–"}</span>
+              {" Pct "}
+              <span style={{ color: (analytics.snapshot.atr_percentile ?? 50) > 75 ? T.red : (analytics.snapshot.atr_percentile ?? 50) > 40 ? T.amber : T.green }}>
+                {analytics.snapshot.atr_percentile ?? "–"}%
+              </span>
+              {" · EMA200 "}
+              <span style={{ color: (analytics.snapshot.ema200_distance_pct ?? 0) > 0 ? T.green : T.red }}>
+                {analytics.snapshot.ema200_distance_pct != null ? ((analytics.snapshot.ema200_distance_pct) * 100).toFixed(3) + "%" : "–"}
+              </span>
+              {" · CLSTR "}
+              <span style={{ color: analytics.snapshot.spike_cluster_active ? T.red : T.textD }}>
+                {analytics.snapshot.spike_cluster_active ? "●ON" : "○OFF"}
+              </span>
+            </span>
+            {/* tick rate + rolling range */}
+            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
+              {"TICK "}
+              <span style={{ color: T.cyan }}>{analytics.snapshot.tick_rate_5s != null ? analytics.snapshot.tick_rate_5s.toFixed(2) : "–"}/5s</span>
+              {" · RANGE60s "}
+              <span style={{ color: T.cyan }}>{analytics.snapshot.range_rolling_pct_60s != null ? (analytics.snapshot.range_rolling_pct_60s * 100).toFixed(2) + "%" : "–"}</span>
+            </span>
+            {/* Z-score + spike probabilities computed from file */}
+            {analytics.spike_stats && (() => {
+              const st = analytics.spike_stats;
+              const zColor = st.z_score > 2 ? T.red : st.z_score > 1 ? T.amber : st.z_score < -0.5 ? T.green : T.textD;
               return (
                 <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-                  PROB·SPIKE{entries.map(([w, p]) => (
-                    <span key={w} style={{ marginLeft: 5, color: p > 0.7 ? T.green : p > 0.5 ? T.amber : T.textD }}>
-                      {w}t:{(p * 100).toFixed(0)}%
-                    </span>
-                  ))}
+                  {"Z "}
+                  <span style={{ color: zColor }}>{st.z_score > 0 ? "+" : ""}{st.z_score.toFixed(2)}</span>
+                  {" · PROB "}
+                  <span style={{ color: st.prob_100 > 0.65 ? T.green : st.prob_100 > 0.35 ? T.amber : T.textD }}>100t:{(st.prob_100 * 100).toFixed(0)}%</span>
+                  {" "}
+                  <span style={{ color: st.prob_200 > 0.65 ? T.green : st.prob_200 > 0.35 ? T.amber : T.textD }}>200t:{(st.prob_200 * 100).toFixed(0)}%</span>
+                  {" "}
+                  <span style={{ color: st.prob_500 > 0.65 ? T.green : st.prob_500 > 0.35 ? T.amber : T.textD }}>500t:{(st.prob_500 * 100).toFixed(0)}%</span>
+                  <span style={{ color: T.mute }}>{" ·n="}{st.sample_size}</span>
                 </span>
               );
             })()}
-            {analytics.z?.z_score != null && (
-              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-                Z·SCORE{" "}
-                <span style={{ color: Math.abs(analytics.z.z_score) > 2 ? T.red : Math.abs(analytics.z.z_score) > 1 ? T.amber : T.green }}>
-                  {analytics.z.z_score > 0 ? "+" : ""}{analytics.z.z_score.toFixed(2)}
-                </span>
-                {" · "}{analytics.z.classification}
-              </span>
-            )}
           </div>
         )}
       </div>
