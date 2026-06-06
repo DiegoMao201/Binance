@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { AnalyticsGrid } from "./analytics-widgets";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSOLA DE OPERACIÓN MANUAL — Deriv CRASH
@@ -299,6 +300,8 @@ export default function DerivOperatorConsole() {
   const tableRows = symFilter === "ALL" ? spikeTable : spikeTable.filter((s) => s.symbol === symFilter);
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
+  const selectedSymbol = symFilter === "ALL" ? (symNames[0] || "CRASH500") : symFilter;
+
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: FONT_MONO, padding: "16px 18px" }}>
       <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}`}</style>
@@ -342,6 +345,14 @@ export default function DerivOperatorConsole() {
       )}
 
       {/* SYMBOL GRID */}
+      {data && (
+        <div style={{ marginBottom: 14 }}>
+          <Panel title={`Analytics · ${selectedSymbol}`} accent={T.cyan}
+            right={<span style={{ fontSize: 9, color: T.mute, fontFamily: FONT_MONO }}>{selectedSymbol}</span>}>
+            <AnalyticsGrid symbol={selectedSymbol} />
+          </Panel>
+        </div>
+      )}
       <div style={{
         display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
         gap: 12, marginBottom: 14,
