@@ -174,9 +174,14 @@ function SymbolCard({ s }) {
   const score = live?.score;
   const gate  = live?.gate;
   const gap   = live?.scoreGap;
+  const liveKind = live?.kind;
+  const isVetado = liveKind === "BLOQUEADO" && gap != null && gap <= 0;
   const pctToGate  = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
-  const scoreColor = gap != null && gap <= 0 ? T.green : gap != null && gap < 0.5 ? T.amber : T.cyan;
-  const gapColor   = gap != null && gap <= 0 ? T.green : T.amber;
+  const scoreColor = isVetado ? T.amber : gap != null && gap <= 0 ? T.green : gap != null && gap < 0.5 ? T.amber : T.cyan;
+  const gapColor   = isVetado ? T.amber : gap != null && gap <= 0 ? T.green : T.amber;
+  const faltaText  = gap == null ? "–" : isVetado ? "VETADO" : gap <= 0 ? "LISTO ✓" : `+${num(gap)}`;
+  const scoreAgeSec = live?.ts ? Math.max(0, Date.now() / 1000 - live.ts) : null;
+  const scoreIsStale = scoreAgeSec != null && scoreAgeSec > 90;
 
   /* ─ Hurst ─ */
   const hurstColor    = hurst == null ? T.mute : hurst < 0.45 ? T.green : hurst < 0.55 ? T.amber : T.red;
@@ -248,7 +253,14 @@ function SymbolCard({ s }) {
       <div style={{ padding: "9px 12px", background: T.bg2, borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
           <div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score</span>
+              {scoreAgeSec != null && (
+                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: scoreIsStale ? T.amber : T.mute }}>
+                  · hace {scoreAgeSec < 60 ? `${Math.round(scoreAgeSec)}s` : `${Math.round(scoreAgeSec / 60)}m`}
+                </span>
+              )}
+            </div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: scoreColor, lineHeight: 1 }}>{num(score)}</div>
           </div>
           <div>
@@ -258,7 +270,7 @@ function SymbolCard({ s }) {
           <div style={{ marginLeft: "auto", textAlign: "right" }}>
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Falta</div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: gapColor }}>
-              {gap == null ? "–" : gap <= 0 ? "LISTO ✓" : `+${num(gap)}`}
+              {faltaText}
             </div>
           </div>
         </div>
@@ -273,6 +285,11 @@ function SymbolCard({ s }) {
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>dir <b style={{ color: sideColor(live.side) }}>{sideLabel(live.side)}</b></span>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>Hurst <b style={{ color: T.text }}>{num(live.hurst, 3)}</b></span>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>vol <b style={{ color: T.text }}>{live.volRegime || "–"}</b></span>
+            {isVetado && live?.label && (
+              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, background: T.amber + "12", border: `1px solid ${T.amber}33`, borderRadius: 4, padding: "1px 5px" }}>
+                ⛔ {live.label}
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -56,7 +56,7 @@ function classifyDecision(d) {
   const reason = String(d?.reason || "");
   const score = Number(d?.score);
   let gate = null;
-  const gm = reason.match(/requires?≥?\s*([\d.]+)/i) || reason.match(/≥\s*([\d.]+)/);
+  const gm = reason.match(/requires?≥?\s*([\d.]+)/i) || reason.match(/≥\s*([\d.]+)/) || reason.match(/strict_min[=:]\s*([\d.]+)/i);
   if (gm) gate = parseFloat(gm[1]);
 
   let kind, label, level; // level: 0 idle .. 4 confirmed
@@ -70,6 +70,16 @@ function classifyDecision(d) {
     kind = "CARGANDO"; label = "Cargando (aún no listo)"; level = 1;
   } else if (/ENTRY_BLOCKED|BLOCK/i.test(reason)) {
     kind = "BLOQUEADO"; label = "Bloqueado"; level = 1;
+  } else if (/HURST.*VETO|veto.*hurst/i.test(reason)) {
+    kind = "BLOQUEADO"; label = "Hurst veto"; level = 1;
+  } else if (/structural_veto|boom_crash_structural|FVG.*VETO/i.test(reason)) {
+    kind = "BLOQUEADO"; label = "Veto estructural"; level = 1;
+  } else if (/dynamic_symbol_inactive|SYMBOL_INACTIVE/i.test(reason)) {
+    kind = "BLOQUEADO"; label = "Símbolo pausado"; level = 1;
+  } else if (/trade_cooldown|spike_burst_cooldown|reactivation_awareness/i.test(reason)) {
+    kind = "BLOQUEADO"; label = "En cooldown"; level = 0;
+  } else if (/veto/i.test(reason)) {
+    kind = "BLOQUEADO"; label = reason.split(":")[0] || "Vetado"; level = 1;
   } else {
     kind = "INFO"; label = reason.split(":")[0] || "—"; level = 0;
   }
