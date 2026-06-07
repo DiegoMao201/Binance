@@ -177,11 +177,11 @@ function SymbolCard({ s }) {
   const liveKind = live?.kind;
   const isVetado = liveKind === "BLOQUEADO" && gap != null && gap <= 0;
   const pctToGate  = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
-  const scoreColor = isVetado ? T.amber : gap != null && gap <= 0 ? T.green : gap != null && gap < 0.5 ? T.amber : T.cyan;
-  const gapColor   = isVetado ? T.amber : gap != null && gap <= 0 ? T.green : T.amber;
-  const faltaText  = gap == null ? "–" : isVetado ? "VETADO" : gap <= 0 ? "LISTO ✓" : `+${num(gap)}`;
   const scoreAgeSec = live?.ts ? Math.max(0, Date.now() / 1000 - live.ts) : null;
   const scoreIsStale = scoreAgeSec != null && scoreAgeSec > 90;
+  const scoreColor = isVetado ? T.amber : gap != null && gap <= 0 ? (scoreIsStale ? T.amber : T.green) : gap != null && gap < 0.5 ? T.amber : T.cyan;
+  const gapColor   = isVetado ? T.amber : gap != null && gap <= 0 ? (scoreIsStale ? T.amber : T.green) : T.amber;
+  const faltaText  = gap == null ? "–" : isVetado ? "VETADO" : gap <= 0 ? (scoreIsStale ? "LISTO ?" : "LISTO ✓") : `+${num(gap)}`;
 
   /* ─ Hurst ─ */
   const hurstColor    = hurst == null ? T.mute : hurst < 0.45 ? T.green : hurst < 0.55 ? T.amber : T.red;
