@@ -191,6 +191,13 @@ _SCARCITY_EXIT_MAX_PROFIT = float(
 _SCARCITY_EXIT_PEAK_GUARD = float(
     os.getenv("DERIV_SCARCITY_EXIT_PEAK_GUARD", "1.0") or 1.0
 )
+# Minimum seconds a SECO-override trade must be held before scarcity_dry_exit
+# can fire. When the entry gate already knew the market was SECO (score≥8 override),
+# the exit must not fire immediately — that creates a 7-second enter/exit loop.
+# Non-SECO-override trades are still exited immediately on SECO detection.
+_SCARCITY_EXIT_MIN_HOLD_SEC = float(
+    os.getenv("DERIV_SCARCITY_EXIT_MIN_HOLD_SEC", "120") or 120
+)
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
 # (dollar_floor) cierra antes de cuota.  Esto evita ganancias chicas en
@@ -860,12 +867,23 @@ class DerivTradeExecutor:
         # (peak>=PEAK_GUARD or current>=MAX_PROFIT) are left to the tier/trailing
         # logic below. This is the operator's exact rule: "se puso morado → la
         # cierro de una".
+        # Detect if this trade was entered via SECO override (entry gate knew market
+        # was SECO but score≥8 passed). Those trades must not be cut immediately —
+        # give them _SCARCITY_EXIT_MIN_HOLD_SEC to let the overdue spike materialize.
+        _seco_override_entry = bool(
+            oc.score_breakdown and oc.score_breakdown.get("scarcity_dry_override_fired")
+        )
+        _held_sec = time.time() - float(oc.opened_at_ts)
         if (
             _SCARCITY_EXIT_ENABLE
             and cid not in self._closing
             and self._risk is not None
             and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
             and current_profit < _SCARCITY_EXIT_MAX_PROFIT
+            and (
+                not _seco_override_entry
+                or _held_sec >= _SCARCITY_EXIT_MIN_HOLD_SEC
+            )
         ):
             _is_dry = False
             _scar_ratio = None
