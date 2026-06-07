@@ -98,6 +98,22 @@ export async function GET(request: NextRequest) {
     const recent = entries.slice(-2000);
     const spike_stats = computeStats(recent);
 
+    // Hurst history — 12 evenly-spaced samples from last 20 min
+    const nowSec = Date.now() / 1000;
+    const histWindow = entries.filter(e => {
+      if (e.hurst == null || typeof e.ts !== 'number') return false;
+      const tsSec = e.ts > 1e10 ? e.ts / 1000 : e.ts;
+      return tsSec >= nowSec - 20 * 60;
+    });
+    const HIST_N = 12;
+    const hurst_history: number[] = [];
+    if (histWindow.length > 0) {
+      for (let i = 0; i < HIST_N; i++) {
+        const idx = Math.round((i / Math.max(HIST_N - 1, 1)) * (histWindow.length - 1));
+        hurst_history.push(+histWindow[Math.min(idx, histWindow.length - 1)].hurst.toFixed(3));
+      }
+    }
+
     return NextResponse.json({
       symbol,
       snapshot: {
@@ -115,6 +131,7 @@ export async function GET(request: NextRequest) {
         post_spike_decay_slope: latest.post_spike_decay_slope,
       },
       spike_stats,
+      hurst_history,
     });
   } catch (err) {
     console.error('market-context error:', err);

@@ -99,17 +99,17 @@ function Stat({ label, value, color }) {
   );
 }
 
-/* ── Q&A row (human language stat) ──────────────────────── */
+/* ── Q&A row ─────────────────────────────────────────────── */
 function QARow({ q, a, aColor }) {
-  const col = aColor || "#374151";
+  const col = aColor || T.text;
   return (
     <div style={{
       display: "flex", justifyContent: "space-between", alignItems: "center",
-      gap: 8, padding: "8px 0", borderBottom: "1px solid rgba(0,0,0,0.06)",
+      gap: 8, padding: "8px 0", borderBottom: `1px solid ${T.border}`,
     }}>
-      <span style={{ fontSize: 13, color: "#6b7280", lineHeight: 1.3 }}>{q}</span>
+      <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: T.textD }}>{q}</span>
       <span style={{
-        fontSize: 12, fontWeight: 700, color: col, whiteSpace: "nowrap",
+        fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, color: col, whiteSpace: "nowrap",
         background: col + "18", border: `1px solid ${col}33`,
         borderRadius: 20, padding: "3px 10px",
       }}>{a}</span>
@@ -145,38 +145,25 @@ function SymbolCard({ s }) {
   const recent  = Number(s.counts?.h1) || 0;
   const cluster = analytics?.snapshot?.spike_cluster_active ?? false;
   const hasOpen = !!s.openContract;
+  const hurst   = analytics?.snapshot?.hurst ?? null;
+  const hurstHistory = analytics?.hurst_history ?? [];
 
-  const isInactive     = s.topReasons?.some(r => r.reason === "dynamic_symbol_inactive")
-                       || s.readiness?.state === "SIN_DATOS";
-  const hasChaseGuard  = s.topReasons?.some(r =>
+  const isInactive    = s.topReasons?.some(r => r.reason === "dynamic_symbol_inactive")
+                      || s.readiness?.state === "SIN_DATOS";
+  const hasChaseGuard = s.topReasons?.some(r =>
     r.reason?.includes("chase") || r.reason?.includes("post_spike_chase"));
-  const clusterDone    = recent >= 3 && !cluster;
+  const clusterDone   = recent >= 3 && !cluster;
 
-  /* ─ semáforo (user spec) ─
-     Rojo: cluster agotado (3+ seguidos) OR inactivo
-     Verde: ticks > p75 histórico + sin chase_guard
-     Amarillo: todo lo demás (spike reciente <120t OR acumulando) */
+  /* ─ semáforo ─ */
   let sem;
   if (isInactive || clusterDone) sem = "red";
   else if (secs > 0 && p75Sec && secs > p75Sec && !hasChaseGuard) sem = "green";
   else sem = "amber";
 
   const SEM = {
-    green: {
-      label: "Lista para entrar", dot: "#22d3a3",
-      boxBg: "#f0fdf9", boxBorder: "#86efac", boxText: "#065f46",
-    },
-    amber: {
-      label: "Observar", dot: "#f59e0b",
-      boxBg: "#fffbeb", boxBorder: "#fcd34d", boxText: "#92400e",
-    },
-    red: {
-      label: isInactive ? "Pausado" : "No entrar ahora",
-      dot: isInactive ? "#9ca3af" : "#ef4444",
-      boxBg: isInactive ? "#f9fafb" : "#fff5f5",
-      boxBorder: isInactive ? "#d1d5db" : "#fca5a5",
-      boxText: isInactive ? "#374151" : "#991b1b",
-    },
+    green: { label: "Lista para entrar", dot: T.green },
+    amber: { label: "Observar",          dot: T.amber },
+    red:   { label: isInactive ? "Pausado" : "No entrar ahora", dot: isInactive ? T.mute : T.red },
   };
   const S = SEM[sem];
 
@@ -186,61 +173,68 @@ function SymbolCard({ s }) {
   let msgEmoji, msgTitle, msgBody;
 
   if (isInactive) {
-    msgEmoji = "⛔";
-    msgTitle = "El bot lo tiene pausado";
-    msgBody  = "El sistema automático decidió pausar este símbolo temporalmente. Puedes operar manual, pero las condiciones no son favorables ahora mismo.";
+    msgEmoji = "⛔"; msgTitle = "El bot lo tiene pausado";
+    msgBody = "El sistema automático decidió pausar este símbolo temporalmente. Puedes operar manual, pero las condiciones no son favorables ahora mismo.";
   } else if (clusterDone) {
-    msgEmoji = "🚨";
-    msgTitle = "Demasiado pronto — el mercado se agotó";
-    msgBody  = `Cayó ${recent} veces seguidas hace poco. Cuando pasa eso, el mercado descansa y las siguientes caídas tardan el doble de lo normal. Espera${medMins ? ` al menos ${medMins} minutos` : " un buen rato"} antes de entrar.`;
+    msgEmoji = "🚨"; msgTitle = "Demasiado pronto — el mercado se agotó";
+    msgBody = `Cayó ${recent} veces seguidas hace poco. Cuando pasa eso, el mercado descansa y las siguientes caídas tardan el doble de lo normal. Espera${medMins ? ` al menos ${medMins} min` : " un buen rato"} antes de entrar.`;
   } else if (sem === "amber" && ticks !== null && ticks < 120) {
-    msgEmoji = "⏳";
-    msgTitle = "Acaba de caer — espera un momento";
-    msgBody  = "Hace apenas unos segundos ocurrió una caída fuerte. Cuando pasa esto, a veces viene otra rápido. Espera 2 minutos viendo la pantalla. Si el precio sube un poco y vuelve a bajar fuerte, ese es el momento de entrar.";
+    msgEmoji = "⏳"; msgTitle = "Acaba de caer — espera un momento";
+    msgBody = "Hace poco ocurrió una caída fuerte. A veces viene otra rápido. Espera 2 min viendo la pantalla. Si el precio sube y vuelve a bajar rápido, ese es el momento.";
   } else if (sem === "green") {
-    msgEmoji = "✅";
-    msgTitle = "Buena ventana — está cargada";
-    msgBody  = `Llevan${minsSince != null ? ` casi ${minsSince} minutos` : " un buen rato"} sin caída y hay mucha energía acumulada. Esta es la zona donde más frecuentemente ocurre la siguiente caída. Las probabilidades estadísticas están a tu favor.`;
+    const hurstNote = hurst != null && hurst < 0.45 ? " y el Hurst está bajando — el mercado perdió fuerza" : "";
+    msgEmoji = "✅"; msgTitle = "Buena ventana — está cargada";
+    msgBody = `Llevan casi ${minsSince != null ? minsSince + " min" : "varios minutos"} sin caída${hurstNote}. Las probabilidades están a tu favor ahora.`;
   } else {
     const pct = p75Sec && secs ? Math.round((secs / p75Sec) * 100) : null;
-    msgEmoji = "⏳";
-    msgTitle = "Acumulando energía";
-    msgBody  = `El mercado está acumulando energía.${pct != null ? ` Ya pasó el ${pct}% del tiempo típico entre caídas.` : ""} En unos minutos podría estar lista la próxima oportunidad. Mantente atenta.`;
+    msgEmoji = "⏳"; msgTitle = "Acumulando energía";
+    msgBody = `El mercado está acumulando energía.${pct != null ? ` Ya pasó el ${pct}% del tiempo típico entre caídas.` : ""} En unos minutos podría estar lista la próxima oportunidad.`;
   }
+
+  /* ─ Hurst visualization ─ */
+  const hurstColor = hurst == null ? T.mute : hurst < 0.45 ? T.green : hurst < 0.55 ? T.amber : T.red;
+  const hurstLabel = hurst == null ? "–" : hurst < 0.45 ? "sin fuerza" : hurst < 0.55 ? "neutro" : "con fuerza";
+  // map hurst [0.30, 0.70] → [0%, 100%] for bar position
+  const hurstPos   = hurst != null ? Math.max(2, Math.min(98, ((hurst - 0.30) / 0.40) * 100)) : 50;
+  const hurstBarColor = (h) => h < 0.45 ? T.green : h < 0.55 ? T.amber : T.red;
 
   /* ─ Q&A answers ─ */
   const z = analytics?.spike_stats?.z_score;
   let energyLabel, energyColor;
-  if (clusterDone)      { energyLabel = "No · se agotó";      energyColor = "#ef4444"; }
-  else if (z == null)   { energyLabel = "Calculando…";         energyColor = "#9ca3af"; }
-  else if (z > 1.2)     { energyLabel = "Sí, hay energía";    energyColor = "#22d3a3"; }
-  else if (z > 0.2)     { energyLabel = "Puede que sí";       energyColor = "#f59e0b"; }
-  else                  { energyLabel = "Todavía poca";        energyColor = "#9ca3af"; }
+  if (clusterDone)    { energyLabel = "No · se agotó";   energyColor = T.red; }
+  else if (z == null) { energyLabel = "Calculando…";      energyColor = T.mute; }
+  else if (z > 1.2)   { energyLabel = "Sí, hay energía"; energyColor = T.green; }
+  else if (z > 0.2)   { energyLabel = "Puede que sí";    energyColor = T.amber; }
+  else                { energyLabel = "Todavía poca";     energyColor = T.mute; }
 
   let botLabel, botColor;
-  if (isInactive)                                                    { botLabel = "No · desactivado";  botColor = "#9ca3af"; }
-  else if (hasChaseGuard)                                            { botLabel = "No · esperando";    botColor = "#f59e0b"; }
-  else if (s.live?.kind === "CONFIRMADO" || s.live?.scoreGap <= 0)  { botLabel = "¡Sí! · entrando";   botColor = "#22d3a3"; }
-  else if (s.live?.scoreGap != null && s.live.scoreGap < 1)         { botLabel = `Casi · falta ${num(s.live.scoreGap, 1)}`; botColor = "#f59e0b"; }
-  else if (s.live)                                                   { botLabel = "No · falta score";  botColor = "#ef4444"; }
-  else                                                               { botLabel = "Evaluando…";         botColor = "#9ca3af"; }
+  if (isInactive)                                                   { botLabel = "No · desactivado"; botColor = T.mute; }
+  else if (hasChaseGuard)                                           { botLabel = "No · esperando";   botColor = T.amber; }
+  else if (s.live?.kind === "CONFIRMADO" || s.live?.scoreGap <= 0) { botLabel = "¡Sí! · entrando";  botColor = T.green; }
+  else if (s.live?.scoreGap != null && s.live.scoreGap < 1)        { botLabel = `Casi · falta ${num(s.live.scoreGap, 1)}`; botColor = T.amber; }
+  else if (s.live)                                                  { botLabel = "No · falta score"; botColor = T.red; }
+  else                                                              { botLabel = "Evaluando…";        botColor = T.mute; }
 
   /* ─ progress bar ─ */
   const acumPct  = medSec && secs ? Math.min(100, Math.round((secs / medSec) * 100)) : 0;
-  const barColor = sem === "green" ? "#22d3a3" : sem === "red" ? "#ef4444" : "#f59e0b";
-  const barText  = ticks !== null && ticks < 120
+  const barColor = sem === "green" ? T.green : sem === "red" ? T.red : T.amber;
+  const barSuffix = acumPct < 40 ? "· aún muy pronto"
+    : acumPct < 75  ? "· zona de espera"
+    : acumPct < 100 ? "· acercándose a la zona"
+    : "· zona óptima";
+  const barText = ticks !== null && ticks < 120
     ? "Ventana de oportunidad: primeros minutos después de la caída"
     : clusterDone
     ? `Solo el ${acumPct}% del tiempo típico ha pasado desde el cluster`
-    : `Acumulación: ${acumPct}% del tiempo típico entre caídas ya pasó`;
+    : `Acumulación: ${acumPct}% del tiempo típico pasó ${barSuffix}`;
 
-  /* ─ dots (últimas caídas seguidas) ─ */
-  const TOTAL = 5;
-  const filled = Math.min(Math.max(0, recent), TOTAL);
-  const hasPossible = sem !== "red" && filled < TOTAL;
-  const dots = Array.from({ length: TOTAL }, (_, i) => {
-    if (i < filled)                    return "filled";
-    if (i === filled && hasPossible)   return "possible";
+  /* ─ dots ─ */
+  const TOTAL   = 7;
+  const filled  = Math.min(Math.max(0, recent), TOTAL);
+  const hasPoss = sem !== "red" && filled < TOTAL;
+  const dots    = Array.from({ length: TOTAL }, (_, i) => {
+    if (i < filled)                  return "filled";
+    if (i === filled && hasPoss)     return "possible";
     return "empty";
   });
   const dotText = filled === 0         ? "Sin caídas recientes en esta hora"
@@ -249,26 +243,25 @@ function SymbolCard({ s }) {
     : `${filled} seguidas · posible una más`;
 
   const symDisplay = (s.symbol || "").replace(/^CRASH/, "CRASH ");
-  const SANS = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
 
   return (
     <div style={{
-      background: "#ffffff", borderRadius: 20,
-      border: `1.5px solid ${S.dot}44`,
-      boxShadow: `0 4px 24px ${S.dot}18, 0 1px 6px rgba(0,0,0,0.10)`,
-      overflow: "hidden", fontFamily: SANS,
+      background: T.panel, borderRadius: 14,
+      border: `1px solid ${S.dot}55`,
+      boxShadow: `0 0 20px ${S.dot}14`,
+      display: "flex", flexDirection: "column", overflow: "hidden",
     }}>
 
       {/* posición abierta */}
       {hasOpen && (
         <div style={{
-          padding: "8px 18px", background: "#eff6ff", borderBottom: "1px solid #bfdbfe",
+          padding: "7px 14px", background: T.cyan + "14", borderBottom: `1px solid ${T.cyan}33`,
           display: "flex", justifyContent: "space-between", alignItems: "center",
         }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: "#1d4ed8" }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, color: T.cyan }}>
             ● POSICIÓN ABIERTA · {sideLabel(s.openContract.side)} · {dur(s.openContract.duration_sec)}
           </span>
-          <span style={{ fontSize: 13, fontWeight: 800, color: pnlColor(s.openContract.floating_pnl) }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: pnlColor(s.openContract.floating_pnl) }}>
             {Number(s.openContract.floating_pnl) >= 0 ? "+" : ""}{num(s.openContract.floating_pnl)} USDT
           </span>
         </div>
@@ -277,77 +270,160 @@ function SymbolCard({ s }) {
       {/* header — nombre + badge */}
       <div style={{
         display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-        padding: "18px 20px 12px",
+        padding: "16px 16px 10px", background: T.panel2, borderBottom: `1px solid ${T.border}`,
       }}>
         <div>
-          <div style={{ fontWeight: 800, fontSize: 24, color: "#111827", letterSpacing: "-0.02em", lineHeight: 1 }}>
+          <div style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 20, color: T.text, letterSpacing: "0.03em", lineHeight: 1 }}>
             {symDisplay}
           </div>
-          <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 3 }}>Índice sintético · baja</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.mute, marginTop: 3 }}>Índice sintético · baja</div>
         </div>
         <div style={{
-          display: "flex", alignItems: "center", gap: 6,
+          display: "flex", alignItems: "center", gap: 5,
           background: S.dot + "18", border: `1px solid ${S.dot}44`,
-          borderRadius: 20, padding: "5px 13px",
+          borderRadius: 20, padding: "5px 12px",
         }}>
           <div style={{
-            width: 8, height: 8, borderRadius: "50%", background: S.dot,
+            width: 7, height: 7, borderRadius: "50%", background: S.dot,
             boxShadow: sem === "green" ? `0 0 6px ${S.dot}` : "none",
+            animation: sem === "green" ? "pulse 1.6s infinite" : "none",
           }} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: S.dot }}>{S.label}</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, color: S.dot, letterSpacing: "0.04em" }}>
+            {S.label}
+          </span>
         </div>
       </div>
 
-      {/* caja principal con la explicación en lenguaje humano */}
+      {/* caja de decisión — explicación en español coloquial */}
       <div style={{
-        margin: "0 16px 14px",
-        background: S.boxBg, border: `1px solid ${S.boxBorder}`,
-        borderRadius: 12, padding: "13px 15px",
+        margin: "12px 14px 10px",
+        background: S.dot + "14", border: `1px solid ${S.dot}33`,
+        borderRadius: 10, padding: "12px 14px",
       }}>
-        <div style={{ fontWeight: 700, fontSize: 14.5, color: S.boxText, marginBottom: 5 }}>
+        <div style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 13, color: S.dot, marginBottom: 5 }}>
           {msgEmoji} {msgTitle}
         </div>
-        <div style={{ fontSize: 13, lineHeight: 1.55, color: "#4b5563" }}>{msgBody}</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, lineHeight: 1.6, color: T.textD }}>{msgBody}</div>
       </div>
 
-      {/* 3 preguntas clave */}
-      <div style={{ padding: "0 16px" }}>
+      {/* ══ HURST — fuerza del mercado ══ */}
+      <div style={{ padding: "10px 14px 12px", borderBottom: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{
+            fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.mute,
+            letterSpacing: "0.10em", textTransform: "uppercase",
+          }}>Fuerza del mercado (Hurst)</span>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 26, fontWeight: 800, color: hurstColor, lineHeight: 1 }}>
+              {hurst != null ? hurst.toFixed(3) : "–"}
+            </span>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600, color: hurstColor }}>{hurstLabel}</span>
+          </div>
+        </div>
+
+        {/* gradient bar + marker */}
+        <div style={{ position: "relative", height: 10, marginBottom: 6 }}>
+          <div style={{
+            height: "100%", borderRadius: 99,
+            background: `linear-gradient(to right, ${T.green} 0%, ${T.amber} 50%, ${T.red} 100%)`,
+          }} />
+          {hurst != null && (
+            <div style={{
+              position: "absolute", top: "50%", transform: "translate(-50%, -50%)",
+              left: `${hurstPos}%`,
+              width: 16, height: 16, borderRadius: "50%",
+              background: T.panel, border: `2.5px solid ${hurstColor}`,
+              boxShadow: `0 0 8px ${hurstColor}99`,
+            }} />
+          )}
+        </div>
+
+        {/* bar labels */}
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.green }}>sin fuerza · entra</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>neutro</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.red }}>con fuerza · espera</span>
+        </div>
+
+        {/* hurst history bars */}
+        {hurstHistory.length > 0 && (
+          <div style={{ display: "flex", gap: 3, alignItems: "flex-end" }}>
+            {hurstHistory.map((h, i) => {
+              const isLast = i === hurstHistory.length - 1;
+              const hc = hurstBarColor(h);
+              return (
+                <div key={i} style={{
+                  flex: 1, height: 18, borderRadius: 4,
+                  background: hc + (isLast ? "ff" : "77"),
+                  border: isLast ? `1.5px solid ${hc}` : "none",
+                  boxShadow: isLast ? `0 0 6px ${hc}` : "none",
+                }} />
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ══ 3 stats rápidos ══ */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 0, borderBottom: `1px solid ${T.border}`,
+      }}>
+        {[
+          { label: "Sin caída hace", value: secs > 0 ? ago(secs) : "–", color: T.amber },
+          { label: "Ticks acum.", value: ticks != null ? intC(ticks) : "–", color: T.text },
+          { label: "Spikes / hora", value: recent > 0 ? `#${recent}` : "–", color: T.cyan },
+        ].map(({ label, value, color }, i) => (
+          <div key={i} style={{
+            padding: "10px 0", textAlign: "center",
+            borderRight: i < 2 ? `1px solid ${T.border}` : "none",
+          }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ══ 3 preguntas humanas ══ */}
+      <div style={{ padding: "4px 14px 0" }}>
         <QARow q="¿Cuánto tiempo sin caída?" a={secs > 0 ? ago(secs) : "–"} />
         <QARow q="¿Tiene energía el mercado?" a={energyLabel} aColor={energyColor} />
         <QARow q="¿Puede entrar el bot ahora?" a={botLabel} aColor={botColor} />
       </div>
 
-      {/* puntitos — últimas caídas seguidas */}
-      <div style={{ padding: "14px 16px 6px" }}>
+      {/* ══ puntitos — últimas caídas seguidas ══ */}
+      <div style={{ padding: "12px 14px 6px" }}>
         <div style={{
-          fontSize: 10, fontWeight: 700, color: "#9ca3af",
-          letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8,
+          fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.mute,
+          letterSpacing: "0.10em", textTransform: "uppercase", marginBottom: 8,
         }}>
           Últimas caídas seguidas
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-          <div style={{ display: "flex", gap: 5 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 4 }}>
             {dots.map((d, i) => (
               <div key={i} style={{
-                width: 14, height: 14, borderRadius: "50%",
+                width: 13, height: 13, borderRadius: "50%",
                 background: d === "filled" ? S.dot : "transparent",
                 border: `2px ${d === "possible" ? "dashed" : "solid"} ${
-                  d === "filled" ? S.dot : d === "possible" ? S.dot + "99" : "#d1d5db"
+                  d === "filled" ? S.dot : d === "possible" ? S.dot + "99" : T.mute + "66"
                 }`,
               }} />
             ))}
           </div>
-          <span style={{ fontSize: 12, color: "#6b7280" }}>{dotText}</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: T.textD }}>{dotText}</span>
         </div>
 
         {/* barra de acumulación */}
-        <div style={{ height: 7, borderRadius: 99, background: "#f3f4f6", overflow: "hidden" }}>
+        <div style={{ height: 6, borderRadius: 99, background: T.bg, overflow: "hidden" }}>
           <div style={{
             height: "100%", borderRadius: 99, background: barColor,
             width: `${acumPct}%`, transition: "width 600ms ease",
           }} />
         </div>
-        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5, paddingBottom: 14 }}>{barText}</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.mute, marginTop: 5, paddingBottom: 14 }}>
+          {barText}
+        </div>
       </div>
     </div>
   );
