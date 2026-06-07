@@ -461,7 +461,12 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const symbols = data?.symbols || [];
+  const SYMBOL_ORDER = ["CRASH500", "CRASH600", "CRASH900", "CRASH1000", "BOOM500", "BOOM600", "BOOM900"];
+  const symbols = (data?.symbols || []).slice().sort((a, b) => {
+    const ai = SYMBOL_ORDER.indexOf(a.symbol);
+    const bi = SYMBOL_ORDER.indexOf(b.symbol);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
   const confFeed = data?.confirmationFeed || [];
   const spikeTable = data?.spikeTable || [];
   const sess = data?.session || {};
