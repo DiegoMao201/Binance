@@ -3437,7 +3437,7 @@ class DerivDaemon:
                 snap.score_breakdown["scarcity_state"] = _scar_state
                 snap.score_breakdown["scarcity_ratio"] = _scar.get("ratio")
             if _scar.get("dry"):
-                _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.0") or 8.0)
+                _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.5") or 8.5)
                 if snap.score < _dry_override:
                     snap.score_breakdown["scarcity_dry_block"] = True
                     snap.score_breakdown["scarcity_dry_override_score"] = _dry_override

@@ -198,6 +198,24 @@ _SCARCITY_EXIT_PEAK_GUARD = float(
 _SCARCITY_EXIT_MIN_HOLD_SEC = float(
     os.getenv("DERIV_SCARCITY_EXIT_MIN_HOLD_SEC", "360") or 360
 )
+# Max hold per symbol in spike_sl_only_mode (p90 empirical spike gap).
+# Acts as a backstop: if no spike arrives within the p90 window and the
+# trade is losing, cut it — don't bleed to the broker SL.
+# Values from live data analysis (2026-06-07):
+#   CRASH500 p90=915s · CRASH600 p90=1097s · CRASH900 p90=1593s (capped at 1200)
+_SPIKE_SL_MAX_HOLD_PER_SYM: dict[str, float] = {
+    "CRASH500": 900.0,
+    "CRASH600": 1050.0,
+    "CRASH900": 1200.0,
+    "CRASH1000": 1400.0,
+    "BOOM500": 900.0,
+    "BOOM600": 1050.0,
+    "BOOM900": 1200.0,
+    "BOOM1000": 1400.0,
+}
+_SPIKE_SL_MAX_HOLD_DEFAULT = float(
+    os.getenv("DERIV_SPIKE_SL_MAX_HOLD_DEFAULT", "900") or 900
+)
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
 # (dollar_floor) cierra antes de cuota.  Esto evita ganancias chicas en
@@ -907,6 +925,42 @@ class DerivTradeExecutor:
                     _LOGGER.warning(
                         "[SCARCITY-DRY-EXIT] %s sell failed cid=%s: %s",
                         source, cid, exc,
+                    )
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
+
+        # ─── RULE 0b — MAX HOLD TIMEOUT (spike_sl_only_mode backstop) ─────────
+        # In spike_sl_only_mode max_hold_seconds is forced to 0 (no profile
+        # timeout). This rule fills that gap: if a losing trade exceeds the
+        # empirical p90 spike-gap for its symbol, the spike window has expired
+        # — cut now instead of bleeding all the way to the broker SL.
+        # Only fires for trades that have NOT caught a spike (peak < guard)
+        # and are currently losing (current_profit < 0).
+        if (
+            self._spike_sl_only_mode
+            and is_spike_market(oc.symbol)
+            and cid not in self._closing
+            and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
+            and current_profit < 0
+        ):
+            _sym_max_hold = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
+                oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
+            )
+            if _held_sec >= _sym_max_hold:
+                self._closing.add(cid)
+                oc.pending_close_reason = "max_hold_timeout"
+                _LOGGER.info(
+                    "[MAX-HOLD-TIMEOUT] %s cid=%s sym=%s held=%.0fs max=%.0fs "
+                    "pnl=%.4f → spike window p90 exhausted, cutting",
+                    source, cid, oc.symbol, _held_sec, _sym_max_hold,
+                    current_profit,
+                )
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[MAX-HOLD-TIMEOUT] sell failed cid=%s: %s", cid, exc
                     )
                     self._closing.discard(cid)
                     oc.pending_close_reason = None
