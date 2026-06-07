@@ -196,7 +196,7 @@ _SCARCITY_EXIT_PEAK_GUARD = float(
 # the exit must not fire immediately — that creates a 7-second enter/exit loop.
 # Non-SECO-override trades are still exited immediately on SECO detection.
 _SCARCITY_EXIT_MIN_HOLD_SEC = float(
-    os.getenv("DERIV_SCARCITY_EXIT_MIN_HOLD_SEC", "120") or 120
+    os.getenv("DERIV_SCARCITY_EXIT_MIN_HOLD_SEC", "360") or 360
 )
 # 2026-05-30 "quota-gate v2": no cerramos por tier % hasta cumplir la cuota
 # horaria esperada (avg de las N horas previas).  Sólo el escalón de dólares
