@@ -134,9 +134,10 @@ function SymbolCard({ s }) {
   const hurst  = analytics?.snapshot?.hurst ?? null;
   const hurstH = analytics?.hurst_history ?? [];
 
-  /* ─ score freshness (needed before isInactive) ─ */
-  const scoreAgeSec0 = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
+  /* ─ score freshness + gap (needed before isInactive / sem) ─ */
+  const scoreAgeSec0  = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
   const scoreIsStale0 = scoreAgeSec0 != null && scoreAgeSec0 > 90;
+  const scoreGap0     = s.live?.scoreGap ?? null;   // gap available early for semaphore
 
   /* ─ semáforo ─ */
   // isInactive only fires when score is stale — if score is fresh, the symbol IS processing normally.
@@ -147,7 +148,7 @@ function SymbolCard({ s }) {
 
   let sem;
   if (isInactive || clusterDone) sem = "red";
-  else if (isManualOnly && gap != null && gap <= 0) sem = "manual";
+  else if (isManualOnly && scoreGap0 != null && scoreGap0 <= 0) sem = "manual";
   else if (secs > 0 && p75Sec && secs > p75Sec && !hasChaseGuard) sem = "green";
   else sem = "amber";
 
@@ -165,7 +166,7 @@ function SymbolCard({ s }) {
   let msgEmoji, msgLine;
   if (isInactive) {
     msgEmoji = "⛔"; msgLine = "Símbolo pausado por el sistema automático";
-  } else if (isManualOnly && gap != null && gap <= 0) {
+  } else if (isManualOnly && scoreGap0 != null && scoreGap0 <= 0) {
     msgEmoji = "🎯"; msgLine = `Score OK · entra manualmente${minsSince != null ? ` · ${minsSince} min sin spike` : ""}`;
   } else if (clusterDone) {
     msgEmoji = "🚨"; msgLine = `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
