@@ -198,6 +198,12 @@ _SCARCITY_EXIT_PEAK_GUARD = float(
 _SCARCITY_EXIT_MIN_HOLD_SEC = float(
     os.getenv("DERIV_SCARCITY_EXIT_MIN_HOLD_SEC", "360") or 360
 )
+# Minimum hold for ALL spike trades before scarcity_dry_exit can fire.
+# Prevents cutting trades that entered just under the SECO threshold and
+# crossed it within seconds. 90s gives the trade at least one chance.
+_SCARCITY_EXIT_BASE_MIN_HOLD_SEC = float(
+    os.getenv("DERIV_SCARCITY_EXIT_BASE_MIN_HOLD_SEC", "90") or 90
+)
 # Max hold per symbol in spike_sl_only_mode (p90 empirical spike gap).
 # Acts as a backstop: if no spike arrives within the p90 window and the
 # trade is losing, cut it — don't bleed to the broker SL.
@@ -898,6 +904,7 @@ class DerivTradeExecutor:
             and self._risk is not None
             and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
             and current_profit < _SCARCITY_EXIT_MAX_PROFIT
+            and _held_sec >= _SCARCITY_EXIT_BASE_MIN_HOLD_SEC
             and (
                 not _seco_override_entry
                 or _held_sec >= _SCARCITY_EXIT_MIN_HOLD_SEC

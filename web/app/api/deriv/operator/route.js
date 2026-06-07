@@ -189,7 +189,17 @@ export async function GET() {
     for (let i = symDecisions.length - 1; i >= 0 && i >= symDecisions.length - 30; i--) {
       if (symDecisions[i].gate != null) { liveGate = symDecisions[i].gate; break; }
     }
-    const liveScore = liveDecision && Number.isFinite(liveDecision.score) ? liveDecision.score : null;
+    // Walk back up to 20 decisions to find the last one with a real score.
+    // Cooldown/geo decisions often have no score field — don't show "—" because of them.
+    let liveScore = null;
+    let liveScoreDecision = null;
+    for (let i = symDecisions.length - 1; i >= 0 && i >= symDecisions.length - 20; i--) {
+      if (Number.isFinite(symDecisions[i].score) && symDecisions[i].score > 0) {
+        liveScore = symDecisions[i].score;
+        liveScoreDecision = symDecisions[i];
+        break;
+      }
+    }
     const scoreGap = liveGate != null && liveScore != null ? +(liveGate - liveScore).toFixed(2) : null;
     // Recent confirmations: meaningful detections (spike / score forming / confirmed).
     const confirmations = symDecisions
@@ -209,10 +219,10 @@ export async function GET() {
         score: liveScore,
         gate: liveGate,
         scoreGap,
-        regime: liveDecision?.regime || null,
+        regime: liveScoreDecision?.regime || liveDecision?.regime || null,
         kind: liveDecision?.kind || null,
         label: liveDecision?.label || null,
-        side: liveDecision?.side || null,
+        side: liveScoreDecision?.side || liveDecision?.side || null,
         ts: liveDecision?.ts || null,
         ticksSinceSpike: ctx.ticks_since_last_spike ?? last?.ticks_since_last_spike ?? null,
         hurst: an.hurst ?? null,
