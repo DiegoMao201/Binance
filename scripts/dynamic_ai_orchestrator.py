@@ -226,10 +226,27 @@ SYMBOL_SCORE_FLOOR_MAP.update(
     _parse_symbol_float_map(os.getenv("DYNAMIC_AI_SYMBOL_SCORE_FLOOR_MAP", ""))
 )
 
+# Per-symbol ceiling on score_min_override — caps how HIGH the LLM can raise the gate.
+# CRASH900 is structurally slow; its calm/SECO scores peak at ~7.0, so capping at 7.0
+# prevents the LLM from permanently blocking it when spike rate temporarily drops.
+# Format: DYNAMIC_AI_{SYM}_SCORE_CEILING=X or DYNAMIC_AI_SYMBOL_SCORE_CEILING_MAP=SYM:X,...
+SYMBOL_SCORE_CEILING_MAP: dict[str, float] = {
+    "CRASH900": float(os.getenv("DYNAMIC_AI_CRASH900_SCORE_CEILING", str(SCORE_MAX_GUARDRAIL)) or SCORE_MAX_GUARDRAIL),
+}
+SYMBOL_SCORE_CEILING_MAP.update(
+    _parse_symbol_float_map(os.getenv("DYNAMIC_AI_SYMBOL_SCORE_CEILING_MAP", ""))
+)
+
 
 def _symbol_score_floor(symbol: str) -> float:
     sym = str(symbol or "").upper()
     base = float(SYMBOL_SCORE_FLOOR_MAP.get(sym, SCORE_MIN_GUARDRAIL))
+    return max(SCORE_MIN_GUARDRAIL, min(base, SCORE_MAX_GUARDRAIL))
+
+
+def _symbol_score_ceiling(symbol: str) -> float:
+    sym = str(symbol or "").upper()
+    base = float(SYMBOL_SCORE_CEILING_MAP.get(sym, SCORE_MAX_GUARDRAIL))
     return max(SCORE_MIN_GUARDRAIL, min(base, SCORE_MAX_GUARDRAIL))
 
 
@@ -580,7 +597,7 @@ def _clamp_cfg(symbol: str, cfg: SymbolCfg) -> SymbolCfg:
             min(int(cfg.spike_pre_filter_target), SPIKE_PREFILTER_MAX_TICKS),
         ),
         zero_peak_grace_sec=max(zero_peak_floor, min(int(cfg.zero_peak_grace_sec), 120)),
-        score_min_override=max(score_floor, min(float(cfg.score_min_override), SCORE_MAX_GUARDRAIL)),
+        score_min_override=max(score_floor, min(float(cfg.score_min_override), _symbol_score_ceiling(sym), SCORE_MAX_GUARDRAIL)),
         is_active=bool(cfg.is_active),
         size_multiplier=size_mult,
     )
