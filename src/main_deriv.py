@@ -526,6 +526,14 @@ class DerivDaemon:
         _sensitive_zero_peak_floor = 60 if _sym in {"BOOM500", "CRASH500", "CRASH600"} else 0
         _score_min = float(os.getenv("DYNAMIC_AI_SCORE_MIN_GUARDRAIL", "5.5") or 5.5)
         _score_max = float(os.getenv("DYNAMIC_AI_SCORE_MAX_GUARDRAIL", "9.2") or 9.2)
+        # Per-symbol floor: DYNAMIC_AI_{SYM}_SCORE_MIN caps how high the LLM can raise the gate.
+        # e.g. DYNAMIC_AI_CRASH900_SCORE_FLOOR=6.80 → score_min_override capped at 6.80 for CRASH900
+        _sym_floor_env = os.getenv(f"DYNAMIC_AI_{_sym}_SCORE_FLOOR") or os.getenv(f"DYNAMIC_AI_{_sym}_SCORE_MIN")
+        if _sym_floor_env:
+            try:
+                _score_max = min(_score_max, float(_sym_floor_env))
+            except ValueError:
+                pass
         _spike_max = max(
             500,
             int(
@@ -3475,6 +3483,7 @@ class DerivDaemon:
                     )
                     return
                 snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
+                snap.score_breakdown["scarcity_dry_override_gate"] = round(_dry_override, 2)
                 _LOGGER.info(
                     "[PIPELINE] SCARCITY_DRY_OVERRIDE %s | score=%.2f≥%.1f ratio=%s× "
                     "elapsed=%ss → taking the slow spike",
@@ -3514,28 +3523,36 @@ class DerivDaemon:
             )
 
         if snap.score < _regime_min:
-            _regime_gate_name = (
-                f"REGIME_SCORE_GATE_{snap.regime}_dynamic"
-                if _dyn_active else
-                f"REGIME_SCORE_GATE_{snap.regime}"
-            )
-            self._log_entry_block(
-                tick.symbol, _regime_gate_name,
-                score=snap.score, effective_min_score=_regime_min,
-                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                score_breakdown=snap.score_breakdown,
-            )
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=snap.side,
-                score=snap.score,
-                reason=(
-                    f"REGIME_SCORE_GATE_DYNAMIC: requires≥{_regime_min:.2f} got={snap.score:.2f}"
+            # SECO-override bypass: the SECO gate already validated the score at a
+            # lower threshold. In SECO state, scores are structurally depressed below
+            # the regime min (e.g. CRASH900 peaks at ~6.3 in deep SECO). The SECO gate
+            # is the authority for these entries; the regime gate would double-block.
+            _seco_override_gate = snap.score_breakdown.get("scarcity_dry_override_gate")
+            if _seco_override_gate is not None and snap.score >= float(_seco_override_gate):
+                snap.score_breakdown["regime_gate_bypassed_by_seco"] = True
+            else:
+                _regime_gate_name = (
+                    f"REGIME_SCORE_GATE_{snap.regime}_dynamic"
                     if _dyn_active else
-                    f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}"
-                ),
-                extra={"regime": snap.regime},
-            )
-            return
+                    f"REGIME_SCORE_GATE_{snap.regime}"
+                )
+                self._log_entry_block(
+                    tick.symbol, _regime_gate_name,
+                    score=snap.score, effective_min_score=_regime_min,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason=(
+                        f"REGIME_SCORE_GATE_DYNAMIC: requires≥{_regime_min:.2f} got={snap.score:.2f}"
+                        if _dyn_active else
+                        f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}"
+                    ),
+                    extra={"regime": snap.regime},
+                )
+                return
 
         # BOOM600 safety override: trending regime needs extra score conviction.
         if tick.symbol.upper() == "BOOM600" and str(snap.regime or "").lower() == "trending":
