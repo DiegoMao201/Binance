@@ -135,6 +135,13 @@ _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
     "BOOM1000,CRASH1000",
 )
 
+# Symbols the bot monitors (full score/Hurst/pipeline) but NEVER trades.
+# Useful for manual-trading consoles where the human executes the entry.
+_MANUAL_ONLY_SYMBOLS: set[str] = _env_symbol_set(
+    "DERIV_MANUAL_ONLY_SYMBOLS",
+    "",
+)
+
 # Dynamic inactive bypass (entry gate only): keeps dynamic score/regime logic
 # active while avoiding hard symbol starvation for selected symbols.
 _DYNAMIC_INACTIVE_BYPASS_ENABLE: bool = _env_flag(
@@ -4173,6 +4180,24 @@ class DerivDaemon:
                 "hurst_ai_override": False,
             } if analysis else {},
         }
+        # Manual-only symbols: run full pipeline (score, Hurst, AI) so the
+        # operator console has live data, but never execute an actual trade.
+        if tick.symbol.upper() in _MANUAL_ONLY_SYMBOLS:
+            _LOGGER.info(
+                "[PIPELINE] MANUAL_ONLY %s | score=%.2f effective_min=%.2f | side=%s — skipping entry",
+                tick.symbol, snap.score, snap.effective_min_score, snap.side,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=f"MANUAL_ONLY: score={snap.score:.2f} gate={snap.effective_min_score:.2f}",
+                extra={
+                    **{k: v for k, v in (decision_extra or {}).items()},
+                    "manual_only": True,
+                },
+            )
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="manual_only")
+            return
         self._cooldown.mark(tick.symbol)
 
         ai_note = "" if analysis is None or analysis.ai_skipped else f" ai={analysis.ai_confidence:.2f}"

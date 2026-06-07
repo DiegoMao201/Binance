@@ -134,22 +134,30 @@ function SymbolCard({ s }) {
   const hurst  = analytics?.snapshot?.hurst ?? null;
   const hurstH = analytics?.hurst_history ?? [];
 
+  /* ─ score freshness (needed before isInactive) ─ */
+  const scoreAgeSec0 = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
+  const scoreIsStale0 = scoreAgeSec0 != null && scoreAgeSec0 > 90;
+
   /* ─ semáforo ─ */
-  const isInactive    = s.topReasons?.some(r => r.reason === "dynamic_symbol_inactive") || ready.state === "SIN_DATOS";
+  // isInactive only fires when score is stale — if score is fresh, the symbol IS processing normally.
+  const isInactive    = scoreIsStale0 && (s.topReasons?.some(r => r.reason === "dynamic_symbol_inactive") || ready.state === "SIN_DATOS");
+  const isManualOnly  = s.topReasons?.some(r => r.reason === "manual_only");
   const hasChaseGuard = s.topReasons?.some(r => r.reason?.includes("chase") || r.reason?.includes("post_spike_chase"));
   const clusterDone   = recent >= 3 && !cluster;
 
   let sem;
   if (isInactive || clusterDone) sem = "red";
+  else if (isManualOnly && gap != null && gap <= 0) sem = "manual";
   else if (secs > 0 && p75Sec && secs > p75Sec && !hasChaseGuard) sem = "green";
   else sem = "amber";
 
   const SEM = {
-    green: { label: "Lista para entrar", dot: T.green },
-    amber: { label: "Observar",          dot: T.amber },
-    red:   { label: isInactive ? "Pausado" : "No entrar ahora", dot: isInactive ? T.mute : T.red },
+    green:  { label: "Lista para entrar",          dot: T.green },
+    amber:  { label: "Observar",                   dot: T.amber },
+    manual: { label: "Condiciones OK — tú entras", dot: T.violet },
+    red:    { label: isInactive ? "Pausado" : "No entrar ahora", dot: isInactive ? T.mute : T.red },
   };
-  const S = SEM[sem];
+  const S = SEM[sem] || SEM["amber"];
 
   /* ─ compact message (1 línea) ─ */
   const minsSince = secs > 0 ? Math.round(secs / 60) : null;
@@ -157,6 +165,8 @@ function SymbolCard({ s }) {
   let msgEmoji, msgLine;
   if (isInactive) {
     msgEmoji = "⛔"; msgLine = "Símbolo pausado por el sistema automático";
+  } else if (isManualOnly && gap != null && gap <= 0) {
+    msgEmoji = "🎯"; msgLine = `Score OK · entra manualmente${minsSince != null ? ` · ${minsSince} min sin spike` : ""}`;
   } else if (clusterDone) {
     msgEmoji = "🚨"; msgLine = `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
   } else if (sem === "amber" && ticks !== null && ticks < 120) {
@@ -176,9 +186,9 @@ function SymbolCard({ s }) {
   const gap   = live?.scoreGap;
   const liveKind = live?.kind;
   const isVetado = liveKind === "BLOQUEADO" && gap != null && gap <= 0;
-  const pctToGate  = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
-  const scoreAgeSec = live?.ts ? Math.max(0, Date.now() / 1000 - live.ts) : null;
-  const scoreIsStale = scoreAgeSec != null && scoreAgeSec > 90;
+  const pctToGate    = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
+  const scoreAgeSec  = scoreAgeSec0;
+  const scoreIsStale = scoreIsStale0;
   const scoreColor = isVetado ? T.amber : gap != null && gap <= 0 ? (scoreIsStale ? T.amber : T.green) : gap != null && gap < 0.5 ? T.amber : T.cyan;
   const gapColor   = isVetado ? T.amber : gap != null && gap <= 0 ? (scoreIsStale ? T.amber : T.green) : T.amber;
   const faltaText  = gap == null ? "–" : isVetado ? "VETADO" : gap <= 0 ? (scoreIsStale ? "LISTO ?" : "LISTO ✓") : `+${num(gap)}`;
@@ -191,7 +201,7 @@ function SymbolCard({ s }) {
 
   /* ─ accumulation bar ─ */
   const accumPct  = Math.min(100, Math.round((secs / (p75Sec || medSec || 1)) * 100));
-  const barColor  = sem === "green" ? T.green : sem === "red" ? T.red : T.amber;
+  const barColor  = sem === "green" ? T.green : sem === "red" ? T.red : sem === "manual" ? T.violet : T.amber;
   const barSuffix = accumPct >= 100 ? "· zona óptima" : accumPct >= 75 ? "· casi lista" : accumPct >= 40 ? "· zona de espera" : "· muy pronto";
 
   return (
@@ -231,6 +241,13 @@ function SymbolCard({ s }) {
           <span style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 15, color: T.text, letterSpacing: "0.04em" }}>
             {s.symbol}
           </span>
+          {isManualOnly && (
+            <span style={{
+              fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700, color: T.violet,
+              background: T.violet + "18", border: `1px solid ${T.violet}44`,
+              borderRadius: 20, padding: "2px 7px", letterSpacing: "0.06em",
+            }}>MANUAL</span>
+          )}
         </div>
         <span style={{
           fontFamily: FONT_MONO, fontSize: 9.5, fontWeight: 800, color: S.dot,
