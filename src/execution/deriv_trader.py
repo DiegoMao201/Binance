@@ -184,7 +184,7 @@ _POST_SPIKE_RED_MAX_LOSS = min(
 # of bleeding to the broker SL. Winners are protected: we only cut when peak
 # never reached PEAK_GUARD ($1) AND current PnL is below MAX_PROFIT ($0.30) — the
 # tier/trailing logic still owns anything that actually caught a spike.
-_SCARCITY_EXIT_ENABLE = _env_flag("DERIV_SCARCITY_EXIT_ENABLE", "true")
+_SCARCITY_EXIT_ENABLE = _env_flag("DERIV_SCARCITY_EXIT_ENABLE", "false")
 _SCARCITY_EXIT_MAX_PROFIT = float(
     os.getenv("DERIV_SCARCITY_EXIT_MAX_PROFIT", "0.30") or 0.30
 )

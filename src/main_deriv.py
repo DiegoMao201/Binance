@@ -3437,7 +3437,19 @@ class DerivDaemon:
                 snap.score_breakdown["scarcity_state"] = _scar_state
                 snap.score_breakdown["scarcity_ratio"] = _scar.get("ratio")
             if _scar.get("dry"):
-                _dry_override = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.5") or 8.5)
+                _dry_override_global = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.5") or 8.5)
+                _dry_override_map_raw = os.getenv("DERIV_DRY_OVERRIDE_SCORE_MAP", "") or ""
+                # CRASH900 is structurally slow (4-5 spikes/hr) — its regime score
+                # peaks at ~7.0 in calm and can never reach 8.5. Use a per-symbol gate.
+                _dry_override_per_sym: dict[str, float] = {"CRASH900": 6.0}
+                for _p in _dry_override_map_raw.split(","):
+                    if ":" in _p:
+                        _ps, _pv = _p.split(":", 1)
+                        try:
+                            _dry_override_per_sym[_ps.strip().upper()] = float(_pv.strip())
+                        except ValueError:
+                            pass
+                _dry_override = _dry_override_per_sym.get(tick.symbol.upper(), _dry_override_global)
                 if snap.score < _dry_override:
                     snap.score_breakdown["scarcity_dry_block"] = True
                     snap.score_breakdown["scarcity_dry_override_score"] = _dry_override
