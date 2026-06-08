@@ -500,7 +500,7 @@ function SymbolCard({ s }) {
               const fvgTier      = sn.fvg_tier || null;
               const scoreRaw     = sn.score_raw ?? null;
 
-              if (!setupType && !scarcity && !grade) return null;
+              if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
               // Setup color
               const setupColor = setupType === "SMC_FVG" ? T.green
@@ -524,9 +524,12 @@ function SymbolCard({ s }) {
               const immStateColor = immState === "BUILDING" ? T.green
                 : immState === "RIPE" ? T.amber : immState === "OVERDUE" ? T.amber : T.mute;
 
-              // Geo channel: < 20% = best zone
+              // Geo channel: < 20% = best zone; < 0 = below channel (green), > 1 = above channel (red)
               const geoColor = geoPos != null ? (geoPos < 0.20 ? T.green : geoPos < 0.40 ? T.amber : T.red) : T.mute;
-              const geoPct   = geoPos != null ? (geoPos * 100).toFixed(0) + "%" : "–";
+              const geoPct   = geoPos == null ? "–"
+                : geoPos < 0 ? "BOT"
+                : geoPos > 1 ? "TOP"
+                : (geoPos * 100).toFixed(0) + "%";
 
               // FVG tier
               const fvgTierColor = fvgTier === "fvg_full_confluence" ? T.green
