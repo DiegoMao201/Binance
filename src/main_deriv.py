@@ -1504,6 +1504,16 @@ class DerivDaemon:
                 "fvg_direction":          _fvg_cache.get("fvg_direction") or None,
                 "fvg_mid":                _fvg_cache.get("fvg_mid"),
                 "smc_bonus":              _fvg_cache.get("smc_bonus"),
+                # Entry quality indicators (operator console)
+                "setup_type":            _fvg_cache.get("setup_type"),
+                "execution_grade":       _fvg_cache.get("execution_grade"),
+                "scarcity_state":        _fvg_cache.get("scarcity_state"),
+                "scarcity_ratio":        _fvg_cache.get("scarcity_ratio"),
+                "spike_imminence_state": _fvg_cache.get("spike_imminence_state"),
+                "spike_imminence_score": _fvg_cache.get("spike_imminence_score"),
+                "geo_channel_pos":       _fvg_cache.get("geo_channel_pos"),
+                "fvg_tier":              _fvg_cache.get("fvg_tier"),
+                "score_raw":             _fvg_cache.get("score_raw"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -2797,17 +2807,32 @@ class DerivDaemon:
             autocorr_lag1=pre_autocorr,
             dynamic_cfg=_dyn_cfg,
         )
-        # Cache FVG state for market context telemetry (written on next 60-tick cycle).
+        # Cache state for market context telemetry (written on next 60-tick cycle).
         _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+        _cache_sym = tick.symbol.upper()
+        if _cache_sym not in self._last_fvg_state:
+            self._last_fvg_state[_cache_sym] = {}
         if "fvg_active" in _sb_now:
-            self._last_fvg_state[tick.symbol.upper()] = {
+            self._last_fvg_state[_cache_sym].update({
                 "fvg_active":    bool(_sb_now.get("fvg_active")),
                 "fvg_direction": str(_sb_now.get("fvg_direction") or ""),
                 "fvg_mid":       _sb_now.get("fvg_mid"),
                 "fvg_top":       _sb_now.get("fvg_top"),
                 "fvg_bottom":    _sb_now.get("fvg_bottom"),
                 "smc_bonus":     float(_sb_now.get("smc_bonus") or 0.0),
-            }
+            })
+        # Always cache entry quality fields for operator console indicators.
+        self._last_fvg_state[_cache_sym].update({
+            "setup_type":            _sb_now.get("setup_type"),
+            "execution_grade":       _sb_now.get("execution_grade"),
+            "scarcity_state":        _sb_now.get("scarcity_state"),
+            "scarcity_ratio":        _sb_now.get("scarcity_ratio"),
+            "spike_imminence_state": _sb_now.get("spike_imminence_state"),
+            "spike_imminence_score": _sb_now.get("spike_imminence_score"),
+            "geo_channel_pos":       _sb_now.get("geo_channel_pos"),
+            "fvg_tier":              _sb_now.get("fvg_tier"),
+            "score_raw":             _sb_now.get("score_raw"),
+        })
 
         # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
         # Moved from its original location (after Hurst/Strategy gates) so that
@@ -3515,6 +3540,36 @@ class DerivDaemon:
                     tick.symbol, snap.score, _dry_override,
                     _scar.get("ratio"), _scar.get("elapsed_s"),
                 )
+
+        # ── 2026-06-07 SETUP TYPE GATE — quantitative: TREND=23%WR/-$26, SMC_FVG=58%WR/+$20 ──
+        # Entries with setup_type=TREND (no FVG confluence) are systematically unprofitable.
+        # Require an elite score (≥9.0) to pass — effectively blocks nearly all TREND entries.
+        # Controlled by DERIV_BLOCK_TREND_SETUP (default true) + DERIV_TREND_SETUP_MIN_SCORE.
+        if _is_bc_bias and str(os.getenv("DERIV_BLOCK_TREND_SETUP", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
+            _entry_setup = str(snap.score_breakdown.get("setup_type") or "")
+            if _entry_setup == "TREND":
+                _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "9.0") or 9.0)
+                if snap.score < _trend_min:
+                    self._log_entry_block(
+                        tick.symbol, "TREND_SETUP_GATE",
+                        score=snap.score, effective_min_score=_trend_min,
+                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                        score_breakdown=snap.score_breakdown,
+                    )
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score,
+                        reason=(
+                            f"TREND_SETUP_GATE: setup=TREND score={snap.score:.2f}<{_trend_min:.1f} "
+                            f"(SMC_FVG or score≥{_trend_min:.0f} required)"
+                        ),
+                        extra={"regime": snap.regime, "setup_type": "TREND"},
+                    )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason="trend_setup_gate", score=snap.score,
+                    )
+                    return
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration

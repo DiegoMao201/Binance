@@ -488,6 +488,86 @@ function SymbolCard({ s }) {
                 </span>
               );
             })()}
+            {/* ── ENTRY QUALITY INDICATORS ─────────────────────────────── */}
+            {(() => {
+              const sn = analytics.snapshot;
+              const setupType    = sn.setup_type    || null;
+              const grade        = sn.execution_grade || null;
+              const scarcity     = sn.scarcity_state  || null;
+              const immState     = sn.spike_imminence_state || null;
+              const immScore     = sn.spike_imminence_score ?? null;
+              const geoPos       = sn.geo_channel_pos ?? null;
+              const fvgTier      = sn.fvg_tier || null;
+              const scoreRaw     = sn.score_raw ?? null;
+
+              if (!setupType && !scarcity && !grade) return null;
+
+              // Setup color
+              const setupColor = setupType === "SMC_FVG" ? T.green
+                : setupType === "TREND" ? T.red
+                : setupType === "EMA200_SPIKE" ? T.cyan : T.mute;
+              const setupLabel = setupType === "SMC_FVG" ? "SMC_FVG"
+                : setupType === "TREND" ? "TREND"
+                : setupType === "EMA200_SPIKE" ? "EMA200" : (setupType || "–");
+
+              // Grade color
+              const gradeColor = grade === "A" ? T.green : grade === "B" ? T.amber : grade === "C" ? T.red : T.mute;
+
+              // Scarcity color
+              const scarColor = ["SECO","VENCIDO"].includes(scarcity) ? T.red
+                : ["FRESCO","CARGANDO","LISTO"].includes(scarcity) ? T.green : T.mute;
+
+              // Imminence: sweet spot 0.3–0.6
+              const immColor = immScore != null
+                ? (immScore >= 0.3 && immScore <= 0.6 ? T.green : immScore > 0.6 && immScore <= 0.8 ? T.amber : immScore > 0.8 ? T.red : T.mute)
+                : T.mute;
+              const immStateColor = immState === "BUILDING" ? T.green
+                : immState === "RIPE" ? T.amber : immState === "OVERDUE" ? T.amber : T.mute;
+
+              // Geo channel: < 20% = best zone
+              const geoColor = geoPos != null ? (geoPos < 0.20 ? T.green : geoPos < 0.40 ? T.amber : T.red) : T.mute;
+              const geoPct   = geoPos != null ? (geoPos * 100).toFixed(0) + "%" : "–";
+
+              // FVG tier
+              const fvgTierColor = fvgTier === "fvg_full_confluence" ? T.green
+                : fvgTier === "fvg_mitigated" ? T.amber
+                : fvgTier === "dynamic_soft_veto_no_fvg" ? T.red : T.mute;
+              const fvgTierLabel = fvgTier === "fvg_full_confluence" ? "CONF"
+                : fvgTier === "fvg_mitigated" ? "MITIG"
+                : fvgTier === "dynamic_soft_veto_no_fvg" ? "SIN_FVG" : (fvgTier ? fvgTier.toUpperCase().slice(0,8) : "–");
+
+              // Score raw color
+              const scoreRawColor = scoreRaw == null ? T.mute
+                : scoreRaw >= 8.5 ? T.green : scoreRaw >= 7.5 ? T.amber : T.red;
+
+              const chip = (label, value, color) => (
+                <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3,
+                  background: color + "18", border: `1px solid ${color}44`,
+                  borderRadius: 4, padding: "1px 5px" }}>
+                  <span style={{ color: T.mute, fontSize: 7, fontWeight: 600 }}>{label}</span>
+                  <span style={{ color, fontSize: 8, fontWeight: 700 }}>{value}</span>
+                </span>
+              );
+
+              return (
+                <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5 }}>
+                  <div style={{ fontSize: 7, color: T.mute, letterSpacing: "0.08em", fontWeight: 600, marginBottom: 4 }}>
+                    CALIDAD DE ENTRADA
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
+                    {setupType && chip("SETUP", setupLabel, setupColor)}
+                    {grade && chip("GRADE", grade, gradeColor)}
+                    {scarcity && chip("SCAR", scarcity, scarColor)}
+                    {immState && chip("IMM", `${immState}${immScore != null ? " " + immScore.toFixed(2) : ""}`, immScore != null ? immColor : immStateColor)}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
+                    {geoPos != null && chip("GEO", geoPct, geoColor)}
+                    {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
       </div>
