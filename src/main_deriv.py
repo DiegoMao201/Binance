@@ -468,6 +468,8 @@ class DerivDaemon:
         self._ctx_tick_count: dict[str, int] = {}
         # 2026-05-29: per-symbol previous write (ts, tick_count) to derive tick_rate.
         self._ctx_prev_write: dict[str, tuple[float, int]] = {}
+        # Last-known FVG state per symbol — updated after risk.evaluate(), read on next ctx write.
+        self._last_fvg_state: dict[str, dict] = {}
         self._ctx_state_dir = Path(
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
@@ -1482,6 +1484,7 @@ class DerivDaemon:
                 # Telemetry is best-effort; never let it break the tick loop.
                 pass
 
+            _fvg_cache = self._last_fvg_state.get(symbol.upper(), {})
             _snap = {
                 "ts":                     round(_now, 3),
                 "iso":                    datetime.fromtimestamp(_now, tz=timezone.utc).isoformat(),
@@ -1497,6 +1500,10 @@ class DerivDaemon:
                 "tick_rate_5s":           _tick_rate_5s,
                 "range_rolling_pct_60s":  _range_rolling_pct_60s,
                 "post_spike_decay_slope": _post_spike_decay_slope,
+                "fvg_active":             _fvg_cache.get("fvg_active"),
+                "fvg_direction":          _fvg_cache.get("fvg_direction") or None,
+                "fvg_mid":                _fvg_cache.get("fvg_mid"),
+                "smc_bonus":              _fvg_cache.get("smc_bonus"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -2790,6 +2797,17 @@ class DerivDaemon:
             autocorr_lag1=pre_autocorr,
             dynamic_cfg=_dyn_cfg,
         )
+        # Cache FVG state for market context telemetry (written on next 60-tick cycle).
+        _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+        if "fvg_active" in _sb_now:
+            self._last_fvg_state[tick.symbol.upper()] = {
+                "fvg_active":    bool(_sb_now.get("fvg_active")),
+                "fvg_direction": str(_sb_now.get("fvg_direction") or ""),
+                "fvg_mid":       _sb_now.get("fvg_mid"),
+                "fvg_top":       _sb_now.get("fvg_top"),
+                "fvg_bottom":    _sb_now.get("fvg_bottom"),
+                "smc_bonus":     float(_sb_now.get("smc_bonus") or 0.0),
+            }
 
         # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
         # Moved from its original location (after Hurst/Strategy gates) so that

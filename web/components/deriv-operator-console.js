@@ -418,7 +418,7 @@ function SymbolCard({ s }) {
           </div>
         )}
 
-        {/* analytics inline — ATR · EMA200 · CLSTR · Z · PROB */}
+        {/* analytics inline — ATR · EMA200 · CLSTR · FVG · Z · PROB */}
         {analytics?.snapshot && (
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
@@ -429,9 +429,18 @@ function SymbolCard({ s }) {
                 {analytics.snapshot.atr_percentile ?? "–"}%
               </span>
               {" · EMA200 "}
-              <span style={{ color: (analytics.snapshot.ema200_distance_pct ?? 0) > 0 ? T.green : T.red }}>
-                {analytics.snapshot.ema200_distance_pct != null ? (analytics.snapshot.ema200_distance_pct * 100).toFixed(3) + "%" : "–"}
-              </span>
+              {/* BOOM500: price BELOW EMA200 (negative %) = bullish context for UP spike */}
+              {/* CRASH500: price ABOVE EMA200 (positive %) = bearish context for DOWN spike */}
+              {(() => {
+                const d = analytics.snapshot.ema200_distance_pct;
+                const isBoom = s.symbol?.startsWith("BOOM");
+                const bullish = isBoom ? (d != null && d < 0) : (d != null && d > 0);
+                return (
+                  <span style={{ color: bullish ? T.green : T.red }}>
+                    {d != null ? (d * 100).toFixed(3) + "%" : "–"}
+                  </span>
+                );
+              })()}
               {" · CLSTR "}
               <span style={{ color: cluster ? T.red : T.textD, fontWeight: 700 }}>
                 {cluster ? "●ON" : "○OFF"}
@@ -442,6 +451,25 @@ function SymbolCard({ s }) {
               <span style={{ color: T.cyan }}>{analytics.snapshot.tick_rate_5s != null ? analytics.snapshot.tick_rate_5s.toFixed(2) : "–"}/5s</span>
               {" · RANGE60s "}
               <span style={{ color: T.cyan }}>{analytics.snapshot.range_rolling_pct_60s != null ? (analytics.snapshot.range_rolling_pct_60s * 100).toFixed(2) + "%" : "–"}</span>
+              {analytics.snapshot.fvg_active != null && (() => {
+                const fvgOn   = analytics.snapshot.fvg_active === true;
+                const fvgDir  = analytics.snapshot.fvg_direction || "";
+                const fvgMid  = analytics.snapshot.fvg_mid;
+                const smc     = analytics.snapshot.smc_bonus;
+                const isBoom  = s.symbol?.startsWith("BOOM");
+                // FVG bullish = good for BOOM (spike UP); FVG bearish = good for CRASH (spike DOWN)
+                const aligned = fvgOn && ((isBoom && fvgDir === "bullish") || (!isBoom && fvgDir === "bearish"));
+                const fvgColor = fvgOn ? (aligned ? T.green : T.amber) : T.mute;
+                return (
+                  <>
+                    {" · FVG "}
+                    <span style={{ color: fvgColor, fontWeight: fvgOn ? 700 : 400 }}>
+                      {fvgOn ? `●${fvgDir.slice(0, 4).toUpperCase()}${fvgMid != null ? " @" + fvgMid.toFixed(1) : ""}` : "○OFF"}
+                    </span>
+                    {smc != null && smc > 0 && <span style={{ color: T.violet }}>{" SMC+" + smc.toFixed(1)}</span>}
+                  </>
+                );
+              })()}
             </span>
             {analytics.spike_stats && (() => {
               const st = analytics.spike_stats;

@@ -79,7 +79,7 @@ function computeStats(entries: any[]): SpikeStats | null {
 
 export async function GET(request: NextRequest) {
   const symbol = request.nextUrl.searchParams.get('symbol');
-  const validSymbols = ['CRASH500', 'CRASH600', 'CRASH900'];
+  const validSymbols = ['BOOM500', 'CRASH500', 'CRASH600', 'CRASH900'];
   if (!symbol || !validSymbols.includes(symbol)) {
     return NextResponse.json({ error: 'Invalid symbol' }, { status: 400 });
   }
@@ -129,6 +129,10 @@ export async function GET(request: NextRequest) {
         tick_rate_5s: latest.tick_rate_5s,
         range_rolling_pct_60s: latest.range_rolling_pct_60s,
         post_spike_decay_slope: latest.post_spike_decay_slope,
+        fvg_active: latest.fvg_active ?? null,
+        fvg_direction: latest.fvg_direction ?? null,
+        fvg_mid: latest.fvg_mid ?? null,
+        smc_bonus: latest.smc_bonus ?? null,
       },
       spike_stats,
       hurst_history,
