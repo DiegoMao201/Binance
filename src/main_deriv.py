@@ -3602,6 +3602,20 @@ class DerivDaemon:
                 _vel_boost, snap.score,
             )
 
+        # ── Late-stage cache update: scarcity_state and imminence fields are added
+        # to score_breakdown AFTER the early cache (line ~2800). Refresh now so
+        # the operator console sees current SCAR/IMM indicators.
+        if _cache_sym in self._last_fvg_state:
+            _sb_late = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            self._last_fvg_state[_cache_sym].update({
+                "scarcity_state":        _sb_late.get("scarcity_state"),
+                "scarcity_ratio":        _sb_late.get("scarcity_ratio"),
+                "spike_imminence_state": _sb_late.get("spike_imminence_state"),
+                "spike_imminence_score": _sb_late.get("spike_imminence_score"),
+                "execution_grade":       _sb_late.get("execution_grade"),
+                "score_raw":             _sb_late.get("score_raw"),
+            })
+
         if snap.score < _regime_min:
             # SECO-override bypass: the SECO gate already validated the score at a
             # lower threshold. In SECO state, scores are structurally depressed below
