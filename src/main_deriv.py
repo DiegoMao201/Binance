@@ -3541,6 +3541,21 @@ class DerivDaemon:
                     _scar.get("ratio"), _scar.get("elapsed_s"),
                 )
 
+        # ── Late-stage telemetry cache: imminence and scarcity are added to
+        # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
+        # Update here so operator console sees live SCAR/IMM indicators even
+        # when the tick exits early through the TREND gate below.
+        if _cache_sym in self._last_fvg_state:
+            _sb_tel = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            self._last_fvg_state[_cache_sym].update({
+                "scarcity_state":        _sb_tel.get("scarcity_state"),
+                "scarcity_ratio":        _sb_tel.get("scarcity_ratio"),
+                "spike_imminence_state": _sb_tel.get("spike_imminence_state"),
+                "spike_imminence_score": _sb_tel.get("spike_imminence_score"),
+                "execution_grade":       _sb_tel.get("execution_grade"),
+                "score_raw":             _sb_tel.get("score_raw"),
+            })
+
         # ── 2026-06-07 SETUP TYPE GATE — quantitative: TREND=23%WR/-$26, SMC_FVG=58%WR/+$20 ──
         # Entries with setup_type=TREND (no FVG confluence) are systematically unprofitable.
         # Require an elite score (≥9.0) to pass — effectively blocks nearly all TREND entries.
@@ -3601,20 +3616,6 @@ class DerivDaemon:
                 tick.symbol, _vel_score, _vel_dir or "?", _hd_bonus_val,
                 _vel_boost, snap.score,
             )
-
-        # ── Late-stage cache update: scarcity_state and imminence fields are added
-        # to score_breakdown AFTER the early cache (line ~2800). Refresh now so
-        # the operator console sees current SCAR/IMM indicators.
-        if _cache_sym in self._last_fvg_state:
-            _sb_late = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
-            self._last_fvg_state[_cache_sym].update({
-                "scarcity_state":        _sb_late.get("scarcity_state"),
-                "scarcity_ratio":        _sb_late.get("scarcity_ratio"),
-                "spike_imminence_state": _sb_late.get("spike_imminence_state"),
-                "spike_imminence_score": _sb_late.get("spike_imminence_score"),
-                "execution_grade":       _sb_late.get("execution_grade"),
-                "score_raw":             _sb_late.get("score_raw"),
-            })
 
         if snap.score < _regime_min:
             # SECO-override bypass: the SECO gate already validated the score at a
