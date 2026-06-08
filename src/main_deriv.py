@@ -2821,18 +2821,25 @@ class DerivDaemon:
                 "fvg_bottom":    _sb_now.get("fvg_bottom"),
                 "smc_bonus":     float(_sb_now.get("smc_bonus") or 0.0),
             })
-        # Always cache entry quality fields for operator console indicators.
-        self._last_fvg_state[_cache_sym].update({
-            "setup_type":            _sb_now.get("setup_type"),
+        # Cache entry quality fields for operator console indicators.
+        # setup_type and fvg_tier always reflect current tick state; others are
+        # preserved when None (hard-veto paths skip full scoring, carrying forward
+        # the last computed value is more informative than overwriting with None).
+        _qfields_always = {
+            "setup_type":  _sb_now.get("setup_type"),
+            "fvg_tier":    _sb_now.get("fvg_tier"),
+        }
+        self._last_fvg_state[_cache_sym].update(_qfields_always)
+        _qfields_preserve = {
             "execution_grade":       _sb_now.get("execution_grade"),
-            "scarcity_state":        _sb_now.get("scarcity_state"),
-            "scarcity_ratio":        _sb_now.get("scarcity_ratio"),
-            "spike_imminence_state": _sb_now.get("spike_imminence_state"),
-            "spike_imminence_score": _sb_now.get("spike_imminence_score"),
             "geo_channel_pos":       _sb_now.get("geo_channel_pos"),
-            "fvg_tier":              _sb_now.get("fvg_tier"),
             "score_raw":             _sb_now.get("score_raw"),
-        })
+        }
+        self._last_fvg_state[_cache_sym].update(
+            {k: v for k, v in _qfields_preserve.items() if v is not None}
+        )
+        # scarcity and imminence are injected into score_breakdown LATER in the
+        # pipeline; they are always None here — updated by the late-stage cache below.
 
         # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
         # Moved from its original location (after Hurst/Strategy gates) so that
@@ -3547,14 +3554,19 @@ class DerivDaemon:
         # when the tick exits early through the TREND gate below.
         if _cache_sym in self._last_fvg_state:
             _sb_tel = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
-            self._last_fvg_state[_cache_sym].update({
+            # Only overwrite when value is non-None — preserves last-known state
+            # across ticks where scarcity/imminence modules don't run (hard-veto paths).
+            _tel_fields = {
                 "scarcity_state":        _sb_tel.get("scarcity_state"),
                 "scarcity_ratio":        _sb_tel.get("scarcity_ratio"),
                 "spike_imminence_state": _sb_tel.get("spike_imminence_state"),
                 "spike_imminence_score": _sb_tel.get("spike_imminence_score"),
                 "execution_grade":       _sb_tel.get("execution_grade"),
                 "score_raw":             _sb_tel.get("score_raw"),
-            })
+            }
+            self._last_fvg_state[_cache_sym].update(
+                {k: v for k, v in _tel_fields.items() if v is not None}
+            )
 
         # ── 2026-06-07 SETUP TYPE GATE — quantitative: TREND=23%WR/-$26, SMC_FVG=58%WR/+$20 ──
         # Entries with setup_type=TREND (no FVG confluence) are systematically unprofitable.
