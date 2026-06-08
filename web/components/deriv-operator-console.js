@@ -502,6 +502,15 @@ function SymbolCard({ s }) {
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
+              // Staleness: market context is written every ~60s; > 90s = old, > 180s = very old
+              const ageS = sn.ts ? Math.floor(Date.now() / 1000 - sn.ts) : null;
+              const isStale     = ageS != null && ageS > 90;
+              const isVeryStale = ageS != null && ageS > 180;
+              const ageLabel = ageS == null ? "" : ageS < 60 ? `hace ${ageS}s` : `hace ${Math.floor(ageS/60)}m${ageS%60}s`;
+              // When stale: dim chip backgrounds so the user sees "old data, not live"
+              const staleOpacity = isVeryStale ? 0.35 : isStale ? 0.55 : 1.0;
+              const headerColor  = isVeryStale ? T.red : isStale ? T.amber : T.mute;
+
               // Setup color
               const setupColor = setupType === "SMC_FVG" ? T.green
                 : setupType === "TREND" ? T.red
@@ -513,7 +522,8 @@ function SymbolCard({ s }) {
               // Grade color
               const gradeColor = grade === "A" ? T.green : grade === "B" ? T.amber : grade === "C" ? T.red : T.mute;
 
-              // Scarcity color
+              // Scarcity: FRESCO right after a spike is correct but does NOT mean "enter now"
+              // Color reflects cycle state, not entry permission
               const scarColor = ["SECO","VENCIDO"].includes(scarcity) ? T.red
                 : ["FRESCO","CARGANDO","LISTO"].includes(scarcity) ? T.green : T.mute;
 
@@ -546,7 +556,7 @@ function SymbolCard({ s }) {
               const chip = (label, value, color) => (
                 <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3,
                   background: color + "18", border: `1px solid ${color}44`,
-                  borderRadius: 4, padding: "1px 5px" }}>
+                  borderRadius: 4, padding: "1px 5px", opacity: staleOpacity }}>
                   <span style={{ color: T.mute, fontSize: 7, fontWeight: 600 }}>{label}</span>
                   <span style={{ color, fontSize: 8, fontWeight: 700 }}>{value}</span>
                 </span>
@@ -554,8 +564,15 @@ function SymbolCard({ s }) {
 
               return (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5 }}>
-                  <div style={{ fontSize: 7, color: T.mute, letterSpacing: "0.08em", fontWeight: 600, marginBottom: 4 }}>
-                    CALIDAD DE ENTRADA
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 7, color: headerColor, letterSpacing: "0.08em", fontWeight: 600 }}>
+                      CALIDAD DE ENTRADA
+                    </span>
+                    {ageLabel && (
+                      <span style={{ fontSize: 6, color: headerColor, opacity: 0.8 }}>
+                        {isStale ? "⚠ " : ""}{ageLabel}
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
                     {setupType && chip("SETUP", setupLabel, setupColor)}
