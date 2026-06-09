@@ -255,6 +255,29 @@ function SymbolCard({ s }) {
     && (_immStateC === "BUILDING"
         || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
 
+  // ── CASCADA ────────────────────────────────────────────────────────────────
+  const _cascadeActive    = _sn?.cascade_active ?? false;
+  const _cascadeGapTicks  = _sn?.cascade_gap_ticks ?? null;
+  const _cascadeDepth     = _sn?.burst_depth ?? null;
+  // CASCADE overrides blind zone: continuous momentum = no retroceso window needed
+  const _inCascade        = _cascadeActive && _isBlindZone;
+
+  // ── PRESIÓN REAL ───────────────────────────────────────────────────────────
+  const _presion          = analytics?.presion ?? null;
+  const _presionScore     = _presion?.score ?? null;
+  const _presionLabel     = _presion?.label ?? null;
+  const _presionColor     = _presionScore == null ? T.mute
+    : _presionScore >= 8 ? T.red
+    : _presionScore >= 6 ? T.orange
+    : _presionScore >= 4 ? T.amber
+    : T.green;
+  // Z-score for slow-market awareness
+  const _zScore           = analytics?.spike_stats?.z_score ?? null;
+  const _ticksWait        = analytics?.spike_stats?.current_wait ?? null;
+  const _p90Ticks         = analytics?.spike_stats?.p90_gap ?? null;
+  const _isOverdueExtreme = _zScore != null && _zScore >= 2.0;
+  const _isOverdueHigh    = _zScore != null && _zScore >= 1.5 && _zScore < 2.0;
+
   return (
     <div style={{
       background: T.panel, borderRadius: 10,
@@ -330,13 +353,17 @@ function SymbolCard({ s }) {
           }}>
             <div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800,
-                color: _isBlindZone ? T.red : T.amber, letterSpacing: "0.10em" }}>
-                {_isBlindZone ? "NO OPERAR · NORMALIZANDO" : "NORMALIZANDO · CONFIRMAR"}
+                color: _inCascade ? T.orange : _isBlindZone ? T.red : T.amber, letterSpacing: "0.10em" }}>
+                {_inCascade
+                  ? "CASCADE — MOMENTUM ACTIVO"
+                  : _isBlindZone ? "NO OPERAR · NORMALIZANDO" : "NORMALIZANDO · CONFIRMAR"}
               </div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, marginTop: 2 }}>
-                {_isBlindZone
-                  ? "FVG · SMC · SCORE sesgados — anclajes activados"
-                  : "Estructura post-spike parcialmente válida"}
+                {_inCascade
+                  ? `${_cascadeDepth ?? "?"}x spikes · gap ${_cascadeGapTicks ?? "?"}t · sin retroceso`
+                  : _isBlindZone
+                    ? "FVG · SMC · SCORE sesgados — anclajes activados"
+                    : "Estructura post-spike parcialmente válida"}
               </div>
             </div>
             {_cdLabel && (
@@ -352,6 +379,27 @@ function SymbolCard({ s }) {
             )}
           </div>
 
+          {/* CASCADE alert inside blind zone */}
+          {_inCascade && (
+            <div style={{
+              marginBottom: 6,
+              background: T.orange + "18", border: `1.5px solid ${T.orange}55`,
+              borderRadius: 6, padding: "6px 10px",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <div style={{ width: 11, height: 11, borderRadius: "50%", flexShrink: 0,
+                background: T.orange, boxShadow: `0 0 7px ${T.orange}` }} />
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
+                  color: T.orange, letterSpacing: "0.08em" }}>
+                  CASCADA CONFIRMADA — {_cascadeDepth ?? "?"}x SPIKES
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
+                  gap={_cascadeGapTicks ?? "?"}t · MOMENTUM sin retroceso · DERIV_CASCADE_ENTRY_ENABLED para operar
+                </div>
+              </div>
+            </div>
+          )}
           {/* BURST window — solo primeros 30s */}
           {_isBurstWin && (
             <div style={{
@@ -643,6 +691,73 @@ function SymbolCard({ s }) {
                 </span>
               );
             })()}
+            {/* ── PRESIÓN REAL ──────────────────────────────────────────── */}
+            {_presionScore != null && (
+              <div style={{ padding: "8px 0 4px" }}>
+                {/* CASCADE alert banner — overrides blind zone */}
+                {_inCascade && (
+                  <div style={{
+                    marginBottom: 6, padding: "6px 10px",
+                    background: T.orange + "18", border: `1px solid ${T.orange}55`,
+                    borderRadius: 6, display: "flex", alignItems: "center", gap: 8,
+                  }}>
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: T.orange, letterSpacing: "0.10em" }}>
+                      ⚡ CASCADE ACTIVA
+                    </span>
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>
+                      {_cascadeDepth ?? "?"}x · {_cascadeGapTicks ?? "?"}t entre spikes · SIN RETROCESO
+                    </span>
+                  </div>
+                )}
+                {/* SOBREPRESIÓN warning — Z > 1.5 in slow market */}
+                {(_isOverdueExtreme || _isOverdueHigh) && !_isBlindZone && (
+                  <div style={{
+                    marginBottom: 6, padding: "5px 10px",
+                    background: (_isOverdueExtreme ? T.red : T.amber) + "14",
+                    border: `1px solid ${(_isOverdueExtreme ? T.red : T.amber)}44`,
+                    borderRadius: 6, display: "flex", alignItems: "center", gap: 8,
+                  }}>
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
+                      color: _isOverdueExtreme ? T.red : T.amber, letterSpacing: "0.08em" }}>
+                      {_isOverdueExtreme ? "SOBREPRESIÓN" : "PRESIÓN ALTA"}
+                    </span>
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>
+                      Z={_zScore != null ? (_zScore > 0 ? "+" : "") + _zScore.toFixed(2) : "?"}
+                      {_ticksWait != null && ` · ${_ticksWait}t esperados`}
+                      {_p90Ticks != null && ` · p90=${_p90Ticks}t`}
+                    </span>
+                  </div>
+                )}
+                {/* PRESIÓN bar */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, minWidth: 52, letterSpacing: "0.06em" }}>PRESIÓN</span>
+                  <div style={{ flex: 1, height: 6, borderRadius: 3, background: T.border, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 3,
+                      width: `${Math.min(100, (_presionScore / 10) * 100)}%`,
+                      background: _presionColor,
+                      transition: "width 0.6s ease",
+                    }} />
+                  </div>
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: _presionColor, minWidth: 42 }}>
+                    {_presionScore?.toFixed(1)} <span style={{ fontSize: 8, color: T.mute }}>{_presionLabel}</span>
+                  </span>
+                </div>
+                {/* Component detail row */}
+                <div style={{ display: "flex", gap: 10, marginTop: 4, paddingLeft: 60 }}>
+                  {[
+                    { label: "Z", val: _presion?.z_component },
+                    { label: "VEL", val: _presion?.velocity_component },
+                    { label: "COMP", val: _presion?.compression_component },
+                    { label: "SCAR", val: _presion?.scarcity_component },
+                  ].map(({ label, val }) => (
+                    <span key={label} style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>
+                      {label}:<span style={{ color: T.textD }}>{val?.toFixed(1) ?? "–"}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             {/* ── ENTRY QUALITY INDICATORS ─────────────────────────────── */}
             {(() => {
               const sn = analytics.snapshot;
@@ -896,6 +1011,7 @@ function SymbolCard({ s }) {
                     {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
                     {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}
                     {burstRetroceso != null && chip("RETR", `${(burstRetroceso * 100).toFixed(0)}%`, burstRetroceso > 0.35 ? T.red : T.green)}
+                    {_cascadeActive && chip("CASCADE", `${_cascadeDepth ?? "?"}x·${_cascadeGapTicks ?? "?"}t`, T.orange)}
                     {structFvgConfirm && chip("5m FVG", "✓" + (structFvgDir ? " " + structFvgDir.slice(0,4).toUpperCase() : ""), T.green)}
                     {structFvgConflict && chip("5m FVG", "⚡CONF", T.red)}
                     {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}

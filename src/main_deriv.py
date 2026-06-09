@@ -2352,7 +2352,7 @@ class DerivDaemon:
                     f"samples={_samples}"
                 )
 
-            # ── Burst surface fields (data only, no gate logic changed) ─────────
+            # ── Burst surface fields ──────────────────────────────────────────────
             # burst_depth = count of spikes seen in the burst window
             # burst_retroceso = price retracement ratio R (0–1); < 0.35 = momentum intact
             # burst_active = True while burst cooldown is active
@@ -2390,15 +2390,37 @@ class DerivDaemon:
                         _atr_ref = float(self._risk.get_current_atr(_sym_sd) or 0.0)
                         if _atr_ref > 0:
                             _burst_retroceso = round(min(1.0, _sp_move / _atr_ref), 4)
+
+            # ── Cascade detection ─────────────────────────────────────────────────
+            # Cascade = 2+ spikes in rapid succession with NO measurable retroceso.
+            # The price is in free-fall momentum; a retroceso-based BURST entry will
+            # never trigger. Instead surface cascade_active + cascade_gap_ticks so
+            # the entry gate and UI can react to continuous-momentum entries.
+            _cascade_active: bool = False
+            _cascade_gap_ticks: int | None = None
+            with suppress(Exception):
+                _casc_gap_thr = int(os.getenv("DERIV_CASCADE_GAP_TICKS", "60") or 60)
+                if (_burst_depth is not None and _burst_depth >= 2
+                        and _burst_retroceso is None):
+                    # ticks_since_last_spike = distance from spike, not a retroceso gap
+                    _cur_tick_n = self._risk.get_tick_count(_sym_sd)
+                    _spk_tick_n = self._risk.get_last_spike_tick_count(_sym_sd)
+                    _ticks_gap = max(0, _cur_tick_n - _spk_tick_n)
+                    if _ticks_gap <= _casc_gap_thr:
+                        _cascade_active = True
+                        _cascade_gap_ticks = int(_ticks_gap)
+
             # Store in fvg_state cache so _maybe_write_market_context can surface them
             with suppress(Exception):
                 _bsym = _sym_sd.upper()
                 if _bsym not in self._last_fvg_state:
                     self._last_fvg_state[_bsym] = {}
                 self._last_fvg_state[_bsym].update({
-                    "burst_depth":      _burst_depth,
-                    "burst_retroceso":  _burst_retroceso,
-                    "burst_active":     _burst_active,
+                    "burst_depth":        _burst_depth,
+                    "burst_retroceso":    _burst_retroceso,
+                    "burst_active":       _burst_active,
+                    "cascade_active":     _cascade_active,
+                    "cascade_gap_ticks":  _cascade_gap_ticks,
                 })
 
             # Persist memory snapshot for AI sidecar to learn from
@@ -3351,6 +3373,24 @@ class DerivDaemon:
         if _sym_bleed_bonus > 0.0:
             _regime_min = min(10.0, _regime_min + _sym_bleed_bonus)
 
+        # ── CASCADE momentum path ──────────────────────────────────────────────
+        # When cascade_active (burst_depth≥2, no retroceso, gap<60t), the price
+        # is in confirmed free-fall momentum — not the retroceso-recovery pattern.
+        # DERIV_CASCADE_ENTRY_ENABLED=false by default; enable explicitly to trade cascades.
+        # When enabled: lower regime_min by CASCADE_MIN_RELIEF (default 0.5).
+        _casc_fvg_data = self._last_fvg_state.get(tick.symbol.upper(), {})
+        _casc_active = bool(_casc_fvg_data.get("cascade_active", False))
+        _casc_entry_en = (
+            _is_bc_bias
+            and str(os.getenv("DERIV_CASCADE_ENTRY_ENABLED", "false") or "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        snap.score_breakdown["cascade_active"] = _casc_active
+        if _casc_active and _casc_entry_en:
+            _casc_min_relief = float(os.getenv("DERIV_CASCADE_MIN_RELIEF", "0.5") or 0.5)
+            _regime_min = max(0.0, _regime_min - _casc_min_relief)
+            snap.score_breakdown["cascade_min_relief"] = round(_casc_min_relief, 2)
+
         # ── 2026-06-01 REGIME EDGE BIAS (full-history forensic, 439 trades) ──
         # TRENDING regime = -$38.59 realized (wr 32%); CALM = +$0.30 (wr 33%).
         # Per-symbol confirms across both closed contracts AND the LLM pattern
@@ -3456,6 +3496,24 @@ class DerivDaemon:
                         "(4th spike imminent ~57-76s)",
                         tick.symbol, _cl_n2, int(_cl_win2), _cl_boost, snap.score,
                     )
+
+        # ── CASCADE score bonus ────────────────────────────────────────────────
+        # Confirmed cascade momentum adds a score bonus to help pass the gate.
+        # Only fires when DERIV_CASCADE_ENTRY_ENABLED=true.
+        if _casc_active and _casc_entry_en and "cascade_bonus" not in snap.score_breakdown:
+            _casc_bonus = float(os.getenv("DERIV_CASCADE_SCORE_BONUS", "1.0") or 1.0)
+            _casc_gap = int(_casc_fvg_data.get("cascade_gap_ticks") or 0)
+            _casc_depth = int(_casc_fvg_data.get("burst_depth") or 0)
+            snap.score = round(min(10.0, snap.score + _casc_bonus), 3)
+            snap.score_breakdown["cascade_bonus"] = round(_casc_bonus, 2)
+            snap.score_breakdown["cascade_gap_ticks"] = _casc_gap
+            snap.reasons.append(
+                f"cascade_momentum: depth={_casc_depth} gap={_casc_gap}t → +{_casc_bonus:.1f}"
+            )
+            _LOGGER.info(
+                "[PIPELINE] CASCADE_MOMENTUM %s | depth=%d gap=%dt → +%.1f score→%.2f",
+                tick.symbol, _casc_depth, _casc_gap, _casc_bonus, snap.score,
+            )
 
         # ── 2026-06-01 SPIKE-PACE / HOT-WINDOW AWARENESS ────────────────────
         # Forensic: ~50-60% of an hour's spikes land in one 20-min window, then

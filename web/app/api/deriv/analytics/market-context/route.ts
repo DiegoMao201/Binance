@@ -77,6 +77,48 @@ function computeStats(entries: any[]): SpikeStats | null {
   };
 }
 
+interface PresionResult {
+  score: number;        // 0-10 composite
+  z_component: number;
+  velocity_component: number;
+  compression_component: number;
+  scarcity_component: number;
+  label: string;        // "BAJA" | "MEDIA" | "ALTA" | "CRITICA"
+}
+
+function computePresion(entry: any, spikeStats: SpikeStats | null): PresionResult {
+  // Component 1: temporal pressure via Z-score (0→3 pts)
+  const z = spikeStats?.z_score ?? 0;
+  const zComp = Math.min(3, Math.max(0, z));
+
+  // Component 2: tick velocity — normalized: 0.5 ticks/s=normal, 3+=max (0→2.5 pts)
+  const rate = typeof entry.tick_rate_5s === 'number' ? entry.tick_rate_5s : 0;
+  const velComp = Math.min(2.5, Math.max(0, (rate - 0.3) / 1.5));
+
+  // Component 3: range compression — range_rolling_pct_60s close to 0 = compression (0→2 pts)
+  const rng = typeof entry.range_rolling_pct_60s === 'number' ? entry.range_rolling_pct_60s : 1;
+  const compComp = Math.max(0, (1 - Math.min(1, rng / 0.6))) * 2;
+
+  // Component 4: scarcity state charging (0→2.5 pts)
+  const scarcityPts: Record<string, number> = {
+    LISTO: 2.5, CARGANDO: 2.0, FRESCO: 1.0, VENCIDO: 0.5, SECO: 0,
+  };
+  const scarComp = scarcityPts[entry.scarcity_state as string] ?? 0;
+
+  const raw = zComp + velComp + compComp + scarComp;
+  const score = Math.min(10, Math.max(0, Math.round(raw * 10) / 10));
+  const label = score >= 8 ? 'CRITICA' : score >= 6 ? 'ALTA' : score >= 4 ? 'MEDIA' : 'BAJA';
+
+  return {
+    score,
+    z_component: +zComp.toFixed(2),
+    velocity_component: +velComp.toFixed(2),
+    compression_component: +compComp.toFixed(2),
+    scarcity_component: +scarComp.toFixed(2),
+    label,
+  };
+}
+
 export async function GET(request: NextRequest) {
   const symbol = request.nextUrl.searchParams.get('symbol');
   const validSymbols = ['BOOM500', 'CRASH500', 'CRASH600', 'CRASH900'];
@@ -158,9 +200,12 @@ export async function GET(request: NextRequest) {
         atr_pre_spike: latest.atr_pre_spike ?? null,
         geo_post_spike_nullified: latest.geo_post_spike_nullified ?? null,
         ema200_anchored: latest.ema200_anchored ?? false,
+        cascade_active: latest.cascade_active ?? false,
+        cascade_gap_ticks: latest.cascade_gap_ticks ?? null,
       },
       spike_stats,
       hurst_history,
+      presion: computePresion(latest, spike_stats),
     });
   } catch (err) {
     console.error('market-context error:', err);
