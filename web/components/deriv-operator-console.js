@@ -499,6 +499,9 @@ function SymbolCard({ s }) {
               const geoPos       = sn.geo_channel_pos ?? null;
               const fvgTier      = sn.fvg_tier || null;
               const scoreRaw     = sn.score_raw ?? null;
+              const burstActive  = sn.burst_active ?? false;
+              const burstDepth   = sn.burst_depth ?? null;
+              const burstRetroceso = sn.burst_retroceso ?? null;
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
@@ -617,6 +620,23 @@ function SymbolCard({ s }) {
                     </div>
                   )}
 
+                  {/* ── Burst active banner ─────────────────────────────────── */}
+                  {burstActive && (
+                    <div style={{ background: "#0ff3" , border: "1px solid #0ff6",
+                      borderRadius: 4, padding: "3px 6px", marginBottom: 4 }}>
+                      <div style={{ color: "#0ff", fontSize: 7, fontWeight: 700, letterSpacing: "0.06em" }}>
+                        BURST ACTIVO
+                        {burstDepth != null ? ` · ${burstDepth}spikes` : ""}
+                        {burstRetroceso != null ? ` · RETR ${(burstRetroceso * 100).toFixed(0)}%` : ""}
+                      </div>
+                      <div style={{ color: T.mute, fontSize: 6, marginTop: 1 }}>
+                        {burstRetroceso != null && burstRetroceso > 0.35
+                          ? "Momentum cancelado — esperar reset"
+                          : "Momentum de ráfaga — R<35% = válido para entrada rápida"}
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
                     {setupType && chip("SETUP", setupLabel, setupColor)}
                     {grade && chip("GRADE", grade, gradeColor)}
@@ -627,6 +647,8 @@ function SymbolCard({ s }) {
                     {fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
                     {geoPos != null && chip("GEO", geoPct, geoColor)}
                     {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
+                    {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}
+                    {burstRetroceso != null && chip("RETR", `${(burstRetroceso * 100).toFixed(0)}%`, burstRetroceso > 0.35 ? T.red : T.green)}
                   </div>
                 </div>
               );

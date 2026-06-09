@@ -470,6 +470,10 @@ class DerivDaemon:
         self._ctx_prev_write: dict[str, tuple[float, int]] = {}
         # Last-known FVG state per symbol — updated after risk.evaluate(), read on next ctx write.
         self._last_fvg_state: dict[str, dict] = {}
+        # Burst mode spike-price tracking — records tick price at the moment each new spike
+        # is detected so we can compute retroceso (price recovery from spike) in real time.
+        self._last_burst_spike_ts: dict[str, float] = {}
+        self._last_burst_spike_px: dict[str, float] = {}
         self._ctx_state_dir = Path(
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
@@ -1520,6 +1524,10 @@ class DerivDaemon:
                 # last_spike_wall_ts lets the frontend compute exact seconds live.
                 "last_spike_wall_ts":    round(_last_spike_ts, 3) if _last_spike_ts > 0 else None,
                 "post_spike_blind":      bool(_last_spike_ts > 0 and _now - _last_spike_ts < 120),
+                # Burst mode fields — surfaced from spike density gate, no gate logic change
+                "burst_depth":           _fvg_cache.get("burst_depth"),
+                "burst_retroceso":       _fvg_cache.get("burst_retroceso"),
+                "burst_active":          _fvg_cache.get("burst_active"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -2298,11 +2306,12 @@ class DerivDaemon:
             _block_detail = ""
 
             # Rule 1 — BURST
-            if (
+            _is_burst = (
                 _count_recent >= self._spike_density_burst_threshold
                 and _last_spike_age is not None
                 and _last_spike_age <= float(self._spike_density_burst_block_after_sec)
-            ):
+            )
+            if _is_burst:
                 _block_reason_sd = "spike_burst_cooldown"
                 _block_detail = (
                     f"recent={_count_recent}≥{self._spike_density_burst_threshold} "
@@ -2321,6 +2330,55 @@ class DerivDaemon:
                     f"ratio={_ratio:.2f}≥{self._spike_density_block_ratio:.2f} "
                     f"samples={_samples}"
                 )
+
+            # ── Burst surface fields (data only, no gate logic changed) ─────────
+            # burst_depth = count of spikes seen in the burst window
+            # burst_retroceso = price retracement ratio R (0–1); < 0.35 = momentum intact
+            # burst_active = True while burst cooldown is active
+            _burst_depth: int | None = None
+            _burst_retroceso: float | None = None
+            _burst_active: bool = False
+            with suppress(Exception):
+                if _is_burst:
+                    _burst_active = True
+                    _burst_depth = int(_count_recent)
+                elif _last_spike_age is not None and _last_spike_age <= float(
+                    self._spike_density_burst_window_sec
+                ):
+                    # Within the burst window but below threshold — surface depth anyway
+                    _burst_depth = int(_count_recent)
+            with suppress(Exception):
+                # Retroceso: use daemon's _last_spike_px cache to compare current price.
+                # Populated below when we detect a new spike_ts.
+                _known_sp_ts = float(
+                    self._risk._last_spike_ts.get(_sym_sd, 0.0) or 0.0  # noqa: SLF001
+                )
+                _cur_px = float(tick.price or 0.0)
+                if _known_sp_ts > 0 and _cur_px > 0:
+                    # Update stored spike-price when ts advanced (new spike)
+                    _prev_sp_ts = float(self._last_burst_spike_ts.get(_sym_sd, 0.0) or 0.0)
+                    if _known_sp_ts > _prev_sp_ts:
+                        self._last_burst_spike_ts[_sym_sd] = _known_sp_ts
+                        self._last_burst_spike_px[_sym_sd] = _cur_px
+                    _sp_px = float(self._last_burst_spike_px.get(_sym_sd, 0.0) or 0.0)
+                    if _sp_px > 0 and _burst_active:
+                        # For CRASH: spike goes DOWN → retroceso = how far price recovered up
+                        # For BOOM:  spike goes UP   → retroceso = how far price recovered down
+                        # Simple ratio: distance recovered / spike magnitude (ATR-relative)
+                        _sp_move = abs(_cur_px - _sp_px)
+                        _atr_ref = float(self._risk.get_current_atr(_sym_sd) or 0.0)
+                        if _atr_ref > 0:
+                            _burst_retroceso = round(min(1.0, _sp_move / _atr_ref), 4)
+            # Store in fvg_state cache so _maybe_write_market_context can surface them
+            with suppress(Exception):
+                _bsym = _sym_sd.upper()
+                if _bsym not in self._last_fvg_state:
+                    self._last_fvg_state[_bsym] = {}
+                self._last_fvg_state[_bsym].update({
+                    "burst_depth":      _burst_depth,
+                    "burst_retroceso":  _burst_retroceso,
+                    "burst_active":     _burst_active,
+                })
 
             # Persist memory snapshot for AI sidecar to learn from
             with suppress(Exception):
