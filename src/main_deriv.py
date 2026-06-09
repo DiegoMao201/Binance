@@ -3412,6 +3412,7 @@ class DerivDaemon:
         # is in confirmed free-fall momentum — not the retroceso-recovery pattern.
         # DERIV_CASCADE_ENTRY_ENABLED=false by default; enable explicitly to trade cascades.
         # When enabled: lower regime_min by CASCADE_MIN_RELIEF (default 0.5).
+        _is_bc_bias = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
         _casc_fvg_data = self._last_fvg_state.get(tick.symbol.upper(), {})
         _casc_active = bool(_casc_fvg_data.get("cascade_active", False))
         _casc_entry_en = (
@@ -3433,7 +3434,6 @@ class DerivDaemon:
         # bot's #1 leak is entering during TRENDING. → raise the required score
         # hard in TRENDING (only A++ setups survive) and keep CALM permissive.
         _risk_regime_bias = str(snap.regime or "").strip().lower()
-        _is_bc_bias = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
         # Compute spike imminence ONCE here so it can both (a) modulate the
         # trending penalty below and (b) feed the score bonus further down.
         _imm = {}

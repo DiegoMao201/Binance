@@ -894,8 +894,11 @@ function SymbolCard({ s }) {
               const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
               const _goodImm      = immState === "BUILDING" ||
                                     (immScore != null && immScore >= 0.3 && immScore <= 0.6);
-              // EMA loaded: null = data missing = neutral (don't penalise)
-              const _goodEma      = ema200Loaded == null || ema200Loaded === true;
+              // EMA loaded: null = sin datos = neutral. Cuando FVG anchor activo,
+              // el EMA negativo post-spike es NORMAL (precio crasheó, eso es esperado)
+              // y el anchor ES la señal de entrada → EMA no bloquea.
+              const _emaOverridedByAnchor = fvgAnchorActive;
+              const _goodEma = ema200Loaded == null || ema200Loaded === true || _emaOverridedByAnchor;
 
               const _redConflict = structFvgConflict;
               const _redSeco     = scarcity === "SECO";
@@ -904,8 +907,8 @@ function SymbolCard({ s }) {
               const _redRipe     = immState === "RIPE";
               const _redScore    = scoreRaw != null && scoreRaw < 7.5;
               const _redGrade    = grade === "C";
-              const _redSetup    = setupType === "TREND";
-              const _redEma      = ema200Loaded === false;
+              // EMA sólo bloquea si no hay FVG anchor activo (anchor = señal primaria post-spike)
+              const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
 
               const _isRed   = _redConflict || _redSeco || _redVencido || _redBlind ||
                                _redRipe || _redScore || _redGrade || _redSetup || _redEma;
@@ -1062,8 +1065,8 @@ function SymbolCard({ s }) {
                     {geoNullified != null && chip("GEO", `NULL ${geoNullified > 0 ? "+" : ""}${geoNullified.toFixed(1)}`, T.amber)}
                     {ema200DistPct != null && chip(
                       "EMA",
-                      `${ema200Loaded ? "✓" : "✗"} ${_emaDevStr}`,
-                      ema200Loaded ? T.green : T.red
+                      `${_emaOverridedByAnchor ? "~" : (ema200Loaded ? "✓" : "✗")} ${_emaDevStr}`,
+                      _emaOverridedByAnchor ? T.mute : (ema200Loaded ? T.green : T.red)
                     )}
                   </div>
                 </div>
