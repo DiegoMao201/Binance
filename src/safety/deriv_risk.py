@@ -575,6 +575,15 @@ class DerivRiskManager:
         # it with the rolling value for DERIV_SPIKE_ATR_ANCHOR_TTL seconds.
         # Format: {SYMBOL_UPPER: {ts: float, atr: float}}
         self._pre_spike_atr_cache: dict[str, dict] = {}
+        # ── Pre-spike EMA200 anchor ─────────────────────────────────────────
+        # Retroceso after a spike pulls the rolling EMA200(ticks) toward the
+        # spike low/high.  The EMA200_SPIKE_HUNTER then fires at the WRONG level
+        # (distorted by retroceso) instead of the true structural mean.
+        # Save EMA200 at spike detection time; evaluate() uses this value for
+        # up to 300s post-spike so the hunter measures deviation from the REAL
+        # structural reference.
+        # Format: {SYMBOL_UPPER: {ts: float, ema: float}}
+        self._pre_spike_ema200_cache: dict[str, dict] = {}
         # ── 5-minute OHLC candle buffer (Structural / Macro path) ──────────
         # Live ticks are aggregated into time-aligned OHLC candles.
         # evaluate() calls _get_structural_geometry() on the CLOSES of these
@@ -1075,6 +1084,19 @@ class DerivRiskManager:
                                         "ts":  _spike_ts,
                                         "atr": _pre_sp_atr,
                                     }
+                        except Exception:
+                            pass
+                        # ── Capture pre-spike EMA200 ───────────────────────────────
+                        # EMA200 at the moment the spike fires = the structural mean
+                        # BEFORE the spike distorted the rolling window.  The spike
+                        # hunter should measure deviation from THIS level, not the
+                        # retroceso-dragged EMA200.
+                        try:
+                            if _ema200_at_spike is not None and _ema200_at_spike > 0:
+                                self._pre_spike_ema200_cache[symbol.upper()] = {
+                                    "ts":  _spike_ts,
+                                    "ema": float(_ema200_at_spike),
+                                }
                         except Exception:
                             pass
                         # ── Capture FVG at spike time (static anchor) ──────────────
@@ -2555,6 +2577,22 @@ class DerivRiskManager:
         if _is_spike_market(symbol) and len(ticks) >= 200:
             try:
                 _ema200_val = _ema200(list(ticks))
+                # ── EMA200 macro anchor ────────────────────────────────────
+                # Post-spike retroceso drags the rolling EMA200 toward the spike
+                # low/high.  The spike hunter should fire at the STRUCTURAL level
+                # (pre-spike EMA200), not the retroceso-distorted one.
+                # Use the anchored value for DERIV_SPIKE_EMA_ANCHOR_TTL seconds.
+                _ema_ttl = float(os.getenv("DERIV_SPIKE_EMA_ANCHOR_TTL", "300"))
+                _ema_anch = self._pre_spike_ema200_cache.get(
+                    symbol.upper() if hasattr(symbol, "upper") else str(symbol)
+                )
+                if (
+                    _ema_anch
+                    and float(_ema_anch.get("ema", 0)) > 0
+                    and (time.time() - float(_ema_anch.get("ts", 0))) < _ema_ttl
+                ):
+                    _ema200_val = float(_ema_anch["ema"])
+                    snap.score_breakdown["ema200_anchored"] = True
                 if _ema200_val is not None and _ema200_val > 0:
                     _price = ticks[-1]
                     _dev = (_price - _ema200_val) / _ema200_val  # signed % deviation

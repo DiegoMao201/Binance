@@ -157,6 +157,7 @@ export async function GET(request: NextRequest) {
         atr_anchored: latest.atr_anchored ?? false,
         atr_pre_spike: latest.atr_pre_spike ?? null,
         geo_post_spike_nullified: latest.geo_post_spike_nullified ?? null,
+        ema200_anchored: latest.ema200_anchored ?? false,
       },
       spike_stats,
       hurst_history,

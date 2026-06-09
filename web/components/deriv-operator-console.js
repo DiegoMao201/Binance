@@ -511,6 +511,7 @@ function SymbolCard({ s }) {
               const structFvgDir      = sn.structural_fvg_direction ?? null;
               const atrAnchored       = sn.atr_anchored ?? false;
               const geoNullified      = sn.geo_post_spike_nullified ?? null;
+              const ema200Anchored    = sn.ema200_anchored ?? false;
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
@@ -586,6 +587,52 @@ function SymbolCard({ s }) {
               // Chips dim when data is stale; blind zone dims further and adds overlay
               const chipOpacity = isBlindZone ? 0.25 : isNormalizingZone ? 0.5 : staleOpacity;
 
+              // ── SEÑAL MAESTRA ─────────────────────────────────────────────
+              const _goodSetup    = setupType === "SMC_FVG" || setupType === "EMA200_SPIKE";
+              const _goodGrade    = grade === "A" || grade === "B";
+              const _goodScore    = scoreRaw != null && scoreRaw >= 8.5;
+              const _goodFvg      = fvgAnchorActive || structFvgConfirm;
+              const _goodScarcity = scarcity != null && ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
+              const _goodImm      = immState === "BUILDING" ||
+                                    (immScore != null && immScore >= 0.3 && immScore <= 0.6);
+
+              const _redConflict = structFvgConflict;
+              const _redSeco     = scarcity === "SECO";
+              const _redVencido  = scarcity === "VENCIDO" && (scoreRaw == null || scoreRaw < 7.5);
+              const _redBlind    = isBlindZone;
+              const _redRipe     = immState === "RIPE";
+              const _redScore    = scoreRaw != null && scoreRaw < 7.5;
+              const _redGrade    = grade === "C";
+              const _redSetup    = setupType === "TREND";
+
+              const _isRed   = _redConflict || _redSeco || _redVencido || _redBlind ||
+                               _redRipe || _redScore || _redGrade || _redSetup;
+              const _isGreen = !_isRed && _goodSetup && _goodGrade && _goodScore &&
+                               _goodFvg && _goodScarcity && _goodImm;
+              const _isAmber = !_isRed && !_isGreen;
+
+              const _semColor = _isRed ? T.red : _isGreen ? T.green : T.amber;
+              const _semLabel = _isRed ? "NO OPERAR" : _isGreen ? "GO" : "ESPERAR";
+
+              const _redReasons = [
+                _redConflict && "5m CONFLICTO",
+                _redSeco     && "SECO",
+                _redVencido  && "VENCIDO",
+                _redBlind    && "ZONA CIEGA",
+                _redRipe     && "IMM RIPE",
+                _redScore    && "SCORE BAJO",
+                _redGrade    && "GRADE C",
+                _redSetup    && "TREND",
+              ].filter(Boolean);
+              const _missing = [
+                !_goodSetup    && "SETUP",
+                !_goodGrade    && "GRADE",
+                !_goodScore    && "SCORE<8.5",
+                !_goodFvg      && "FVG",
+                !_goodScarcity && "SCAR",
+                !_goodImm      && "IMM",
+              ].filter(Boolean);
+
               const chip = (label, value, color) => (
                 <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3,
                   background: color + "18", border: `1px solid ${color}44`,
@@ -597,6 +644,40 @@ function SymbolCard({ s }) {
 
               return (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5 }}>
+                  {/* ── SEÑAL MAESTRA ──────────────────────────────────────── */}
+                  <div style={{
+                    background: _semColor + "1a",
+                    border: `2px solid ${_semColor}77`,
+                    borderRadius: 5, padding: "5px 8px", marginBottom: 6,
+                    display: "flex", alignItems: "center", gap: 7,
+                  }}>
+                    <div style={{
+                      width: 11, height: 11, borderRadius: "50%",
+                      background: _semColor, flexShrink: 0,
+                      boxShadow: _isGreen ? `0 0 7px ${T.green}` : "none",
+                    }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ color: _semColor, fontSize: 9, fontWeight: 800, letterSpacing: "0.12em" }}>
+                        {_semLabel}
+                      </div>
+                      {_isRed && _redReasons.length > 0 && (
+                        <div style={{ color: _semColor, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
+                          {_redReasons.join(" · ")}
+                        </div>
+                      )}
+                      {_isAmber && _missing.length > 0 && (
+                        <div style={{ color: T.amber, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
+                          Falta: {_missing.join(", ")}
+                        </div>
+                      )}
+                      {_isGreen && (
+                        <div style={{ color: T.green, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
+                          Todos los filtros OK
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isBlindZone || isNormalizingZone ? 3 : 4 }}>
                     <span style={{ fontSize: 7, color: headerColor, letterSpacing: "0.08em", fontWeight: 600 }}>
                       CALIDAD DE ENTRADA
@@ -664,6 +745,7 @@ function SymbolCard({ s }) {
                     {structFvgConflict && chip("5m FVG", "⚡CONF", T.red)}
                     {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}
                     {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
+                    {ema200Anchored && chip("EMA200", "ANCLADO", T.violet)}
                     {geoNullified != null && chip("GEO", `NULL ${geoNullified > 0 ? "+" : ""}${geoNullified.toFixed(1)}`, T.amber)}
                   </div>
                 </div>

@@ -3504,29 +3504,74 @@ class DerivDaemon:
                 snap.score_breakdown["spike_imminence_state"] = _imm_state
                 snap.score_breakdown["spike_imminence_score"] = round(_imm_score, 3)
                 snap.score_breakdown["spike_ticks_since_last"] = _imm.get("ticks_since_last")
-            if _imm_state in ("RIPE", "BUILDING", "OVERDUE") and "spike_cluster_bonus" not in snap.score_breakdown:
-                # 2026-06-06: raised default 0.8→1.5 (calibrado sobre gaps reales);
-                # OVERDUE añadido: gap > p75 sigue siendo zona válida de entrada
+            # ── 2026-06-08: Imminencia corregida por datos cuantitativos ────────
+            # Análisis 172 trades: BUILDING(0.30-0.60)=61%WR, RIPE(>0.80)=30%WR.
+            # El edge real está en BUILDING (cañón cargándose), NO en RIPE
+            # (donde el retroceso post-spike ya es inminente).
+            # BUILDING: bonus completo (captura el movimiento mientras se construye)
+            # OVERDUE:  bonus reducido 40% (estadísticamente tarde, pero aún válido)
+            # RIPE:     sin bonus + gate de score mínimo (30%WR no merece premium)
+            if _imm_state in ("BUILDING", "OVERDUE", "RIPE") and "spike_cluster_bonus" not in snap.score_breakdown:
                 _imm_max = max(
                     0.0,
                     float(os.getenv("DERIV_SPIKE_IMMINENCE_MAX_BONUS", "1.5") or 1.5),
                 )
-                # OVERDUE recibe bonus reducido (el spike ya debería haber ocurrido)
-                _imm_max_adj = _imm_max * (0.60 if _imm_state == "OVERDUE" else 1.0)
-                # Scale by imminence score; RIPE (≈1.0) gets the full bonus.
-                _imm_boost = round(_imm_max_adj * _imm_score, 2)
-                if _imm_boost > 0.0:
+                if _imm_state == "RIPE":
+                    # RIPE: spike ya está vencido. No bonus; exige estructura de calidad.
+                    _imm_boost = 0.0
+                    _ripe_min = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "8.5") or 8.5)
+                    if snap.score < _ripe_min:
+                        snap.score_breakdown["imminence_ripe_block"] = True
+                        self._log_entry_block(
+                            tick.symbol, "IMMINENCE_RIPE_GATE",
+                            score=snap.score, effective_min_score=_ripe_min,
+                            side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                            score_breakdown=snap.score_breakdown,
+                        )
+                        self._record_decision(
+                            symbol=tick.symbol, allowed=False, side=snap.side,
+                            score=snap.score,
+                            reason=(
+                                f"IMMINENCE_RIPE_GATE: RIPE state (imm={_imm_score:.2f}) "
+                                f"requires score≥{_ripe_min:.1f} got={snap.score:.2f} "
+                                f"(datos: RIPE=30%WR)"
+                            ),
+                        )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason="imminence_ripe_gate", score=snap.score,
+                        )
+                        return
+                    # Passed RIPE gate: tag but no bonus
+                    snap.score_breakdown["spike_imminence_bonus"] = 0.0
+                    snap.reasons.append(
+                        f"spike_imminence_RIPE: gap={_imm.get('ticks_since_last')}t "
+                        f"score={_imm_score:.2f} → no bonus (RIPE gate passed, score≥{_ripe_min:.1f})"
+                    )
+                elif _imm_state == "BUILDING" and 0.25 <= _imm_score <= 0.65:
+                    # Sweet spot: bonus completo escalado por score de inminencia
+                    _imm_boost = round(_imm_max * _imm_score, 2)
                     snap.score = round(min(10.0, snap.score + _imm_boost), 3)
                     snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
                     snap.reasons.append(
-                        f"spike_imminence_{_imm_state}: gap={_imm.get('ticks_since_last')}t "
-                        f"score={_imm_score:.2f} → +{_imm_boost:.2f}"
+                        f"spike_imminence_BUILDING: gap={_imm.get('ticks_since_last')}t "
+                        f"score={_imm_score:.2f} → +{_imm_boost:.2f} (61%WR sweet spot)"
                     )
                     _LOGGER.info(
-                        "[PIPELINE] SPIKE_IMMINENCE %s | %s gap=%st imm=%.2f → +%.2f score→%.2f",
-                        tick.symbol, _imm_state, _imm.get("ticks_since_last"),
+                        "[PIPELINE] SPIKE_IMMINENCE_BUILDING %s gap=%st imm=%.2f → +%.2f score→%.2f",
+                        tick.symbol, _imm.get("ticks_since_last"),
                         _imm_score, _imm_boost, snap.score,
                     )
+                elif _imm_state == "OVERDUE":
+                    # Pasó el p75 — spike overdue, bonus reducido 40%
+                    _imm_boost = round(_imm_max * _imm_score * 0.40, 2)
+                    if _imm_boost > 0.0:
+                        snap.score = round(min(10.0, snap.score + _imm_boost), 3)
+                        snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
+                        snap.reasons.append(
+                            f"spike_imminence_OVERDUE: gap={_imm.get('ticks_since_last')}t "
+                            f"score={_imm_score:.2f} → +{_imm_boost:.2f} (overdue 40%)"
+                        )
 
         # ── 2026-06-06 HURST × IMMINENCIA — bonus mean-reversion para CRASH ─
         # Insight cuantitativo: cuando Hurst < 0.42 el mercado es mean-reverting
@@ -3624,6 +3669,48 @@ class DerivDaemon:
                     tick.symbol, snap.score, _dry_override,
                     _scar.get("ratio"), _scar.get("elapsed_s"),
                 )
+            # ── VENCIDO gate — datos: 11%WR, no hay gate hoy ─────────────────
+            # VENCIDO (ratio 1.4–2.2×): mercado lento pero no seco todavía.
+            # Permitimos entrar SOLO con estructura excepcional (≥7.5 por defecto).
+            elif _scar_state == "VENCIDO":
+                _vencido_min = float(
+                    os.getenv("DERIV_VENCIDO_OVERRIDE_SCORE", "7.5") or 7.5
+                )
+                # Per-symbol override (CRASH900 es estructuralmente más lento)
+                _vencido_map_raw = os.getenv("DERIV_VENCIDO_OVERRIDE_SCORE_MAP", "") or ""
+                _vencido_per_sym: dict[str, float] = {"CRASH900": 6.5}
+                for _vp in _vencido_map_raw.split(","):
+                    if ":" in _vp:
+                        _vs, _vv = _vp.split(":", 1)
+                        try:
+                            _vencido_per_sym[_vs.strip().upper()] = float(_vv.strip())
+                        except ValueError:
+                            pass
+                _vencido_thr = _vencido_per_sym.get(tick.symbol.upper(), _vencido_min)
+                if snap.score < _vencido_thr:
+                    snap.score_breakdown["scarcity_vencido_block"] = True
+                    self._log_entry_block(
+                        tick.symbol, "SCARCITY_VENCIDO_GATE",
+                        score=snap.score, effective_min_score=_vencido_thr,
+                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                        score_breakdown=snap.score_breakdown,
+                    )
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score,
+                        reason=(
+                            f"SCARCITY_VENCIDO_GATE: vencido (ratio={_scar.get('ratio')}× "
+                            f"elapsed={_scar.get('elapsed_s')}s) requires score≥{_vencido_thr:.1f} "
+                            f"got={snap.score:.2f} (datos: VENCIDO=11%WR)"
+                        ),
+                        extra={"regime": snap.regime, "scarcity_state": "VENCIDO"},
+                    )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason="scarcity_vencido_gate", score=snap.score,
+                    )
+                    return
+                snap.score_breakdown["scarcity_vencido_override_fired"] = round(snap.score, 2)
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
@@ -3685,6 +3772,36 @@ class DerivDaemon:
                         block_reason="trend_setup_gate", score=snap.score,
                     )
                     return
+
+        # ── Structural FVG conflict gate ──────────────────────────────────────
+        # Si el FVG de ticks apunta en dirección opuesta a la del candle de 5m,
+        # tenemos micro vs macro en conflicto. El bot puede entrar, pero solo con
+        # estructura sobresaliente (≥9.0). Cualquier cosa menor es ruido de ticks.
+        if snap.score_breakdown.get("structural_fvg_conflict") and _is_bc_bias:
+            _struct_min = float(
+                os.getenv("DERIV_STRUCTURAL_CONFLICT_MIN_SCORE", "9.0") or 9.0
+            )
+            if snap.score < _struct_min:
+                snap.score_breakdown["structural_conflict_block"] = True
+                self._log_entry_block(
+                    tick.symbol, "STRUCTURAL_CONFLICT_GATE",
+                    score=snap.score, effective_min_score=_struct_min,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score,
+                    reason=(
+                        f"STRUCTURAL_CONFLICT_GATE: tick FVG ≠ 5m candle FVG "
+                        f"requires score≥{_struct_min:.1f} got={snap.score:.2f}"
+                    ),
+                )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason="structural_conflict_gate", score=snap.score,
+                )
+                return
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──
         # When the TickVelocityAnalyzer detects exponential tick-delta acceleration
