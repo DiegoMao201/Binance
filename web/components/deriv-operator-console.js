@@ -102,6 +102,13 @@ function Stat({ label, value, color }) {
 /* ── symbol card (fusión: data técnica completa + nuevo visual) ── */
 function SymbolCard({ s }) {
   const [analytics, setAnalytics] = useState(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => {
     const sym = s.symbol;
     if (!sym) return;
@@ -205,6 +212,49 @@ function SymbolCard({ s }) {
   const barColor  = sem === "green" ? T.green : sem === "red" ? T.red : sem === "manual" ? T.violet : T.amber;
   const barSuffix = accumPct >= 100 ? "· zona óptima" : accumPct >= 75 ? "· casi lista" : accumPct >= 40 ? "· zona de espera" : "· muy pronto";
 
+  // ── SEÑAL MAESTRA — card-level (drives conditional rendering) ──────────
+  const _sn           = analytics?.snapshot ?? null;
+  const _lastSpikeWTs = _sn?.last_spike_wall_ts ?? null;
+  const _secsSinceSpk = _lastSpikeWTs ? Math.floor(now / 1000 - _lastSpikeWTs) : null;
+  const _isBlindZone  = _secsSinceSpk != null && _secsSinceSpk < 120;
+  const _isNormZone   = _secsSinceSpk != null && _secsSinceSpk >= 120 && _secsSinceSpk < 300;
+  const _isBurstWin   = _secsSinceSpk != null && _secsSinceSpk < 30;
+  const _burstActive  = _sn?.burst_active ?? false;
+  const _burstRetr    = _sn?.burst_retroceso ?? null;
+  const _burstDepth   = _sn?.burst_depth ?? null;
+  // Live countdown (updates every second via `now`)
+  const _cdTarget     = _isBlindZone ? 120 : _isNormZone ? 300 : null;
+  const _cdRemain     = _cdTarget != null ? Math.max(0, _cdTarget - (_secsSinceSpk ?? _cdTarget)) : null;
+  const _cdLabel      = _cdRemain != null
+    ? `${String(Math.floor(_cdRemain / 60)).padStart(2,"0")}:${String(_cdRemain % 60).padStart(2,"0")}`
+    : null;
+  // SEÑAL MAESTRA variables (mirrors inner block logic)
+  const _scoreRawC    = _sn?.score_raw ?? null;
+  const _setupTypeC   = _sn?.setup_type ?? null;
+  const _gradeC       = _sn?.execution_grade ?? null;
+  const _scarcityC    = _sn?.scarcity_state ?? null;
+  const _immStateC    = _sn?.spike_imminence_state ?? null;
+  const _immScoreC    = _sn?.spike_imminence_score ?? null;
+  const _fvgAnchC     = _sn?.fvg_anchor_active ?? false;
+  const _structConfC  = _sn?.structural_fvg_confirm ?? false;
+  const _structConflC = _sn?.structural_fvg_conflict ?? false;
+  const _masterRed    = _isBlindZone
+    || _structConflC
+    || _scarcityC === "SECO"
+    || (_scarcityC === "VENCIDO" && (_scoreRawC == null || _scoreRawC < 7.5))
+    || _immStateC === "RIPE"
+    || (_scoreRawC != null && _scoreRawC < 7.5)
+    || _gradeC === "C"
+    || _setupTypeC === "TREND";
+  const _masterGreen  = !_masterRed && _sn != null
+    && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
+    && (_gradeC === "A" || _gradeC === "B")
+    && _scoreRawC != null && _scoreRawC >= 8.5
+    && (_fvgAnchC || _structConfC)
+    && _scarcityC != null && ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC)
+    && (_immStateC === "BUILDING"
+        || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
+
   return (
     <div style={{
       background: T.panel, borderRadius: 10,
@@ -267,7 +317,109 @@ function SymbolCard({ s }) {
         </span>
       </div>
 
-      {/* score strip */}
+      {/* ══ ZONA CIEGA / NORMALIZANDO — reemplaza contenido analítico ══ */}
+      {(_isBlindZone || _isNormZone) && (
+        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${(_isBlindZone ? T.red : T.amber)}33` }}>
+          {/* Countdown + estado */}
+          <div style={{
+            background: (_isBlindZone ? T.red : T.amber) + "1a",
+            border: `2px solid ${_isBlindZone ? T.red : T.amber}66`,
+            borderRadius: 7, padding: "8px 12px",
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            marginBottom: _isBurstWin ? 8 : 0,
+          }}>
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800,
+                color: _isBlindZone ? T.red : T.amber, letterSpacing: "0.10em" }}>
+                {_isBlindZone ? "NO OPERAR · NORMALIZANDO" : "NORMALIZANDO · CONFIRMAR"}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, marginTop: 2 }}>
+                {_isBlindZone
+                  ? "FVG · SMC · SCORE sesgados — anclajes activados"
+                  : "Estructura post-spike parcialmente válida"}
+              </div>
+            </div>
+            {_cdLabel && (
+              <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 16 }}>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                  {_isBlindZone ? "REACTIVACIÓN" : "NORMALIZACIÓN"}
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 26, fontWeight: 800,
+                  color: _isBlindZone ? T.red : T.amber, lineHeight: 1 }}>
+                  {_cdLabel}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* BURST window — solo primeros 30s */}
+          {_isBurstWin && (
+            <div style={{
+              background: (_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red) + "18",
+              border: `1.5px solid ${_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red}55`,
+              borderRadius: 6, padding: "6px 10px",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <div style={{
+                width: 11, height: 11, borderRadius: "50%", flexShrink: 0,
+                background: _burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red,
+                boxShadow: `0 0 7px ${_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red}`,
+              }} />
+              <div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
+                  color: _burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red,
+                  letterSpacing: "0.08em" }}>
+                  {_burstActive
+                    ? (_burstRetr != null && _burstRetr <= 0.35 ? "BURST — ENTRADA RÁPIDA OK" : "BURST CANCELADO · RETR EXCESIVO")
+                    : "SIN BURST"}
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
+                  {_burstDepth != null ? `${_burstDepth} spikes · ` : ""}
+                  {_burstRetr != null ? `RETR ${(_burstRetr * 100).toFixed(0)}%` : "sin retroceso"}
+                  {_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? " · momentum activo" : ""}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ GO — banner hero cuando todos los filtros pasan ══ */}
+      {_masterGreen && !_isBlindZone && !_isNormZone && (
+        <div style={{
+          padding: "8px 12px", background: T.green + "12",
+          borderBottom: `1px solid ${T.green}33`,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <div style={{
+            width: 13, height: 13, borderRadius: "50%", flexShrink: 0,
+            background: T.green, boxShadow: `0 0 10px ${T.green}`,
+          }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 12, fontWeight: 800,
+              color: T.green, letterSpacing: "0.12em" }}>
+              ENTRADA CONFIRMADA
+            </div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.green, opacity: 0.7, marginTop: 1 }}>
+              {_setupTypeC} · GRADE {_gradeC} · {_scarcityC} · {_immStateC}
+              {_fvgAnchC ? " · FVG ANCLADO" : _structConfC ? " · 5m CONF" : ""}
+            </div>
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, textTransform: "uppercase" }}>SCORE</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800,
+              color: T.green, lineHeight: 1 }}>
+              {_scoreRawC?.toFixed(1) ?? "–"}
+            </div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800, color: T.green }}>
+              {_gradeC}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* score strip — oculto en zona ciega (score sesgado por spike) */}
+      {!_isBlindZone && (
       <div style={{ padding: "9px 12px", background: T.bg2, borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
           <div>
@@ -311,8 +463,10 @@ function SymbolCard({ s }) {
           </div>
         )}
       </div>
+      )}
 
       {/* ══ HURST — fuerza del mercado ══ */}
+      {!_isBlindZone && (
       <div style={{ padding: "10px 12px 10px", borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
           <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.mute, letterSpacing: "0.10em", textTransform: "uppercase" }}>
@@ -361,6 +515,7 @@ function SymbolCard({ s }) {
           </div>
         )}
       </div>
+      )}
 
       {/* ══ tiempo + ticks (grande) ══ */}
       <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
@@ -401,7 +556,7 @@ function SymbolCard({ s }) {
         </div>
 
         {/* razones (por qué el bot no entró) */}
-        {s.topReasons?.length > 0 && (
+        {!_isBlindZone && s.topReasons?.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>
               Notas (por qué el bot no entró)
@@ -419,7 +574,7 @@ function SymbolCard({ s }) {
         )}
 
         {/* analytics inline — ATR · EMA200 · CLSTR · FVG · Z · PROB */}
-        {analytics?.snapshot && (
+        {!_isBlindZone && analytics?.snapshot && (
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
               {"ATR "}
