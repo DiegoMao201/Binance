@@ -2389,6 +2389,42 @@ class DerivRiskManager:
                             symbol, _cur_px, _a_top, _pen_pct, _anch_tol, _anch_atr_mult,
                         )
                         snap.score_breakdown["fvg_anchor_wick_survived"] = round(_pen_pct, 4)
+                        # Penalización proporcional a la profundidad en la zona de tolerancia.
+                        # Cuanto más cerca del techo de invalidación, mayor la deducción (0→max_pen).
+                        _anch_max_pen = float(os.getenv("DERIV_FVG_ANCHOR_TOL_PENALTY", "1.5") or 1.5)
+                        _anch_pen_ratio = min(1.0, abs(_cur_px - (_a_top if _a_dir == "bearish" else _a_bot)) / _anch_tol)
+                        _anch_score_pen = round(_anch_pen_ratio * _anch_max_pen, 2)
+                        if _anch_score_pen > 0:
+                            score = max(0.0, score - _anch_score_pen)
+                            snap.score_breakdown["fvg_anchor_tol_penalty"] = _anch_score_pen
+                            snap.reasons.append(
+                                f"fvg_anchor_tol: -{_anch_score_pen:.2f} "
+                                f"({_pen_pct:.3f}% into zone)"
+                            )
+                        # Penalización adicional si el precio SIGUE SUBIENDO en la zona
+                        # (para CRASH bearish: precio subiendo = movimiento adverso = entrada mala)
+                        _tol_rising = (
+                            _a_dir == "bearish"
+                            and len(ticks) >= 5
+                            and float(ticks[-1]) > float(ticks[-5])
+                        )
+                        _tol_falling = (
+                            _a_dir == "bullish"
+                            and len(ticks) >= 5
+                            and float(ticks[-1]) < float(ticks[-5])
+                        )
+                        if _tol_rising or _tol_falling:
+                            _mom_pen = float(os.getenv("DERIV_FVG_ANCHOR_MOM_PENALTY", "0.5") or 0.5)
+                            score = max(0.0, score - _mom_pen)
+                            snap.score_breakdown["fvg_anchor_mom_penalty"] = _mom_pen
+                            snap.reasons.append(
+                                f"fvg_anchor_rising: -{_mom_pen:.2f} (no rejection yet)"
+                            )
+                            _LOGGER.info(
+                                "[FVG_ANCHOR_RISING] %s precio aún sube en zona tol "
+                                "dir=%s cur=%.5f fvg_top=%.5f → penalty -%.2f",
+                                symbol, _a_dir, _cur_px, _a_top, _mom_pen,
+                            )
                     if _broke_thru or _anch_age >= _anchor_ttl:
                         self._spike_fvg_anchor.pop(symbol.upper(), None)
                         snap.score_breakdown["fvg_anchor_active"] = False

@@ -782,8 +782,11 @@ function SymbolCard({ s }) {
               const burstActive     = sn.burst_active ?? false;
               const burstDepth      = sn.burst_depth ?? null;
               const burstRetroceso  = sn.burst_retroceso ?? null;
-              const fvgAnchorActive = sn.fvg_anchor_active ?? false;
-              const fvgAnchorAgeS   = sn.fvg_anchor_age_s ?? null;
+              const fvgAnchorActive    = sn.fvg_anchor_active ?? false;
+              const fvgAnchorAgeS      = sn.fvg_anchor_age_s ?? null;
+              const fvgAnchorWick      = sn.fvg_anchor_wick_survived ?? null;
+              const fvgAnchorTolPen    = sn.fvg_anchor_tol_penalty ?? null;
+              const fvgAnchorMomPen    = sn.fvg_anchor_mom_penalty ?? null;
               const structFvgConfirm  = sn.structural_fvg_confirm ?? false;
               const structFvgConflict = sn.structural_fvg_conflict ?? false;
               const structFvgAbsent   = sn.structural_fvg_absent ?? false;
@@ -1041,6 +1044,11 @@ function SymbolCard({ s }) {
                     {fvgAnchorActive
                       ? chip("FVG", `ANCLADO${fvgAnchorAgeS != null ? " " + Math.round(fvgAnchorAgeS) + "s" : ""}`, T.violet)
                       : fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
+                    {fvgAnchorWick != null && chip(
+                      "ZONA TOL",
+                      `+${fvgAnchorWick.toFixed(3)}%${fvgAnchorMomPen != null ? " ↑" : ""}`,
+                      fvgAnchorMomPen != null ? T.red : T.amber
+                    )}
                     {geoPos != null && chip("GEO", geoPct, geoColor)}
                     {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
                     {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}
