@@ -122,7 +122,7 @@ function SymbolCard({ s }) {
       } catch { /* noop */ }
     };
     doFetch();
-    const id = setInterval(doFetch, 15000);
+    const id = setInterval(doFetch, 5000);
     return () => { active = false; clearInterval(id); };
   }, [s.symbol]);
 
@@ -264,6 +264,21 @@ function SymbolCard({ s }) {
     && (_ema200LoadedC == null || _ema200LoadedC === true)
     && (_immStateC === "BUILDING"
         || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
+
+  // ── DISPLAY SCORE — usa score_raw del analytics cuando decisión está vencida ──
+  const _usingLiveScore = scoreIsStale0 && _scoreRawC != null;
+  const _dispScore    = _usingLiveScore ? _scoreRawC    : score;
+  const _dispGap      = (_usingLiveScore && gate != null) ? +(gate - _scoreRawC).toFixed(2) : gap;
+  const _dispPct      = gate && _dispScore != null ? Math.max(0, Math.min(100, (_dispScore / gate) * 100)) : null;
+  const _dispFalta    = _dispGap == null ? "–"
+    : isVetado ? "VETADO"
+    : _dispGap <= 0 ? "LISTO ✓"
+    : `+${num(_dispGap)}`;
+  const _dispScoreC   = isVetado ? T.amber
+    : _dispGap != null && _dispGap <= 0 ? T.green
+    : _dispGap != null && _dispGap < 0.5 ? T.amber : T.cyan;
+  const _dispGapC     = isVetado ? T.amber
+    : _dispGap != null && _dispGap <= 0 ? T.green : T.amber;
 
   // ── CASCADA ────────────────────────────────────────────────────────────────
   const _cascadeActive    = _sn?.cascade_active ?? false;
@@ -483,13 +498,16 @@ function SymbolCard({ s }) {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score</span>
-              {scoreAgeSec != null && (
-                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: scoreIsStale ? T.amber : T.mute }}>
-                  · hace {scoreAgeSec < 60 ? `${Math.round(scoreAgeSec)}s` : `${Math.round(scoreAgeSec / 60)}m`}
-                </span>
-              )}
+              {_usingLiveScore
+                ? <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.green }}>· en vivo</span>
+                : scoreAgeSec != null && (
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: scoreIsStale ? T.amber : T.mute }}>
+                    · hace {scoreAgeSec < 60 ? `${Math.round(scoreAgeSec)}s` : `${Math.round(scoreAgeSec / 60)}m`}
+                  </span>
+                )
+              }
             </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: scoreColor, lineHeight: 1 }}>{num(score)}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: _dispScoreC, lineHeight: 1 }}>{num(_dispScore)}</div>
           </div>
           <div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
@@ -497,14 +515,14 @@ function SymbolCard({ s }) {
           </div>
           <div style={{ marginLeft: "auto", textAlign: "right" }}>
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Falta</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: gapColor }}>
-              {faltaText}
+            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: _dispGapC }}>
+              {_dispFalta}
             </div>
           </div>
         </div>
-        {pctToGate != null && (
+        {_dispPct != null && (
           <div style={{ height: 4, borderRadius: 3, background: T.bg, overflow: "hidden", marginTop: 6 }}>
-            <div style={{ height: "100%", width: `${pctToGate}%`, background: scoreColor, transition: "width 500ms ease" }} />
+            <div style={{ height: "100%", width: `${_dispPct}%`, background: _dispScoreC, transition: "width 500ms ease" }} />
           </div>
         )}
         {live && (
@@ -793,7 +811,6 @@ function SymbolCard({ s }) {
               const structFvgActive   = sn.structural_fvg_active ?? null;
               const structFvgDir      = sn.structural_fvg_direction ?? null;
               const atrAnchored       = sn.atr_anchored ?? false;
-              const geoNullified      = sn.geo_post_spike_nullified ?? null;
               const ema200Anchored    = sn.ema200_anchored ?? false;
               const ema200DistPct     = sn.ema200_distance_pct ?? null;
               // EMA200 loaded: for CRASH need price above EMA200 (dev ≥ +0.008% fraction)
@@ -1063,7 +1080,6 @@ function SymbolCard({ s }) {
                     {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}
                     {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
                     {ema200Anchored && chip("EMA200", "ANCLADO", T.violet)}
-                    {geoNullified != null && chip("GEO-N", `−${geoNullified.toFixed(1)}pt`, T.amber)}
                     {ema200DistPct != null && chip(
                       "EMA",
                       `${_emaOverridedByAnchor ? "~" : (ema200Loaded ? "✓" : "✗")} ${_emaDevStr}`,
