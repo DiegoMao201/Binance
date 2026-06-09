@@ -1063,7 +1063,7 @@ function SymbolCard({ s }) {
                     {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}
                     {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
                     {ema200Anchored && chip("EMA200", "ANCLADO", T.violet)}
-                    {geoNullified != null && chip("GEO", `NULL ${geoNullified > 0 ? "+" : ""}${geoNullified.toFixed(1)}`, T.amber)}
+                    {geoNullified != null && chip("GEO-N", `−${geoNullified.toFixed(1)}pt`, T.amber)}
                     {ema200DistPct != null && chip(
                       "EMA",
                       `${_emaOverridedByAnchor ? "~" : (ema200Loaded ? "✓" : "✗")} ${_emaDevStr}`,
