@@ -142,6 +142,8 @@ export async function GET(request: NextRequest) {
         geo_channel_pos: latest.geo_channel_pos ?? null,
         fvg_tier: latest.fvg_tier ?? null,
         score_raw: latest.score_raw ?? null,
+        last_spike_wall_ts: latest.last_spike_wall_ts ?? null,
+        post_spike_blind: latest.post_spike_blind ?? false,
       },
       spike_stats,
       hurst_history,

@@ -502,14 +502,32 @@ function SymbolCard({ s }) {
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
-              // Staleness: market context is written every ~60s; > 90s = old, > 180s = very old
+              // ── Post-spike blind zone ──────────────────────────────────────
+              // Indicators computed in the 120s after a spike are biased by the
+              // spike's price action (FVG/SMC/geo all reflect the spike anomaly).
+              // Use last_spike_wall_ts for real-time accuracy (not cached ticks).
+              const lastSpikeWallTs = sn.last_spike_wall_ts ?? null;
+              const secsSinceSpike  = lastSpikeWallTs
+                ? Math.floor(Date.now() / 1000 - lastSpikeWallTs) : null;
+              // 0-120s: ciega total (indicadores sesgados por el spike)
+              // 120-300s: normalizando (primeras velas post-spike, aún parcialmente sesgados)
+              const isBlindZone       = secsSinceSpike != null && secsSinceSpike < 120;
+              const isNormalizingZone = secsSinceSpike != null && secsSinceSpike >= 120 && secsSinceSpike < 300;
+              const postSpikeLabel = secsSinceSpike != null && secsSinceSpike < 300
+                ? (secsSinceSpike < 60 ? `${secsSinceSpike}s` : `${Math.floor(secsSinceSpike/60)}m${secsSinceSpike%60}s`)
+                : null;
+
+              // ── Staleness (datos viejos del cache) ─────────────────────────
               const ageS = sn.ts ? Math.floor(Date.now() / 1000 - sn.ts) : null;
-              const isStale     = ageS != null && ageS > 90;
-              const isVeryStale = ageS != null && ageS > 180;
-              const ageLabel = ageS == null ? "" : ageS < 60 ? `hace ${ageS}s` : `hace ${Math.floor(ageS/60)}m${ageS%60}s`;
-              // When stale: dim chip backgrounds so the user sees "old data, not live"
+              const isStale     = !isBlindZone && ageS != null && ageS > 90;
+              const isVeryStale = !isBlindZone && ageS != null && ageS > 180;
+              const ageLabel = (!isBlindZone && !isNormalizingZone && ageS != null)
+                ? (ageS < 60 ? `hace ${ageS}s` : `hace ${Math.floor(ageS/60)}m${ageS%60}s`) : null;
+
               const staleOpacity = isVeryStale ? 0.35 : isStale ? 0.55 : 1.0;
-              const headerColor  = isVeryStale ? T.red : isStale ? T.amber : T.mute;
+              const headerColor  = isBlindZone ? T.red
+                : isNormalizingZone ? T.amber
+                : isVeryStale ? T.red : isStale ? T.amber : T.mute;
 
               // Setup color
               const setupColor = setupType === "SMC_FVG" ? T.green
@@ -553,10 +571,13 @@ function SymbolCard({ s }) {
               const scoreRawColor = scoreRaw == null ? T.mute
                 : scoreRaw >= 8.5 ? T.green : scoreRaw >= 7.5 ? T.amber : T.red;
 
+              // Chips dim when data is stale; blind zone dims further and adds overlay
+              const chipOpacity = isBlindZone ? 0.25 : isNormalizingZone ? 0.5 : staleOpacity;
+
               const chip = (label, value, color) => (
                 <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3,
                   background: color + "18", border: `1px solid ${color}44`,
-                  borderRadius: 4, padding: "1px 5px", opacity: staleOpacity }}>
+                  borderRadius: 4, padding: "1px 5px", opacity: chipOpacity }}>
                   <span style={{ color: T.mute, fontSize: 7, fontWeight: 600 }}>{label}</span>
                   <span style={{ color, fontSize: 8, fontWeight: 700 }}>{value}</span>
                 </span>
@@ -564,7 +585,7 @@ function SymbolCard({ s }) {
 
               return (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isBlindZone || isNormalizingZone ? 3 : 4 }}>
                     <span style={{ fontSize: 7, color: headerColor, letterSpacing: "0.08em", fontWeight: 600 }}>
                       CALIDAD DE ENTRADA
                     </span>
@@ -574,6 +595,28 @@ function SymbolCard({ s }) {
                       </span>
                     )}
                   </div>
+
+                  {/* Post-spike blind zone warning — overrides chips */}
+                  {isBlindZone && (
+                    <div style={{ background: T.red + "22", border: `1px solid ${T.red}55`,
+                      borderRadius: 4, padding: "3px 6px", marginBottom: 4 }}>
+                      <div style={{ color: T.red, fontSize: 7, fontWeight: 700, letterSpacing: "0.06em" }}>
+                        ZONA CIEGA · {postSpikeLabel} post-spike
+                      </div>
+                      <div style={{ color: T.mute, fontSize: 6, marginTop: 1 }}>
+                        Indicadores sesgados — FVG/SMC/GRADE no válidos hasta normalización
+                      </div>
+                    </div>
+                  )}
+                  {isNormalizingZone && (
+                    <div style={{ background: T.amber + "18", border: `1px solid ${T.amber}44`,
+                      borderRadius: 4, padding: "2px 5px", marginBottom: 4 }}>
+                      <div style={{ color: T.amber, fontSize: 6, fontWeight: 700 }}>
+                        NORMALIZANDO · {postSpikeLabel} post-spike · confirmar con score en vivo
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
                     {setupType && chip("SETUP", setupLabel, setupColor)}
                     {grade && chip("GRADE", grade, gradeColor)}

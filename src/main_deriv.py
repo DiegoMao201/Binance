@@ -1514,6 +1514,12 @@ class DerivDaemon:
                 "geo_channel_pos":       _fvg_cache.get("geo_channel_pos"),
                 "fvg_tier":              _fvg_cache.get("fvg_tier"),
                 "score_raw":             _fvg_cache.get("score_raw"),
+                # Post-spike blind window: indicators computed in the 120s after a
+                # spike are biased by the spike's price action (FVG, SMC, geo all
+                # reflect the spike anomaly, not the next entry opportunity).
+                # last_spike_wall_ts lets the frontend compute exact seconds live.
+                "last_spike_wall_ts":    round(_last_spike_ts, 3) if _last_spike_ts > 0 else None,
+                "post_spike_blind":      bool(_last_spike_ts > 0 and _now - _last_spike_ts < 120),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
