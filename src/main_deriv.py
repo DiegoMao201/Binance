@@ -2945,8 +2945,31 @@ class DerivDaemon:
         self._last_fvg_state[_cache_sym].update(
             {k: v for k, v in _qfields_preserve.items() if v is not None}
         )
-        # scarcity and imminence are injected into score_breakdown LATER in the
-        # pipeline; they are always None here — updated by the late-stage cache below.
+        # Eagerly cache scarcity/imminence so market_context always shows live data
+        # regardless of which early-return gate fires first.  The late-stage cache
+        # at line ~3807 still runs for ticks that pass all gates and adds refinements,
+        # but this block guarantees non-null values after the first detected spike.
+        _is_bc_early = any(k in tick.symbol.upper() for k in ("BOOM", "CRASH"))
+        if _is_bc_early:
+            try:
+                _imm_tel = self._risk.get_spike_imminence_state(tick.symbol)
+                _imm_s = str(_imm_tel.get("state") or "") or None
+                if _imm_s:
+                    self._last_fvg_state[_cache_sym]["spike_imminence_state"] = _imm_s
+                    self._last_fvg_state[_cache_sym]["spike_imminence_score"] = round(
+                        float(_imm_tel.get("score") or 0.0), 3
+                    )
+            except Exception:
+                pass
+            try:
+                _scar_tel = self._risk.get_scarcity_state(tick.symbol)
+                _scar_s = str(_scar_tel.get("state") or "") if isinstance(_scar_tel, dict) else ""
+                if _scar_s and _scar_s != "SIN_DATOS":
+                    self._last_fvg_state[_cache_sym]["scarcity_state"] = _scar_s
+                    if isinstance(_scar_tel, dict) and _scar_tel.get("ratio") is not None:
+                        self._last_fvg_state[_cache_sym]["scarcity_ratio"] = _scar_tel.get("ratio")
+            except Exception:
+                pass
 
         # ── BUG-C fix (2026-05-19 phase13): Geo channel position gate runs here ──
         # Moved from its original location (after Hurst/Strategy gates) so that

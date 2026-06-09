@@ -202,6 +202,7 @@ export async function GET(request: NextRequest) {
         ema200_anchored: latest.ema200_anchored ?? false,
         cascade_active: latest.cascade_active ?? false,
         cascade_gap_ticks: latest.cascade_gap_ticks ?? null,
+        ema200_distance_pct: latest.ema200_distance_pct ?? null,
       },
       spike_stats,
       hurst_history,

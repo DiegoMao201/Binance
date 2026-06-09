@@ -238,6 +238,14 @@ function SymbolCard({ s }) {
   const _fvgAnchC     = _sn?.fvg_anchor_active ?? false;
   const _structConfC  = _sn?.structural_fvg_confirm ?? false;
   const _structConflC = _sn?.structural_fvg_conflict ?? false;
+  const _ema200DistC  = _sn?.ema200_distance_pct ?? null;
+  const _isCrashCard  = s.symbol.toUpperCase().includes("CRASH");
+  const _isBoomCard   = s.symbol.toUpperCase().includes("BOOM");
+  const _ldThr        = 0.00008; // 0.008% in fraction form
+  const _ema200LoadedC = _ema200DistC == null ? null
+    : _isCrashCard ? _ema200DistC >= _ldThr
+    : _isBoomCard  ? _ema200DistC <= -_ldThr
+    : null;
   const _masterRed    = _isBlindZone
     || _structConflC
     || _scarcityC === "SECO"
@@ -245,13 +253,15 @@ function SymbolCard({ s }) {
     || _immStateC === "RIPE"
     || (_scoreRawC != null && _scoreRawC < 7.5)
     || _gradeC === "C"
-    || _setupTypeC === "TREND";
+    || _setupTypeC === "TREND"
+    || _ema200LoadedC === false;
   const _masterGreen  = !_masterRed && _sn != null
     && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
     && (_gradeC === "A" || _gradeC === "B")
     && _scoreRawC != null && _scoreRawC >= 8.5
     && (_fvgAnchC || _structConfC)
-    && _scarcityC != null && ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC)
+    && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC))
+    && (_ema200LoadedC == null || _ema200LoadedC === true)
     && (_immStateC === "BUILDING"
         || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
 
@@ -782,6 +792,21 @@ function SymbolCard({ s }) {
               const atrAnchored       = sn.atr_anchored ?? false;
               const geoNullified      = sn.geo_post_spike_nullified ?? null;
               const ema200Anchored    = sn.ema200_anchored ?? false;
+              const ema200DistPct     = sn.ema200_distance_pct ?? null;
+              // EMA200 loaded: for CRASH need price above EMA200 (dev ≥ +0.008% fraction)
+              //                for BOOM  need price below EMA200 (dev ≤ −0.008% fraction)
+              const _isCrashSym = s.symbol.toUpperCase().includes("CRASH");
+              const _isBoomSym  = s.symbol.toUpperCase().includes("BOOM");
+              const _ldThresh   = 0.00008; // = 0.008% / 100
+              const ema200Loaded = ema200DistPct == null ? null
+                : _isCrashSym ? ema200DistPct >= _ldThresh
+                : _isBoomSym  ? ema200DistPct <= -_ldThresh
+                : null;
+              // Time since last spike in human-readable form (ticks ≈ seconds for synthetics)
+              const _ticksSinceSpi  = sn.ticks_since_last_spike ?? null;
+              const _timeSinceSpiStr = _ticksSinceSpi == null ? null
+                : _ticksSinceSpi < 60 ? `${_ticksSinceSpi}s`
+                : `${Math.floor(_ticksSinceSpi / 60)}m${_ticksSinceSpi % 60 > 0 ? ((_ticksSinceSpi % 60) + "s") : ""}`;
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
@@ -862,9 +887,12 @@ function SymbolCard({ s }) {
               const _goodGrade    = grade === "A" || grade === "B";
               const _goodScore    = scoreRaw != null && scoreRaw >= 8.5;
               const _goodFvg      = fvgAnchorActive || structFvgConfirm;
-              const _goodScarcity = scarcity != null && ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
+              // null scarcity = SIN_DATOS (fresh restart, no history) = neutral, not blocking
+              const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
               const _goodImm      = immState === "BUILDING" ||
                                     (immScore != null && immScore >= 0.3 && immScore <= 0.6);
+              // EMA loaded: null = data missing = neutral (don't penalise)
+              const _goodEma      = ema200Loaded == null || ema200Loaded === true;
 
               const _redConflict = structFvgConflict;
               const _redSeco     = scarcity === "SECO";
@@ -874,33 +902,39 @@ function SymbolCard({ s }) {
               const _redScore    = scoreRaw != null && scoreRaw < 7.5;
               const _redGrade    = grade === "C";
               const _redSetup    = setupType === "TREND";
+              const _redEma      = ema200Loaded === false;
 
               const _isRed   = _redConflict || _redSeco || _redVencido || _redBlind ||
-                               _redRipe || _redScore || _redGrade || _redSetup;
+                               _redRipe || _redScore || _redGrade || _redSetup || _redEma;
               const _isGreen = !_isRed && _goodSetup && _goodGrade && _goodScore &&
-                               _goodFvg && _goodScarcity && _goodImm;
+                               _goodFvg && _goodScarcity && _goodImm && _goodEma;
               const _isAmber = !_isRed && !_isGreen;
 
               const _semColor = _isRed ? T.red : _isGreen ? T.green : T.amber;
               const _semLabel = _isRed ? "NO OPERAR" : _isGreen ? "GO" : "ESPERAR";
 
+              const _emaDevStr = ema200DistPct != null
+                ? ((ema200DistPct >= 0 ? "+" : "") + (ema200DistPct * 100).toFixed(3) + "%")
+                : null;
               const _redReasons = [
                 _redConflict && "5m CONFLICTO",
-                _redSeco     && "SECO",
-                _redVencido  && "VENCIDO",
+                _redSeco     && `SECO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr + " sin spike" : ""}`,
+                _redVencido  && `VENCIDO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr : ""}`,
                 _redBlind    && "ZONA CIEGA",
-                _redRipe     && "IMM RIPE",
-                _redScore    && "SCORE BAJO",
+                _redRipe     && "INMINENTE · no cazar spike",
+                _redScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 7.5`,
                 _redGrade    && "GRADE C",
-                _redSetup    && "TREND",
+                _redSetup    && "SETUP TREND sin FVG",
+                _redEma      && `EMA DESCARGADO${_emaDevStr ? " " + _emaDevStr : ""}`,
               ].filter(Boolean);
               const _missing = [
                 !_goodSetup    && "SETUP",
                 !_goodGrade    && "GRADE",
-                !_goodScore    && "SCORE<8.5",
-                !_goodFvg      && "FVG",
-                !_goodScarcity && "SCAR",
-                !_goodImm      && "IMM",
+                !_goodScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 8.5`,
+                !_goodFvg      && "FVG ANCLADO",
+                scarcity && !_goodScarcity && `SCAR ${scarcity}`,
+                !_goodImm      && `IMM ${immState ?? "SIN DATOS"}`,
+                !_goodEma      && `EMA${_emaDevStr ? " " + _emaDevStr : ""}`,
               ].filter(Boolean);
 
               const chip = (label, value, color) => (
@@ -1018,6 +1052,11 @@ function SymbolCard({ s }) {
                     {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
                     {ema200Anchored && chip("EMA200", "ANCLADO", T.violet)}
                     {geoNullified != null && chip("GEO", `NULL ${geoNullified > 0 ? "+" : ""}${geoNullified.toFixed(1)}`, T.amber)}
+                    {ema200DistPct != null && chip(
+                      "EMA",
+                      `${ema200Loaded ? "✓" : "✗"} ${_emaDevStr}`,
+                      ema200Loaded ? T.green : T.red
+                    )}
                   </div>
                 </div>
               );
