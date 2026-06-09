@@ -2830,6 +2830,48 @@ class DerivDaemon:
                         )
                         return
 
+        # ═══════════════════════════════════════════════════════════════════
+        # MATURITY_GATE — structural floor: first FRAC of the typical cycle
+        # Blocks entry while elapsed wall-clock time < median_gap × FRAC.
+        # Uses get_scarcity_state() (same source as the operator card "típico").
+        # Env vars: DERIV_MATURITY_GATE_ENABLED (default true)
+        #           DERIV_MATURITY_GATE_FRAC    (default 0.70)
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            is_spike_market(tick.symbol)
+            and str(os.getenv("DERIV_MATURITY_GATE_ENABLED", "true")).strip().lower()
+               in ("1", "true", "yes", "on")
+        ):
+            _mat_scar = self._risk.get_scarcity_state(tick.symbol)
+            _mat_median_s = _mat_scar.get("median_gap_s")
+            _mat_elapsed_s = _mat_scar.get("elapsed_s")
+            if _mat_median_s and _mat_elapsed_s is not None and _mat_median_s > 0:
+                _mat_frac = float(os.getenv("DERIV_MATURITY_GATE_FRAC", "0.70"))
+                _mat_threshold_s = _mat_median_s * _mat_frac
+                if _mat_elapsed_s < _mat_threshold_s:
+                    _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
+                    _mat_key = f"{tick.symbol}:early_entry_gate"
+                    _mat_last_emit = float(
+                        self._dynamic_inactive_last_emit_ts.get(_mat_key) or 0.0
+                    )
+                    _mat_now = time.time()
+                    if (_mat_now - _mat_last_emit) >= 30.0:
+                        self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
+                        _LOGGER.info(
+                            "[MATURITY_GATE] EARLY_ENTRY_GATE %s | elapsed=%.0fs < "
+                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs",
+                            tick.symbol,
+                            _mat_elapsed_s,
+                            _mat_threshold_s,
+                            _mat_frac * 100,
+                            _mat_median_s,
+                            _mat_remain_s,
+                        )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False, block_reason="early_entry_gate"
+                    )
+                    return
+
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
         # Per-symbol override via ASSET_INTEL_PROFILES['cooldown_sec'] takes
@@ -4301,6 +4343,75 @@ class DerivDaemon:
                 score=getattr(snap, "score", 0.0),
             )
             return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # EXHAUSTION_TRIGGER — micro-momentum confirmation for FVG entries
+        # After maturity opens, requires price momentum to have reversed
+        # in the trade direction while inside the FVG zone. Prevents entering
+        # the instant price touches the FVG (manipulation wick capture).
+        # Skipped for math-override fast path (structural certainty signals).
+        # Env vars: DERIV_EXHAUSTION_GATE_ENABLED  (default true)
+        #           DERIV_EXHAUSTION_GATE_ATR_FRAC (default 0.10 = 10% of ATR)
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            is_spike_market(tick.symbol)
+            and not snap.hurst_ai_override
+            and str(os.getenv("DERIV_EXHAUSTION_GATE_ENABLED", "true")).strip().lower()
+               in ("1", "true", "yes", "on")
+            and bool(snap.score_breakdown.get("fvg_active"))
+            and str(snap.score_breakdown.get("setup_type") or "") == "SMC_FVG"
+        ):
+            _ex_fvg_top = snap.score_breakdown.get("fvg_top")
+            _ex_fvg_bot = snap.score_breakdown.get("fvg_bottom")
+            _ex_price = float(tick.price or 0.0)
+            _ex_side = snap.side
+            _ex_ticks = list(self._risk._ticks.get(tick.symbol, []))
+            _ex_atr = float(snap.score_breakdown.get("atr_abs") or 0.0)
+            if (
+                _ex_fvg_top is not None and _ex_fvg_bot is not None
+                and _ex_fvg_top > 0 and _ex_fvg_bot > 0
+                and len(_ex_ticks) >= 6
+                and _ex_atr > 0
+                and _ex_price > 0
+            ):
+                _ex_zone_tol = _ex_atr * 0.5
+                _ex_in_zone = (
+                    (_ex_fvg_bot - _ex_zone_tol) <= _ex_price <= (_ex_fvg_top + _ex_zone_tol)
+                )
+                if _ex_in_zone:
+                    _ex_delta_5t = _ex_ticks[-1] - _ex_ticks[-6]
+                    _ex_min_move = _ex_atr * float(
+                        os.getenv("DERIV_EXHAUSTION_GATE_ATR_FRAC", "0.10")
+                    )
+                    _ex_momentum_ok = (
+                        (_ex_side == "SELL" and _ex_delta_5t <= -_ex_min_move)
+                        or (_ex_side == "BUY" and _ex_delta_5t >= +_ex_min_move)
+                    )
+                    if not _ex_momentum_ok:
+                        _ex_key = f"{tick.symbol}:exhaustion_gate"
+                        _ex_last = float(
+                            self._dynamic_inactive_last_emit_ts.get(_ex_key) or 0.0
+                        )
+                        _ex_now = time.time()
+                        if (_ex_now - _ex_last) >= 10.0:
+                            self._dynamic_inactive_last_emit_ts[_ex_key] = _ex_now
+                            _LOGGER.info(
+                                "[EXHAUSTION_GATE] WAITING_REVERSAL %s | price=%.5f "
+                                "zone=[%.5f,%.5f] side=%s delta5t=%.6f need%s%.6f",
+                                tick.symbol,
+                                _ex_price,
+                                _ex_fvg_bot,
+                                _ex_fvg_top,
+                                _ex_side,
+                                _ex_delta_5t,
+                                "≤−" if _ex_side == "SELL" else "≥+",
+                                _ex_min_move,
+                            )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason="exhaustion_gate_pending",
+                        )
+                        return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH

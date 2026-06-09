@@ -141,6 +141,14 @@ function SymbolCard({ s }) {
   const hurst  = analytics?.snapshot?.hurst ?? null;
   const hurstH = analytics?.hurst_history ?? [];
 
+  /* ─ maturity gate — mirrors DERIV_MATURITY_GATE_FRAC=0.70 in the bot ─ */
+  const _matFrac       = 0.70;
+  const _matThresholdS = medSec ? Math.round(medSec * _matFrac) : null;
+  const _matRemainS    = (_matThresholdS && secs > 0 && secs < _matThresholdS)
+    ? Math.ceil(_matThresholdS - secs) : 0;
+  const _inMaturity    = _matRemainS > 0 && medSec != null;
+  const _matPct        = _matThresholdS ? Math.min(100, Math.round((secs / _matThresholdS) * 100)) : null;
+
   /* ─ score freshness + gap (needed before isInactive / sem) ─ */
   const scoreAgeSec0  = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
   const scoreIsStale0 = scoreAgeSec0 != null && scoreAgeSec0 > 90;
@@ -182,6 +190,10 @@ function SymbolCard({ s }) {
       : `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
   } else if (sem === "amber" && secs > 0 && secs < 120) {
     msgEmoji = "⏳"; msgLine = "Acaba de caer — espera 2 min antes de entrar";
+  } else if (_inMaturity) {
+    const _mm = String(Math.floor(_matRemainS / 60)).padStart(2, "0");
+    const _ss = String(_matRemainS % 60).padStart(2, "0");
+    msgEmoji = "🟡"; msgLine = `Esperando madurez · Falta ${_mm}:${_ss} (${_matPct}% del ciclo)`;
   } else if (sem === "green") {
     const hurstNote = hurst != null && hurst < 0.45 ? " · Hurst bajo = sin fuerza" : "";
     msgEmoji = "✅"; msgLine = `Zona cargada${minsSince != null ? ` · ${minsSince} min sin caída` : ""}${hurstNote}`;
@@ -962,6 +974,7 @@ function SymbolCard({ s }) {
                 scarcity && !_goodScarcity && `SCAR ${scarcity}`,
                 !_goodImm      && `IMM ${immState ?? "SIN DATOS"}`,
                 !_goodEma      && `EMA${_emaDevStr ? " " + _emaDevStr : ""}`,
+                _inMaturity    && (() => { const _mm=String(Math.floor(_matRemainS/60)).padStart(2,"0"); const _ss=String(_matRemainS%60).padStart(2,"0"); return `MADUREZ ${_mm}:${_ss}`; })(),
               ].filter(Boolean);
 
               const chip = (label, value, color) => (
