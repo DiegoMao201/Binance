@@ -2361,11 +2361,34 @@ class DerivRiskManager:
                     _a_bot = float(_fvg_anch["fvg_bottom"])
                     _a_dir = str(_fvg_anch["fvg_direction"])
                     _cur_px = float(ticks[-1]) if len(ticks) else 0.0
-                    # Invalidate: price broke through the gap from the wrong side
-                    _broke_thru = (
-                        (_a_dir == "bearish" and _cur_px > _a_top)
-                        or (_a_dir == "bullish" and _cur_px < _a_bot)
+                    # Invalidate only on a structurally significant break: shallow wicks
+                    # above fvg_top during post-spike retroceso are liquidity grabs, not
+                    # true invalidations.  Require price to exceed the gap by ATR_MARGIN*ATR.
+                    _anch_atr_mult = float(
+                        os.getenv("DERIV_FVG_ANCHOR_ATR_MARGIN", "1.5") or 1.5
                     )
+                    _anch_tol = atr * _anch_atr_mult if atr > 0 else 0.0
+                    _broke_thru = (
+                        (_a_dir == "bearish" and _cur_px > _a_top + _anch_tol)
+                        or (_a_dir == "bullish" and _cur_px < _a_bot - _anch_tol)
+                    )
+                    # Log near-misses: price entered tolerance zone but anchor survived
+                    _near_miss = (
+                        (not _broke_thru)
+                        and _anch_tol > 0
+                        and (
+                            (_a_dir == "bearish" and _cur_px > _a_top)
+                            or (_a_dir == "bullish" and _cur_px < _a_bot)
+                        )
+                    )
+                    if _near_miss:
+                        _pen_pct = abs(_cur_px - (_a_top if _a_dir == "bearish" else _a_bot)) / _a_top * 100
+                        _LOGGER.info(
+                            "[FVG_ANCHOR_SURVIVE] %s wick %.5f > fvg_top %.5f by %.4f%% "
+                            "(tol=%.5f = %.1fx ATR) — anchor preserved",
+                            symbol, _cur_px, _a_top, _pen_pct, _anch_tol, _anch_atr_mult,
+                        )
+                        snap.score_breakdown["fvg_anchor_wick_survived"] = round(_pen_pct, 4)
                     if _broke_thru or _anch_age >= _anchor_ttl:
                         self._spike_fvg_anchor.pop(symbol.upper(), None)
                         snap.score_breakdown["fvg_anchor_active"] = False
