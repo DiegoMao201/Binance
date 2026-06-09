@@ -1528,6 +1528,10 @@ class DerivDaemon:
                 "burst_depth":           _fvg_cache.get("burst_depth"),
                 "burst_retroceso":       _fvg_cache.get("burst_retroceso"),
                 "burst_active":          _fvg_cache.get("burst_active"),
+                # FVG Anchor — True when evaluate() reinstated the spike's frozen FVG
+                # instead of the dynamic rolling-window result (anti-retroceso-amnesia).
+                "fvg_anchor_active":     _fvg_cache.get("fvg_anchor_active"),
+                "fvg_anchor_age_s":      _fvg_cache.get("fvg_anchor_age_s"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -3627,6 +3631,8 @@ class DerivDaemon:
                 "spike_imminence_score": _sb_tel.get("spike_imminence_score"),
                 "execution_grade":       _sb_tel.get("execution_grade"),
                 "score_raw":             _sb_tel.get("score_raw"),
+                "fvg_anchor_active":     _sb_tel.get("fvg_anchor_active"),
+                "fvg_anchor_age_s":      _sb_tel.get("fvg_anchor_age_s"),
             }
             self._last_fvg_state[_cache_sym].update(
                 {k: v for k, v in _tel_fields.items() if v is not None}

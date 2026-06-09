@@ -499,9 +499,11 @@ function SymbolCard({ s }) {
               const geoPos       = sn.geo_channel_pos ?? null;
               const fvgTier      = sn.fvg_tier || null;
               const scoreRaw     = sn.score_raw ?? null;
-              const burstActive  = sn.burst_active ?? false;
-              const burstDepth   = sn.burst_depth ?? null;
-              const burstRetroceso = sn.burst_retroceso ?? null;
+              const burstActive     = sn.burst_active ?? false;
+              const burstDepth      = sn.burst_depth ?? null;
+              const burstRetroceso  = sn.burst_retroceso ?? null;
+              const fvgAnchorActive = sn.fvg_anchor_active ?? false;
+              const fvgAnchorAgeS   = sn.fvg_anchor_age_s ?? null;
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
@@ -644,7 +646,9 @@ function SymbolCard({ s }) {
                     {immState && chip("IMM", `${immState}${immScore != null ? " " + immScore.toFixed(2) : ""}`, immScore != null ? immColor : immStateColor)}
                   </div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
+                    {fvgAnchorActive
+                      ? chip("FVG", `ANCLADO${fvgAnchorAgeS != null ? " " + Math.round(fvgAnchorAgeS) + "s" : ""}`, T.violet)
+                      : fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
                     {geoPos != null && chip("GEO", geoPct, geoColor)}
                     {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
                     {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}

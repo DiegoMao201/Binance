@@ -147,6 +147,8 @@ export async function GET(request: NextRequest) {
         burst_depth: latest.burst_depth ?? null,
         burst_retroceso: latest.burst_retroceso ?? null,
         burst_active: latest.burst_active ?? false,
+        fvg_anchor_active: latest.fvg_anchor_active ?? false,
+        fvg_anchor_age_s: latest.fvg_anchor_age_s ?? null,
       },
       spike_stats,
       hurst_history,

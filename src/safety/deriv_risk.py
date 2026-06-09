@@ -31,7 +31,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, pstdev
@@ -558,6 +558,16 @@ class DerivRiskManager:
         self._MAX_SPIKE_INTERVALS = 80
         # Rolling spike timestamps for cadence-aware decisions (entry/exit).
         self._spike_recent_ts: dict[str, list[float]] = {}
+        # ── Spike FVG Anchor — anti-retroceso-amnesia ──────────────────────
+        # When a spike fires, _compute_geometry is called on the current tick
+        # buffer so the bearish/bullish FVG created by the spike is captured
+        # as a static anchor.  evaluate() reinstates this anchor whenever the
+        # 200-tick rolling window fills with retroceso micro-FVGs that flip the
+        # direction, preventing "mathematical amnesia" (indicators turn red 3-5
+        # min post-spike while the structural FVG is still valid).
+        # Format: {SYMBOL_UPPER: {ts, fvg_top, fvg_bottom, fvg_mid,
+        #                         fvg_direction, smc_bonus, smc_side, smc_reason}}
+        self._spike_fvg_anchor: dict[str, dict] = {}
         self._spike_count_window_sec = max(
             600.0,
             min(float(os.getenv("DERIV_SPIKE_COUNT_WINDOW_SEC", "3600") or 3600), 72 * 3600.0),
@@ -1016,6 +1026,52 @@ class DerivRiskManager:
                             _spike_file.write_text(json.dumps(_existing))
                         except Exception as _e:
                             _LOGGER.debug("[SPIKE_EVENT] failed to persist to JSON: %s", _e)
+                        # ── Capture FVG at spike time (static anchor) ──────────────
+                        # The 200-tick rolling window still shows the spike's FVG at
+                        # this instant.  After ~200 retroceso ticks the window fills
+                        # with opposite-direction micro-FVGs and the score "goes red".
+                        # We freeze the valid FVG coordinates here so evaluate() can
+                        # reinstate them during the retroceso phase.
+                        try:
+                            _anchor_buf = np.array(
+                                list(buf)[-min(500, len(buf)):], dtype=float
+                            )
+                            if len(_anchor_buf) >= 203:
+                                _anchor_geo = _compute_geometry(
+                                    _anchor_buf,
+                                    hurst=None,
+                                    fvg_mit_pct=0.15,
+                                )
+                                _su_anch = symbol.upper()
+                                _expected_dir = "bearish" if _direction == "DOWN" else "bullish"
+                                if (
+                                    _anchor_geo is not None
+                                    and _anchor_geo.fvg_active
+                                    and _anchor_geo.fvg_direction == _expected_dir
+                                ):
+                                    self._spike_fvg_anchor[_su_anch] = {
+                                        "ts":            _spike_ts,
+                                        "fvg_top":       float(_anchor_geo.fvg_top),
+                                        "fvg_bottom":    float(_anchor_geo.fvg_bottom),
+                                        "fvg_mid":       float(_anchor_geo.fvg_mid),
+                                        "fvg_direction": str(_anchor_geo.fvg_direction),
+                                        "smc_bonus":     float(_anchor_geo.smc_bonus),
+                                        "smc_side":      str(_anchor_geo.smc_side or ""),
+                                        "smc_reason":    str(_anchor_geo.smc_reason or ""),
+                                        "spike_dir":     _direction,
+                                    }
+                                    _LOGGER.info(
+                                        "[SPIKE_FVG_ANCHOR] %s captured dir=%s "
+                                        "top=%.5f bot=%.5f smc_bonus=%.1f",
+                                        _su_anch, _anchor_geo.fvg_direction,
+                                        _anchor_geo.fvg_top, _anchor_geo.fvg_bottom,
+                                        _anchor_geo.smc_bonus,
+                                    )
+                                else:
+                                    # No valid FVG at spike time → clear stale anchor
+                                    self._spike_fvg_anchor.pop(symbol.upper(), None)
+                        except Exception as _anch_e:
+                            _LOGGER.debug("[SPIKE_FVG_ANCHOR] capture failed: %s", _anch_e)
 
     def get_last_spike_ts(self, symbol: str) -> float:
         """Return wall-clock time of the last spike detected for *symbol*.
@@ -2188,6 +2244,66 @@ class DerivRiskManager:
             # deep penetration. R_* use env-var default (50%).
             _fvg_mit_override = 0.15 if _is_spike else None
             _geo = _compute_geometry(ticks, hurst=hurst, fvg_mit_pct=_fvg_mit_override)
+
+            # ── Spike FVG Anchor — reinstates the spike's FVG when retroceso
+            # fills the 200-tick rolling window with opposite-direction micro-FVGs.
+            # Only active for BOOM/CRASH symbols; expires after ANCHOR_TTL seconds
+            # or when price breaks through the anchor gap (true invalidation).
+            _anchor_ttl = float(os.getenv("DERIV_SPIKE_FVG_ANCHOR_TTL", "600"))
+            _anchor_enabled = os.getenv(
+                "DERIV_SPIKE_FVG_ANCHOR_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if _anchor_enabled and _is_spike and _geo is not None:
+                _fvg_anch = self._spike_fvg_anchor.get(
+                    symbol.upper() if hasattr(symbol, "upper") else str(symbol)
+                )
+                if _fvg_anch:
+                    _anch_age = time.time() - float(_fvg_anch.get("ts", 0))
+                    _a_top = float(_fvg_anch["fvg_top"])
+                    _a_bot = float(_fvg_anch["fvg_bottom"])
+                    _a_dir = str(_fvg_anch["fvg_direction"])
+                    _cur_px = float(ticks[-1]) if len(ticks) else 0.0
+                    # Invalidate: price broke through the gap from the wrong side
+                    _broke_thru = (
+                        (_a_dir == "bearish" and _cur_px > _a_top)
+                        or (_a_dir == "bullish" and _cur_px < _a_bot)
+                    )
+                    if _broke_thru or _anch_age >= _anchor_ttl:
+                        self._spike_fvg_anchor.pop(symbol.upper(), None)
+                        snap.score_breakdown["fvg_anchor_active"] = False
+                    elif not _geo.fvg_active or _geo.fvg_direction != _a_dir:
+                        # Dynamic window lost the spike's FVG — reinstate anchor
+                        _smc_side_anch = str(_fvg_anch.get("smc_side") or "")
+                        if not _smc_side_anch:
+                            _smc_side_anch = (
+                                "MULTDOWN" if _a_dir == "bearish" else "MULTUP"
+                            )
+                        _smc_bonus_anch = float(_fvg_anch.get("smc_bonus", 1.5))
+                        _geo = _dc_replace(
+                            _geo,
+                            fvg_active    = True,
+                            fvg_top       = _a_top,
+                            fvg_bottom    = _a_bot,
+                            fvg_mid       = (_a_top + _a_bot) / 2.0,
+                            fvg_direction = _a_dir,
+                            smc_bonus     = _smc_bonus_anch,
+                            smc_side      = _smc_side_anch,
+                            smc_reason    = (
+                                f"fvg_anchor age={_anch_age:.0f}s "
+                                f"top={_a_top:.5f} bot={_a_bot:.5f}"
+                            ),
+                        )
+                        snap.score_breakdown["fvg_anchor_active"] = True
+                        snap.score_breakdown["fvg_anchor_age_s"]  = round(_anch_age, 1)
+                        _LOGGER.debug(
+                            "[FVG_ANCHOR] %s reinstated dir=%s age=%.0fs "
+                            "top=%.5f bot=%.5f smc_bonus=%.1f",
+                            symbol, _a_dir, _anch_age,
+                            _a_top, _a_bot, _smc_bonus_anch,
+                        )
+                    else:
+                        snap.score_breakdown["fvg_anchor_active"] = False
+
             if _geo.geo_score_delta != 0.0:
                 score = float(np.clip(score + _geo.geo_score_delta, 0.0, 10.0))
                 snap.reasons.append(f"geo: {_geo.geo_reason}")
