@@ -176,8 +176,11 @@ function SymbolCard({ s }) {
   } else if (isManualOnly && scoreGap0 != null && scoreGap0 <= 0) {
     msgEmoji = "🎯"; msgLine = `Score OK · entra manualmente${minsSince != null ? ` · ${minsSince} min sin spike` : ""}`;
   } else if (clusterDone) {
-    msgEmoji = "🚨"; msgLine = `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
-  } else if (sem === "amber" && ticks !== null && ticks < 120) {
+    msgEmoji = "🚨";
+    msgLine = secs > 300
+      ? `Post-cluster · ${minsSince}m sin spike · esperando normalización`
+      : `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
+  } else if (sem === "amber" && secs > 0 && secs < 120) {
     msgEmoji = "⏳"; msgLine = "Acaba de caer — espera 2 min antes de entrar";
   } else if (sem === "green") {
     const hurstNote = hurst != null && hurst < 0.45 ? " · Hurst bajo = sin fuerza" : "";
@@ -258,7 +261,7 @@ function SymbolCard({ s }) {
   const _masterGreen  = !_masterRed && _sn != null
     && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
     && (_gradeC === "A" || _gradeC === "B")
-    && _scoreRawC != null && _scoreRawC >= 7.8
+    && _scoreRawC != null && +_scoreRawC.toFixed(1) >= 7.8
     && (_fvgAnchC || _structConfC)
     && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC))
     && (_ema200LoadedC == null || _ema200LoadedC === true)
@@ -266,7 +269,7 @@ function SymbolCard({ s }) {
         || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
 
   // ── DISPLAY SCORE — usa score_raw del analytics cuando decisión está vencida ──
-  const _usingLiveScore = scoreIsStale0 && _scoreRawC != null;
+  const _usingLiveScore = _scoreRawC != null && (score == null || scoreIsStale0);
   const _dispScore    = _usingLiveScore ? _scoreRawC    : score;
   const _dispGap      = (_usingLiveScore && gate != null) ? +(gate - _scoreRawC).toFixed(2) : gap;
   const _dispPct      = gate && _dispScore != null ? Math.max(0, Math.min(100, (_dispScore / gate) * 100)) : null;
@@ -905,7 +908,7 @@ function SymbolCard({ s }) {
               // ── SEÑAL MAESTRA ─────────────────────────────────────────────
               const _goodSetup    = setupType === "SMC_FVG" || setupType === "EMA200_SPIKE";
               const _goodGrade    = grade === "A" || grade === "B";
-              const _goodScore    = scoreRaw != null && scoreRaw >= 7.8;
+              const _goodScore    = scoreRaw != null && +scoreRaw.toFixed(1) >= 7.8;
               const _goodFvg      = fvgAnchorActive || structFvgConfirm;
               // null scarcity = SIN_DATOS (fresh restart, no history) = neutral, not blocking
               const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
