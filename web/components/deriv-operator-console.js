@@ -907,6 +907,7 @@ function SymbolCard({ s }) {
               const _redRipe     = immState === "RIPE";
               const _redScore    = scoreRaw != null && scoreRaw < 7.5;
               const _redGrade    = grade === "C";
+              const _redSetup    = setupType === "TREND";
               // EMA sólo bloquea si no hay FVG anchor activo (anchor = señal primaria post-spike)
               const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
 
