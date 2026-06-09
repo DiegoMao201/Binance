@@ -1530,8 +1530,17 @@ class DerivDaemon:
                 "burst_active":          _fvg_cache.get("burst_active"),
                 # FVG Anchor — True when evaluate() reinstated the spike's frozen FVG
                 # instead of the dynamic rolling-window result (anti-retroceso-amnesia).
-                "fvg_anchor_active":     _fvg_cache.get("fvg_anchor_active"),
-                "fvg_anchor_age_s":      _fvg_cache.get("fvg_anchor_age_s"),
+                "fvg_anchor_active":        _fvg_cache.get("fvg_anchor_active"),
+                "fvg_anchor_age_s":         _fvg_cache.get("fvg_anchor_age_s"),
+                # Dual-path structural fields (5m candle geometry)
+                "structural_fvg_active":    _fvg_cache.get("structural_fvg_active"),
+                "structural_fvg_direction": _fvg_cache.get("structural_fvg_direction"),
+                "structural_fvg_confirm":   _fvg_cache.get("structural_fvg_confirm"),
+                "structural_fvg_conflict":  _fvg_cache.get("structural_fvg_conflict"),
+                "structural_fvg_absent":    _fvg_cache.get("structural_fvg_absent"),
+                "atr_anchored":             _fvg_cache.get("atr_anchored"),
+                "atr_pre_spike":            _fvg_cache.get("atr_pre_spike"),
+                "geo_post_spike_nullified": _fvg_cache.get("geo_post_spike_nullified"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -3625,14 +3634,23 @@ class DerivDaemon:
             # Only overwrite when value is non-None — preserves last-known state
             # across ticks where scarcity/imminence modules don't run (hard-veto paths).
             _tel_fields = {
-                "scarcity_state":        _sb_tel.get("scarcity_state"),
-                "scarcity_ratio":        _sb_tel.get("scarcity_ratio"),
-                "spike_imminence_state": _sb_tel.get("spike_imminence_state"),
-                "spike_imminence_score": _sb_tel.get("spike_imminence_score"),
-                "execution_grade":       _sb_tel.get("execution_grade"),
-                "score_raw":             _sb_tel.get("score_raw"),
-                "fvg_anchor_active":     _sb_tel.get("fvg_anchor_active"),
-                "fvg_anchor_age_s":      _sb_tel.get("fvg_anchor_age_s"),
+                "scarcity_state":          _sb_tel.get("scarcity_state"),
+                "scarcity_ratio":          _sb_tel.get("scarcity_ratio"),
+                "spike_imminence_state":   _sb_tel.get("spike_imminence_state"),
+                "spike_imminence_score":   _sb_tel.get("spike_imminence_score"),
+                "execution_grade":         _sb_tel.get("execution_grade"),
+                "score_raw":               _sb_tel.get("score_raw"),
+                "fvg_anchor_active":       _sb_tel.get("fvg_anchor_active"),
+                "fvg_anchor_age_s":        _sb_tel.get("fvg_anchor_age_s"),
+                # Dual-path structural fields
+                "structural_fvg_active":   _sb_tel.get("structural_fvg_active"),
+                "structural_fvg_direction":_sb_tel.get("structural_fvg_direction"),
+                "structural_fvg_confirm":  _sb_tel.get("structural_fvg_confirm"),
+                "structural_fvg_conflict": _sb_tel.get("structural_fvg_conflict"),
+                "structural_fvg_absent":   _sb_tel.get("structural_fvg_absent"),
+                "atr_anchored":            _sb_tel.get("atr_anchored"),
+                "atr_pre_spike":           _sb_tel.get("atr_pre_spike"),
+                "geo_post_spike_nullified":_sb_tel.get("geo_post_spike_nullified"),
             }
             self._last_fvg_state[_cache_sym].update(
                 {k: v for k, v in _tel_fields.items() if v is not None}

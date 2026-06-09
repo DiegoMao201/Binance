@@ -740,13 +740,49 @@ def _build_ai_prompt(
             "Never approve an entry justified only by spikes that ALREADY occurred. Confirmations are for the "
             "NEXT spike; if the spike already passed, wait for another.\n"
         )
+    # ── Dual-path structural context string ───────────────────────────────
+    _struct_ctx = ""
+    if breakdown:
+        _sf_active  = breakdown.get("structural_fvg_active")
+        _sf_dir     = breakdown.get("structural_fvg_direction", "")
+        _sf_confirm = breakdown.get("structural_fvg_confirm")
+        _sf_conflict= breakdown.get("structural_fvg_conflict")
+        _sf_absent  = breakdown.get("structural_fvg_absent")
+        _fvg_anchor = breakdown.get("fvg_anchor_active")
+        _atr_anch   = breakdown.get("atr_anchored")
+        _geo_nullif = breakdown.get("geo_post_spike_nullified")
+        _parts = []
+        if _sf_confirm:
+            _parts.append(f"structural_fvg_CONFIRMED: 5m candle FVG agrees with tick FVG (dir={_sf_dir}) → HIGH CONVICTION")
+        elif _sf_conflict:
+            _tick_dir = breakdown.get("fvg_direction", "?")
+            _parts.append(f"structural_fvg_CONFLICT: tick FVG dir={_tick_dir} but 5m candle FVG dir={_sf_dir} → REDUCE CONVICTION")
+        elif _sf_absent:
+            _parts.append("structural_fvg_ABSENT: tick FVG detected but no matching 5m candle FVG → TICK-ONLY signal")
+        elif _sf_active is False:
+            _parts.append("structural_fvg_NONE: no FVG visible on 5m candle structure")
+        if _fvg_anchor:
+            _age = breakdown.get("fvg_anchor_age_s", 0)
+            _parts.append(f"fvg_anchor_ACTIVE: spike FVG coordinates frozen ({_age:.0f}s ago) — retroceso window filling but structural level still valid")
+        if _atr_anch:
+            _parts.append(f"atr_ANCHORED: rolling ATR suppressed by retroceso — using pre-spike ATR blend (pre={breakdown.get('atr_pre_spike','?')}, blended={breakdown.get('atr_blended','?')})")
+        if _geo_nullif is not None:
+            _parts.append(f"geo_post_spike_NULLIFIED: Hurst/slope delta of {_geo_nullif:+.2f} suppressed (retroceso bias, wrong direction)")
+        if _parts:
+            _struct_ctx = (
+                "\nDUAL-PATH STRUCTURAL ANALYSIS:\n"
+                + "\n".join(f"  - {p}" for p in _parts)
+                + "\nNOTE: Structural path uses 5m candle closes (immune to tick retroceso). "
+                + "Always weight structural_fvg_CONFIRMED above tick-level FVG alone."
+            )
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
 PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
-Score breakdown: {json.dumps(breakdown)}
+Score breakdown: {json.dumps(breakdown)}{_struct_ctx}
 
 SYMBOL_GUARDRAIL:
 - symbol_bleed_bonus: {_bleed_bonus:.2f}

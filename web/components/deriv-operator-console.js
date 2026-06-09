@@ -504,6 +504,13 @@ function SymbolCard({ s }) {
               const burstRetroceso  = sn.burst_retroceso ?? null;
               const fvgAnchorActive = sn.fvg_anchor_active ?? false;
               const fvgAnchorAgeS   = sn.fvg_anchor_age_s ?? null;
+              const structFvgConfirm  = sn.structural_fvg_confirm ?? false;
+              const structFvgConflict = sn.structural_fvg_conflict ?? false;
+              const structFvgAbsent   = sn.structural_fvg_absent ?? false;
+              const structFvgActive   = sn.structural_fvg_active ?? null;
+              const structFvgDir      = sn.structural_fvg_direction ?? null;
+              const atrAnchored       = sn.atr_anchored ?? false;
+              const geoNullified      = sn.geo_post_spike_nullified ?? null;
 
               if (!setupType && !scarcity && !grade && !fvgTier && geoPos == null) return null;
 
@@ -653,6 +660,11 @@ function SymbolCard({ s }) {
                     {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
                     {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}
                     {burstRetroceso != null && chip("RETR", `${(burstRetroceso * 100).toFixed(0)}%`, burstRetroceso > 0.35 ? T.red : T.green)}
+                    {structFvgConfirm && chip("5m FVG", "✓" + (structFvgDir ? " " + structFvgDir.slice(0,4).toUpperCase() : ""), T.green)}
+                    {structFvgConflict && chip("5m FVG", "⚡CONF", T.red)}
+                    {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}
+                    {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
+                    {geoNullified != null && chip("GEO", `NULL ${geoNullified > 0 ? "+" : ""}${geoNullified.toFixed(1)}`, T.amber)}
                   </div>
                 </div>
               );

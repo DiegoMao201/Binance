@@ -568,6 +568,22 @@ class DerivRiskManager:
         # Format: {SYMBOL_UPPER: {ts, fvg_top, fvg_bottom, fvg_mid,
         #                         fvg_direction, smc_bonus, smc_side, smc_reason}}
         self._spike_fvg_anchor: dict[str, dict] = {}
+        # ── Pre-spike ATR anchor ────────────────────────────────────────────
+        # After a spike the 30-tick ATR collapses to near-zero (retroceso ticks
+        # are tiny/uniform) → atr_score tanks → valid post-spike setups are
+        # penalised.  Save ATR from the 30 ticks BEFORE the spike and blend
+        # it with the rolling value for DERIV_SPIKE_ATR_ANCHOR_TTL seconds.
+        # Format: {SYMBOL_UPPER: {ts: float, atr: float}}
+        self._pre_spike_atr_cache: dict[str, dict] = {}
+        # ── 5-minute OHLC candle buffer (Structural / Macro path) ──────────
+        # Live ticks are aggregated into time-aligned OHLC candles.
+        # evaluate() calls _get_structural_geometry() on the CLOSES of these
+        # candles to detect FVGs that are immune to tick-level retroceso.
+        # Format: {SYMBOL: [{ts_key, open, high, low, close}]}
+        self._candles_5m:    dict[str, list[dict]] = {}
+        self._candle_current: dict[str, dict]       = {}
+        self._CANDLE_SEC: int  = int(os.getenv("DERIV_STRUCTURAL_CANDLE_SEC", "300"))
+        self._CANDLE_MAX: int  = 50  # 50 candles ≈ 250 min of structural history
         self._spike_count_window_sec = max(
             600.0,
             min(float(os.getenv("DERIV_SPIKE_COUNT_WINDOW_SEC", "3600") or 3600), 72 * 3600.0),
@@ -887,6 +903,28 @@ class DerivRiskManager:
             del buf[: len(buf) - self._max_window]
         # Increment per-symbol tick counter
         self._ingest_tick_count[symbol] = self._ingest_tick_count.get(symbol, 0) + 1
+        # ── 5-minute OHLC candle builder ───────────────────────────────────
+        try:
+            _cb_key = int(time.time() // self._CANDLE_SEC) * self._CANDLE_SEC
+            _cur_c  = self._candle_current.get(symbol)
+            if _cur_c is None or _cur_c.get("ts_key") != _cb_key:
+                if _cur_c is not None:
+                    _closed_list = self._candles_5m.setdefault(symbol, [])
+                    _closed_list.append(_cur_c)
+                    if len(_closed_list) > self._CANDLE_MAX:
+                        del _closed_list[: len(_closed_list) - self._CANDLE_MAX]
+                self._candle_current[symbol] = {
+                    "ts_key": _cb_key,
+                    "open": price, "high": price, "low": price, "close": price,
+                }
+            else:
+                if price > _cur_c["high"]:
+                    _cur_c["high"] = price
+                if price < _cur_c["low"]:
+                    _cur_c["low"] = price
+                _cur_c["close"] = price
+        except Exception:
+            pass
         # ── FEED_QUALITY: duplicate/stale tick detector ────────────────────
         # H=0.200 anomalies (BOOM1000 18/5, BOOM900 19/5) are caused by the
         # broker feed repeating the same price for many consecutive ticks.
@@ -1026,6 +1064,19 @@ class DerivRiskManager:
                             _spike_file.write_text(json.dumps(_existing))
                         except Exception as _e:
                             _LOGGER.debug("[SPIKE_EVENT] failed to persist to JSON: %s", _e)
+                        # ── Capture pre-spike ATR ──────────────────────────────────
+                        # Save ATR from the 30 ticks BEFORE the spike tick so
+                        # evaluate() can restore it when retroceso collapses ATR.
+                        try:
+                            if len(buf) >= 31:
+                                _pre_sp_atr = self._synthetic_atr(list(buf)[-31:-1])
+                                if _pre_sp_atr > 0:
+                                    self._pre_spike_atr_cache[symbol.upper()] = {
+                                        "ts":  _spike_ts,
+                                        "atr": _pre_sp_atr,
+                                    }
+                        except Exception:
+                            pass
                         # ── Capture FVG at spike time (static anchor) ──────────────
                         # The 200-tick rolling window still shows the spike's FVG at
                         # this instant.  After ~200 retroceso ticks the window fills
@@ -1762,6 +1813,31 @@ class DerivRiskManager:
                     symbol, len(ticks), _atr_cached,
                 )
                 atr = _atr_cached
+        # ── Pre-spike ATR anchor: post-spike retroceso compresses ATR to near-
+        # zero (30 uniform micro-ticks after spike exit).  atr_score then tanks
+        # to rank 0 → penalises perfectly valid entries.  Blend the pre-spike
+        # ATR (70%) with rolling ATR (30%) for DERIV_SPIKE_ATR_ANCHOR_TTL s.
+        _atr_anchor_ttl = float(os.getenv("DERIV_SPIKE_ATR_ANCHOR_TTL", "300"))
+        _atr_anch = self._pre_spike_atr_cache.get(
+            symbol.upper() if hasattr(symbol, "upper") else str(symbol)
+        )
+        if _atr_anch:
+            _atr_anch_age = time.time() - float(_atr_anch.get("ts", 0))
+            _pre_sp_atr_val = float(_atr_anch.get("atr", 0))
+            if (
+                _atr_anch_age < _atr_anchor_ttl
+                and _pre_sp_atr_val > 0
+                and atr < _pre_sp_atr_val * 0.6   # only intervene when collapse detected
+            ):
+                _atr_blended = _pre_sp_atr_val * 0.65 + atr * 0.35
+                snap.score_breakdown["atr_pre_spike"] = round(_pre_sp_atr_val, 6)
+                snap.score_breakdown["atr_blended"]   = round(_atr_blended, 6)
+                snap.score_breakdown["atr_anchored"]  = True
+                atr = _atr_blended
+                _LOGGER.debug(
+                    "[ATR_ANCHOR] %s rolling=%.6f→blended=%.6f pre_spike=%.6f age=%.0fs",
+                    symbol, atr, _atr_blended, _pre_sp_atr_val, _atr_anch_age,
+                )
         snap.synthetic_atr = round(atr, 8)
 
         # Detect market regime first (influences score weights)
@@ -2304,6 +2380,30 @@ class DerivRiskManager:
                     else:
                         snap.score_breakdown["fvg_anchor_active"] = False
 
+            # ── Post-spike Hurst geo nullification ────────────────────────
+            # Retroceso after a spike creates an upward slope in the 500-tick
+            # macro channel.  When Hurst > 0.56, compute_geometry interprets
+            # this as "trending up" and issues geo_score_delta > 0 for MULTUP
+            # — the wrong direction for a CRASH symbol.  Nullify this delta
+            # (and the geo_side) during the 300s post-spike window.
+            _psa_sym = symbol.upper() if hasattr(symbol, "upper") else str(symbol)
+            _psa_ts  = float(self._last_spike_ts.get(_psa_sym, 0) or 0)
+            if (
+                _is_spike
+                and _psa_ts > 0
+                and (time.time() - _psa_ts) < 300
+                and _geo.geo_side is not None
+                and _geo.geo_side != side
+                and _geo.geo_score_delta > 0
+            ):
+                snap.score_breakdown["geo_post_spike_nullified"] = round(_geo.geo_score_delta, 2)
+                _geo = _dc_replace(
+                    _geo,
+                    geo_score_delta = 0.0,
+                    geo_side        = None,
+                    geo_reason      = "post_spike_geo_nullified (retroceso bias)",
+                )
+
             if _geo.geo_score_delta != 0.0:
                 score = float(np.clip(score + _geo.geo_score_delta, 0.0, 10.0))
                 snap.reasons.append(f"geo: {_geo.geo_reason}")
@@ -2381,6 +2481,41 @@ class DerivRiskManager:
                     "+%.2f score=%.2f", symbol, _geo.fvg_direction,
                     _geo.divergence, side, _geo.smc_bonus, score,
                 )
+
+        # ── Structural geometry (5m candle closes) — Macro/Structural path ──
+        # Double-checks the tick-level FVG against 5m candle structural data.
+        # This is immune to tick retroceso because candle closes are anchored
+        # to wall-clock boundaries and don't change after the candle is closed.
+        # CONFIRM  (+0.5): both paths agree on FVG direction → high conviction.
+        # CONFLICT (-0.5): tick FVG ≠ candle FVG direction → reduce conviction.
+        # ABSENT: structural shows no FVG (tick FVG only) → tag without penalty.
+        try:
+            _struct_geo = self._get_structural_geometry(symbol)
+            if _struct_geo is not None:
+                snap.score_breakdown["structural_fvg_active"]    = _struct_geo.fvg_active
+                snap.score_breakdown["structural_fvg_direction"] = (
+                    _struct_geo.fvg_direction or ""
+                )
+                if _struct_geo.fvg_active and _geo is not None and _geo.fvg_active:
+                    if _struct_geo.fvg_direction == _geo.fvg_direction:
+                        score = float(np.clip(score + 0.5, 0.0, 10.0))
+                        snap.score_breakdown["structural_fvg_confirm"] = True
+                        snap.reasons.append(
+                            f"structural_fvg_confirm: 5m={_struct_geo.fvg_direction} +0.5"
+                        )
+                        snap.score = round(score, 3)
+                    elif _struct_geo.fvg_direction and _geo.fvg_direction:
+                        score = max(0.0, score - 0.5)
+                        snap.score_breakdown["structural_fvg_conflict"] = True
+                        snap.reasons.append(
+                            f"structural_fvg_conflict: tick={_geo.fvg_direction} "
+                            f"vs 5m={_struct_geo.fvg_direction} -0.5"
+                        )
+                        snap.score = round(score, 3)
+                elif not _struct_geo.fvg_active and _geo is not None and _geo.fvg_active:
+                    snap.score_breakdown["structural_fvg_absent"] = True
+        except Exception as _sg_exc:
+            _LOGGER.debug("[deriv-risk] structural geometry skipped: %s", _sg_exc)
 
         # ── Micro-channel scalp trigger (Hurst<0.40 + 1.5σ band touch) ───────
         # When the market is strongly mean-reverting (H<0.40) we don't wait for
@@ -3318,6 +3453,26 @@ class DerivRiskManager:
         if macro_dir == trade_dir:
             return 2.0    # ← HD aligned: macro trend confirms trade direction (+2.0, boosted from 1.5)
         return -0.5       # ← HD opposed: macro trend contradicts trade direction
+
+    def _get_structural_geometry(self, symbol: str) -> "GeometryResult | None":
+        """Compute FVG/SMC on 5-minute candle closes — immune to tick retroceso.
+
+        Uses closed candles from self._candles_5m plus the current open candle.
+        Needs >= 10 candles (50 min) for a reliable FVG scan.
+        """
+        _sym = symbol.upper() if hasattr(symbol, "upper") else str(symbol)
+        closed  = self._candles_5m.get(_sym, [])
+        cur     = self._candle_current.get(_sym)
+        all_c   = closed + ([cur] if cur is not None else [])
+        if len(all_c) < 10:
+            return None
+        closes = np.array([float(c["close"]) for c in all_c[-self._CANDLE_MAX:]], dtype=float)
+        if len(closes) < 10:
+            return None
+        try:
+            return _compute_geometry(closes, hurst=None, fvg_mit_pct=0.15)
+        except Exception:
+            return None
 
     @staticmethod
     def _synthetic_atr(ticks: list[float]) -> float:
