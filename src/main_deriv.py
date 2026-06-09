@@ -3208,6 +3208,17 @@ class DerivDaemon:
                         reason=f"SPIKE_NOT_LOADED: {_ld_reason}",
                         extra={"spike_loaded": False},
                     )
+                    _gl_setup = str(snap.score_breakdown.get("setup_type") or "")
+                    _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                    if _gl_setup in ("SMC_FVG", "EMA200_SPIKE") and _gl_grade in ("A", "B") and snap.score >= 7.0:
+                        self._ghost_logger.add(
+                            symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                            score_raw=float(snap.score), gate="SPIKE_NOT_LOADED",
+                            setup_type=_gl_setup, grade=_gl_grade,
+                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                        )
                     return
 
         # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 6.0) ──────

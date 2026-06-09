@@ -258,7 +258,7 @@ function SymbolCard({ s }) {
   const _masterGreen  = !_masterRed && _sn != null
     && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
     && (_gradeC === "A" || _gradeC === "B")
-    && _scoreRawC != null && _scoreRawC >= 8.5
+    && _scoreRawC != null && _scoreRawC >= 7.8
     && (_fvgAnchC || _structConfC)
     && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC))
     && (_ema200LoadedC == null || _ema200LoadedC === true)
@@ -877,7 +877,7 @@ function SymbolCard({ s }) {
 
               // Score raw color
               const scoreRawColor = scoreRaw == null ? T.mute
-                : scoreRaw >= 8.5 ? T.green : scoreRaw >= 7.5 ? T.amber : T.red;
+                : scoreRaw >= 7.8 ? T.green : scoreRaw >= 7.0 ? T.amber : T.red;
 
               // Chips dim when data is stale; blind zone dims further and adds overlay
               const chipOpacity = isBlindZone ? 0.25 : isNormalizingZone ? 0.5 : staleOpacity;
@@ -885,7 +885,7 @@ function SymbolCard({ s }) {
               // ── SEÑAL MAESTRA ─────────────────────────────────────────────
               const _goodSetup    = setupType === "SMC_FVG" || setupType === "EMA200_SPIKE";
               const _goodGrade    = grade === "A" || grade === "B";
-              const _goodScore    = scoreRaw != null && scoreRaw >= 8.5;
+              const _goodScore    = scoreRaw != null && scoreRaw >= 7.8;
               const _goodFvg      = fvgAnchorActive || structFvgConfirm;
               // null scarcity = SIN_DATOS (fresh restart, no history) = neutral, not blocking
               const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
@@ -930,7 +930,7 @@ function SymbolCard({ s }) {
               const _missing = [
                 !_goodSetup    && "SETUP",
                 !_goodGrade    && "GRADE",
-                !_goodScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 8.5`,
+                !_goodScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 7.8`,
                 !_goodFvg      && "FVG ANCLADO",
                 scarcity && !_goodScarcity && `SCAR ${scarcity}`,
                 !_goodImm      && `IMM ${immState ?? "SIN DATOS"}`,
