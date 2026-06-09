@@ -41,6 +41,7 @@ from src.execution.deriv_mirror_client import DerivMirrorClient
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator, MacroHDCalibrator
+from src.safety.ghost_logger import GhostLogger
 from src.execution.position_manager import SYMBOL_RATCHET_PARAMS as _DPM_PARAMS
 from src.strategies.deriv_signals import (
     adaptive_max_hold,
@@ -428,6 +429,11 @@ class DerivDaemon:
         self._cooldown = _CooldownGate(ticks=max(60, int(settings.contract_duration_sec)), risk=self._risk)
         self._stop_event = asyncio.Event()
         self._velocity = TickVelocityAnalyzer()  # Module 2: tick acceleration detector
+        self._ghost_logger = GhostLogger(
+            log_dir=os.getenv("BOT_STATE_DIR", "/data/logs"),
+            window_sec=float(os.getenv("DERIV_GHOST_WINDOW_SEC", "600") or 600),
+            sl_pct=float(os.getenv("DERIV_GHOST_SL_PCT", "0.025") or 0.025),
+        )
         # Telemetría in-memory (anillos) para que el frontend audite por qué
         # entra (o no entra) el bot. Se serializa junto al status cada 10s.
         self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
@@ -2120,6 +2126,8 @@ class DerivDaemon:
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
         self._velocity.ingest_tick(tick.symbol, tick.price)
         self._velocity.ingest_tick(tick.symbol, tick.price)
+        _ghost_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
+        self._ghost_logger.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
 
         # Market-context snapshot (every 60 ticks ≈ 60 s)
         self._maybe_write_market_context(tick.symbol)
@@ -3541,6 +3549,17 @@ class DerivDaemon:
                             tick.symbol, bot_entered=False,
                             block_reason="imminence_ripe_gate", score=snap.score,
                         )
+                        _gl_setup = str(snap.score_breakdown.get("setup_type") or "")
+                        _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                        if _gl_setup in ("SMC_FVG", "EMA200_SPIKE") and _gl_grade in ("A", "B") and snap.score >= 7.0:
+                            self._ghost_logger.add(
+                                symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                                score_raw=float(snap.score), gate="IMMINENCE_RIPE_GATE",
+                                setup_type=_gl_setup, grade=_gl_grade,
+                                scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                                imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                                imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                            )
                         return
                     # Passed RIPE gate: tag but no bonus
                     snap.score_breakdown["spike_imminence_bonus"] = 0.0
@@ -3709,6 +3728,17 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False,
                         block_reason="scarcity_vencido_gate", score=snap.score,
                     )
+                    _gl_setup = str(snap.score_breakdown.get("setup_type") or "")
+                    _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                    if _gl_setup in ("SMC_FVG", "EMA200_SPIKE") and _gl_grade in ("A", "B") and snap.score >= 7.0:
+                        self._ghost_logger.add(
+                            symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                            score_raw=float(snap.score), gate="SCARCITY_VENCIDO_GATE",
+                            setup_type=_gl_setup, grade=_gl_grade,
+                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                        )
                     return
                 snap.score_breakdown["scarcity_vencido_override_fired"] = round(snap.score, 2)
 
@@ -3771,6 +3801,16 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False,
                         block_reason="trend_setup_gate", score=snap.score,
                     )
+                    _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                    if _gl_grade in ("A", "B") and snap.score >= 7.0:
+                        self._ghost_logger.add(
+                            symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                            score_raw=float(snap.score), gate="TREND_SETUP_GATE",
+                            setup_type="TREND", grade=_gl_grade,
+                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                        )
                     return
 
         # ── Structural FVG conflict gate ──────────────────────────────────────
@@ -3801,6 +3841,17 @@ class DerivDaemon:
                     tick.symbol, bot_entered=False,
                     block_reason="structural_conflict_gate", score=snap.score,
                 )
+                _gl_setup = str(snap.score_breakdown.get("setup_type") or "")
+                _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                if _gl_setup in ("SMC_FVG", "EMA200_SPIKE") and _gl_grade in ("A", "B") and snap.score >= 7.0:
+                    self._ghost_logger.add(
+                        symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                        score_raw=float(snap.score), gate="STRUCTURAL_CONFLICT_GATE",
+                        setup_type=_gl_setup, grade=_gl_grade,
+                        scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                        imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                        imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                    )
                 return
 
         # ── Module 2: Velocity-confluence override (tick acceleration + HD) ──

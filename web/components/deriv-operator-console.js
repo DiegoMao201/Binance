@@ -954,6 +954,19 @@ export default function DerivOperatorConsole() {
   const totals = data?.totals || {};
   const symNames = symbols.map((s) => s.symbol);
 
+  const [ghostData, setGhostData] = useState(null);
+  useEffect(() => {
+    const loadGhost = async () => {
+      try {
+        const r = await fetch("/api/deriv/analytics/ghost-trades?hours=24", { cache: "no-store" });
+        if (r.ok) setGhostData(await r.json());
+      } catch {}
+    };
+    loadGhost();
+    const id = setInterval(loadGhost, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   const tableRows = symFilter === "ALL" ? spikeTable : spikeTable.filter((s) => s.symbol === symFilter);
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
@@ -1097,6 +1110,100 @@ export default function DerivOperatorConsole() {
             </tbody>
           </table>
         </div>
+      </Panel>
+
+      {/* ══ GHOST TRADES ══════════════════════════════════════════════════════ */}
+      <Panel title="GHOST TRADES — GATES AUDITADOS" style={{ marginTop: 12 }}>
+        {!ghostData ? (
+          <div style={{ padding: "14px 16px", color: T.mute, fontSize: 11 }}>Cargando datos fantasma…</div>
+        ) : ghostData.totals?.total === 0 ? (
+          <div style={{ padding: "14px 16px", color: T.mute, fontSize: 11 }}>Sin trades fantasma en las últimas 24h.</div>
+        ) : (
+          <div style={{ padding: "12px 16px" }}>
+            {/* Summary row */}
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+              {[
+                { label: "TOTAL",   val: ghostData.totals?.total,   color: T.text },
+                { label: "WIN",     val: ghostData.totals?.WIN,     color: T.green },
+                { label: "LOSS",    val: ghostData.totals?.LOSS,    color: T.red },
+                { label: "EXPIRED", val: ghostData.totals?.EXPIRED, color: T.amber },
+                { label: "PENDING", val: ghostData.totals?.PENDING, color: T.mute },
+                { label: "WR",      val: ghostData.totals?.win_rate != null ? `${(ghostData.totals.win_rate * 100).toFixed(0)}%` : "–", color: ghostData.totals?.win_rate >= 0.5 ? T.green : T.red },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ textAlign: "center", minWidth: 56 }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "–"}</div>
+                  <div style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em" }}>{label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Per-gate table */}
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                    {["GATE", "TOTAL", "WIN", "LOSS", "EXPIRED", "PEND", "WR"].map(h => (
+                      <th key={h} style={{ padding: "4px 8px", textAlign: "left", color: T.mute, fontWeight: 700, letterSpacing: "0.06em" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(ghostData.by_gate || {}).map(([gate, s]) => {
+                    const wr = s.win_rate;
+                    const wrColor = wr >= 0.55 ? T.green : wr >= 0.40 ? T.amber : T.red;
+                    return (
+                      <tr key={gate} style={{ borderBottom: `1px solid ${T.border}22` }}>
+                        <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700, fontSize: 10 }}>{gate.replace("_GATE","").replace("_"," ")}</td>
+                        <td style={{ padding: "5px 8px", color: T.text, fontWeight: 800 }}>{s.total}</td>
+                        <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{s.WIN}</td>
+                        <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{s.LOSS}</td>
+                        <td style={{ padding: "5px 8px", color: T.amber }}>{s.EXPIRED}</td>
+                        <td style={{ padding: "5px 8px", color: T.mute }}>{s.PENDING}</td>
+                        <td style={{ padding: "5px 8px", fontWeight: 800, color: wrColor, fontFamily: FONT_MONO }}>{s.WIN + s.LOSS > 0 ? `${(wr * 100).toFixed(0)}%` : "–"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Recent resolved */}
+            {ghostData.recent?.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 10, color: T.mute, letterSpacing: "0.08em", marginBottom: 6 }}>ÚLTIMOS RESUELTOS</div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                        {["SYM", "GATE", "SCORE", "GRADE", "OUTCOME", "HACE"].map(h => (
+                          <th key={h} style={{ padding: "3px 8px", textAlign: "left", color: T.mute, fontWeight: 700 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ghostData.recent.map((r) => {
+                        const oc = r.outcome;
+                        const ocColor = oc === "GHOST_WIN" ? T.green : oc === "GHOST_LOSS" ? T.red : T.amber;
+                        const secsAgo = r.outcome_ts ? Math.round(Date.now() / 1000 - r.outcome_ts) : null;
+                        const agoStr = secsAgo == null ? "–" : secsAgo < 60 ? `${secsAgo}s` : secsAgo < 3600 ? `${Math.floor(secsAgo/60)}m` : `${Math.floor(secsAgo/3600)}h`;
+                        return (
+                          <tr key={r.id} style={{ borderBottom: `1px solid ${T.border}18` }}>
+                            <td style={{ padding: "4px 8px", color: T.text, fontWeight: 700 }}>{r.symbol}</td>
+                            <td style={{ padding: "4px 8px", color: T.cyan, fontSize: 9 }}>{(r.gate||"").replace("_GATE","").replace("_"," ")}</td>
+                            <td style={{ padding: "4px 8px", color: T.amber, fontFamily: FONT_MONO }}>{r.score_raw?.toFixed(1) ?? "–"}</td>
+                            <td style={{ padding: "4px 8px", color: T.text }}>{r.grade ?? "–"}</td>
+                            <td style={{ padding: "4px 8px", fontWeight: 800, color: ocColor }}>{oc.replace("GHOST_","")}</td>
+                            <td style={{ padding: "4px 8px", color: T.mute }}>{agoStr}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Panel>
     </div>
   );
