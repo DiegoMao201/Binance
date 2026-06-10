@@ -4428,6 +4428,72 @@ class DerivDaemon:
                         return
 
         # ═══════════════════════════════════════════════════════════════════
+        # ANTI_RETRACE_GUARD — block entry when price is actively bouncing
+        # against the trade direction post-spike (prevents eating the retrace).
+        # Complements EXHAUSTION_GATE which only covers SMC_FVG inside FVG zone.
+        # This gate applies to ALL setups (TREND, EMA200_SPIKE, SMC_FVG).
+        # Measures 10-tick price delta: if price is rising for CRASH or falling
+        # for BOOM by more than ATR * frac, the bounce hasn't exhausted — wait.
+        # Env: DERIV_ANTI_RETRACE_ENABLED (default true)
+        #      DERIV_ANTI_RETRACE_ATR_FRAC (default 0.15)
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            is_spike_market(tick.symbol)
+            and not snap.hurst_ai_override
+            and str(os.getenv("DERIV_ANTI_RETRACE_ENABLED", "true")).strip().lower()
+               in ("1", "true", "yes", "on")
+            and snap.side
+        ):
+            _ar_ticks = list(self._risk._ticks.get(tick.symbol, []))
+            _ar_atr = float(snap.score_breakdown.get("atr_abs") or 0.0)
+            if len(_ar_ticks) >= 11 and _ar_atr > 0:
+                _ar_delta_10t = _ar_ticks[-1] - _ar_ticks[-11]
+                _ar_frac = float(
+                    os.getenv("DERIV_ANTI_RETRACE_ATR_FRAC", "0.15") or "0.15"
+                )
+                _ar_threshold = _ar_atr * _ar_frac
+                _ar_bounce = (
+                    (snap.side == "MULTDOWN" and _ar_delta_10t > +_ar_threshold)
+                    or (snap.side == "MULTUP" and _ar_delta_10t < -_ar_threshold)
+                )
+                if _ar_bounce:
+                    _ar_key = f"{tick.symbol}:anti_retrace"
+                    _ar_last = float(
+                        self._dynamic_inactive_last_emit_ts.get(_ar_key) or 0.0
+                    )
+                    _ar_now = time.time()
+                    if (_ar_now - _ar_last) >= 10.0:
+                        self._dynamic_inactive_last_emit_ts[_ar_key] = _ar_now
+                        _LOGGER.info(
+                            "[ANTI_RETRACE_GUARD] BOUNCE_ACTIVE %s side=%s "
+                            "delta10t=%+.6f threshold=%.6f (ATR=%.6f×%.2f)",
+                            tick.symbol, snap.side,
+                            _ar_delta_10t, _ar_threshold, _ar_atr, _ar_frac,
+                        )
+                    _ar_setup = str(snap.score_breakdown.get("setup_type") or "")
+                    _ar_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                    if (
+                        _ar_setup in ("SMC_FVG", "EMA200_SPIKE")
+                        and _ar_grade in ("A", "B")
+                        and snap.score >= 7.0
+                    ):
+                        self._ghost_logger.add(
+                            symbol=tick.symbol, price=float(tick.price),
+                            side=str(snap.side or ""),
+                            score_raw=float(snap.score),
+                            gate="ANTI_RETRACE_GUARD",
+                            setup_type=_ar_setup, grade=_ar_grade,
+                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                        )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason="anti_retrace_bounce",
+                    )
+                    return
+
+        # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH
         # If the risk engine flagged a mathematical certainty (SMC FVG mitigation,
         # Hurst-trend confluence, or micro-scalp band touch), we BYPASS the AI
