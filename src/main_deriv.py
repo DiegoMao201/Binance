@@ -3373,7 +3373,19 @@ class DerivDaemon:
             tick.symbol, _atr_current, _atr_threshold, _atr_p_req, _atr_ok,
             snap.score, _atr_calm_bypassed, len(_atr_hist),
         )
-        if not _atr_ok and not _atr_calm_bypassed:
+        _atr_hot_bypass = (
+            bool(snap.score_breakdown.get("hot_reentry_fired"))
+            and float(snap.score or 0.0) >= float(
+                os.getenv("DERIV_ATR_HOT_BYPASS_MIN_SCORE", "8.0") or "8.0"
+            )
+        )
+        if _atr_hot_bypass:
+            _LOGGER.info(
+                "[ATR_FILTER] HOT_BYPASS %s | score=%.2f atr_abs=%.6f "
+                "hot_reentry_active → skip ATR check",
+                tick.symbol, float(snap.score or 0.0), _atr_current,
+            )
+        if not _atr_ok and not _atr_calm_bypassed and not _atr_hot_bypass:
             self._log_entry_block(
                 tick.symbol, "ATR_VOLATILITY_FILTER",
                 score=snap.score, effective_min_score=snap.effective_min_score,
