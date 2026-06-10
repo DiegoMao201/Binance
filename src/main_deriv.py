@@ -4430,12 +4430,12 @@ class DerivDaemon:
         # ═══════════════════════════════════════════════════════════════════
         # ANTI_RETRACE_GUARD — block entry when price is actively bouncing
         # against the trade direction post-spike (prevents eating the retrace).
-        # Complements EXHAUSTION_GATE which only covers SMC_FVG inside FVG zone.
-        # This gate applies to ALL setups (TREND, EMA200_SPIKE, SMC_FVG).
-        # Measures 10-tick price delta: if price is rising for CRASH or falling
-        # for BOOM by more than ATR * frac, the bounce hasn't exhausted — wait.
+        # Applies to ALL setups (TREND, EMA200_SPIKE, SMC_FVG).
+        # Uses a self-normalizing range-based threshold: computes the 20-tick
+        # price range and blocks only if net directional move > 50% of that range.
+        # This avoids the ATR unit-scale mismatch and only blocks meaningful bounces.
         # Env: DERIV_ANTI_RETRACE_ENABLED (default true)
-        #      DERIV_ANTI_RETRACE_ATR_FRAC (default 0.15)
+        #      DERIV_ANTI_RETRACE_RANGE_FRAC (default 0.50)
         # ═══════════════════════════════════════════════════════════════════
         if (
             is_spike_market(tick.symbol)
@@ -4445,16 +4445,20 @@ class DerivDaemon:
             and snap.side
         ):
             _ar_ticks = list(self._risk._ticks.get(tick.symbol, []))
-            _ar_atr = float(snap.score_breakdown.get("atr_abs") or 0.0)
-            if len(_ar_ticks) >= 11 and _ar_atr > 0:
-                _ar_delta_10t = _ar_ticks[-1] - _ar_ticks[-11]
+            if len(_ar_ticks) >= 21:
+                _ar_window = _ar_ticks[-21:]
+                _ar_delta_20t = _ar_window[-1] - _ar_window[0]
+                _ar_range_20t = max(_ar_window) - min(_ar_window)
                 _ar_frac = float(
-                    os.getenv("DERIV_ANTI_RETRACE_ATR_FRAC", "0.15") or "0.15"
+                    os.getenv("DERIV_ANTI_RETRACE_RANGE_FRAC", "0.50") or "0.50"
                 )
-                _ar_threshold = _ar_atr * _ar_frac
+                _ar_threshold = _ar_range_20t * _ar_frac if _ar_range_20t > 0 else 0.0
                 _ar_bounce = (
-                    (snap.side == "MULTDOWN" and _ar_delta_10t > +_ar_threshold)
-                    or (snap.side == "MULTUP" and _ar_delta_10t < -_ar_threshold)
+                    _ar_threshold > 0
+                    and (
+                        (snap.side == "MULTDOWN" and _ar_delta_20t > +_ar_threshold)
+                        or (snap.side == "MULTUP" and _ar_delta_20t < -_ar_threshold)
+                    )
                 )
                 if _ar_bounce:
                     _ar_key = f"{tick.symbol}:anti_retrace"
@@ -4466,9 +4470,9 @@ class DerivDaemon:
                         self._dynamic_inactive_last_emit_ts[_ar_key] = _ar_now
                         _LOGGER.info(
                             "[ANTI_RETRACE_GUARD] BOUNCE_ACTIVE %s side=%s "
-                            "delta10t=%+.6f threshold=%.6f (ATR=%.6f×%.2f)",
+                            "delta20t=%+.6f threshold=%.6f (range=%.6f×%.2f)",
                             tick.symbol, snap.side,
-                            _ar_delta_10t, _ar_threshold, _ar_atr, _ar_frac,
+                            _ar_delta_20t, _ar_threshold, _ar_range_20t, _ar_frac,
                         )
                     _ar_setup = str(snap.score_breakdown.get("setup_type") or "")
                     _ar_grade = str(snap.score_breakdown.get("execution_grade") or "")
