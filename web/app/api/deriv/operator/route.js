@@ -66,6 +66,12 @@ function classifyDecision(d) {
     kind = "SPIKE"; label = "SPIKE detectado"; level = 3;
   } else if (/REGIME_SCORE_GATE|SCORE_TOO_LOW|SCORE_GATE/i.test(reason)) {
     kind = "SCORE"; label = "Setup formándose (score)"; level = 2;
+  } else if (/SCARCITY_DRY_GATE/i.test(reason)) {
+    kind = "SECO"; label = "Mercado seco (umbral reducido)"; level = 2;
+  } else if (/TREND_SETUP_GATE/i.test(reason)) {
+    kind = "TREND_GATE"; label = "TREND sin FVG"; level = 2;
+  } else if (/AI_VETO/i.test(reason)) {
+    kind = "AI_VETO"; label = "IA vetó la entrada"; level = 2;
   } else if (/SPIKE_NOT_LOADED/i.test(reason)) {
     kind = "CARGANDO"; label = "Cargando (aún no listo)"; level = 1;
   } else if (/ENTRY_BLOCKED|BLOCK/i.test(reason)) {
@@ -276,10 +282,21 @@ export async function GET() {
 
   // Global confirmation feed — the bot's meaningful detections across all symbols,
   // newest first. This is what the manual operator watches to decide.
+  // Deduplicate high-frequency noise gates (SECO/TREND_GATE/AI_VETO) — keep only the
+  // most recent entry per (symbol, kind) so they don't flood the feed.
+  const _seenNoisy = new Set();
   const confirmationFeed = decoratedDecisions
     .filter((d) => d.level >= 2 && d.ts)
     .sort((a, b) => b.ts - a.ts)
-    .slice(0, 50)
+    .filter((d) => {
+      if (d.kind === "SECO" || d.kind === "TREND_GATE" || d.kind === "AI_VETO") {
+        const key = `${d.symbol}:${d.kind}`;
+        if (_seenNoisy.has(key)) return false;
+        _seenNoisy.add(key);
+      }
+      return true;
+    })
+    .slice(0, 30)
     .map((d) => ({
       ts: d.ts,
       symbol: d.symbol,

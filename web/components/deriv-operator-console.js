@@ -34,6 +34,9 @@ const KIND = {
   SPIKE: { color: T.red, label: "SPIKE" },
   SCORE: { color: T.amber, label: "SCORE" },
   CARGANDO: { color: T.cyan, label: "CARGANDO" },
+  SECO: { color: "#f59e0b", label: "SECO" },
+  TREND_GATE: { color: T.mute, label: "TREND sin FVG" },
+  AI_VETO: { color: "#a78bfa", label: "IA VETÓ" },
   BLOQUEADO: { color: T.mute, label: "BLOQUEADO" },
   INFO: { color: T.mute, label: "INFO" },
 };
