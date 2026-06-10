@@ -4488,6 +4488,12 @@ class DerivDaemon:
                         or (snap.side == "MULTUP" and _ar_delta_20t < -_ar_threshold)
                     )
                 )
+                _ar_hot_bypass = (
+                    bool(snap.score_breakdown.get("hot_reentry_fired"))
+                    and float(snap.score or 0.0) >= float(
+                        os.getenv("DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE", "8.0") or "8.0"
+                    )
+                )
                 if _ar_bounce:
                     _ar_key = f"{tick.symbol}:anti_retrace"
                     _ar_last = float(
@@ -4497,33 +4503,37 @@ class DerivDaemon:
                     if (_ar_now - _ar_last) >= 10.0:
                         self._dynamic_inactive_last_emit_ts[_ar_key] = _ar_now
                         _LOGGER.info(
-                            "[ANTI_RETRACE_GUARD] BOUNCE_ACTIVE %s side=%s "
+                            "[ANTI_RETRACE_GUARD] %s %s side=%s "
                             "delta20t=%+.6f threshold=%.6f (range=%.6f×%.2f)",
+                            "HOT_BYPASS" if _ar_hot_bypass else "BOUNCE_ACTIVE",
                             tick.symbol, snap.side,
                             _ar_delta_20t, _ar_threshold, _ar_range_20t, _ar_frac,
                         )
-                    _ar_setup = str(snap.score_breakdown.get("setup_type") or "")
-                    _ar_grade = str(snap.score_breakdown.get("execution_grade") or "")
-                    if (
-                        _ar_setup in ("SMC_FVG", "EMA200_SPIKE")
-                        and _ar_grade in ("A", "B")
-                        and snap.score >= 7.0
-                    ):
-                        self._ghost_logger.add(
-                            symbol=tick.symbol, price=float(tick.price),
-                            side=str(snap.side or ""),
-                            score_raw=float(snap.score),
-                            gate="ANTI_RETRACE_GUARD",
-                            setup_type=_ar_setup, grade=_ar_grade,
-                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
-                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
-                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                    if _ar_hot_bypass:
+                        pass  # allow entry — BOOM/CRASH spikes come FROM a down/up move
+                    else:
+                        _ar_setup = str(snap.score_breakdown.get("setup_type") or "")
+                        _ar_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                        if (
+                            _ar_setup in ("SMC_FVG", "EMA200_SPIKE")
+                            and _ar_grade in ("A", "B")
+                            and snap.score >= 7.0
+                        ):
+                            self._ghost_logger.add(
+                                symbol=tick.symbol, price=float(tick.price),
+                                side=str(snap.side or ""),
+                                score_raw=float(snap.score),
+                                gate="ANTI_RETRACE_GUARD",
+                                setup_type=_ar_setup, grade=_ar_grade,
+                                scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                                imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                                imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                            )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason="anti_retrace_bounce",
                         )
-                    self._spike_enrich(
-                        tick.symbol, bot_entered=False,
-                        block_reason="anti_retrace_bounce",
-                    )
-                    return
+                        return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH
