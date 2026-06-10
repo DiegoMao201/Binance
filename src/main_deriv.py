@@ -4401,7 +4401,23 @@ class DerivDaemon:
                         (_ex_side == "MULTDOWN" and _ex_delta_5t <= -_ex_min_move)
                         or (_ex_side == "MULTUP" and _ex_delta_5t >= +_ex_min_move)
                     )
-                    if not _ex_momentum_ok:
+                    # HOT_REENTRY bypass: when the symbol just spiked (≤200t ago)
+                    # and score is very high, BOOM spikes come from flat/declining
+                    # delta — waiting for reversal means missing the spike entirely.
+                    # Env: DERIV_EXHAUSTION_HOT_BYPASS_MIN_SCORE (default 9.0)
+                    _ex_hot_bypass = (
+                        bool(snap.score_breakdown.get("hot_reentry_fired"))
+                        and float(snap.score or 0.0) >= float(
+                            os.getenv("DERIV_EXHAUSTION_HOT_BYPASS_MIN_SCORE", "9.0") or "9.0"
+                        )
+                    )
+                    if _ex_hot_bypass:
+                        _LOGGER.info(
+                            "[EXHAUSTION_GATE] HOT_BYPASS %s | score=%.2f delta5t=%.6f "
+                            "hot_reentry_active → skip delta check",
+                            tick.symbol, float(snap.score or 0.0), _ex_delta_5t,
+                        )
+                    if not _ex_momentum_ok and not _ex_hot_bypass:
                         _ex_key = f"{tick.symbol}:exhaustion_gate"
                         _ex_last = float(
                             self._dynamic_inactive_last_emit_ts.get(_ex_key) or 0.0
