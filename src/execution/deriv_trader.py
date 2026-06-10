@@ -1174,6 +1174,12 @@ class DerivTradeExecutor:
             self._closing.discard(cid)
             oc.pending_close_reason = None
             return False
+        except BaseException:
+            # CancelledError/TimeoutError from WS disconnect — unlock so next
+            # reaper cycle can retry instead of staying stuck in _closing forever.
+            self._closing.discard(cid)
+            oc.pending_close_reason = None
+            raise
         return True
 
     # ─── Profit-lock per symbol (per-hour NET PnL) ───────────────────────
