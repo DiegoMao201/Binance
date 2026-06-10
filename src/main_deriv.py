@@ -3659,9 +3659,11 @@ class DerivDaemon:
                     float(os.getenv("DERIV_SPIKE_IMMINENCE_MAX_BONUS", "1.5") or 1.5),
                 )
                 if _imm_state == "RIPE":
-                    # RIPE: spike ya está vencido. No bonus; exige estructura de calidad.
+                    # RIPE: inminencia alta → spike próximo en ~3 min (ghost WR 86.7% para
+                    # SMC_FVG Grade A/B score≥7.0). Umbral bajado 8.5→7.5 por evidencia ghost.
+                    # DERIV_IMMINENCE_RIPE_MIN_SCORE controla (default 7.5).
                     _imm_boost = 0.0
-                    _ripe_min = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "8.5") or 8.5)
+                    _ripe_min = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "7.5") or 7.5)
                     if snap.score < _ripe_min:
                         snap.score_breakdown["imminence_ripe_block"] = True
                         self._log_entry_block(
@@ -4175,6 +4177,17 @@ class DerivDaemon:
                 block_reason=_post_spike_reason,
                 score=snap.score,
             )
+            _pssv_setup = str(snap.score_breakdown.get("setup_type") or "")
+            _pssv_grade = str(snap.score_breakdown.get("execution_grade") or "")
+            if _pssv_setup in ("SMC_FVG", "EMA200_SPIKE") and _pssv_grade in ("A", "B") and snap.score >= 7.0:
+                self._ghost_logger.add(
+                    symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                    score_raw=float(snap.score), gate="POST_SPIKE_STRENGTH_VETO",
+                    setup_type=_pssv_setup, grade=_pssv_grade,
+                    scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                    imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                    imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                )
             return
 
         # Per-profile stake cap — overrides global DERIV_MAX_STAKE_USDT for symbols
@@ -4383,9 +4396,10 @@ class DerivDaemon:
                     _ex_min_move = _ex_atr * float(
                         os.getenv("DERIV_EXHAUSTION_GATE_ATR_FRAC", "0.10")
                     )
+                    # Deriv sides: MULTDOWN (CRASH/SELL) and MULTUP (BOOM/BUY)
                     _ex_momentum_ok = (
-                        (_ex_side == "SELL" and _ex_delta_5t <= -_ex_min_move)
-                        or (_ex_side == "BUY" and _ex_delta_5t >= +_ex_min_move)
+                        (_ex_side == "MULTDOWN" and _ex_delta_5t <= -_ex_min_move)
+                        or (_ex_side == "MULTUP" and _ex_delta_5t >= +_ex_min_move)
                     )
                     if not _ex_momentum_ok:
                         _ex_key = f"{tick.symbol}:exhaustion_gate"
@@ -4404,7 +4418,7 @@ class DerivDaemon:
                                 _ex_fvg_top,
                                 _ex_side,
                                 _ex_delta_5t,
-                                "≤−" if _ex_side == "SELL" else "≥+",
+                                "≤−" if _ex_side == "MULTDOWN" else "≥+",
                                 _ex_min_move,
                             )
                         self._spike_enrich(
