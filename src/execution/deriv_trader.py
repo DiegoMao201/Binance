@@ -210,14 +210,14 @@ _SCARCITY_EXIT_BASE_MIN_HOLD_SEC = float(
 # Values from live data analysis (2026-06-07):
 #   CRASH500 p90=915s · CRASH600 p90=1097s · CRASH900 p90=1593s (capped at 1200)
 _SPIKE_SL_MAX_HOLD_PER_SYM: dict[str, float] = {
-    "CRASH500": 900.0,
-    "CRASH600": 1050.0,
-    "CRASH900": 1200.0,
-    "CRASH1000": 1400.0,
-    "BOOM500": 900.0,
-    "BOOM600": 1050.0,
-    "BOOM900": 1200.0,
-    "BOOM1000": 1400.0,
+    "CRASH500":  float(os.getenv("DERIV_MAX_HOLD_CRASH500",  "480") or 480),
+    "CRASH600":  float(os.getenv("DERIV_MAX_HOLD_CRASH600",  "540") or 540),
+    "CRASH900":  float(os.getenv("DERIV_MAX_HOLD_CRASH900",  "600") or 600),
+    "CRASH1000": float(os.getenv("DERIV_MAX_HOLD_CRASH1000", "700") or 700),
+    "BOOM500":   float(os.getenv("DERIV_MAX_HOLD_BOOM500",   "480") or 480),
+    "BOOM600":   float(os.getenv("DERIV_MAX_HOLD_BOOM600",   "540") or 540),
+    "BOOM900":   float(os.getenv("DERIV_MAX_HOLD_BOOM900",   "600") or 600),
+    "BOOM1000":  float(os.getenv("DERIV_MAX_HOLD_BOOM1000",  "700") or 700),
 }
 _SPIKE_SL_MAX_HOLD_DEFAULT = float(
     os.getenv("DERIV_SPIKE_SL_MAX_HOLD_DEFAULT", "900") or 900

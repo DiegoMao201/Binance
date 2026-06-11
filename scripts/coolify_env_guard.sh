@@ -41,10 +41,22 @@ REQUIRED_VARS=(
   # Coolify regenere .env desde su DB. Guard self-healing enforcement.
   "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM900,BOOM1000,CRASH1000,R_50,R_75,R_100"
   # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
-  "DERIV_TREND_SETUP_MIN_SCORE=7.0"
   "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS=BOOM900,CRASH900"
   "DERIV_ANTI_RETRACE_RANGE_FRAC=0.65"
   "DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE=7.5"
+  # 2026-06-11: edge fixes — TREND WR=36.8% -$40 en 591 trades, bloqueado permanentemente
+  "DERIV_TREND_SETUP_MIN_SCORE=99.0"
+  # 2026-06-11: max_hold reducido 900→480s — 110 trades timeout costaron -$160 (avg -$1.46 cada uno)
+  "DERIV_MAX_HOLD_CRASH500=480"
+  "DERIV_MAX_HOLD_CRASH600=540"
+  "DERIV_MAX_HOLD_CRASH900=600"
+  "DERIV_MAX_HOLD_CRASH1000=700"
+  "DERIV_MAX_HOLD_BOOM500=480"
+  "DERIV_MAX_HOLD_BOOM600=540"
+  "DERIV_MAX_HOLD_BOOM900=600"
+  "DERIV_MAX_HOLD_BOOM1000=700"
+  # 2026-06-11: vision LLM model correcto (gemini-flash-1.5 no existe en OpenRouter)
+  "DYNAMIC_AI_VISION_MODEL=google/gemini-2.5-flash-lite"
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }

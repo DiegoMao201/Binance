@@ -3291,7 +3291,7 @@ async def _read_current_cfg(conn: Any) -> dict[str, SymbolCfg]:
 
 # ── Vision LLM — 15m chart analysis ─────────────────────────────────────────
 _VISION_ENABLED   = os.getenv("DYNAMIC_AI_VISION_ENABLED", "true").lower() in ("1", "true", "yes")
-_VISION_MODEL     = os.getenv("DYNAMIC_AI_VISION_MODEL", "google/gemini-flash-1.5")
+_VISION_MODEL     = os.getenv("DYNAMIC_AI_VISION_MODEL", "google/gemini-2.5-flash-lite")
 _VISION_CACHE_TTL = int(os.getenv("DYNAMIC_AI_VISION_CACHE_SEC", "900") or 900)
 _CANDLES_FILE     = Path(os.getenv("DERIV_CANDLES_FILE", "/data/logs/deriv_candles_5m.json"))
 _VISION_FILE      = Path(os.getenv("DERIV_VISION_FILE", "/data/logs/deriv_vision.json"))
