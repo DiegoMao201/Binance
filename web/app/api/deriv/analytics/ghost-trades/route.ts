@@ -16,6 +16,12 @@ interface GateStats {
   EXPIRED: number;
   PENDING: number;
   win_rate: number;
+  net_pnl: number;
+  profit_factor: number;
+  avg_win_pnl: number;
+  avg_loss_pnl: number;
+  gross_win_pnl: number;
+  gross_loss_pnl: number;
 }
 
 interface GhostRecord {
@@ -31,9 +37,11 @@ interface GhostRecord {
   scarcity: string | null;
   imm_state: string | null;
   imm_score: number | null;
+  stake_usdt?: number;
   outcome: string;
   outcome_ts: number | null;
   outcome_price: number | null;
+  estimated_pnl?: number | null;
 }
 
 let _cache: { ts: number; data: GhostRecord[] } | null = null;
@@ -52,6 +60,42 @@ async function loadAll(): Promise<GhostRecord[]> {
   }
 }
 
+function emptyStats(): GateStats {
+  return { total: 0, WIN: 0, LOSS: 0, EXPIRED: 0, PENDING: 0, win_rate: 0,
+           net_pnl: 0, profit_factor: 0, avg_win_pnl: 0, avg_loss_pnl: 0,
+           gross_win_pnl: 0, gross_loss_pnl: 0 };
+}
+
+function finalizeStats(s: GateStats): void {
+  const resolved = s.WIN + s.LOSS;
+  s.win_rate = resolved > 0 ? +(s.WIN / resolved).toFixed(3) : 0;
+  s.net_pnl = +(s.gross_win_pnl - s.gross_loss_pnl).toFixed(2);
+  s.profit_factor = s.gross_loss_pnl > 0
+    ? +(s.gross_win_pnl / s.gross_loss_pnl).toFixed(2)
+    : (s.gross_win_pnl > 0 ? 999 : 0);
+  s.avg_win_pnl = s.WIN > 0 ? +(s.gross_win_pnl / s.WIN).toFixed(2) : 0;
+  s.avg_loss_pnl = s.LOSS > 0 ? +(s.gross_loss_pnl / s.LOSS).toFixed(2) : 0;
+  s.gross_win_pnl = +s.gross_win_pnl.toFixed(2);
+  s.gross_loss_pnl = +s.gross_loss_pnl.toFixed(2);
+}
+
+function accumulatePnl(s: GateStats, r: GhostRecord): void {
+  const stake = r.stake_usdt ?? 5.0;
+  const pnl = r.estimated_pnl != null ? r.estimated_pnl : (
+    r.outcome === 'GHOST_WIN' && r.outcome_price != null && r.price > 0
+      ? (() => {
+          const movePct = r.side === 'MULTUP'
+            ? (r.outcome_price - r.price) / r.price
+            : (r.price - r.outcome_price) / r.price;
+          const slPct = 0.025;
+          return Math.min(stake * Math.max(0, movePct) / slPct, stake * 3);
+        })()
+      : r.outcome === 'GHOST_LOSS' ? -stake : 0
+  );
+  if (r.outcome === 'GHOST_WIN') s.gross_win_pnl += pnl;
+  else if (r.outcome === 'GHOST_LOSS') s.gross_loss_pnl += Math.abs(pnl);
+}
+
 export async function GET(request: NextRequest) {
   const hoursParam = request.nextUrl.searchParams.get('hours');
   const hours = Math.min(168, Math.max(1, parseFloat(hoursParam || '24') || 24));
@@ -62,20 +106,25 @@ export async function GET(request: NextRequest) {
 
   // Aggregate per gate
   const byGate: Record<string, GateStats> = {};
+  // Aggregate per symbol
+  const bySymbol: Record<string, GateStats> = {};
+
   for (const r of window) {
     const g = r.gate || 'unknown';
-    if (!byGate[g]) byGate[g] = { total: 0, WIN: 0, LOSS: 0, EXPIRED: 0, PENDING: 0, win_rate: 0 };
-    byGate[g].total++;
-    if (r.outcome === 'GHOST_WIN') byGate[g].WIN++;
-    else if (r.outcome === 'GHOST_LOSS') byGate[g].LOSS++;
-    else if (r.outcome === 'GHOST_EXPIRED') byGate[g].EXPIRED++;
-    else byGate[g].PENDING++;
+    const sym = r.symbol || 'unknown';
+    if (!byGate[g])   byGate[g]   = emptyStats();
+    if (!bySymbol[sym]) bySymbol[sym] = emptyStats();
+
+    for (const s of [byGate[g], bySymbol[sym]]) {
+      s.total++;
+      if (r.outcome === 'GHOST_WIN')      s.WIN++;
+      else if (r.outcome === 'GHOST_LOSS') s.LOSS++;
+      else if (r.outcome === 'GHOST_EXPIRED') s.EXPIRED++;
+      else s.PENDING++;
+      accumulatePnl(s, r);
+    }
   }
-  for (const g of Object.keys(byGate)) {
-    const s = byGate[g];
-    const resolved = s.WIN + s.LOSS;
-    s.win_rate = resolved > 0 ? +(s.WIN / resolved).toFixed(3) : 0;
-  }
+  for (const s of [...Object.values(byGate), ...Object.values(bySymbol)]) finalizeStats(s);
 
   // Recent resolved (last 30)
   const resolved = window
@@ -84,15 +133,16 @@ export async function GET(request: NextRequest) {
     .reverse();
 
   // Summary totals
-  const totals = { total: window.length, WIN: 0, LOSS: 0, EXPIRED: 0, PENDING: 0, win_rate: 0 };
+  const totals = emptyStats();
+  totals.total = window.length;
   for (const r of window) {
-    if (r.outcome === 'GHOST_WIN') totals.WIN++;
+    if (r.outcome === 'GHOST_WIN')      totals.WIN++;
     else if (r.outcome === 'GHOST_LOSS') totals.LOSS++;
     else if (r.outcome === 'GHOST_EXPIRED') totals.EXPIRED++;
     else totals.PENDING++;
+    accumulatePnl(totals, r);
   }
-  const resolvedTotal = totals.WIN + totals.LOSS;
-  totals.win_rate = resolvedTotal > 0 ? +(totals.WIN / resolvedTotal).toFixed(3) : 0;
+  finalizeStats(totals);
 
-  return NextResponse.json({ hours, totals, by_gate: byGate, recent: resolved });
+  return NextResponse.json({ hours, totals, by_gate: byGate, by_symbol: bySymbol, recent: resolved });
 }

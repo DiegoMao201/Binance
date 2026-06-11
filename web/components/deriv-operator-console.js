@@ -1323,29 +1323,31 @@ export default function DerivOperatorConsole() {
         ) : (
           <div style={{ padding: "12px 16px" }}>
             {/* Summary row */}
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
               {[
                 { label: "TOTAL",   val: ghostData.totals?.total,   color: T.text },
                 { label: "WIN",     val: ghostData.totals?.WIN,     color: T.green },
                 { label: "LOSS",    val: ghostData.totals?.LOSS,    color: T.red },
                 { label: "EXPIRED", val: ghostData.totals?.EXPIRED, color: T.amber },
-                { label: "PENDING", val: ghostData.totals?.PENDING, color: T.mute },
                 { label: "WR",      val: ghostData.totals?.win_rate != null ? `${(ghostData.totals.win_rate * 100).toFixed(0)}%` : "–", color: ghostData.totals?.win_rate >= 0.5 ? T.green : T.red },
+                { label: "PnL EST", val: ghostData.totals?.net_pnl != null ? `${ghostData.totals.net_pnl >= 0 ? "+" : ""}${ghostData.totals.net_pnl.toFixed(2)}` : "–", color: (ghostData.totals?.net_pnl ?? 0) >= 0 ? T.green : T.red },
+                { label: "PF",      val: ghostData.totals?.profit_factor != null ? (ghostData.totals.profit_factor === 999 ? "∞" : ghostData.totals.profit_factor.toFixed(2)) : "–", color: (ghostData.totals?.profit_factor ?? 0) >= 1.5 ? T.green : (ghostData.totals?.profit_factor ?? 0) >= 1.0 ? T.amber : T.red },
               ].map(({ label, val, color }) => (
-                <div key={label} style={{ textAlign: "center", minWidth: 56 }}>
-                  <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "–"}</div>
+                <div key={label} style={{ textAlign: "center", minWidth: 52 }}>
+                  <div style={{ fontSize: 17, fontWeight: 800, color }}>{val ?? "–"}</div>
                   <div style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em" }}>{label}</div>
                 </div>
               ))}
             </div>
 
             {/* Per-gate table */}
-            <div style={{ overflowX: "auto" }}>
+            <div style={{ overflowX: "auto", marginBottom: 12 }}>
+              <div style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em", marginBottom: 4 }}>POR GATE</div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                    {["GATE", "TOTAL", "WIN", "LOSS", "EXPIRED", "PEND", "WR"].map(h => (
-                      <th key={h} style={{ padding: "4px 8px", textAlign: "left", color: T.mute, fontWeight: 700, letterSpacing: "0.06em" }}>{h}</th>
+                    {["GATE", "TOTAL", "WIN", "LOSS", "EXP", "WR", "PnL EST", "PF", "AVG WIN", "AVG LOSS"].map(h => (
+                      <th key={h} style={{ padding: "4px 8px", textAlign: "left", color: T.mute, fontWeight: 700, letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -1353,21 +1355,62 @@ export default function DerivOperatorConsole() {
                   {Object.entries(ghostData.by_gate || {}).map(([gate, s]) => {
                     const wr = s.win_rate;
                     const wrColor = wr >= 0.55 ? T.green : wr >= 0.40 ? T.amber : T.red;
+                    const pnlColor = (s.net_pnl ?? 0) >= 0 ? T.green : T.red;
+                    const pfColor = (s.profit_factor ?? 0) >= 1.5 ? T.green : (s.profit_factor ?? 0) >= 1.0 ? T.amber : T.red;
                     return (
                       <tr key={gate} style={{ borderBottom: `1px solid ${T.border}22` }}>
-                        <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700, fontSize: 10 }}>{gate.replace("_GATE","").replace("_"," ")}</td>
+                        <td style={{ padding: "5px 8px", color: T.cyan, fontWeight: 700, fontSize: 10, whiteSpace: "nowrap" }}>{gate.replace("_GATE","").replace(/_/g," ")}</td>
                         <td style={{ padding: "5px 8px", color: T.text, fontWeight: 800 }}>{s.total}</td>
                         <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{s.WIN}</td>
                         <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{s.LOSS}</td>
                         <td style={{ padding: "5px 8px", color: T.amber }}>{s.EXPIRED}</td>
-                        <td style={{ padding: "5px 8px", color: T.mute }}>{s.PENDING}</td>
-                        <td style={{ padding: "5px 8px", fontWeight: 800, color: wrColor, fontFamily: FONT_MONO }}>{s.WIN + s.LOSS > 0 ? `${(wr * 100).toFixed(0)}%` : "–"}</td>
+                        <td style={{ padding: "5px 8px", fontWeight: 800, color: wrColor }}>{s.WIN + s.LOSS > 0 ? `${(wr * 100).toFixed(0)}%` : "–"}</td>
+                        <td style={{ padding: "5px 8px", fontWeight: 800, color: pnlColor }}>{s.net_pnl != null ? `${s.net_pnl >= 0 ? "+" : ""}${s.net_pnl.toFixed(2)}` : "–"}</td>
+                        <td style={{ padding: "5px 8px", fontWeight: 800, color: pfColor }}>{s.profit_factor != null ? (s.profit_factor === 999 ? "∞" : s.profit_factor.toFixed(2)) : "–"}</td>
+                        <td style={{ padding: "5px 8px", color: T.green }}>{s.avg_win_pnl ? `+${s.avg_win_pnl.toFixed(2)}` : "–"}</td>
+                        <td style={{ padding: "5px 8px", color: T.red }}>{s.avg_loss_pnl ? `-${s.avg_loss_pnl.toFixed(2)}` : "–"}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+
+            {/* Per-symbol table */}
+            {ghostData.by_symbol && Object.keys(ghostData.by_symbol).length > 0 && (
+              <div style={{ overflowX: "auto", marginBottom: 12 }}>
+                <div style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em", marginBottom: 4 }}>POR SÍMBOLO</div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                      {["SÍMBOLO", "TOTAL", "WIN", "LOSS", "EXP", "WR", "PnL EST", "PF"].map(h => (
+                        <th key={h} style={{ padding: "4px 8px", textAlign: "left", color: T.mute, fontWeight: 700, letterSpacing: "0.06em" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(ghostData.by_symbol).map(([sym, s]) => {
+                      const wr = s.win_rate;
+                      const wrColor = wr >= 0.55 ? T.green : wr >= 0.40 ? T.amber : T.red;
+                      const pnlColor = (s.net_pnl ?? 0) >= 0 ? T.green : T.red;
+                      const pfColor = (s.profit_factor ?? 0) >= 1.5 ? T.green : (s.profit_factor ?? 0) >= 1.0 ? T.amber : T.red;
+                      return (
+                        <tr key={sym} style={{ borderBottom: `1px solid ${T.border}22` }}>
+                          <td style={{ padding: "5px 8px", color: T.text, fontWeight: 800 }}>{sym}</td>
+                          <td style={{ padding: "5px 8px", color: T.text }}>{s.total}</td>
+                          <td style={{ padding: "5px 8px", color: T.green, fontWeight: 700 }}>{s.WIN}</td>
+                          <td style={{ padding: "5px 8px", color: T.red, fontWeight: 700 }}>{s.LOSS}</td>
+                          <td style={{ padding: "5px 8px", color: T.amber }}>{s.EXPIRED}</td>
+                          <td style={{ padding: "5px 8px", fontWeight: 800, color: wrColor }}>{s.WIN + s.LOSS > 0 ? `${(wr * 100).toFixed(0)}%` : "–"}</td>
+                          <td style={{ padding: "5px 8px", fontWeight: 800, color: pnlColor }}>{s.net_pnl != null ? `${s.net_pnl >= 0 ? "+" : ""}${s.net_pnl.toFixed(2)}` : "–"}</td>
+                          <td style={{ padding: "5px 8px", fontWeight: 800, color: pfColor }}>{s.profit_factor != null ? (s.profit_factor === 999 ? "∞" : s.profit_factor.toFixed(2)) : "–"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* Recent resolved */}
             {ghostData.recent?.length > 0 && (
@@ -1377,7 +1420,7 @@ export default function DerivOperatorConsole() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10 }}>
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                        {["SYM", "GATE", "SCORE", "GRADE", "OUTCOME", "HACE"].map(h => (
+                        {["SYM", "GATE", "SCORE", "GRADE", "OUTCOME", "PnL EST", "HACE"].map(h => (
                           <th key={h} style={{ padding: "3px 8px", textAlign: "left", color: T.mute, fontWeight: 700 }}>{h}</th>
                         ))}
                       </tr>
@@ -1386,15 +1429,19 @@ export default function DerivOperatorConsole() {
                       {ghostData.recent.map((r) => {
                         const oc = r.outcome;
                         const ocColor = oc === "GHOST_WIN" ? T.green : oc === "GHOST_LOSS" ? T.red : T.amber;
+                        const pnl = r.estimated_pnl;
+                        const pnlStr = pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}` : "–";
+                        const pnlColor = pnl != null ? (pnl >= 0 ? T.green : T.red) : T.mute;
                         const secsAgo = r.outcome_ts ? Math.round(Date.now() / 1000 - r.outcome_ts) : null;
                         const agoStr = secsAgo == null ? "–" : secsAgo < 60 ? `${secsAgo}s` : secsAgo < 3600 ? `${Math.floor(secsAgo/60)}m` : `${Math.floor(secsAgo/3600)}h`;
                         return (
                           <tr key={r.id} style={{ borderBottom: `1px solid ${T.border}18` }}>
                             <td style={{ padding: "4px 8px", color: T.text, fontWeight: 700 }}>{r.symbol}</td>
-                            <td style={{ padding: "4px 8px", color: T.cyan, fontSize: 9 }}>{(r.gate||"").replace("_GATE","").replace("_"," ")}</td>
+                            <td style={{ padding: "4px 8px", color: T.cyan, fontSize: 9 }}>{(r.gate||"").replace("_GATE","").replace(/_/g," ")}</td>
                             <td style={{ padding: "4px 8px", color: T.amber, fontFamily: FONT_MONO }}>{r.score_raw?.toFixed(1) ?? "–"}</td>
                             <td style={{ padding: "4px 8px", color: T.text }}>{r.grade ?? "–"}</td>
                             <td style={{ padding: "4px 8px", fontWeight: 800, color: ocColor }}>{oc.replace("GHOST_","")}</td>
+                            <td style={{ padding: "4px 8px", fontWeight: 700, color: pnlColor }}>{pnlStr}</td>
                             <td style={{ padding: "4px 8px", color: T.mute }}>{agoStr}</td>
                           </tr>
                         );
