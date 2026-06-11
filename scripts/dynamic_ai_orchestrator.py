@@ -3315,7 +3315,7 @@ def _generate_chart_b64(symbol: str, candles: list[dict]) -> str | None:
         import matplotlib.pyplot as plt  # noqa: PLC0415
 
         recent = candles[-60:] if len(candles) >= 6 else candles
-        if len(recent) < 6:
+        if len(recent) < 3:
             return None
         # Resample 5m → 15m (group of 3)
         c15: list[dict] = []
@@ -3438,7 +3438,7 @@ def _run_vision_cycle(
         if cached and now - float(cached.get("updated_at", 0)) < _VISION_CACHE_TTL:
             results[sym] = cached
             continue
-        if len(candles) < 6:
+        if len(candles) < 3:
             continue
         price = float(candles[-1].get("close", 0) or 0)
         chart_b64 = _generate_chart_b64(sym, candles)
