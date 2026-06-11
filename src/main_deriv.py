@@ -3925,11 +3925,14 @@ class DerivDaemon:
         # Entries with setup_type=TREND (no FVG confluence) are systematically unprofitable.
         # Require an elite score (≥9.0) to pass — effectively blocks nearly all TREND entries.
         # Controlled by DERIV_BLOCK_TREND_SETUP (default true) + DERIV_TREND_SETUP_MIN_SCORE.
+        # 2026-06-11: SECO bypass — dry market (DRY_OVERRIDE fired) skips TREND gate;
+        # the DRY gate already screened for minimum score, double-blocking is counter-productive.
         if _is_bc_bias and str(os.getenv("DERIV_BLOCK_TREND_SETUP", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
             _entry_setup = str(snap.score_breakdown.get("setup_type") or "")
             if _entry_setup == "TREND":
                 _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "9.0") or 9.0)
-                if snap.score < _trend_min:
+                _seco_dry_bypass = snap.score_breakdown.get("scarcity_dry_override_fired") is not None
+                if snap.score < _trend_min and not _seco_dry_bypass:
                     self._log_entry_block(
                         tick.symbol, "TREND_SETUP_GATE",
                         score=snap.score, effective_min_score=_trend_min,

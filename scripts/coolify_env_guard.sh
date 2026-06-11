@@ -40,6 +40,11 @@ REQUIRED_VARS=(
   # 2026-06-01: CRASH900 reactivado — debe seguir FUERA de force-disabled aunque
   # Coolify regenere .env desde su DB. Guard self-healing enforcement.
   "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM900,BOOM1000,CRASH1000,R_50,R_75,R_100"
+  # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
+  "DERIV_TREND_SETUP_MIN_SCORE=7.0"
+  "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS=BOOM900,CRASH900"
+  "DERIV_ANTI_RETRACE_RANGE_FRAC=0.65"
+  "DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE=7.5"
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
