@@ -630,25 +630,18 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     },
     # ── NEW: BOOM/CRASH 600 — active ──────────────────────────────────────────────────
     "BOOM600": {
-        # 2026-05-29 user directive: BOOM600 puro ruido — DESACTIVADO.
-        "disabled": True,
+        # 2026-06-10 re-activado para medir edge real con ghost trades.
+        # Mismo setup que BOOM500 — ciclo 600 ticks (20% más lento).
         "type": "spike_boom",
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
         "max_hold_ticks": 15,
-        # 2026-05-27 quality-overhaul:
-        # - max_hold extended 280→600s: spike-cycle ≈600 ticks; 280s was killing
-        #   trades right before the spike (root cause of "sale antes del spike").
-        # - min_score 6.00→7.20: less garbage entries, ~50% fewer signals expected.
-        # - cooldown 120→240s: prevents over-entering on noise (target 100-200 trades/day).
-        # - bc_escape_env still hard-vetoed (was 60% zero_peak source).
         "max_hold_seconds": 600,
         "ema_distance_pct": 0.03,
         "require_fvg_mitigation": True,
         "allow_mean_reversion": False,
         "allow_breakout": False,
-        # 2026-05-29 user directive: BOOM600 1 entrada en 12h — bajar gate manteniendo FVG obligatorio.
-        "min_score": 5.50,
+        "min_score": 7.0,
         "min_hurst": 0.0,
         "atr_min": 0.0,
         "cooldown_sec": 240,

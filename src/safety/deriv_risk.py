@@ -1352,6 +1352,7 @@ class DerivRiskManager:
     # history exists yet (cold start). Override via env DERIV_SPIKE_BASELINE_PER_HOUR_MAP.
     _SPIKE_BASELINE_PER_HOUR: dict[str, float] = {
         "BOOM500": 8.0,
+        "BOOM600": 7.0,   # ciclo 600t → ~7 spikes/h (escala 500/600 × 8)
         "CRASH500": 7.0,
         "CRASH600": 6.0,
         "CRASH900": 5.0,
@@ -1370,11 +1371,12 @@ class DerivRiskManager:
     # no 60-160 ticks después del pico estadístico de spikes.
     # Tuple = (p25, p50, p75, p90). Override via DERIV_SPIKE_GAP_PCTL_MAP.
     _SPIKE_GAP_PCTL: dict[str, tuple[float, float, float, float]] = {
-        "CRASH500": (100.0, 199.0, 500.0, 915.0),
+        "CRASH500": (100.0, 199.0, 500.0,  915.0),
         "CRASH600": (150.0, 301.0, 650.0, 1097.0),
         "CRASH900": (190.0, 380.0, 900.0, 1593.0),
         "BOOM500":  (129.0, 318.0, 595.0, 1021.0),
-        "CRASH300": (120.0, 300.0, 480.0, 720.0),
+        "BOOM600":  (155.0, 382.0, 715.0, 1225.0),  # escala BOOM500 × 600/500
+        "CRASH300": (120.0, 300.0, 480.0,  720.0),
     }
 
     def get_spike_imminence_state(self, symbol: str) -> dict[str, Any]:
