@@ -139,13 +139,13 @@ class GhostLogger:
                     gt.outcome = "GHOST_LOSS"
                     gt.outcome_ts = now
                     gt.outcome_price = float(price)
-                    gt.estimated_pnl = -gt.stake_usdt
+                    gt.estimated_pnl = -(float(gt.stake_usdt) if gt.stake_usdt is not None else 5.0)
                     resolved.append(self._pending.pop(gid))
                 elif gt.side == "MULTUP" and price < gt.price * (1.0 - gt.sl_pct):
                     gt.outcome = "GHOST_LOSS"
                     gt.outcome_ts = now
                     gt.outcome_price = float(price)
-                    gt.estimated_pnl = -gt.stake_usdt
+                    gt.estimated_pnl = -(float(gt.stake_usdt) if gt.stake_usdt is not None else 5.0)
                     resolved.append(self._pending.pop(gid))
         for gt in resolved:
             self._update(gt)
@@ -157,8 +157,9 @@ class GhostLogger:
         Multiplier ≈ 1/sl_pct. WIN profit = stake × price_move_pct / sl_pct,
         capped at 3× stake to account for early DPM exit.
         """
+        stake = float(gt.stake_usdt) if gt.stake_usdt is not None else 5.0
         if gt.outcome == "GHOST_LOSS":
-            return -gt.stake_usdt
+            return -stake
         if gt.outcome != "GHOST_WIN" or gt.price <= 0:
             return 0.0
         if gt.side == "MULTUP":
@@ -166,8 +167,8 @@ class GhostLogger:
         else:
             move_pct = (gt.price - outcome_price) / gt.price
         sl = gt.sl_pct if gt.sl_pct > 0 else 0.025
-        raw = gt.stake_usdt * max(0.0, move_pct) / sl
-        return round(min(raw, gt.stake_usdt * 3.0), 4)
+        raw = stake * max(0.0, move_pct) / sl
+        return round(min(raw, stake * 3.0), 4)
 
     def stats(self, hours: float = 24.0) -> dict:
         """Aggregated win/loss/expired counts + PnL/PF per gate for the last `hours`."""
@@ -230,6 +231,8 @@ class GhostLogger:
             for r in self._read_all():
                 if r.get("outcome") == "PENDING" and r.get("expires_at", 0) > now:
                     fields = {k: r.get(k) for k in GhostTrade.__dataclass_fields__}
+                    if fields.get("stake_usdt") is None:
+                        fields["stake_usdt"] = 5.0
                     gt = GhostTrade(**fields)
                     self._pending[gt.id] = gt
         except Exception:
