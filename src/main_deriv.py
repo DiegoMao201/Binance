@@ -5122,7 +5122,8 @@ class DerivDaemon:
             _cpath = path.parent / "deriv_candles_5m.json"
             _ctmp  = _cpath.with_suffix(".tmp")
             _cexp: dict = {}
-            for _csym in list(self._risk._candles_5m.keys()):
+            _all_syms = set(self._risk._candles_5m.keys()) | set(self._risk._candle_current.keys())
+            for _csym in list(_all_syms):
                 _closed = list(self._risk._candles_5m.get(_csym, []))
                 _cur    = self._risk._candle_current.get(_csym)
                 _all    = _closed + ([_cur] if _cur else [])
