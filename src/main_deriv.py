@@ -3930,7 +3930,15 @@ class DerivDaemon:
         if _is_bc_bias and str(os.getenv("DERIV_BLOCK_TREND_SETUP", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
             _entry_setup = str(snap.score_breakdown.get("setup_type") or "")
             if _entry_setup == "TREND":
-                _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "9.0") or 9.0)
+                # Per-symbol block list: symbols here always get 99.0 (permanent TREND block).
+                # Other symbols use DERIV_TREND_SETUP_MIN_SCORE (default 7.0).
+                _trend_block_syms = {
+                    s.strip() for s in os.getenv("DERIV_TREND_BLOCK_SYMBOLS", "").split(",") if s.strip()
+                }
+                if tick.symbol in _trend_block_syms:
+                    _trend_min = 99.0
+                else:
+                    _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
                 _seco_dry_bypass = snap.score_breakdown.get("scarcity_dry_override_fired") is not None
                 if snap.score < _trend_min and not _seco_dry_bypass:
                     self._log_entry_block(
