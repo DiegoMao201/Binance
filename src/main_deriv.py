@@ -5118,6 +5118,19 @@ class DerivDaemon:
             oc_tmp  = oc_path.with_suffix(oc_path.suffix + ".tmp")
             oc_tmp.write_text(json.dumps(open_contracts, indent=None, separators=(",", ":")))
             oc_tmp.replace(oc_path)
+            # Export 5m OHLC candles for vision LLM analysis
+            _cpath = path.parent / "deriv_candles_5m.json"
+            _ctmp  = _cpath.with_suffix(".tmp")
+            _cexp: dict = {}
+            for _csym in list(self._risk._candles_5m.keys()):
+                _closed = list(self._risk._candles_5m.get(_csym, []))
+                _cur    = self._risk._candle_current.get(_csym)
+                _all    = _closed + ([_cur] if _cur else [])
+                if _all:
+                    _cexp[_csym] = _all[-50:]
+            if _cexp:
+                _ctmp.write_text(json.dumps(_cexp, separators=(",", ":")))
+                _ctmp.replace(_cpath)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("[deriv-daemon] failed to write status file")
 

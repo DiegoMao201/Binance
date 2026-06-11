@@ -737,6 +737,85 @@ function SymbolCard({ s }) {
                 </span>
               );
             })()}
+            {/* ── ESTRUCTURA MACRO 15M (Vision LLM) ────────────────────── */}
+            {s.vision && (() => {
+              const v = s.vision;
+              const trend = v.trend_15m || "ranging";
+              const strength = v.trend_strength || "weak";
+              const bias = v.bias || "NEUTRAL";
+              const conf = typeof v.confidence === "number" ? v.confidence : 0;
+              const isBoom = s.symbol?.startsWith("BOOM");
+              const biasAligned = (isBoom && bias === "MULTUP") || (!isBoom && bias === "MULTDOWN");
+              const biasConflict = (isBoom && bias === "MULTDOWN") || (!isBoom && bias === "MULTUP");
+              const trendColor = trend === "uptrend" ? T.green : trend === "downtrend" ? T.red : T.amber;
+              const biasColor = biasAligned ? T.green : biasConflict ? T.red : T.amber;
+              const trendArrow = trend === "uptrend" ? "▲" : trend === "downtrend" ? "▼" : "◆";
+              const strengthDot = strength === "strong" ? "●●●" : strength === "moderate" ? "●●○" : "●○○";
+              const ageMin = v.updated_at ? Math.round((Date.now() / 1000 - v.updated_at) / 60) : null;
+              return (
+                <div style={{
+                  margin: "8px 0 4px",
+                  padding: "8px 10px",
+                  background: `${trendColor}0d`,
+                  border: `1px solid ${trendColor}30`,
+                  borderRadius: 6,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em", fontWeight: 700 }}>ESTRUCTURA 15M</span>
+                    {ageMin !== null && <span style={{ fontSize: 8, color: T.mute }}>hace {ageMin}m</span>}
+                    {conf > 0 && (
+                      <span style={{ fontSize: 8, color: conf >= 0.7 ? T.green : conf >= 0.45 ? T.amber : T.mute, marginLeft: "auto" }}>
+                        conf {Math.round(conf * 100)}%
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                    {/* Trend direction */}
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                      <span style={{ fontSize: 18, fontWeight: 900, color: trendColor, lineHeight: 1 }}>{trendArrow}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: trendColor, letterSpacing: "0.04em" }}>
+                        {trend === "uptrend" ? "ALCISTA" : trend === "downtrend" ? "BAJISTA" : "LATERAL"}
+                      </span>
+                      <span style={{ fontSize: 9, color: trendColor, opacity: 0.8 }}>{strengthDot}</span>
+                    </div>
+                    {/* Bot bias alignment */}
+                    <div style={{
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      background: `${biasColor}18`,
+                      border: `1px solid ${biasColor}40`,
+                      fontSize: 9,
+                      fontWeight: 800,
+                      color: biasColor,
+                      letterSpacing: "0.06em",
+                    }}>
+                      {bias === "NEUTRAL" ? "NEUTRAL" : bias === "MULTUP" ? "SUBE ▲" : "BAJA ▼"}
+                      {biasAligned ? " ✓" : biasConflict ? " ✗" : ""}
+                    </div>
+                    {/* Pattern */}
+                    {v.pattern && (
+                      <span style={{ fontSize: 9, color: T.mute, fontStyle: "italic" }}>{v.pattern}</span>
+                    )}
+                  </div>
+                  {/* Key levels */}
+                  {(v.key_resistance != null || v.key_support != null) && (
+                    <div style={{ display: "flex", gap: 14, marginTop: 5 }}>
+                      {v.key_resistance != null && (
+                        <span style={{ fontSize: 9, color: T.red }}>
+                          RESIST <span style={{ fontWeight: 700, fontFamily: FONT_MONO }}>{Number(v.key_resistance).toFixed(0)}</span>
+                        </span>
+                      )}
+                      {v.key_support != null && (
+                        <span style={{ fontSize: 9, color: T.green }}>
+                          SOPORT <span style={{ fontWeight: 700, fontFamily: FONT_MONO }}>{Number(v.key_support).toFixed(0)}</span>
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* ── PRESIÓN REAL ──────────────────────────────────────────── */}
             {_presionScore != null && (
               <div style={{ padding: "8px 0 4px" }}>

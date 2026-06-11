@@ -13,6 +13,7 @@ const OPEN_FILE = path.join(DERIV_LOGS, "deriv_open_contracts.json");
 const CLOSED_FILE = path.join(DERIV_LOGS, "deriv_closed_contracts.json");
 const STATUS_FILE = path.join(DERIV_LOGS, "deriv_status.json");
 const SESSION_FILE = path.join(DERIV_LOGS, "deriv_session.json");
+const VISION_FILE = path.join(DERIV_LOGS, "deriv_vision.json");
 
 async function readJson(file, fallback) {
   try {
@@ -96,13 +97,15 @@ function classifyDecision(d) {
 export async function GET() {
   const nowSec = Date.now() / 1000;
 
-  const [spikesRaw, openRaw, closedRaw, status, session] = await Promise.all([
+  const [spikesRaw, openRaw, closedRaw, status, session, visionRaw] = await Promise.all([
     readJson(SPIKE_FILE, []),
     readJson(OPEN_FILE, []),
     readJson(CLOSED_FILE, []),
     readJson(STATUS_FILE, {}),
     readJson(SESSION_FILE, null),
+    readJson(VISION_FILE, {}),
   ]);
+  const visionData = (visionRaw && typeof visionRaw === "object") ? visionRaw : {};
 
   const spikes = (Array.isArray(spikesRaw) ? spikesRaw : [])
     .filter((s) => s && Number.isFinite(Number(s.ts)))
@@ -268,6 +271,7 @@ export async function GET() {
       topReasons,
       openContract: openBySymbol.get(symbol) || null,
       recentSpikes: sym.slice(-12).reverse(),
+      vision: visionData[symbol] || null,
     });
   }
 

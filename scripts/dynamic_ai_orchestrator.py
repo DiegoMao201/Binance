@@ -17,6 +17,8 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from contextlib import suppress
 import json
 import logging
@@ -3118,7 +3120,7 @@ def _scrub_telemetry_for_prompt(telemetry: dict[str, Any]) -> dict[str, Any]:
     return scrubbed
 
 
-def _build_prompt(telemetry_json: dict[str, Any]) -> str:
+def _build_prompt(telemetry_json: dict[str, Any], vision_context: dict[str, dict] | None = None) -> str:
     score_max = f"{SCORE_MAX_GUARDRAIL:.1f}"
     now_utc = datetime.now(tz=timezone.utc)
     return (
@@ -3177,6 +3179,25 @@ def _build_prompt(telemetry_json: dict[str, Any]) -> str:
         "{\n"
         "  \"BOOM1000\": {\"regime\": \"FAST\", \"zero_peak_grace_sec\": 60, \"score_min_override\": 6.8, \"size_multiplier\": 1.0}\n"
         "}\n"
+        + (
+            "\nMACRO_STRUCTURE_VISUAL (análisis visual 15m por símbolo via IA de visión — "
+            "tendencia real vista en chart de velas):\n"
+            + json.dumps({
+                sym: {k: v for k, v in d.items()
+                      if k in ("trend_15m", "trend_strength", "bias",
+                               "key_resistance", "key_support", "pattern", "confidence")}
+                for sym, d in vision_context.items()
+            }, ensure_ascii=True)
+            + "\n27. USA MACRO_STRUCTURE_VISUAL como contexto macro para tus decisiones:\n"
+            "    - Si bias visual = MULTDOWN y trend=downtrend/strong: confirma size_multiplier normal, "
+            "considera bajar score 0.1 si hour_perf positivo.\n"
+            "    - Si bias visual CONTRADICE el pulso esperado del símbolo: sube score_min_override 0.3 "
+            "y baja size_multiplier 0.2 (mercado estructuralmente adverso).\n"
+            "    - Si trend=ranging/weak o confidence<0.5: ignorar bias visual, mantener decisión por pulso.\n"
+            "    - key_resistance / key_support son niveles reales vistos en chart: "
+            "si el precio está cerca de resistencia (BOOM) reduce size; si está en soporte (CRASH) reduce size.\n"
+            if vision_context else ""
+        )
     )
 
 
@@ -3266,6 +3287,185 @@ async def _read_current_cfg(conn: Any) -> dict[str, SymbolCfg]:
     for sym in SYMBOLS:
         out.setdefault(sym, _clamp_cfg(sym, SymbolCfg("NORMAL", 280, 0, 7.0, True, 1.0)))
     return out
+
+
+# ── Vision LLM — 15m chart analysis ─────────────────────────────────────────
+_VISION_ENABLED   = os.getenv("DYNAMIC_AI_VISION_ENABLED", "true").lower() in ("1", "true", "yes")
+_VISION_MODEL     = os.getenv("DYNAMIC_AI_VISION_MODEL", "google/gemini-flash-1.5")
+_VISION_CACHE_TTL = int(os.getenv("DYNAMIC_AI_VISION_CACHE_SEC", "900") or 900)
+_CANDLES_FILE     = Path(os.getenv("DERIV_CANDLES_FILE", "/data/logs/deriv_candles_5m.json"))
+_VISION_FILE      = Path(os.getenv("DERIV_VISION_FILE", "/data/logs/deriv_vision.json"))
+_VISION_CACHE: dict[str, dict] = {}
+
+
+def _load_candles_5m() -> dict[str, list[dict]]:
+    try:
+        if _CANDLES_FILE.exists():
+            return json.loads(_CANDLES_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _generate_chart_b64(symbol: str, candles: list[dict]) -> str | None:
+    """Render 15m candlestick chart from 5m OHLC candles → base64 PNG."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        recent = candles[-60:] if len(candles) >= 6 else candles
+        if len(recent) < 6:
+            return None
+        # Resample 5m → 15m (group of 3)
+        c15: list[dict] = []
+        for i in range(0, len(recent) - 2, 3):
+            grp = recent[i: i + 3]
+            c15.append({
+                "o": grp[0]["open"], "h": max(c["high"] for c in grp),
+                "l": min(c["low"]  for c in grp), "c": grp[-1]["close"],
+            })
+        if len(c15) < 4:
+            c15 = [{"o": c["open"], "h": c["high"], "l": c["low"], "c": c["close"]}
+                   for c in recent]
+        opens  = [c["o"] for c in c15]
+        highs  = [c["h"] for c in c15]
+        lows   = [c["l"] for c in c15]
+        closes = [c["c"] for c in c15]
+        xs = list(range(len(c15)))
+
+        fig, ax = plt.subplots(figsize=(6, 3), dpi=80)
+        fig.patch.set_facecolor("#0d1117")
+        ax.set_facecolor("#161b22")
+        for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
+            col = "#26a69a" if c >= o else "#ef5350"
+            body_h = max(abs(c - o), (h - l) * 0.015)
+            ax.bar(i, body_h, bottom=min(o, c), color=col, width=0.7, zorder=2)
+            ax.plot([i, i], [l, min(o, c)],   color=col, linewidth=0.9, zorder=1)
+            ax.plot([i, i], [max(o, c), h],   color=col, linewidth=0.9, zorder=1)
+        # EMA14
+        k, ema = 2 / 15, closes[0]
+        emas = []
+        for c in closes:
+            ema = c * k + ema * (1 - k)
+            emas.append(ema)
+        ax.plot(xs, emas, color="#ffa726", linewidth=1.4, zorder=3, label="EMA14")
+        ax.set_title(f"{symbol}  15m", color="#e6edf3", fontsize=9, pad=3, loc="left")
+        ax.tick_params(colors="#484f58", labelsize=6, length=2)
+        ax.yaxis.set_label_position("right")
+        ax.yaxis.tick_right()
+        ax.yaxis.set_major_formatter(plt.FormatStrFormatter("%.0f"))
+        ax.set_xticks([])
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#21262d")
+        plt.tight_layout(pad=0.4)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight",
+                    facecolor=fig.get_facecolor(), dpi=80)
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+    except Exception as exc:
+        LOG.debug("[vision] chart gen failed %s: %s", symbol, exc)
+        return None
+
+
+def _call_vision_analysis(symbol: str, chart_b64: str, current_price: float) -> dict | None:
+    """Ask vision LLM to classify 15m market structure from chart image."""
+    api_key = (
+        os.getenv("DYNAMIC_AI_API_KEY") or os.getenv("OPENROUTER_API_KEY") or ""
+    ).strip()
+    api_url = os.getenv("DYNAMIC_AI_BASE_URL",
+                        "https://openrouter.ai/api/v1/chat/completions")
+    if not api_key or not chart_b64:
+        return None
+    payload = {
+        "model": _VISION_MODEL,
+        "temperature": 0.05,
+        "messages": [
+            {"role": "system",
+             "content": (
+                 "You are a technical analysis engine for synthetic spike indices (Deriv). "
+                 "Analyze 15-minute OHLC charts. Return ONLY a JSON object, no markdown."
+             )},
+            {"role": "user",
+             "content": [
+                 {"type": "image_url",
+                  "image_url": {"url": f"data:image/png;base64,{chart_b64}"}},
+                 {"type": "text", "text": (
+                     f"Chart: {symbol} 15m candlesticks. Current price ≈ {current_price:.0f}. "
+                     "Orange line = EMA14. Identify the dominant trend and key price levels.\n"
+                     'Return ONLY valid JSON (no markdown, no extra text):\n'
+                     '{"trend_15m":"uptrend|downtrend|ranging",'
+                     '"trend_strength":"strong|moderate|weak",'
+                     '"bias":"MULTUP|MULTDOWN|NEUTRAL",'
+                     '"key_resistance":null_or_number,'
+                     '"key_support":null_or_number,'
+                     '"pattern":"short_string_e.g._breakdown_recovery_channel_up_double_top",'
+                     '"confidence":0.0_to_1.0}'
+                 )},
+             ]},
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv("DYNAMIC_AI_REFERER", "https://localhost"),
+        "X-Title": "Deriv Vision Analyzer",
+    }
+    try:
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        raw  = resp.json()["choices"][0]["message"]["content"]
+        result = _parse_json_maybe_fenced(raw)
+        result.update({"symbol": symbol, "updated_at": time.time()})
+        return result
+    except Exception as exc:
+        LOG.debug("[vision] call failed %s: %s", symbol, exc)
+        return None
+
+
+def _run_vision_cycle(
+    candles_all: dict[str, list[dict]],
+) -> dict[str, dict]:
+    """Generate chart + call vision LLM for each symbol with cache."""
+    if not _VISION_ENABLED:
+        return {}
+    now = time.time()
+    results: dict[str, dict] = {}
+    for sym, candles in candles_all.items():
+        cached = _VISION_CACHE.get(sym)
+        if cached and now - float(cached.get("updated_at", 0)) < _VISION_CACHE_TTL:
+            results[sym] = cached
+            continue
+        if len(candles) < 6:
+            continue
+        price = float(candles[-1].get("close", 0) or 0)
+        chart_b64 = _generate_chart_b64(sym, candles)
+        if not chart_b64:
+            continue
+        result = _call_vision_analysis(sym, chart_b64, price)
+        if result:
+            _VISION_CACHE[sym] = result
+            results[sym] = result
+            LOG.info(
+                "[vision] %s → %s/%s bias=%s conf=%.2f",
+                sym,
+                result.get("trend_15m", "?"),
+                result.get("trend_strength", "?"),
+                result.get("bias", "?"),
+                float(result.get("confidence") or 0),
+            )
+    return results
+
+
+def _write_vision_results(results: dict[str, dict]) -> None:
+    try:
+        tmp = _VISION_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(results, separators=(",", ":")))
+        tmp.replace(_VISION_FILE)
+    except Exception as exc:
+        LOG.debug("[vision] write failed: %s", exc)
 
 
 def _build_cfg_from_llm(raw: dict[str, Any], current_cfg: dict[str, SymbolCfg]) -> dict[str, SymbolCfg]:
@@ -3785,7 +3985,21 @@ async def run_loop() -> None:
             except Exception as mp_exc:  # noqa: BLE001
                 LOG.warning("[dynamic-ai][MARKET_PULSE] skip: %s", mp_exc)
 
-            prompt = _build_prompt(_scrub_telemetry_for_prompt(telemetry))
+            # ── Vision cycle — generate charts + call gemini-flash ──────────
+            _vision_ctx: dict[str, dict] = {}
+            try:
+                _candles_all = _load_candles_5m()
+                if _candles_all:
+                    _vision_ctx = _run_vision_cycle(_candles_all)
+                    if _vision_ctx:
+                        _write_vision_results(_vision_ctx)
+            except Exception as _ve:
+                LOG.debug("[vision] cycle error: %s", _ve)
+
+            prompt = _build_prompt(
+                _scrub_telemetry_for_prompt(telemetry),
+                vision_context=_vision_ctx or None,
+            )
 
             try:
                 llm_raw = _call_llm(prompt)

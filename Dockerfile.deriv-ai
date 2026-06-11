@@ -10,7 +10,7 @@ WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip --no-cache-dir && \
-    pip install --no-cache-dir asyncpg requests python-dotenv
+    pip install --no-cache-dir asyncpg requests python-dotenv matplotlib
 
 COPY . .
 
