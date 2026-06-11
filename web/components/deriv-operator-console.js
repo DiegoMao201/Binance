@@ -745,10 +745,13 @@ function SymbolCard({ s }) {
               const bias = v.bias || "NEUTRAL";
               const conf = typeof v.confidence === "number" ? v.confidence : 0;
               const isBoom = s.symbol?.startsWith("BOOM");
-              const biasAligned = (isBoom && bias === "MULTUP") || (!isBoom && bias === "MULTDOWN");
-              const biasConflict = (isBoom && bias === "MULTDOWN") || (!isBoom && bias === "MULTUP");
-              const trendColor = trend === "uptrend" ? T.green : trend === "downtrend" ? T.red : T.amber;
-              const biasColor = biasAligned ? T.green : biasConflict ? T.red : T.amber;
+              // Para índices de spike: CRASH sube lento y crashea DOWN → alcista = acumulando energía = FAVORABLE
+              // BOOM baja lento y boomea UP → bajista = acumulando energía = FAVORABLE
+              // Conflicto real: CRASH bajista = crash ya ocurrió | BOOM alcista = boom ya ocurrió
+              const biasAligned = (isBoom && trend === "downtrend") || (!isBoom && trend === "uptrend");
+              const biasConflict = (isBoom && trend === "uptrend") || (!isBoom && trend === "downtrend");
+              const trendColor = biasAligned ? T.green : biasConflict ? T.red : T.amber;
+              const biasColor = trendColor;
               const trendArrow = trend === "uptrend" ? "▲" : trend === "downtrend" ? "▼" : "◆";
               const strengthDot = strength === "strong" ? "●●●" : strength === "moderate" ? "●●○" : "●○○";
               const ageMin = v.updated_at ? Math.round((Date.now() / 1000 - v.updated_at) / 60) : null;
@@ -789,8 +792,10 @@ function SymbolCard({ s }) {
                       color: biasColor,
                       letterSpacing: "0.06em",
                     }}>
-                      {bias === "NEUTRAL" ? "NEUTRAL" : bias === "MULTUP" ? "SUBE ▲" : "BAJA ▼"}
-                      {biasAligned ? " ✓" : biasConflict ? " ✗" : ""}
+                      {trend === "ranging" ? "LATERAL" : isBoom
+                        ? (trend === "downtrend" ? "CARGANDO ▼ ✓" : "YA SUBIÓ ▲ ✗")
+                        : (trend === "uptrend"   ? "CARGANDO ▲ ✓" : "YA CAYÓ ▼ ✗")}
+                      {trend === "ranging" ? "" : ""}
                     </div>
                     {/* Pattern */}
                     {v.pattern && (

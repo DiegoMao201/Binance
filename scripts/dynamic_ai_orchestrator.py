@@ -3188,14 +3188,18 @@ def _build_prompt(telemetry_json: dict[str, Any], vision_context: dict[str, dict
                                "key_resistance", "key_support", "pattern", "confidence")}
                 for sym, d in vision_context.items()
             }, ensure_ascii=True)
-            + "\n27. USA MACRO_STRUCTURE_VISUAL como contexto macro para tus decisiones:\n"
-            "    - Si bias visual = MULTDOWN y trend=downtrend/strong: confirma size_multiplier normal, "
-            "considera bajar score 0.1 si hour_perf positivo.\n"
-            "    - Si bias visual CONTRADICE el pulso esperado del símbolo: sube score_min_override 0.3 "
-            "y baja size_multiplier 0.2 (mercado estructuralmente adverso).\n"
-            "    - Si trend=ranging/weak o confidence<0.5: ignorar bias visual, mantener decisión por pulso.\n"
-            "    - key_resistance / key_support son niveles reales vistos en chart: "
-            "si el precio está cerca de resistencia (BOOM) reduce size; si está en soporte (CRASH) reduce size.\n"
+            + "\n27. USA MACRO_STRUCTURE_VISUAL como contexto macro. IMPORTANTE — lógica de spike indices:\n"
+            "    CRASH (CRASH500/600/900): el precio NORMALMENTE sube lento entre crashes.\n"
+            "      - trend=uptrend → FAVORABLE: mercado acumulando energía, crash por venir. Mantén o baja score_min 0.1.\n"
+            "      - trend=downtrend → ADVERSO: crash ya ocurrió o en progreso. Sube score_min 0.3, baja size 0.2.\n"
+            "      - trend=ranging → NEUTRAL: mercado sin dirección, mantén config por pulso.\n"
+            "    BOOM (BOOM500/600/900): el precio NORMALMENTE baja lento entre booms.\n"
+            "      - trend=downtrend → FAVORABLE: mercado acumulando energía, boom por venir. Mantén o baja score_min 0.1.\n"
+            "      - trend=uptrend → ADVERSO: boom ya ocurrió o en progreso. Sube score_min 0.3, baja size 0.2.\n"
+            "      - trend=ranging → NEUTRAL: mercado sin dirección, mantén config por pulso.\n"
+            "    - confidence<0.5 → ignorar análisis visual completamente.\n"
+            "    - key_resistance/key_support: niveles reales del chart. Si precio está pegado al nivel "
+            "opuesto a la dirección esperada (CRASH cerca de soporte = ya cayó mucho), sube score_min 0.2.\n"
             if vision_context else ""
         )
     )
