@@ -1665,17 +1665,7 @@ class DerivDaemon:
         if _ptype not in {"spike_crash", "spike_boom"}:
             return float(stake)
 
-        # Streak protection: if the streak/edge system has reduced stake below the
-        # base stake, respect that reduction — don't force it back up to the profile
-        # target. The profile target acts as a ceiling only when no streak penalty
-        # is active (stake >= base).  When stake < base it means bad-streak mult
-        # fired (e.g. 2.0 × 0.8 = 1.6), and overriding to $5 nullifies the guard.
-        _streak_base = float(os.getenv("DERIV_STREAK_BASE_STAKE_USDT", "2.0"))
-        if float(stake) < _streak_base - 0.01:
-            # Streak has reduced below base — honour it, apply cap but no upscale
-            fixed = round(max(1.0, float(stake)), 2)
-        else:
-            fixed = round(max(1.0, target), 2)
+        fixed = round(max(1.0, target), 2)
 
         try:
             profile_cap = float(profile.get("stake_max_usdt") or 0.0)
@@ -1689,13 +1679,11 @@ class DerivDaemon:
             sb["profile_stake_pre_target"] = round(float(stake), 2)
             sb["profile_stake_final"] = round(float(fixed), 2)
             _LOGGER.info(
-                "[STAKE_POLICY] %s profile_target=%.2f pre=%.2f final=%.2f"
-                " (streak_reduced=%s)",
+                "[STAKE_POLICY] %s profile_target=%.2f pre=%.2f final=%.2f",
                 symbol,
                 float(target),
                 float(stake),
                 float(fixed),
-                float(stake) < _streak_base - 0.01,
             )
         return float(fixed)
 

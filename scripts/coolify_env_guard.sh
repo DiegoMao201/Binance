@@ -61,6 +61,8 @@ REQUIRED_VARS=(
   "DERIV_MAX_HOLD_BOOM1000=700"
   # 2026-06-11: vision LLM model correcto (gemini-flash-1.5 no existe en OpenRouter)
   "DYNAMIC_AI_VISION_MODEL=google/gemini-2.5-flash-lite"
+  # 2026-06-12: estructura 15m cada 5min (era 900s=15min, demasiado lenta para contexto bot)
+  "DYNAMIC_AI_VISION_CACHE_SEC=300"
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
