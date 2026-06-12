@@ -2846,7 +2846,13 @@ class DerivDaemon:
             _mat_median_s = _mat_scar.get("median_gap_s")
             _mat_elapsed_s = _mat_scar.get("elapsed_s")
             if _mat_median_s and _mat_elapsed_s is not None and _mat_median_s > 0:
-                _mat_frac = float(os.getenv("DERIV_MATURITY_GATE_FRAC", "0.70"))
+                # Post-cluster: score is inflated by cluster bonus (spike_cluster_bonus).
+                # Data: cluster entries WR=38.5% (-$0.287/trade) vs 53.5% (-$0.039) single spike.
+                # When cluster_n>=2, require elapsed >= P50 (1.0×median) instead of 0.70.
+                _mat_cl_n = int(self._risk.get_spike_count_recent(tick.symbol, 300) or 0)
+                _mat_frac_base = float(os.getenv("DERIV_MATURITY_GATE_FRAC", "0.70"))
+                _mat_frac_cluster = float(os.getenv("DERIV_MATURITY_GATE_CLUSTER_FRAC", "1.0"))
+                _mat_frac = _mat_frac_cluster if _mat_cl_n >= 2 else _mat_frac_base
                 _mat_threshold_s = _mat_median_s * _mat_frac
                 if _mat_elapsed_s < _mat_threshold_s:
                     _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
@@ -2859,13 +2865,14 @@ class DerivDaemon:
                         self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
                         _LOGGER.info(
                             "[MATURITY_GATE] EARLY_ENTRY_GATE %s | elapsed=%.0fs < "
-                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs",
+                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs | cluster_n=%d",
                             tick.symbol,
                             _mat_elapsed_s,
                             _mat_threshold_s,
                             _mat_frac * 100,
                             _mat_median_s,
                             _mat_remain_s,
+                            _mat_cl_n,
                         )
                     self._spike_enrich(
                         tick.symbol, bot_entered=False, block_reason="early_entry_gate"
