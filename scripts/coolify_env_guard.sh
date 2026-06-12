@@ -63,6 +63,15 @@ REQUIRED_VARS=(
   "DYNAMIC_AI_VISION_MODEL=google/gemini-2.5-flash-lite"
   # 2026-06-12: estructura 15m cada 5min (era 900s=15min, demasiado lenta para contexto bot)
   "DYNAMIC_AI_VISION_CACHE_SEC=300"
+  # 2026-06-12: LISTO_RIPE_BYPASS — entra ANTES del spike cuando LISTO+RIPE+score≥6.0
+  # Problema raíz: IMMINENCE_RIPE_GATE bloqueaba exactamente cuando el spike está cargado.
+  # HOT_REENTRY entraba POST-spike (score=10) y comía todo el retroceso.
+  "DERIV_LISTO_RIPE_BYPASS_MIN_SCORE=6.0"
+  # HOT_REENTRY: requiere cluster ≥2 spikes — no re-entrada tras spike solitario
+  "DERIV_HOT_REENTRY_MIN_SPIKES=2"
+  # MATURITY_GATE: single-spike espera P75 (1.80×P50) antes de entrar — era 0.70×P50
+  # Objetivo: no entrar a los 2-3 min post-spike solitario, esperar zona óptima P75
+  "DERIV_MATURITY_GATE_FRAC=1.80"
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }

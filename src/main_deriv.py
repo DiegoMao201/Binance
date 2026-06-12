@@ -3684,6 +3684,22 @@ class DerivDaemon:
                     # DERIV_IMMINENCE_RIPE_MIN_SCORE controla (default 7.5).
                     _imm_boost = 0.0
                     _ripe_min = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "7.5") or 7.5)
+                    # LISTO_RIPE_BYPASS: cuando scarcity=LISTO/CARGANDO Y spike RIPE, el mercado
+                    # está estadísticamente cargado para disparar el PRIMER spike. Entramos
+                    # ANTES del spike (no después como HOT_REENTRY). Disabled by default (0).
+                    # Set DERIV_LISTO_RIPE_BYPASS_MIN_SCORE=6.0 to enable.
+                    _lrb_min = float(os.getenv("DERIV_LISTO_RIPE_BYPASS_MIN_SCORE", "0") or 0)
+                    _lrb_scar = str(snap.score_breakdown.get("scarcity_state") or "")
+                    if (_lrb_min > 0 and _lrb_scar in ("LISTO", "CARGANDO")
+                            and float(snap.score) >= _lrb_min):
+                        snap.score_breakdown["listo_ripe_bypass_fired"] = round(float(snap.score), 2)
+                        _ripe_min = _lrb_min
+                        _LOGGER.info(
+                            "[PIPELINE] LISTO_RIPE_BYPASS %s | score=%.2f scar=%s imm=%.2f"
+                            " → lowering RIPE gate %.1f→%.1f (pre-spike entry)",
+                            tick.symbol, float(snap.score), _lrb_scar,
+                            _imm_score, 7.5, _lrb_min,
+                        )
                     if snap.score < _ripe_min:
                         snap.score_breakdown["imminence_ripe_block"] = True
                         self._log_entry_block(
@@ -3948,7 +3964,8 @@ class DerivDaemon:
                 else:
                     _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
                 _seco_dry_bypass = snap.score_breakdown.get("scarcity_dry_override_fired") is not None
-                if snap.score < _trend_min and not _seco_dry_bypass:
+                _listo_ripe_bypass = snap.score_breakdown.get("listo_ripe_bypass_fired") is not None
+                if snap.score < _trend_min and not _seco_dry_bypass and not _listo_ripe_bypass:
                     self._log_entry_block(
                         tick.symbol, "TREND_SETUP_GATE",
                         score=snap.score, effective_min_score=_trend_min,
