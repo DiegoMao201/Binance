@@ -45,7 +45,6 @@ from src.safety.ghost_logger import GhostLogger
 from src.execution.position_manager import SYMBOL_RATCHET_PARAMS as _DPM_PARAMS
 from src.strategies.deriv_signals import (
     adaptive_max_hold,
-    extreme_mr_penalty,
     get_asset_profile,
     is_spike_market,
     min_score_for,
@@ -3389,39 +3388,6 @@ class DerivDaemon:
                         )
                     return
 
-        # ── Mean-reverting R_* score floor (H < 0.45 → require ≥ 6.0) ──────
-        # evaluate() sets effective_min=6.0 for mean_rev setups (+3.0 bonus
-        # applied inside evaluate).  This outer gate mirrors that floor so that
-        # snap.allowed=False setups are surfaced in _log_entry_block.
-        # Changed 9.0 → 6.0 (Phase9): requiring 9.0 was blocking every valid
-        # Grade A mean-rev setup (e.g. R_100 H=0.41 scoring 8.72 after the
-        # +3.0 mean-rev bonus — the bonus already compensates for absent trend).
-        if _rw_regime == "mean_reverting" and snap.score < 6.0:
-            self._log_entry_block(
-                tick.symbol, "MEAN_REV_SCORE_GATE",
-                score=snap.score, effective_min_score=6.0,
-                side=snap.side, regime=snap.regime,
-                hurst=_eval_hurst,
-                score_breakdown=snap.score_breakdown,
-            )
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=snap.side,
-                score=snap.score,
-                reason=f"MEAN_REV_SCORE_GATE: H={_eval_hurst:.3f} mean_reverting requires≥6.00 got={snap.score:.2f}",
-                extra={"hurst": _eval_hurst, "regime": "mean_reverting"},
-            )
-            return
-
-        # ── Extreme MR exhaustion penalty (BOOM/CRASH only) ───────────────
-        _geo_label = str(snap.score_breakdown.get("geo_layout") or "")
-        _mr_pen = extreme_mr_penalty(tick.symbol, _eval_hurst, _geo_label)
-        if _mr_pen != 0.0:
-            snap.score = round(max(0.0, snap.score + _mr_pen), 3)
-            snap.score_breakdown["hurst_mr_penalty"] = _mr_pen
-            _LOGGER.info(
-                "[PIPELINE] EXTREME_MR_PENALTY %s | H=%.3f geo=%s pen=%.2f score→%.2f",
-                tick.symbol, _eval_hurst, _geo_label, _mr_pen, snap.score,
-            )
 
         # ── ATR volatility filter (BOOM500/1000 + CRASH500/1000) ──────────
         # Reject entries during low-volume sessions where the spike accumulation
@@ -4063,57 +4029,6 @@ class DerivDaemon:
                 {k: v for k, v in _tel_fields.items() if v is not None}
             )
 
-        # ── 2026-06-07 SETUP TYPE GATE — quantitative: TREND=23%WR/-$26, SMC_FVG=58%WR/+$20 ──
-        # Entries with setup_type=TREND (no FVG confluence) are systematically unprofitable.
-        # Require an elite score (≥9.0) to pass — effectively blocks nearly all TREND entries.
-        # Controlled by DERIV_BLOCK_TREND_SETUP (default true) + DERIV_TREND_SETUP_MIN_SCORE.
-        # 2026-06-11: SECO bypass — dry market (DRY_OVERRIDE fired) skips TREND gate;
-        # the DRY gate already screened for minimum score, double-blocking is counter-productive.
-        if _is_bc_bias and str(os.getenv("DERIV_BLOCK_TREND_SETUP", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
-            _entry_setup = str(snap.score_breakdown.get("setup_type") or "")
-            if _entry_setup == "TREND":
-                # Per-symbol block list: symbols here always get 99.0 (permanent TREND block).
-                # Other symbols use DERIV_TREND_SETUP_MIN_SCORE (default 7.0).
-                _trend_block_syms = {
-                    s.strip() for s in os.getenv("DERIV_TREND_BLOCK_SYMBOLS", "").split(",") if s.strip()
-                }
-                if tick.symbol in _trend_block_syms:
-                    _trend_min = 99.0
-                else:
-                    _trend_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
-                _seco_dry_bypass = snap.score_breakdown.get("scarcity_dry_override_fired") is not None
-                _listo_ripe_bypass = snap.score_breakdown.get("listo_ripe_bypass_fired") is not None
-                if snap.score < _trend_min and not _seco_dry_bypass and not _listo_ripe_bypass:
-                    self._log_entry_block(
-                        tick.symbol, "TREND_SETUP_GATE",
-                        score=snap.score, effective_min_score=_trend_min,
-                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                        score_breakdown=snap.score_breakdown,
-                    )
-                    self._record_decision(
-                        symbol=tick.symbol, allowed=False, side=snap.side,
-                        score=snap.score,
-                        reason=(
-                            f"TREND_SETUP_GATE: setup=TREND score={snap.score:.2f}<{_trend_min:.1f} "
-                            f"(SMC_FVG or score≥{_trend_min:.0f} required)"
-                        ),
-                        extra={"regime": snap.regime, "setup_type": "TREND"},
-                    )
-                    self._spike_enrich(
-                        tick.symbol, bot_entered=False,
-                        block_reason="trend_setup_gate", score=snap.score,
-                    )
-                    _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
-                    if _gl_grade in ("A", "B") and snap.score >= 7.0:
-                        self._ghost_logger.add(
-                            symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
-                            score_raw=float(snap.score), gate="TREND_SETUP_GATE",
-                            setup_type="TREND", grade=_gl_grade,
-                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
-                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
-                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
-                        )
-                    return
 
         # ── Structural FVG conflict gate ──────────────────────────────────────
         # Si el FVG de ticks apunta en dirección opuesta a la del candle de 5m,
@@ -4481,23 +4396,6 @@ class DerivDaemon:
         #  right after snap = self._risk.evaluate() — so that geo_gate is in
         #  score_breakdown for all _log_entry_block calls.)
 
-        # ── hurst_min_spike gate (spike markets that have a strict Hurst floor) ──
-        # BOOM1000/CRASH1000 etc. can declare hurst_min_spike: 0.43 to filter out
-        # entries where the underlying Hurst is too low (no persistence).
-        _hms = _asset_profile.get("hurst_min_spike")
-        if _hms is not None and is_spike_market(tick.symbol):
-            if _eval_hurst < float(_hms):
-                _hms_reason = (
-                    f"HURST_SPIKE_VETO: {tick.symbol} H={_eval_hurst:.3f} < strict_min={_hms:.3f}"
-                )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score, reason=_hms_reason,
-                    extra={"hurst": _eval_hurst, "hurst_min_spike": _hms},
-                )
-                self._spike_enrich(tick.symbol, bot_entered=False,
-                                   block_reason=_hms_reason)
-                return
 
         decision_extra = {
             "score_breakdown": snap.score_breakdown,
@@ -4693,29 +4591,6 @@ class DerivDaemon:
                         )
                         return
 
-        # ── POST-SPIKE COOLDOWN: retracement < 50% → demote TREND to COOLDOWN ──
-        # When the spike body has NOT been retraced > 50%, the price is still in
-        # active retroceso. Entering a TREND setup here means riding the momentum
-        # of the spike itself — wrong direction.  COOLDOWN prevents misclassification.
-        # SMC_FVG / EMA200_SPIKE entries are NOT blocked (FVG is the anchor post-spike).
-        _ps_setup  = str(snap.score_breakdown.get("setup_type") or "")
-        _ps_ret    = snap.score_breakdown.get("burst_retroceso")
-        _ps_active = bool(snap.score_breakdown.get("burst_active", False))
-        _ps_thresh = float(os.getenv("DERIV_COOLDOWN_RETRACE_MIN", "0.50") or "0.50")
-        if (
-            is_spike_market(tick.symbol)
-            and _ps_active
-            and _ps_ret is not None
-            and float(_ps_ret) < _ps_thresh
-            and _ps_setup in ("TREND", "TREND_NO_STRUCT")
-        ):
-            snap.score_breakdown["setup_type"]          = "POST_SPIKE_COOLDOWN"
-            snap.score_breakdown["post_spike_cooldown"] = True
-            snap.score_breakdown["retracement_pct"]     = round(float(_ps_ret), 3)
-            _LOGGER.debug(
-                "[COOLDOWN] %s TREND demoted → POST_SPIKE_COOLDOWN | retrace=%.2f < %.2f",
-                tick.symbol, float(_ps_ret), _ps_thresh,
-            )
 
         # ── RNG PROBABILITY SCORE ─────────────────────────────────────────────────
         # Replaces binary Trifecta gate.  Deriv synthetics are Poisson-distributed

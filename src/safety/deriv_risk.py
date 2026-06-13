@@ -2935,7 +2935,7 @@ class DerivRiskManager:
                 s.strip().upper()
                 for s in os.getenv(
                     "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS",
-                    "BOOM600,BOOM900,CRASH900",
+                    "",
                 ).split(",")
                 if s.strip()
             }
