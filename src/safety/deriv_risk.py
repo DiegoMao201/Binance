@@ -1864,15 +1864,23 @@ class DerivRiskManager:
                 )
         snap.synthetic_atr = round(atr, 8)
 
+        # ── Ghost Price series (Precio Fantasma) ───────────────────────────
+        # MAD of tick-sizes → threshold to clip spike bodies.
+        # OLS-based scoring uses ghost series so a fresh spike doesn't inflate
+        # trend/momentum/regime signals for the NEXT entry decision.
+        # ATR and FVG/BOS detection ALWAYS use raw prices.
+        _ghost_med, _ghost_mad = self._mad_volatility(ticks)
+        _ghost_ticks = self._ghost_price_series(ticks, _ghost_mad, _ghost_med)
+
         # Detect market regime first (influences score weights)
-        regime = self._detect_regime(ticks, atr)
+        regime = self._detect_regime(_ghost_ticks, atr)
         snap.regime = regime
 
-        trend_score, trend_dir = self._trend_score_v2(ticks)
-        momentum_score = self._momentum_score(ticks)
+        trend_score, trend_dir = self._trend_score_v2(_ghost_ticks)
+        momentum_score = self._momentum_score(_ghost_ticks)
         spread_score = self._spread_score(spread_pct)
         atr_score = self._atr_adaptive_score(atr, ticks[-1], symbol)
-        stability_score = self._stability_score(ticks)
+        stability_score = self._stability_score(_ghost_ticks)
         streak_penalty = self._streak_penalty()
         cooldown_bonus = self._cooldown_bonus(symbol)
         headroom_bonus = self._headroom_bonus(dd_cap)
@@ -2211,6 +2219,11 @@ class DerivRiskManager:
             # ── Calm-regime bypass telemetry ────────────────────────────────
             "atr_calm_bypassed": _atr_calm_bypassed,
             "calm_bc_floor": _calm_bc_floor_used,
+            # ── Ghost Price / MAD volatility ─────────────────────────────────
+            # MAD of tick-sizes on 300-tick window (true calm-zone volatility).
+            # ghost_* fields are populated after geometry is computed below.
+            "ghost_mad": round(_ghost_mad, 8),
+            "ghost_med_change": round(_ghost_med, 8),
         }
         snap.score = round(score, 3)
         snap.effective_min_score = round(effective_min_score, 2)
@@ -2599,6 +2612,35 @@ class DerivRiskManager:
                     snap.score_breakdown["structural_fvg_absent"] = True
         except Exception as _sg_exc:
             _LOGGER.debug("[deriv-risk] structural geometry skipped: %s", _sg_exc)
+
+        # ── Kinetic state + BOS-gated TREND (BOOM/CRASH only) ───────────────
+        # Inject kinetic compression metrics from geometry into score_breakdown.
+        # BOS-gated TREND: for spike markets the default setup_type="TREND" (no FVG)
+        # now requires a confirmed Break of Structure.  Without BOS the label is
+        # "TREND_NO_STRUCT" — treated identically by downstream gates but
+        # distinguishable in telemetry so we can track how often pure drift entries
+        # lack structural backing.
+        if _is_spike and _geo is not None:
+            # Kinetic compression state from ghost price series
+            snap.score_breakdown["kinetic_velocity"]     = _geo.kinetic_velocity
+            snap.score_breakdown["kinetic_acceleration"] = _geo.kinetic_acceleration
+            snap.score_breakdown["kinetic_compressed"]   = _geo.kinetic_compressed
+            snap.score_breakdown["fvg_bos_validated"]    = _geo.fvg_bos_validated
+            # Update ghost_mad with the geometry engine's value (uses same algo)
+            if _geo.ghost_mad > 0:
+                snap.score_breakdown["ghost_mad"] = round(_geo.ghost_mad, 8)
+
+            # BOS-gated TREND: demote to TREND_NO_STRUCT when BOS absent
+            _current_setup = snap.score_breakdown.get("setup_type", "TREND")
+            if _current_setup == "TREND" and not _geo.bos_confirmed:
+                snap.score_breakdown["setup_type"] = "TREND_NO_STRUCT"
+                snap.score_breakdown["trend_no_struct_reason"] = "bos_not_confirmed"
+                _LOGGER.debug(
+                    "[deriv-risk] TREND_NO_STRUCT %s | bos_confirmed=False"
+                    " | kv=%.4f ka=%.4f compressed=%s",
+                    symbol, _geo.kinetic_velocity, _geo.kinetic_acceleration,
+                    _geo.kinetic_compressed,
+                )
 
         # ── Micro-channel scalp trigger (Hurst<0.40 + 1.5σ band touch) ───────
         # When the market is strongly mean-reverting (H<0.40) we don't wait for
@@ -3618,6 +3660,54 @@ class DerivRiskManager:
         intercept = y_mean - slope * x_mean
         ss_res = sum((prices[i] - (slope * i + intercept)) ** 2 for i in range(n))
         return max(0.0, 1.0 - ss_res / ss_tot)
+
+    # ── Ghost Price (Precio Fantasma) — MAD spike filter ─────────────────────
+    # Spike-free series for OLS/regime assessment.  FVG/ATR use raw prices.
+
+    @staticmethod
+    def _mad_volatility(ticks: list[float], window: int = 300) -> tuple[float, float]:
+        """Median Absolute Deviation of tick-sizes on the last `window` ticks.
+
+        tick_size_i = |P_i − P_{i-1}|
+        MAD = median(|size_i − median(sizes)|)
+
+        Returns (median_change, mad).  Both zero when insufficient data.
+        """
+        import numpy as _np  # local import — avoids top-level circular risk
+        seg = ticks[-window:] if len(ticks) > window else ticks
+        if len(seg) < 3:
+            return 0.0, 0.0
+        changes = _np.abs(_np.diff(_np.asarray(seg, dtype=_np.float64)))
+        med = float(_np.median(changes))
+        mad = float(_np.median(_np.abs(changes - med)))
+        return med, mad
+
+    @staticmethod
+    def _ghost_price_series(
+        ticks: list[float],
+        mad: float,
+        med_change: float,
+        window: int = 300,
+        spike_mult: float = 5.0,
+    ) -> list[float]:
+        """Return spike-clipped price series for clean OLS / regime detection.
+
+        Any tick whose absolute jump exceeds  med_change + spike_mult × MAD
+        is replaced by linear extrapolation from the previous two points.
+        This removes the spike body from the OLS so trend/regime reflects
+        the calm-zone drift, not the spike itself.
+        """
+        if mad <= 0 or med_change <= 0 or len(ticks) < 3:
+            return ticks
+        thresh = med_change + spike_mult * max(mad, med_change * 0.01)
+        seg_start = max(0, len(ticks) - window)
+        ghost = list(ticks)
+        for i in range(max(1, seg_start), len(ghost)):
+            jump = abs(ghost[i] - ghost[i - 1])
+            if jump > thresh:
+                slope = (ghost[i - 1] - ghost[i - 2]) if i >= 2 else 0.0
+                ghost[i] = ghost[i - 1] + slope
+        return ghost
 
     @classmethod
     def _trend_score_v2(cls, ticks: list[float]) -> tuple[float, int | None]:

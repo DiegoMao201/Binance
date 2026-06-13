@@ -3399,6 +3399,11 @@ def _call_vision_analysis(symbol: str, chart_b64: str, current_price: float) -> 
                  {"type": "text", "text": (
                      f"Chart: {symbol} 15m candlesticks. Current price ≈ {current_price:.0f}. "
                      "Orange line = EMA14. Identify the dominant trend and key price levels.\n"
+                     "zona_liquidez_macro: true when the chart shows a clear institutional "
+                     "liquidity zone — defined as a visible consolidation block, FVG, or "
+                     "S/R level that the price is approaching or touching with directional "
+                     "confluence. false when price is in open air or mid-range with no "
+                     "structural reference nearby.\n"
                      'Return ONLY valid JSON (no markdown, no extra text):\n'
                      '{"trend_15m":"uptrend|downtrend|ranging",'
                      '"trend_strength":"strong|moderate|weak",'
@@ -3406,7 +3411,8 @@ def _call_vision_analysis(symbol: str, chart_b64: str, current_price: float) -> 
                      '"key_resistance":null_or_number,'
                      '"key_support":null_or_number,'
                      '"pattern":"short_string_e.g._breakdown_recovery_channel_up_double_top",'
-                     '"confidence":0.0_to_1.0}'
+                     '"confidence":0.0_to_1.0,'
+                     '"zona_liquidez_macro":true_or_false}'
                  )},
              ]},
         ],
@@ -3453,12 +3459,13 @@ def _run_vision_cycle(
             _VISION_CACHE[sym] = result
             results[sym] = result
             LOG.info(
-                "[vision] %s → %s/%s bias=%s conf=%.2f",
+                "[vision] %s → %s/%s bias=%s conf=%.2f zona_liq=%s",
                 sym,
                 result.get("trend_15m", "?"),
                 result.get("trend_strength", "?"),
                 result.get("bias", "?"),
                 float(result.get("confidence") or 0),
+                result.get("zona_liquidez_macro", "?"),
             )
     return results
 

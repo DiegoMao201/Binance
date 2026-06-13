@@ -48,6 +48,13 @@ PIVOT_ORDER = 5     # peak/trough must be extreme over ±5 ticks
 # ── S/R cluster tolerance: group pivots within this fraction of price range ──
 CLUSTER_TOL_PCT = 0.002   # 0.2 %
 
+# ── Ghost Price (Precio Fantasma) — MAD spike filter ─────────────────────────
+# Used exclusively for OLS-based kinetic state (NOT for FVG/BOS — those need spikes).
+# MAD on a 300-tick window classifies each tick-size as spike vs normal drift.
+GHOST_WINDOW      = 300   # ticks for MAD baseline (≈ 5 min at 1 tick/s)
+GHOST_SPIKE_MULT  = 5.0   # X_i > GHOST_SPIKE_MULT × MAD → classified as spike
+KINETIC_PERIOD    = 5     # n for V_t = P_t − P_{t-n}  (short-term displacement)
+
 
 # ─── Result dataclasses ───────────────────────────────────────────────────────
 
@@ -96,6 +103,13 @@ class GeometryResult:
     smc_bonus: float = 0.0          # +3.0 (full) or +1.0 (partial FVG)
     smc_reason: str = ""            # human-readable label
     micro_band_signal: str | None = None  # micro-channel 1.5σ touch signal
+    # ── Ghost Price / Kinetic state ───────────────────────────────────────────
+    kinetic_velocity: float = 0.0      # V_t = (P_t − P_{t-n}) / price  ×1e4
+    kinetic_acceleration: float = 0.0  # A_t = V_t − V_{t-n}            ×1e4
+    kinetic_compressed: bool = False   # True when BOOM/CRASH in compression zone
+    ghost_mad: float = 0.0             # MAD of tick-sizes on ghost window
+    # ── BOS-validated FVG ────────────────────────────────────────────────────
+    fvg_bos_validated: bool = False    # FVG active AND BOS confirmed in same window
 
 
 # ── Microstructure parameters (SMC + Momentum) ───────────────────────────────
@@ -360,6 +374,86 @@ def _detect_bos(prices: np.ndarray) -> tuple[bool, str]:
     return False, ""
 
 
+# ─── Ghost Price (Precio Fantasma) + Kinetic Compression ─────────────────────
+
+def _mad_ghost_prices(
+    prices: np.ndarray,
+    window: int = GHOST_WINDOW,
+    spike_mult: float = GHOST_SPIKE_MULT,
+) -> tuple[np.ndarray, float]:
+    """Return (ghost_series, mad) where spikes are replaced by linear extrapolation.
+
+    Algorithm:
+      1. Tick sizes  = |P_i − P_{i-1}|   (absolute candle bodies)
+      2. MAD         = median(|size_i − median(sizes)|)
+      3. threshold   = median(sizes) + spike_mult × MAD
+      4. Any tick whose size exceeds the threshold is a spike; replace it with
+         P_{i-1} + slope(P_{i-2}→P_{i-1}) so the OLS/kinetic sees smooth drift.
+
+    FVG and BOS detection MUST use raw prices (spikes ARE the FVGs).
+    This function is ONLY for drift/regime/kinetic assessment.
+    """
+    n = len(prices)
+    seg = prices[-window:] if n > window else prices
+    k = len(seg)
+    if k < 3:
+        return prices.copy(), 0.0
+
+    changes = np.abs(np.diff(seg))          # |P_i − P_{i-1}|, length = k-1
+    med_change = float(np.median(changes))
+    mad = float(np.median(np.abs(changes - med_change)))
+
+    # Threshold in price units
+    thresh = med_change + spike_mult * max(mad, med_change * 0.01)
+
+    # Build ghost on the full incoming array (edit only the window portion)
+    ghost = prices.copy()
+    offset = n - k  # index of seg[0] in prices
+    for i in range(1, k):
+        gi = offset + i
+        jump = abs(float(prices[gi]) - float(prices[gi - 1]))
+        if jump > thresh:
+            slope = float(ghost[gi - 1] - ghost[gi - 2]) if gi >= 2 else 0.0
+            ghost[gi] = ghost[gi - 1] + slope
+
+    return ghost, mad
+
+
+def _kinetic_state(
+    ghost: np.ndarray,
+    period: int = KINETIC_PERIOD,
+) -> tuple[float, float, bool]:
+    """Velocity and Acceleration on the ghost price series.
+
+    Definitions (normalised by current price × 1e4 for readability):
+        V_t = P_t − P_{t-n}
+        A_t = V_t − V_{t-n}
+
+    Compression triggers (spike loading zones):
+        BOOM  side: V_t < 0 (price drifting ↓) AND A_t ≥ 0 (drift decelerating)
+        CRASH side: V_t > 0 (price drifting ↑) AND A_t ≤ 0 (drift decelerating)
+
+    Returns (velocity_e4, acceleration_e4, compressed_bool)
+    """
+    n = len(ghost)
+    if n < period * 2 + 1:
+        return 0.0, 0.0, False
+
+    ref = float(ghost[-1]) if float(ghost[-1]) > 0 else 1.0
+
+    v_now  = (float(ghost[-1])          - float(ghost[-1 - period]))  / ref
+    v_prev = (float(ghost[-1 - period]) - float(ghost[-1 - 2 * period])) / ref
+    a_now  = v_now - v_prev
+
+    # BOOM: price slowly falling between booms (V<0) and losing momentum (A≥0)
+    boom_compressed  = v_now < -1e-6 and a_now >= 0.0
+    # CRASH: price slowly rising between crashes (V>0) and losing momentum (A≤0)
+    crash_compressed = v_now > +1e-6 and a_now <= 0.0
+
+    compressed = boom_compressed or crash_compressed
+    return round(v_now * 1e4, 4), round(a_now * 1e4, 4), compressed
+
+
 # ─── Public entry point ───────────────────────────────────────────────────────
 
 def _tiered_overextension_penalty(channel_pos: float) -> float:
@@ -547,7 +641,14 @@ def compute_geometry(
                 f"neutral_extended_{_direction}: pos={channel_pos:.2f} penalty={geo_score_delta:.2f}"
             )
 
+    # ── Ghost Price (Precio Fantasma) + Kinetic state ────────────────────────
+    # Ghost: spikes replaced by linear extrapolation on GHOST_WINDOW ticks.
+    # Used ONLY for drift/kinetic assessment — FVG/BOS must use raw prices.
+    ghost_arr, _ghost_mad = _mad_ghost_prices(arr)
+    kin_vel, kin_acc, kin_compressed = _kinetic_state(ghost_arr)
+
     # ── SMC / Microstructure layer (advisory) ────────────────────────────
+    # FVG and BOS run on RAW prices (spikes create the fair-value gaps).
     fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr)
     fvg_mid = (fvg_top + fvg_bot) / 2.0 if fvg_active else 0.0
     gap_mitigated = False
@@ -568,8 +669,13 @@ def compute_geometry(
     divergence = _detect_divergence(arr)
     micro_band_sig = _micro_band_signal(micro, current_price) if micro else None
 
-    # ── BOS detection ──────────────────────────────────────────────────────
+    # ── BOS detection (raw prices — breaks are real price events) ─────────
     bos_ok, bos_dir = _detect_bos(arr)
+
+    # BOS-validated FVG: FVG is structurally significant when a BOS exists
+    # in the same lookback window. Without BOS, the FVG is in a consolidation
+    # zone (lower conviction → keeps partial bonus but won't qualify as validated).
+    fvg_bos_validated = fvg_active and bos_ok
 
     smc_side: str | None = None
     smc_bonus = 0.0
@@ -638,4 +744,9 @@ def compute_geometry(
         smc_bonus=smc_bonus,
         smc_reason=smc_reason,
         micro_band_signal=micro_band_sig,
+        kinetic_velocity=kin_vel,
+        kinetic_acceleration=kin_acc,
+        kinetic_compressed=kin_compressed,
+        ghost_mad=_ghost_mad,
+        fvg_bos_validated=fvg_bos_validated,
     )

@@ -410,6 +410,11 @@ class DerivDaemon:
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
+        # Vision LLM context: keyed by symbol.upper() → dict with zona_liquidez_macro etc.
+        # Loaded from /data/logs/deriv_vision.json (written by dynamic_ai_orchestrator).
+        self._last_vision_context: dict[str, dict] = {}
+        self._vision_file_loaded_at: float = 0.0
+        self._vision_file_ttl_sec: float = 60.0  # re-read file at most every 60s
         # 2026-05-29 v5: per-symbol spike_wait_timeout published by orchestrator.
         # File path resolved later from _ctx_state_dir; cached with TTL to avoid
         # I/O on every dynamic_config lookup.
@@ -1355,6 +1360,24 @@ class DerivDaemon:
             len(self._dynamic_configs),
         )
 
+    def _try_load_vision_context(self) -> None:
+        """Load deriv_vision.json written by the orchestrator (best-effort, TTL-cached)."""
+        now = time.time()
+        if now - self._vision_file_loaded_at < self._vision_file_ttl_sec:
+            return
+        vision_path = os.getenv("DERIV_VISION_FILE", "/data/logs/deriv_vision.json")
+        try:
+            import json as _json  # noqa: PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+            _vf = _Path(vision_path)
+            if _vf.exists():
+                raw = _json.loads(_vf.read_text())
+                if isinstance(raw, dict):
+                    self._last_vision_context = {k.upper(): v for k, v in raw.items()}
+                    self._vision_file_loaded_at = now
+        except Exception as _ve:
+            _LOGGER.debug("[vision-ctx] load failed: %s", _ve)
+
     async def _dynamic_config_refresh_loop(self) -> None:
         """Periodic refresh loop for dynamic symbol config overrides."""
         if not self._dynamic_enabled:
@@ -2174,6 +2197,9 @@ class DerivDaemon:
                 _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
 
     async def _pipeline(self, tick: NormalisedTick) -> None:
+        # Refresh vision context file (TTL-cached, non-blocking)
+        self._try_load_vision_context()
+
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
         # ═══════════════════════════════════════════════════════════════════
@@ -2978,6 +3004,15 @@ class DerivDaemon:
                 "fvg_bottom":    _sb_now.get("fvg_bottom"),
                 "smc_bonus":     float(_sb_now.get("smc_bonus") or 0.0),
             })
+        # Inject burst/kinetic surface fields from fvg_state into score_breakdown
+        # so downstream gates and the LLM can read them without extra lookups.
+        _burst_state_now = self._last_fvg_state.get(_cache_sym, {})
+        _burst_ret_val = _burst_state_now.get("burst_retroceso")
+        _burst_active_val = bool(_burst_state_now.get("burst_active", False))
+        if _burst_ret_val is not None:
+            snap.score_breakdown["burst_retroceso"] = _burst_ret_val
+            snap.score_breakdown["burst_active"]    = _burst_active_val
+
         # Cache entry quality fields for operator console indicators.
         # setup_type and fvg_tier always reflect current tick state; others are
         # preserved when None (hard-veto paths skip full scoring, carrying forward
@@ -4570,6 +4605,59 @@ class DerivDaemon:
                             block_reason="anti_retrace_bounce",
                         )
                         return
+
+        # ── POST-SPIKE COOLDOWN: retracement < 50% → demote TREND to COOLDOWN ──
+        # When the spike body has NOT been retraced > 50%, the price is still in
+        # active retroceso. Entering a TREND setup here means riding the momentum
+        # of the spike itself — wrong direction.  COOLDOWN prevents misclassification.
+        # SMC_FVG / EMA200_SPIKE entries are NOT blocked (FVG is the anchor post-spike).
+        _ps_setup  = str(snap.score_breakdown.get("setup_type") or "")
+        _ps_ret    = snap.score_breakdown.get("burst_retroceso")
+        _ps_active = bool(snap.score_breakdown.get("burst_active", False))
+        _ps_thresh = float(os.getenv("DERIV_COOLDOWN_RETRACE_MIN", "0.50") or "0.50")
+        if (
+            is_spike_market(tick.symbol)
+            and _ps_active
+            and _ps_ret is not None
+            and float(_ps_ret) < _ps_thresh
+            and _ps_setup in ("TREND", "TREND_NO_STRUCT")
+        ):
+            snap.score_breakdown["setup_type"]          = "POST_SPIKE_COOLDOWN"
+            snap.score_breakdown["post_spike_cooldown"] = True
+            snap.score_breakdown["retracement_pct"]     = round(float(_ps_ret), 3)
+            _LOGGER.debug(
+                "[COOLDOWN] %s TREND demoted → POST_SPIKE_COOLDOWN | retrace=%.2f < %.2f",
+                tick.symbol, float(_ps_ret), _ps_thresh,
+            )
+
+        # ── TRIFECTA TRACKER ─────────────────────────────────────────────────────
+        # Trifecta = ideal setup: macro liquidity zone confirmed by Vision LLM
+        # + kinetic compression on ghost series + scarcity LISTO/CARGANDO
+        # + BOS-validated FVG.  All four together = highest-conviction entry.
+        #
+        # Currently INFORMATIONAL only (trifecta_met flag surfaced in logs/UI).
+        # Enable as hard gate via: DERIV_TRIFECTA_GATE_ENABLED=true
+        # (when enabled, non-trifecta setups still allowed but skip LLM call
+        #  and go straight to math score gate — cheaper and faster).
+        _trifecta_vision = bool(
+            (self._last_vision_context or {})
+            .get(tick.symbol.upper(), {})
+            .get("zona_liquidez_macro", False)
+        )
+        _trifecta_kinetic  = bool(snap.score_breakdown.get("kinetic_compressed", False))
+        _trifecta_scarcity = str(snap.score_breakdown.get("scarcity_state") or "") in ("LISTO", "CARGANDO")
+        _trifecta_fvg_bos  = bool(snap.score_breakdown.get("fvg_bos_validated", False))
+        _trifecta_met = _trifecta_vision and _trifecta_kinetic and _trifecta_scarcity and _trifecta_fvg_bos
+        snap.score_breakdown["trifecta_met"]      = _trifecta_met
+        snap.score_breakdown["trifecta_vision"]   = _trifecta_vision
+        snap.score_breakdown["trifecta_kinetic"]  = _trifecta_kinetic
+        snap.score_breakdown["trifecta_scarcity"] = _trifecta_scarcity
+        snap.score_breakdown["trifecta_fvg_bos"]  = _trifecta_fvg_bos
+        if _trifecta_met:
+            _LOGGER.info(
+                "[TRIFECTA] %s ✓ ALL FOUR met — vision+kinetic+scarcity+fvg_bos | score=%.2f",
+                tick.symbol, float(snap.score or 0.0),
+            )
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH
