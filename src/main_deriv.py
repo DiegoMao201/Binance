@@ -3537,7 +3537,23 @@ class DerivDaemon:
                 "hot_reentry_active → skip ATR check",
                 tick.symbol, float(snap.score or 0.0), _atr_current,
             )
-        if not _atr_ok and not _atr_calm_bypassed and not _atr_hot_bypass:
+        # MASTER_KEY bypass: score ≥ 8.5 (MASTER_KEY confirmed) means all other
+        # gates already validated this entry — ATR percentile must not veto it.
+        _atr_master_key_min = float(
+            os.getenv("DERIV_ATR_MASTER_KEY_BYPASS_MIN_SCORE", "8.5") or "8.5"
+        )
+        _atr_master_bypass = (
+            is_spike_market(tick.symbol)
+            and float(snap.score or 0.0) >= _atr_master_key_min
+        )
+        if _atr_master_bypass:
+            _LOGGER.info(
+                "[ATR_FILTER] MASTER_KEY_BYPASS %s | score=%.2f≥%.2f atr_abs=%.6f "
+                "required_p%d=%.6f → ATR gate bypassed (high-conviction entry)",
+                tick.symbol, float(snap.score or 0.0), _atr_master_key_min,
+                _atr_current, _atr_threshold, _atr_p_req,
+            )
+        if not _atr_ok and not _atr_calm_bypassed and not _atr_hot_bypass and not _atr_master_bypass:
             self._log_entry_block(
                 tick.symbol, "ATR_VOLATILITY_FILTER",
                 score=snap.score, effective_min_score=snap.effective_min_score,
@@ -4033,6 +4049,31 @@ class DerivDaemon:
                         tick.symbol, _scar_state or "?", _fb_st, float(_fb_rt or 0.0),
                     )
 
+        # ── LEY 2: arm SECO/VENCIDO regime-gate bypass ───────────────────────
+        # scarcity_dry_override_gate enables the bypass at ~line 4258:
+        # when score < regime_min AND scarcity is SECO/VENCIDO, entry is allowed
+        # if score >= this gate (DERIV_DRY_OVERRIDE_SCORE or per-symbol map).
+        # Without this block the gate key is never set and the bypass is dead code.
+        if _is_bc_bias:
+            _seco_resolved = str(snap.score_breakdown.get("scarcity_state") or "")
+            if _seco_resolved in ("SECO", "VENCIDO"):
+                _dry_gate_score = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.5") or "8.5")
+                _dry_map_str = os.getenv("DERIV_DRY_OVERRIDE_SCORE_MAP", "") or ""
+                for _dry_entry in _dry_map_str.split(","):
+                    _dry_entry = _dry_entry.strip()
+                    if ":" in _dry_entry:
+                        _dry_sym_k, _dry_val_k = _dry_entry.split(":", 1)
+                        if _dry_sym_k.strip().upper() == tick.symbol.upper():
+                            try:
+                                _dry_gate_score = float(_dry_val_k.strip())
+                            except Exception:
+                                pass
+                snap.score_breakdown["scarcity_dry_override_gate"] = round(_dry_gate_score, 2)
+                _LOGGER.debug(
+                    "[LEY2] %s %s → dry_override_gate=%.2f (regime gate bypass armed)",
+                    tick.symbol, _seco_resolved, _dry_gate_score,
+                )
+
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
         # Update here so operator console sees live SCAR/IMM indicators even
@@ -4276,10 +4317,14 @@ class DerivDaemon:
                     return
 
         # BOOM600 safety override: trending regime needs extra score conviction.
-        # BYPASS when scarcity is SECO — DRY override already validated the entry.
-        # In drought the spike is statistically overdue; trending gate would double-block.
+        # BYPASS when scarcity is SECO/VENCIDO or Z2 pressure — high-tension states
+        # mean the spike is statistically overdue; the trending gate would double-block
+        # what ELASTICITY + scoring already validated.
         _b600_scarcity = str(snap.score_breakdown.get("scarcity_state") or "")
-        _b600_dry_bypass = tick.symbol.upper() == "BOOM600" and _b600_scarcity == "SECO"
+        _b600_dry_bypass = (
+            tick.symbol.upper() == "BOOM600"
+            and (_b600_scarcity in ("SECO", "VENCIDO") or _is_z2)
+        )
         if tick.symbol.upper() == "BOOM600" and str(snap.regime or "").lower() == "trending" and not _b600_dry_bypass:
             # 2026-05-29: gate is now IA-managed via dynamic_symbol_config.
             # Floor at 8.5 to prevent IA from collapsing the gate too low.
