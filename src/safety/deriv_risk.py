@@ -1001,9 +1001,12 @@ class DerivRiskManager:
                     # would inflate 1H/6H/12H counts and append phantom entries to
                     # deriv_spike_events.json that compound on every restart.
                     _cur_tick_n_early = self._ingest_tick_count.get(symbol, 0)
+                    # Use a separate threshold (default 1100) so the full Deriv WS
+                    # preload burst (~1000 ticks/symbol) is covered. DERIV_MIN_WARMUP_TICKS
+                    # (600) is the trading-gate threshold; the ingest guard must be higher.
                     _spike_warmup_skip = (
                         _cur_tick_n_early
-                        <= int(os.getenv("DERIV_MIN_WARMUP_TICKS", "600"))
+                        <= int(os.getenv("DERIV_INGEST_WARMUP_TICKS", "1100"))
                     )
                     if (_is_boom_spike or _is_crash_spike) and _spike_warmup_skip:
                         _LOGGER.debug(
