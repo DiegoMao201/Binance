@@ -1051,8 +1051,9 @@ class DerivRiskManager:
                             _spike_file = _state_dir / "deriv_spike_events.json"
                             # --- enriched context available at spike detection time ---
                             _price_at_spike = round(buf[-1], 5)
-                            _since_last_trade = round(
-                                _spike_ts - self._last_trade_ts_per_symbol.get(symbol.upper(), 0), 1
+                            _last_trade_at = self._last_trade_ts_per_symbol.get(symbol.upper(), 0)
+                            _since_last_trade = (
+                                round(_spike_ts - _last_trade_at, 1) if _last_trade_at > 0 else None
                             )
                             _lockout_active = False
                             try:
