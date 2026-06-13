@@ -106,7 +106,7 @@ class GeometryResult:
     # ── Ghost Price / Kinetic state ───────────────────────────────────────────
     kinetic_velocity: float = 0.0      # V_t = (P_t − P_{t-n}) / price  ×1e4
     kinetic_acceleration: float = 0.0  # A_t = V_t − V_{t-n}            ×1e4
-    kinetic_compressed: bool = False   # True when BOOM/CRASH in compression zone
+    kinetic_compressed: float = 0.0    # 0.0–1.0 kinetic compression score (FASE 3)
     ghost_mad: float = 0.0             # MAD of tick-sizes on ghost window
     # ── BOS-validated FVG ────────────────────────────────────────────────────
     fvg_bos_validated: bool = False    # FVG active AND BOS confirmed in same window
@@ -422,22 +422,20 @@ def _mad_ghost_prices(
 def _kinetic_state(
     ghost: np.ndarray,
     period: int = KINETIC_PERIOD,
-) -> tuple[float, float, bool]:
-    """Velocity and Acceleration on the ghost price series.
+) -> tuple[float, float, float]:
+    """Continuous kinetic compression score (0.0–1.0) on the ghost price series.
 
-    Definitions (normalised by current price × 1e4 for readability):
-        V_t = P_t − P_{t-n}
-        A_t = V_t − V_{t-n}
+    Three weighted components:
+      0.40 × direction  — counter-trend drift + deceleration (original V/A logic)
+      0.30 × variance   — low tick variance = tight coiling (price holding tension)
+      0.30 × consistency — fraction of recent micro-moves in compression direction
 
-    Compression triggers (spike loading zones):
-        BOOM  side: V_t < 0 (price drifting ↓) AND A_t ≥ 0 (drift decelerating)
-        CRASH side: V_t > 0 (price drifting ↑) AND A_t ≤ 0 (drift decelerating)
-
-    Returns (velocity_e4, acceleration_e4, compressed_bool)
+    Returns (velocity_e4, acceleration_e4, kinetic_score)
+    where kinetic_score ∈ [0.0, 1.0].  0.5+ = meaningful compression.
     """
     n = len(ghost)
     if n < period * 2 + 1:
-        return 0.0, 0.0, False
+        return 0.0, 0.0, 0.0
 
     ref = float(ghost[-1]) if float(ghost[-1]) > 0 else 1.0
 
@@ -445,13 +443,37 @@ def _kinetic_state(
     v_prev = (float(ghost[-1 - period]) - float(ghost[-1 - 2 * period])) / ref
     a_now  = v_now - v_prev
 
-    # BOOM: price slowly falling between booms (V<0) and losing momentum (A≥0)
     boom_compressed  = v_now < -1e-6 and a_now >= 0.0
-    # CRASH: price slowly rising between crashes (V>0) and losing momentum (A≤0)
     crash_compressed = v_now > +1e-6 and a_now <= 0.0
+    direction_score  = 1.0 if (boom_compressed or crash_compressed) else 0.0
 
-    compressed = boom_compressed or crash_compressed
-    return round(v_now * 1e4, 4), round(a_now * 1e4, 4), compressed
+    # Variance component: tight ghost drift → low std → high score
+    _var_window = ghost[max(0, n - 20):]
+    if ref > 0 and len(_var_window) > 1:
+        _pct_ch = np.diff(_var_window.astype(float)) / ref
+        _std = float(np.std(_pct_ch))
+        _TIGHT, _LOOSE = 1e-4, 8e-4
+        variance_score = max(0.0, min(1.0, (_LOOSE - _std) / (_LOOSE - _TIGHT)))
+    else:
+        variance_score = 0.0
+
+    # Consistency: ratio of recent micro-moves aligned with compression direction
+    _recent_diffs = np.diff(ghost[-period - 1:].astype(float))
+    if len(_recent_diffs) > 0 and (boom_compressed or crash_compressed):
+        if boom_compressed:
+            _aligned = float(np.sum(_recent_diffs < 0))
+        else:
+            _aligned = float(np.sum(_recent_diffs > 0))
+        consistency_score = _aligned / len(_recent_diffs)
+    else:
+        consistency_score = 0.0
+
+    kinetic_score = (
+        0.40 * direction_score +
+        0.30 * variance_score +
+        0.30 * consistency_score
+    )
+    return round(v_now * 1e4, 4), round(a_now * 1e4, 4), round(kinetic_score, 4)
 
 
 # ─── Public entry point ───────────────────────────────────────────────────────
@@ -645,7 +667,7 @@ def compute_geometry(
     # Ghost: spikes replaced by linear extrapolation on GHOST_WINDOW ticks.
     # Used ONLY for drift/kinetic assessment — FVG/BOS must use raw prices.
     ghost_arr, _ghost_mad = _mad_ghost_prices(arr)
-    kin_vel, kin_acc, kin_compressed = _kinetic_state(ghost_arr)
+    kin_vel, kin_acc, kin_score = _kinetic_state(ghost_arr)
 
     # ── SMC / Microstructure layer (advisory) ────────────────────────────
     # FVG and BOS run on RAW prices (spikes create the fair-value gaps).
@@ -746,7 +768,7 @@ def compute_geometry(
         micro_band_signal=micro_band_sig,
         kinetic_velocity=kin_vel,
         kinetic_acceleration=kin_acc,
-        kinetic_compressed=kin_compressed,
+        kinetic_compressed=kin_score,
         ghost_mad=_ghost_mad,
         fvg_bos_validated=fvg_bos_validated,
     )

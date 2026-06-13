@@ -192,31 +192,31 @@ def _compute_atr_hold_extension(
 
 
 def _calculate_rng_probability(
-    kinetic_compressed: bool,
+    kinetic_score: float,
     fvg_bos_validated: bool,
     zona_liquidez_macro: bool,
     scarcity_state: str,
+    scarcity_ratio: float,
     cooldown_active: bool,
 ) -> tuple[int, list[str]]:
     """Probabilistic RNG alignment score (0-100).
 
-    Replaces binary Trifecta with weighted scoring.  No gate requires all four
-    conditions simultaneously — asymmetric edge only needs statistical tilt.
-
-    Weights derived from empirical impact on spike probability:
-      35  kinetic_compressed  — drift decelerating = RNG exhaustion
-      30  fvg_bos_validated   — structural algorithm reset confirmed
-      20  zona_liquidez_macro — macro liquidity zone (Vision LLM)
-      15  scarcity LISTO/CARGANDO — cycle maturity in optimal window
+    Weights:
+      35  kinetic_score (0.0–1.0) — continuous compression: tight drift + deceleration
+      30  fvg_bos_validated       — structural algorithm reset confirmed
+      20  zona_liquidez_macro     — macro liquidity zone (Vision LLM)
+      15  scarcity (inverted)     — overdue = higher spike probability:
+            FRESCO(<0.5×)→0  CARGANDO(<0.9×)→3  LISTO(<1.4×)→8
+            VENCIDO(<2.2×)→12  SECO(≥2.2×)→15  extreme(≥2.8×)→+2
 
     Cooldown veto: if burst retrace < 50%, multiply score by 0.3 (energy not reset).
     """
     score = 0
     missing: list[str] = []
 
-    if kinetic_compressed:
-        score += 35
-    else:
+    _kin_pts = round(kinetic_score * 35)
+    score += _kin_pts
+    if _kin_pts == 0:
         missing.append("compresión cinética ausente")
 
     if fvg_bos_validated:
@@ -229,16 +229,23 @@ def _calculate_rng_probability(
     else:
         missing.append("zona macro no confirmada")
 
-    if scarcity_state in ("LISTO", "CARGANDO"):
-        score += 15
+    # FASE 1: inverted scarcity — overdue = higher spike pressure
+    if scarcity_state == "SECO":
+        score += 15 + (2 if scarcity_ratio >= 2.8 else 0)
+    elif scarcity_state == "VENCIDO":
+        score += 12
+    elif scarcity_state == "LISTO":
+        score += 8
+    elif scarcity_state == "CARGANDO":
+        score += 3
     else:
-        missing.append(f"scarcity={scarcity_state or 'desconocida'} fuera de ventana óptima")
+        missing.append(f"scarcity={scarcity_state or 'desconocida'} muy temprana (ratio={scarcity_ratio:.2f}×)")
 
     if cooldown_active:
         score = round(score * 0.3)
         missing.append("COOLDOWN activo — retroceso <50%")
 
-    return score, missing
+    return min(score, 100), missing
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
@@ -3764,19 +3771,21 @@ class DerivDaemon:
         # El gate final RNG_PROBABILITY_GATE sigue siendo el filtro autoritativo.
         # Scarcity puede no estar resuelta aquí; RNG será conservador (sin componente
         # de escasez = underestimate): kinetic(35)+fvg_bos(30)+vision(20)=85 max.
-        _mk_kinetic = bool(snap.score_breakdown.get("kinetic_compressed", False))
+        _mk_kinetic = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
         _mk_fvg_bos = bool(snap.score_breakdown.get("fvg_bos_validated", False))
         _mk_vision  = bool(
             (self._last_vision_context or {})
             .get(tick.symbol.upper(), {})
             .get("zona_liquidez_macro", False)
         )
-        _mk_scar    = str(snap.score_breakdown.get("scarcity_state") or "")
+        _mk_scar      = str(snap.score_breakdown.get("scarcity_state") or "")
+        _mk_scar_ratio = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
         _mk_rng, _mk_missing = _calculate_rng_probability(
-            kinetic_compressed=_mk_kinetic,
+            kinetic_score=_mk_kinetic,
             fvg_bos_validated=_mk_fvg_bos,
             zona_liquidez_macro=_mk_vision,
             scarcity_state=_mk_scar,
+            scarcity_ratio=_mk_scar_ratio,
             cooldown_active=False,
         )
         _mk_score_thr = float(os.getenv("DERIV_MASTER_KEY_SCORE", "6.25") or "6.25")
@@ -3957,17 +3966,9 @@ class DerivDaemon:
                         _imm.get("ticks_since_last", 0), _h_mr_boost, snap.score,
                     )
 
-        # ── 2026-06-02 SCARCITY (seco/lento) ENTRY GATE — operator directive ─
-        # Use the SAME live read as the manual-operator card (purple "seco/lento"
-        # at ~2.2× the symbol's own recent median inter-spike gap — typically
-        # ~10 min, NOT the 1h that the historical p90 would require). When the
-        # symbol is live-SECO the bot kept entering on every "good score" and
-        # bled to the SL waiting for a spike that was not coming. While SECO we
-        # require a near-perfect score (>=8) to enter — the operator's exact
-        # rule: "se puso morado, mejor espero un buen score". The symbol does
-        # NOT leave SECO until a real spike resets the ratio, so this also
-        # blocks re-entry through the whole drought. A >=8 setup arriving in
-        # SECO is the rare case where the signal lands WITH the slow spike.
+        # ── Scarcity state — inverted scoring feeds _calculate_rng_probability ─
+        # SECO/VENCIDO states now reward the RNG (overdue = spike more likely).
+        # Hard gates removed (FASE 1): SECO gets 15 pts, VENCIDO 12, LISTO 8.
         if _is_bc_bias:
             try:
                 _scar = self._risk.get_scarcity_state(tick.symbol)
@@ -3977,125 +3978,6 @@ class DerivDaemon:
             if _scar_state:
                 snap.score_breakdown["scarcity_state"] = _scar_state
                 snap.score_breakdown["scarcity_ratio"] = _scar.get("ratio")
-            if _scar.get("dry"):
-                _dry_override_global = float(os.getenv("DERIV_DRY_OVERRIDE_SCORE", "8.5") or 8.5)
-                _dry_override_map_raw = os.getenv("DERIV_DRY_OVERRIDE_SCORE_MAP", "") or ""
-                # CRASH900 is structurally slow (4-5 spikes/hr) — its regime score
-                # peaks at ~7.0 in calm and can never reach 8.5. Use a per-symbol gate.
-                _dry_override_per_sym: dict[str, float] = {"CRASH900": 6.0}
-                for _p in _dry_override_map_raw.split(","):
-                    if ":" in _p:
-                        _ps, _pv = _p.split(":", 1)
-                        try:
-                            _dry_override_per_sym[_ps.strip().upper()] = float(_pv.strip())
-                        except ValueError:
-                            pass
-                _dry_override = _dry_override_per_sym.get(tick.symbol.upper(), _dry_override_global)
-                if snap.score < _dry_override:
-                    snap.score_breakdown["scarcity_dry_block"] = True
-                    snap.score_breakdown["scarcity_dry_override_score"] = _dry_override
-                    self._log_entry_block(
-                        tick.symbol, "SCARCITY_DRY_GATE",
-                        score=snap.score, effective_min_score=_dry_override,
-                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                        score_breakdown=snap.score_breakdown,
-                    )
-                    self._record_decision(
-                        symbol=tick.symbol, allowed=False, side=snap.side,
-                        score=snap.score,
-                        reason=(
-                            f"SCARCITY_DRY_GATE: seco/lento (ratio={_scar.get('ratio')}× "
-                            f"elapsed={_scar.get('elapsed_s')}s) requires score≥{_dry_override:.1f} "
-                            f"got={snap.score:.2f}"
-                        ),
-                        extra={"regime": snap.regime, "scarcity_state": "SECO"},
-                    )
-                    self._spike_enrich(
-                        tick.symbol, bot_entered=False,
-                        block_reason="scarcity_dry_gate", score=snap.score,
-                    )
-                    if _master_key:
-                        _LOGGER.info(
-                            "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=SCARCITY_DRY_GATE"
-                            " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.1f",
-                            tick.symbol, snap.score, _mk_score_thr,
-                            _mk_rng, _mk_rng_thr, _dry_override,
-                        )
-                        snap.score_breakdown["master_key_bypass"] = "SCARCITY_DRY_GATE"
-                        snap.score_breakdown["master_key_rng"] = _mk_rng
-                    else:
-                        return
-                snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
-                snap.score_breakdown["scarcity_dry_override_gate"] = round(_dry_override, 2)
-                _LOGGER.info(
-                    "[PIPELINE] SCARCITY_DRY_OVERRIDE %s | score=%.2f≥%.1f ratio=%s× "
-                    "elapsed=%ss → taking the slow spike",
-                    tick.symbol, snap.score, _dry_override,
-                    _scar.get("ratio"), _scar.get("elapsed_s"),
-                )
-            # ── VENCIDO gate — datos: 11%WR, no hay gate hoy ─────────────────
-            # VENCIDO (ratio 1.4–2.2×): mercado lento pero no seco todavía.
-            # Permitimos entrar SOLO con estructura excepcional (≥7.5 por defecto).
-            elif _scar_state == "VENCIDO":
-                _vencido_min = float(
-                    os.getenv("DERIV_VENCIDO_OVERRIDE_SCORE", "7.5") or 7.5
-                )
-                # Per-symbol override (CRASH900 es estructuralmente más lento)
-                _vencido_map_raw = os.getenv("DERIV_VENCIDO_OVERRIDE_SCORE_MAP", "") or ""
-                _vencido_per_sym: dict[str, float] = {"CRASH900": 6.5}
-                for _vp in _vencido_map_raw.split(","):
-                    if ":" in _vp:
-                        _vs, _vv = _vp.split(":", 1)
-                        try:
-                            _vencido_per_sym[_vs.strip().upper()] = float(_vv.strip())
-                        except ValueError:
-                            pass
-                _vencido_thr = _vencido_per_sym.get(tick.symbol.upper(), _vencido_min)
-                if snap.score < _vencido_thr:
-                    snap.score_breakdown["scarcity_vencido_block"] = True
-                    self._log_entry_block(
-                        tick.symbol, "SCARCITY_VENCIDO_GATE",
-                        score=snap.score, effective_min_score=_vencido_thr,
-                        side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                        score_breakdown=snap.score_breakdown,
-                    )
-                    self._record_decision(
-                        symbol=tick.symbol, allowed=False, side=snap.side,
-                        score=snap.score,
-                        reason=(
-                            f"SCARCITY_VENCIDO_GATE: vencido (ratio={_scar.get('ratio')}× "
-                            f"elapsed={_scar.get('elapsed_s')}s) requires score≥{_vencido_thr:.1f} "
-                            f"got={snap.score:.2f} (datos: VENCIDO=11%WR)"
-                        ),
-                        extra={"regime": snap.regime, "scarcity_state": "VENCIDO"},
-                    )
-                    self._spike_enrich(
-                        tick.symbol, bot_entered=False,
-                        block_reason="scarcity_vencido_gate", score=snap.score,
-                    )
-                    _gl_setup = str(snap.score_breakdown.get("setup_type") or "")
-                    _gl_grade = str(snap.score_breakdown.get("execution_grade") or "")
-                    if _gl_setup in ("SMC_FVG", "EMA200_SPIKE") and _gl_grade in ("A", "B") and snap.score >= 7.0:
-                        self._ghost_logger.add(
-                            symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
-                            score_raw=float(snap.score), gate="SCARCITY_VENCIDO_GATE",
-                            setup_type=_gl_setup, grade=_gl_grade,
-                            scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
-                            imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
-                            imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
-                        )
-                    if _master_key:
-                        _LOGGER.info(
-                            "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=SCARCITY_VENCIDO_GATE"
-                            " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.1f",
-                            tick.symbol, snap.score, _mk_score_thr,
-                            _mk_rng, _mk_rng_thr, _vencido_thr,
-                        )
-                        snap.score_breakdown["master_key_bypass"] = "SCARCITY_VENCIDO_GATE"
-                        snap.score_breakdown["master_key_rng"] = _mk_rng
-                    else:
-                        return
-                snap.score_breakdown["scarcity_vencido_override_fired"] = round(snap.score, 2)
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
@@ -4728,11 +4610,36 @@ class DerivDaemon:
         _rng_cooldown_active = (
             str(snap.score_breakdown.get("setup_type", "")) == "POST_SPIKE_COOLDOWN"
         )
+
+        # ── FASE 2: POST_CLUSTER_EXHAUSTION — 3+ spikes in 300s + overextension ─
+        # When the market just fired a spike cluster AND price is overextended,
+        # kinetic energy is spent — suppress kinetic contribution to RNG.
+        _cluster_exhausted = False
+        try:
+            _ce_spikes = self._risk.get_spike_count_recent(tick.symbol, 300.0)
+            _ce_ch_pos = abs(float(snap.score_breakdown.get("geo_channel_pos") or 0.0))
+            if _ce_spikes >= 3 and _ce_ch_pos > 0.7:
+                _cluster_exhausted = True
+                snap.score_breakdown["post_cluster_exhaustion"] = True
+                snap.score_breakdown["post_cluster_spike_count"] = _ce_spikes
+                _LOGGER.info(
+                    "[PIPELINE] POST_CLUSTER_EXHAUSTION %s | spikes_300s=%d ch_pos=%.3f"
+                    " → kinetic suppressed in RNG",
+                    tick.symbol, _ce_spikes, _ce_ch_pos,
+                )
+        except Exception:
+            pass
+
+        _rng_kinetic = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
+        if _cluster_exhausted:
+            _rng_kinetic = 0.0
+
         _rng_prob, _rng_missing = _calculate_rng_probability(
-            kinetic_compressed=bool(snap.score_breakdown.get("kinetic_compressed", False)),
+            kinetic_score=_rng_kinetic,
             fvg_bos_validated=bool(snap.score_breakdown.get("fvg_bos_validated", False)),
             zona_liquidez_macro=_rng_vision,
             scarcity_state=str(snap.score_breakdown.get("scarcity_state") or ""),
+            scarcity_ratio=float(snap.score_breakdown.get("scarcity_ratio") or 0.0),
             cooldown_active=_rng_cooldown_active,
         )
         _rng_threshold = int(float(os.getenv("DERIV_PROBABILITY_THRESHOLD", "65") or "65"))
@@ -4743,8 +4650,8 @@ class DerivDaemon:
 
         # Keep trifecta fields for UI chip display
         _trifecta_vision   = _rng_vision
-        _trifecta_kinetic  = bool(snap.score_breakdown.get("kinetic_compressed", False))
-        _trifecta_scarcity = str(snap.score_breakdown.get("scarcity_state") or "") in ("LISTO", "CARGANDO")
+        _trifecta_kinetic  = float(snap.score_breakdown.get("kinetic_compressed") or 0.0) >= 0.5
+        _trifecta_scarcity = str(snap.score_breakdown.get("scarcity_state") or "") in ("LISTO", "VENCIDO", "SECO")
         _trifecta_fvg_bos  = bool(snap.score_breakdown.get("fvg_bos_validated", False))
         _trifecta_met      = _trifecta_vision and _trifecta_kinetic and _trifecta_scarcity and _trifecta_fvg_bos
         snap.score_breakdown["trifecta_met"]      = _trifecta_met
