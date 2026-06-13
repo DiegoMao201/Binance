@@ -144,14 +144,6 @@ function SymbolCard({ s }) {
   const hurst  = analytics?.snapshot?.hurst ?? null;
   const hurstH = analytics?.hurst_history ?? [];
 
-  /* ─ maturity gate — mirrors DERIV_MATURITY_GATE_FRAC=0.70 in the bot ─ */
-  const _matFrac       = 0.70;
-  const _matThresholdS = medSec ? Math.round(medSec * _matFrac) : null;
-  const _matRemainS    = (_matThresholdS && secs > 0 && secs < _matThresholdS)
-    ? Math.ceil(_matThresholdS - secs) : 0;
-  const _inMaturity    = _matRemainS > 0 && medSec != null;
-  const _matPct        = _matThresholdS ? Math.min(100, Math.round((secs / _matThresholdS) * 100)) : null;
-
   /* ─ score freshness + gap (needed before isInactive / sem) ─ */
   const scoreAgeSec0  = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
   const scoreIsStale0 = scoreAgeSec0 != null && scoreAgeSec0 > 90;
@@ -191,15 +183,8 @@ function SymbolCard({ s }) {
     msgLine = secs > 300
       ? `Post-cluster · ${minsSince}m sin spike · esperando normalización`
       : `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
-  } else if (sem === "amber" && secs > 0 && secs < 120) {
-    msgEmoji = "⏳"; msgLine = "Acaba de caer — espera 2 min antes de entrar";
-  } else if (_inMaturity) {
-    const _mm = String(Math.floor(_matRemainS / 60)).padStart(2, "0");
-    const _ss = String(_matRemainS % 60).padStart(2, "0");
-    msgEmoji = "🟡"; msgLine = `Esperando madurez · Falta ${_mm}:${_ss} (${_matPct}% del ciclo)`;
   } else if (sem === "green") {
-    const hurstNote = hurst != null && hurst < 0.45 ? " · Hurst bajo = sin fuerza" : "";
-    msgEmoji = "✅"; msgLine = `Zona cargada${minsSince != null ? ` · ${minsSince} min sin caída` : ""}${hurstNote}`;
+    msgEmoji = "✅"; msgLine = `Zona cargada${minsSince != null ? ` · ${minsSince} min sin caída` : ""}`;
   } else {
     const pct = p75Sec && secs ? Math.round((secs / p75Sec) * 100) : null;
     msgEmoji = "⏳"; msgLine = `Acumulando${pct != null ? ` · ${pct}% del tiempo típico` : ""}`;
@@ -264,26 +249,17 @@ function SymbolCard({ s }) {
     : _isCrashCard ? _ema200DistC >= _ldThr
     : _isBoomCard  ? _ema200DistC <= -_ldThr
     : null;
-  const _masterRed    = _isBlindZone
-    || _structConflC
+  const _rngProbC   = _sn?.rng_probability ?? null;
+  const _rngThreshC = _sn?.rng_threshold ?? 65;
+  const _masterRed    = _structConflC
     || _scarcityC === "SECO"
-    || (_scarcityC === "VENCIDO" && (_scoreRawC == null || _scoreRawC < 7.5))
-    || _immStateC === "RIPE"
-    || (_scoreRawC != null && _scoreRawC < 7.5)
+    || (_scarcityC === "VENCIDO" && (_scoreRawC == null || _scoreRawC < 7.0))
     || _gradeC === "C"
-    || _setupTypeC === "TREND"
-    || _setupTypeC === "TREND_NO_STRUCT"
-    || _setupTypeC === "POST_SPIKE_COOLDOWN"
     || _ema200LoadedC === false;
   const _masterGreen  = !_masterRed && _sn != null
-    && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
+    && _rngProbC != null && _rngProbC >= _rngThreshC
     && (_gradeC === "A" || _gradeC === "B")
-    && _scoreRawC != null && +_scoreRawC.toFixed(1) >= 7.8
-    && (_fvgAnchC || _structConfC)
-    && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC))
-    && (_ema200LoadedC == null || _ema200LoadedC === true)
-    && (_immStateC === "BUILDING"
-        || (_immScoreC != null && _immScoreC >= 0.3 && _immScoreC <= 0.6));
+    && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC));
 
   // ── DISPLAY SCORE — usa score_raw del analytics cuando decisión está vencida ──
   const _usingLiveScore = _scoreRawC != null && (score == null || scoreIsStale0);
@@ -385,100 +361,37 @@ function SymbolCard({ s }) {
         </span>
       </div>
 
-      {/* ══ ZONA CIEGA / NORMALIZANDO — reemplaza contenido analítico ══ */}
+      {/* ══ POST-SPIKE INFO — informacional, no bloqueante ══ */}
       {(_isBlindZone || _isNormZone) && (
-        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${(_isBlindZone ? T.red : T.amber)}33` }}>
-          {/* Countdown + estado */}
+        <div style={{ padding: "6px 12px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{
-            background: (_isBlindZone ? T.red : T.amber) + "1a",
-            border: `2px solid ${_isBlindZone ? T.red : T.amber}66`,
-            borderRadius: 7, padding: "8px 12px",
+            background: T.cyan + "0d", border: `1px solid ${T.cyan}33`,
+            borderRadius: 6, padding: "5px 10px",
             display: "flex", alignItems: "center", justifyContent: "space-between",
-            marginBottom: _isBurstWin ? 8 : 0,
           }}>
             <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800,
-                color: _inCascade ? T.orange : _isBlindZone ? T.red : T.amber, letterSpacing: "0.10em" }}>
-                {_inCascade
-                  ? "CASCADE — MOMENTUM ACTIVO"
-                  : _isBlindZone ? "NO OPERAR · NORMALIZANDO" : "NORMALIZANDO · CONFIRMAR"}
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800,
+                color: _inCascade ? T.orange : T.cyan, letterSpacing: "0.08em" }}>
+                {_inCascade ? "CASCADE — MOMENTUM ACTIVO" : "POST-SPIKE · anclajes activos"}
               </div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, marginTop: 2 }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
                 {_inCascade
-                  ? `${_cascadeDepth ?? "?"}x spikes · gap ${_cascadeGapTicks ?? "?"}t · sin retroceso`
-                  : _isBlindZone
-                    ? "FVG · SMC · SCORE sesgados — anclajes activados"
-                    : "Estructura post-spike parcialmente válida"}
+                  ? `${_cascadeDepth ?? "?"}x spikes · gap ${_cascadeGapTicks ?? "?"}t`
+                  : "Probabilidad RNG actualizada — confiar en el score"}
               </div>
             </div>
             {_cdLabel && (
-              <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 16 }}>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                  {_isBlindZone ? "REACTIVACIÓN" : "NORMALIZACIÓN"}
-                </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 26, fontWeight: 800,
-                  color: _isBlindZone ? T.red : T.amber, lineHeight: 1 }}>
-                  {_cdLabel}
-                </div>
+              <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 12 }}>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 6, color: T.mute, textTransform: "uppercase" }}>desde spike</div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 800, color: T.cyan, lineHeight: 1 }}>{_cdLabel}</div>
               </div>
             )}
           </div>
-
-          {/* CASCADE alert inside blind zone */}
-          {_inCascade && (
-            <div style={{
-              marginBottom: 6,
-              background: T.orange + "18", border: `1.5px solid ${T.orange}55`,
-              borderRadius: 6, padding: "6px 10px",
-              display: "flex", alignItems: "center", gap: 8,
-            }}>
-              <div style={{ width: 11, height: 11, borderRadius: "50%", flexShrink: 0,
-                background: T.orange, boxShadow: `0 0 7px ${T.orange}` }} />
-              <div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
-                  color: T.orange, letterSpacing: "0.08em" }}>
-                  CASCADA CONFIRMADA — {_cascadeDepth ?? "?"}x SPIKES
-                </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
-                  gap={_cascadeGapTicks ?? "?"}t · MOMENTUM sin retroceso · DERIV_CASCADE_ENTRY_ENABLED para operar
-                </div>
-              </div>
-            </div>
-          )}
-          {/* BURST window — solo primeros 30s */}
-          {_isBurstWin && (
-            <div style={{
-              background: (_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red) + "18",
-              border: `1.5px solid ${_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red}55`,
-              borderRadius: 6, padding: "6px 10px",
-              display: "flex", alignItems: "center", gap: 8,
-            }}>
-              <div style={{
-                width: 11, height: 11, borderRadius: "50%", flexShrink: 0,
-                background: _burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red,
-                boxShadow: `0 0 7px ${_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red}`,
-              }} />
-              <div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
-                  color: _burstActive && _burstRetr != null && _burstRetr <= 0.35 ? T.green : T.red,
-                  letterSpacing: "0.08em" }}>
-                  {_burstActive
-                    ? (_burstRetr != null && _burstRetr <= 0.35 ? "BURST — ENTRADA RÁPIDA OK" : "BURST CANCELADO · RETR EXCESIVO")
-                    : "SIN BURST"}
-                </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
-                  {_burstDepth != null ? `${_burstDepth} spikes · ` : ""}
-                  {_burstRetr != null ? `RETR ${(_burstRetr * 100).toFixed(0)}%` : "sin retroceso"}
-                  {_burstActive && _burstRetr != null && _burstRetr <= 0.35 ? " · momentum activo" : ""}
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
       {/* ══ GO — banner hero cuando todos los filtros pasan ══ */}
-      {_masterGreen && !_isBlindZone && !_isNormZone && (
+      {_masterGreen && (
         <div style={{
           padding: "8px 12px", background: T.green + "12",
           borderBottom: `1px solid ${T.green}33`,
@@ -494,25 +407,23 @@ function SymbolCard({ s }) {
               ENTRADA CONFIRMADA
             </div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.green, opacity: 0.7, marginTop: 1 }}>
-              {_setupTypeC} · GRADE {_gradeC} · {_scarcityC} · {_immStateC}
-              {_fvgAnchC ? " · FVG ANCLADO" : _structConfC ? " · 5m CONF" : ""}
+              {_setupTypeC} · GRADE {_gradeC} · {_scarcityC}
             </div>
           </div>
           <div style={{ textAlign: "right", flexShrink: 0 }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, textTransform: "uppercase" }}>SCORE</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800,
+            <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>PROB RNG</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 32, fontWeight: 800,
               color: T.green, lineHeight: 1 }}>
-              {_scoreRawC?.toFixed(1) ?? "–"}
+              {_rngProbC ?? "–"}
             </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800, color: T.green }}>
-              {_gradeC}
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.green }}>
+              GRADE {_gradeC}
             </div>
           </div>
         </div>
       )}
 
-      {/* score strip — oculto en zona ciega (score sesgado por spike) */}
-      {!_isBlindZone && (
+      {/* score strip */}
       <div style={{ padding: "9px 12px", background: T.bg2, borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
           <div>
@@ -559,7 +470,6 @@ function SymbolCard({ s }) {
           </div>
         )}
       </div>
-      )}
 
 
       {/* ══ tiempo + ticks (grande) ══ */}
@@ -602,7 +512,7 @@ function SymbolCard({ s }) {
 
 
         {/* analytics — Vision 15M + ENTRY QUALITY */}
-        {!_isBlindZone && analytics?.snapshot && (
+        {analytics?.snapshot && (
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
             {analytics.spike_stats && (() => {
               const st = analytics.spike_stats;
@@ -760,16 +670,14 @@ function SymbolCard({ s }) {
                 : isNormalizingZone ? T.amber
                 : isVeryStale ? T.red : isStale ? T.amber : T.mute;
 
-              // Setup color
+              // Setup color — TREND ahora es ámbar (bot lo permite vía RNG)
               const setupColor = setupType === "SMC_FVG" ? T.green
-                : setupType === "TREND" ? T.red
-                : setupType === "TREND_NO_STRUCT" ? T.orange
-                : setupType === "POST_SPIKE_COOLDOWN" ? T.cyan
+                : setupType === "TREND" ? T.amber
+                : setupType === "TREND_NO_STRUCT" ? T.amber
                 : setupType === "EMA200_SPIKE" ? T.cyan : T.mute;
               const setupLabel = setupType === "SMC_FVG" ? "SMC_FVG"
                 : setupType === "TREND" ? "TREND"
                 : setupType === "TREND_NO_STRUCT" ? "SIN BOS"
-                : setupType === "POST_SPIKE_COOLDOWN" ? "COOLDOWN"
                 : setupType === "EMA200_SPIKE" ? "EMA200" : (setupType || "–");
 
               // Grade color
@@ -806,40 +714,25 @@ function SymbolCard({ s }) {
               const scoreRawColor = scoreRaw == null ? T.mute
                 : scoreRaw >= 7.8 ? T.green : scoreRaw >= 7.0 ? T.amber : T.red;
 
-              // Chips dim when data is stale; blind zone dims further and adds overlay
-              const chipOpacity = isBlindZone ? 0.25 : isNormalizingZone ? 0.5 : staleOpacity;
+              // Chips dim only when data is stale
+              const chipOpacity = staleOpacity;
 
-              // ── SEÑAL MAESTRA ─────────────────────────────────────────────
-              const _goodSetup    = setupType === "SMC_FVG" || setupType === "EMA200_SPIKE";
-              const _redSetupType = setupType === "TREND" || setupType === "TREND_NO_STRUCT" || setupType === "POST_SPIKE_COOLDOWN";
+              // ── SEÑAL MAESTRA — basada en RNG Probability ─────────────────
               const _goodGrade    = grade === "A" || grade === "B";
-              const _goodScore    = scoreRaw != null && +scoreRaw.toFixed(1) >= 7.8;
-              const _goodFvg      = fvgAnchorActive || structFvgConfirm;
-              // null scarcity = SIN_DATOS (fresh restart, no history) = neutral, not blocking
+              const _goodRng      = rngProb != null && rngProb >= rngThreshold;
+              // null scarcity = SIN_DATOS (fresh restart, no history) = neutral
               const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
-              const _goodImm      = immState === "BUILDING" ||
-                                    (immScore != null && immScore >= 0.3 && immScore <= 0.6);
-              // EMA loaded: null = sin datos = neutral. Cuando FVG anchor activo,
-              // el EMA negativo post-spike es NORMAL (precio crasheó, eso es esperado)
-              // y el anchor ES la señal de entrada → EMA no bloquea.
               const _emaOverridedByAnchor = fvgAnchorActive;
               const _goodEma = ema200Loaded == null || ema200Loaded === true || _emaOverridedByAnchor;
 
               const _redConflict = structFvgConflict;
               const _redSeco     = scarcity === "SECO";
-              const _redVencido  = scarcity === "VENCIDO" && (scoreRaw == null || scoreRaw < 7.5);
-              const _redBlind    = isBlindZone;
-              const _redRipe     = immState === "RIPE";
-              const _redScore    = scoreRaw != null && scoreRaw < 7.5;
+              const _redVencido  = scarcity === "VENCIDO" && (scoreRaw == null || scoreRaw < 7.0);
               const _redGrade    = grade === "C";
-              const _redSetup    = _redSetupType;
-              // EMA sólo bloquea si no hay FVG anchor activo (anchor = señal primaria post-spike)
               const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
 
-              const _isRed   = _redConflict || _redSeco || _redVencido || _redBlind ||
-                               _redRipe || _redScore || _redGrade || _redSetup || _redEma;
-              const _isGreen = !_isRed && _goodSetup && _goodGrade && _goodScore &&
-                               _goodFvg && _goodScarcity && _goodImm && _goodEma;
+              const _isRed   = _redConflict || _redSeco || _redVencido || _redGrade || _redEma;
+              const _isGreen = !_isRed && _goodRng && _goodGrade && _goodScarcity && _goodEma;
               const _isAmber = !_isRed && !_isGreen;
 
               const _semColor = _isRed ? T.red : _isGreen ? T.green : T.amber;
@@ -852,22 +745,14 @@ function SymbolCard({ s }) {
                 _redConflict && "5m CONFLICTO",
                 _redSeco     && `SECO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr + " sin spike" : ""}`,
                 _redVencido  && `VENCIDO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr : ""}`,
-                _redBlind    && "ZONA CIEGA",
-                _redRipe     && "INMINENTE · no cazar spike",
-                _redScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 7.5`,
                 _redGrade    && "GRADE C",
-                _redSetup    && (setupType === "POST_SPIKE_COOLDOWN" ? "COOLDOWN — retroceso activo" : setupType === "TREND_NO_STRUCT" ? "TREND sin BOS estructural" : "SETUP TREND sin FVG"),
                 _redEma      && `EMA DESCARGADO${_emaDevStr ? " " + _emaDevStr : ""}`,
               ].filter(Boolean);
               const _missing = [
-                !_goodSetup    && "SETUP",
+                !_goodRng      && `RNG ${rngProb ?? "?"}% < ${rngThreshold}%`,
                 !_goodGrade    && "GRADE",
-                !_goodScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 7.8`,
-                !_goodFvg      && "FVG ANCLADO",
                 scarcity && !_goodScarcity && `SCAR ${scarcity}`,
-                !_goodImm      && `IMM ${immState ?? "SIN DATOS"}`,
                 !_goodEma      && `EMA${_emaDevStr ? " " + _emaDevStr : ""}`,
-                _inMaturity    && (() => { const _mm=String(Math.floor(_matRemainS/60)).padStart(2,"0"); const _ss=String(_matRemainS%60).padStart(2,"0"); return `MADUREZ ${_mm}:${_ss}`; })(),
               ].filter(Boolean);
 
               const chip = (label, value, color) => (
@@ -926,26 +811,6 @@ function SymbolCard({ s }) {
                     )}
                   </div>
 
-                  {/* Post-spike blind zone warning — overrides chips */}
-                  {isBlindZone && (
-                    <div style={{ background: T.red + "22", border: `1px solid ${T.red}55`,
-                      borderRadius: 4, padding: "3px 6px", marginBottom: 4 }}>
-                      <div style={{ color: T.red, fontSize: 7, fontWeight: 700, letterSpacing: "0.06em" }}>
-                        ZONA CIEGA · {postSpikeLabel} post-spike
-                      </div>
-                      <div style={{ color: T.mute, fontSize: 6, marginTop: 1 }}>
-                        Indicadores sesgados — FVG/SMC/GRADE no válidos hasta normalización
-                      </div>
-                    </div>
-                  )}
-                  {isNormalizingZone && (
-                    <div style={{ background: T.amber + "18", border: `1px solid ${T.amber}44`,
-                      borderRadius: 4, padding: "2px 5px", marginBottom: 4 }}>
-                      <div style={{ color: T.amber, fontSize: 6, fontWeight: 700 }}>
-                        NORMALIZANDO · {postSpikeLabel} post-spike · confirmar con score en vivo
-                      </div>
-                    </div>
-                  )}
 
                   {/* ── Burst active banner ─────────────────────────────────── */}
                   {burstActive && (
@@ -964,44 +829,45 @@ function SymbolCard({ s }) {
                     </div>
                   )}
 
-                  {/* ── RNG Probability bar ──────────────────────────────── */}
+                  {/* ── RNG Probability — métrica principal ───────────────── */}
                   {rngProb != null && (() => {
                     const pct = Math.min(100, rngProb);
                     const passed = rngProb >= rngThreshold;
-                    const barCol = rngProb >= 85 ? T.green
+                    const barCol = rngProb >= 80 ? T.green
                       : rngProb >= rngThreshold ? T.amber
                       : rngProb >= 45 ? T.orange : T.red;
                     return (
                       <div style={{
-                        background: barCol + "12",
-                        border: `1px solid ${barCol}44`,
-                        borderRadius: 5, padding: "5px 8px", marginBottom: 6,
+                        background: barCol + "18",
+                        border: `2px solid ${barCol}${passed ? "99" : "44"}`,
+                        borderRadius: 7, padding: "8px 10px", marginBottom: 6,
                         opacity: chipOpacity,
+                        boxShadow: passed ? `0 0 10px ${barCol}22` : "none",
                       }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-                          <span style={{ fontSize: 7, color: T.mute, fontWeight: 700, letterSpacing: "0.08em" }}>
-                            PROB RNG
-                          </span>
-                          <span style={{ fontSize: 9, fontWeight: 800, color: barCol }}>
-                            {rngProb}
-                            <span style={{ fontSize: 7, color: T.mute }}>/100</span>
-                            {" "}
-                            <span style={{ fontSize: 7, color: passed ? barCol : T.mute }}>
-                              {passed ? "✓ PASA" : `✗ <${rngThreshold}`}
-                            </span>
-                          </span>
-                        </div>
-                        <div style={{ height: 4, borderRadius: 3, background: T.bg, overflow: "hidden", marginBottom: rngMissing.length > 0 ? 3 : 0 }}>
-                          <div style={{
-                            height: "100%", borderRadius: 3, width: `${pct}%`,
-                            background: barCol, transition: "width 0.5s ease",
-                          }} />
-                        </div>
-                        {rngMissing.length > 0 && (
-                          <div style={{ fontSize: 6, color: T.mute, marginTop: 1 }}>
-                            Falta: {rngMissing.join(" · ")}
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 7, color: T.mute, fontWeight: 700, letterSpacing: "0.10em", marginBottom: 3 }}>
+                              PROBABILIDAD RNG
+                            </div>
+                            <div style={{ height: 6, borderRadius: 4, background: T.bg, overflow: "hidden", marginBottom: 3 }}>
+                              <div style={{
+                                height: "100%", borderRadius: 4, width: `${pct}%`,
+                                background: barCol, transition: "width 0.5s ease",
+                              }} />
+                            </div>
+                            {rngMissing.length > 0 && (
+                              <div style={{ fontSize: 6, color: T.mute }}>Falta: {rngMissing.join(" · ")}</div>
+                            )}
                           </div>
-                        )}
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <div style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 800, color: barCol, lineHeight: 1 }}>
+                              {rngProb}
+                            </div>
+                            <div style={{ fontSize: 8, color: passed ? barCol : T.mute, fontWeight: 700, letterSpacing: "0.08em" }}>
+                              {passed ? `✓ ≥${rngThreshold}` : `✗ <${rngThreshold}`}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     );
                   })()}
