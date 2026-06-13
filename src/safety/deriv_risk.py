@@ -3007,9 +3007,21 @@ class DerivRiskManager:
                 and _dyn_regime in _dyn_relax_regimes
                 and score >= (effective_min_score + _dyn_relax_score_margin)
             )
+            # Bypass BLOCK_SYMBOLS hard veto when extreme tension is sustained:
+            # elapsed ≥ 60% of symbol extreme-tension limit means the RNG has been
+            # compressed beyond normal Poisson expectations. Apply soft penalty instead
+            # of hard block so the pipeline can still evaluate the entry.
+            _tension_bypass_pct = float(
+                os.getenv("DERIV_STRUCTURAL_TENSION_BYPASS_PCT", "0.60") or "0.60"
+            )
+            _tens_bypass = (
+                _dyn_elapsed_sec > 0
+                and _dyn_sym_max > 0
+                and _dyn_elapsed_sec >= _dyn_sym_max * _tension_bypass_pct
+            )
             _dyn_relax_structural = (
                 _dyn_relax_candidate
-                and symbol.upper() not in _dyn_relax_block_symbols
+                and (symbol.upper() not in _dyn_relax_block_symbols or _tens_bypass)
             )
 
             if not _has_fvg_active and not _has_spike_hunter:
@@ -3032,17 +3044,24 @@ class DerivRiskManager:
                         snap.score_breakdown["dynamic_structural_penalty"] = round(
                             _dyn_relax_no_fvg_penalty, 2
                         )
+                        if _tens_bypass:
+                            snap.score_breakdown["tension_bypass_structural"] = True
+                            snap.score_breakdown["tension_bypass_elapsed_pct"] = round(
+                                _dyn_elapsed_sec / _dyn_sym_max, 2
+                            ) if _dyn_sym_max > 0 else 0.0
                         snap.reasons.append(
                             f"dynamic_structural_relax_no_fvg: regime={_dyn_regime} "
                             f"penalty={_dyn_relax_no_fvg_penalty:.2f} score_after={score:.2f}"
+                            + (f" [TENSION_BYPASS {_dyn_elapsed_sec:.0f}s/{_dyn_sym_max:.0f}s]" if _tens_bypass else "")
                         )
                         _LOGGER.info(
                             "[STRUCTURAL_RELAX_DYNAMIC] %s no_fvg_hard_veto→soft "
-                            "regime=%s penalty=%.2f score_after=%.2f",
+                            "regime=%s penalty=%.2f score_after=%.2f%s",
                             symbol,
                             _dyn_regime,
                             _dyn_relax_no_fvg_penalty,
                             score,
+                            f" [TENSION_BYPASS {_dyn_elapsed_sec:.0f}s/{_dyn_sym_max:.0f}s]" if _tens_bypass else "",
                         )
                     else:
                         if _dyn_relax_candidate and symbol.upper() in _dyn_relax_block_symbols:

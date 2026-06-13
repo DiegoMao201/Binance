@@ -895,6 +895,7 @@ class DerivDaemon:
         dyn_cfg: dict[str, Any],
         dyn_active: bool,
         score_floor: float,
+        elastic_z2: bool = False,
     ) -> tuple[bool, str]:
         """Allow post-spike entries only when continuation strength is explicit.
 
@@ -903,6 +904,13 @@ class DerivDaemon:
           - Reduce late/chasing entries that often end in spike_timeout.
         """
         if not self._entry_tick_only or not is_spike_market(symbol):
+            return True, ""
+
+        # Elasticity Z2 (extreme tension: ratio≥2.0 OR elapsed≥100% symbol limit)
+        # means the symbol has been compressed beyond normal Poisson expectations.
+        # At this point the PSSV protection is less meaningful — the spike is
+        # statistically overdue and we want to be positioned, not guarded.
+        if elastic_z2:
             return True, ""
 
         _last_spike_tick = self._risk.get_last_spike_tick_count(symbol)
@@ -951,10 +959,16 @@ class DerivDaemon:
             _hot_min_spikes = max(
                 1, int(float(os.getenv("DERIV_HOT_REENTRY_MIN_SPIKES", "1") or 1))
             )
+            # Block HOT_REENTRY when spike cluster is too dense: 3+ spikes means the
+            # RNG bucket is recently depleted — consecutive spikes inflate score/RNG
+            # artificially but the next spike is NOT statistically imminent.
+            _hot_max_spikes = int(float(os.getenv("DERIV_HOT_REENTRY_MAX_RECENT_SPIKES", "0") or 0))
+            _hot_cluster_block = _hot_max_spikes > 0 and _hot_recent_spikes > _hot_max_spikes
             if (
                 float(snap.score or 0.0) >= _hot_min_score
                 and _elapsed <= _hot_fresh_ticks
                 and _hot_recent_spikes >= _hot_min_spikes
+                and not _hot_cluster_block
             ):
                 _sb_hot = (
                     snap.score_breakdown
@@ -972,6 +986,12 @@ class DerivDaemon:
                     _elapsed, _hot_fresh_ticks, _hot_recent_spikes, int(_hot_win_sec),
                 )
                 return True, ""
+            elif _hot_cluster_block:
+                _LOGGER.info(
+                    "[POST_SPIKE_CHASE_GUARD] %s HOT_REENTRY blocked: spike_cluster "
+                    "spikes=%d/%ds > max=%d (bucket depleted, score inflation risk)",
+                    symbol, _hot_recent_spikes, int(_hot_win_sec), _hot_max_spikes,
+                )
 
         # ── 2026-06-01 SPIKE-CLUSTER OVERRIDE ("se alinearon las estrellas") ──
         # Forensic over 1102 spikes: when >=3 spikes hit in the last 300s, the
@@ -4303,6 +4323,22 @@ class DerivDaemon:
         _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
         if _sym_bleed_bonus > 0.0:
             _profile_min_score = min(10.0, _profile_min_score + _sym_bleed_bonus)
+        # FASE 3 elastic: also discount the PROFILE gate under extreme tension so
+        # it doesn't remain a hard floor when the REGIME gate was already relaxed.
+        if _is_bc_bias and _is_z2:
+            _el_pct_prof = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28) * 0.50
+            _profile_min_score = max(
+                float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50),
+                _profile_min_score * (1.0 - _el_pct_prof),
+            )
+            snap.score_breakdown["elasticity_profile_min_elastic"] = round(_profile_min_score, 2)
+        elif _is_bc_bias and _is_z1:
+            _el_pct_prof = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28) * 0.25
+            _profile_min_score = max(
+                float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50),
+                _profile_min_score * (1.0 - _el_pct_prof),
+            )
+            snap.score_breakdown["elasticity_profile_min_elastic"] = round(_profile_min_score, 2)
 
         # Keep a single authoritative effective_min for every downstream gate/log.
         # This removes visual drift where AI_VETO/ENTRY_ALLOWED showed the base
@@ -4342,7 +4378,17 @@ class DerivDaemon:
                     "dynamic_cfg": _dyn_cfg,
                 },
             )
-            return
+            if _master_key:
+                _LOGGER.info(
+                    "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=PROFILE_SCORE_GATE"
+                    " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.2f",
+                    tick.symbol, snap.score, _mk_score_thr,
+                    _mk_rng, _mk_rng_thr, _profile_min_score,
+                )
+                snap.score_breakdown["master_key_bypass"] = "PROFILE_SCORE_GATE"
+                snap.score_breakdown["master_key_rng"] = _mk_rng
+            else:
+                return
 
         # Post-spike intelligent gate: after the anti-chase window, only allow
         # continuation entries when multi-signal strength is explicit.
@@ -4353,6 +4399,7 @@ class DerivDaemon:
             dyn_cfg=_dyn_cfg,
             dyn_active=_dyn_active,
             score_floor=_profile_min_score,
+            elastic_z2=_is_z2,
         )
         if not _post_spike_ok:
             self._log_entry_block(
@@ -4863,7 +4910,20 @@ class DerivDaemon:
                 tick.symbol, bot_entered=False,
                 block_reason=f"rng_probability:{_rng_prob}/100<{_rng_threshold}",
             )
-            return
+            # MASTER_KEY: preview RNG ≥ threshold means the setup WAS validated earlier
+            # in this same tick cycle (FVG may have expired milliseconds later).
+            # Allow bypass — the full score ≥ threshold AND structural check already passed.
+            if _master_key and _mk_rng >= _rng_threshold:
+                _LOGGER.info(
+                    "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=RNG_PROBABILITY_GATE"
+                    " preview_rng=%d≥%d actual=%d → continuing to LLM",
+                    tick.symbol, _mk_rng, _rng_threshold, _rng_prob,
+                )
+                snap.score_breakdown["master_key_bypass"] = "RNG_PROBABILITY_GATE"
+                snap.score_breakdown["master_key_rng"] = _mk_rng
+                snap.score_breakdown["rng_actual_at_bypass"] = _rng_prob
+            else:
+                return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH
