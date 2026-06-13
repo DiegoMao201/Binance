@@ -994,7 +994,26 @@ class DerivRiskManager:
                     _su = symbol.upper()
                     _is_boom_spike  = "BOOM"  in _su and _jump >  3.0 * _recent_atr
                     _is_crash_spike = "CRASH" in _su and _jump < -3.0 * _recent_atr
-                    if _is_boom_spike or _is_crash_spike:
+                    # Warmup guard: the first N ticks per symbol are historical preload.
+                    # _restore_scarcity_from_json() already seeded _last_spike_ts,
+                    # _spike_recent_ts and _spike_scar_ts from the JSON file at boot.
+                    # Re-detecting those historical spikes with time.time() as timestamp
+                    # would inflate 1H/6H/12H counts and append phantom entries to
+                    # deriv_spike_events.json that compound on every restart.
+                    _cur_tick_n_early = self._ingest_tick_count.get(symbol, 0)
+                    _spike_warmup_skip = (
+                        _cur_tick_n_early
+                        <= int(os.getenv("DERIV_MIN_WARMUP_TICKS", "600"))
+                    )
+                    if (_is_boom_spike or _is_crash_spike) and _spike_warmup_skip:
+                        _LOGGER.debug(
+                            "[SPIKE_WARMUP_SKIP] %s tick=%d dir=%s — "
+                            "seeded from JSON; skipping registration",
+                            symbol,
+                            _cur_tick_n_early,
+                            "UP" if _is_boom_spike else "DOWN",
+                        )
+                    if (_is_boom_spike or _is_crash_spike) and not _spike_warmup_skip:
                         _direction = "UP" if _is_boom_spike else "DOWN"
                         # Capture pre-update values for enrichment fields
                         _prev_spike_ts   = self._last_spike_ts.get(symbol, 0.0)
