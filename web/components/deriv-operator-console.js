@@ -410,14 +410,18 @@ function SymbolCard({ s }) {
               {_setupTypeC} · GRADE {_gradeC} · {_scarcityC}
             </div>
           </div>
-          <div style={{ textAlign: "right", flexShrink: 0 }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>PROB RNG</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 32, fontWeight: 800,
-              color: T.green, lineHeight: 1 }}>
-              {_rngProbC ?? "–"}
+          <div style={{ display: "flex", gap: 14, flexShrink: 0, alignItems: "flex-end" }}>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>SCORE</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.green, lineHeight: 1 }}>
+                {_scoreRawC?.toFixed(1) ?? "–"}
+              </div>
             </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.green }}>
-              GRADE {_gradeC}
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>PROB RNG</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.green, lineHeight: 1 }}>
+                {_rngProbC ?? "–"}
+              </div>
             </div>
           </div>
         </div>
@@ -444,9 +448,18 @@ function SymbolCard({ s }) {
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>≥ {num(gate)}</div>
           </div>
+          {_rngProbC != null && (
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>RNG</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800,
+                color: _rngProbC >= (_sn?.rng_threshold ?? 65) ? T.green : T.orange }}>
+                {_rngProbC}%
+              </div>
+            </div>
+          )}
           <div style={{ marginLeft: "auto", textAlign: "right" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Falta</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800, color: _dispGapC }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Estado</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: _dispGapC }}>
               {_dispFalta}
             </div>
           </div>
@@ -626,6 +639,8 @@ function SymbolCard({ s }) {
               const rngProb           = sn.rng_probability ?? null;
               const rngMissing        = sn.rng_missing ?? [];
               const rngThreshold      = sn.rng_threshold ?? 65;
+              const masterKeyBypass   = sn.master_key_bypass ?? null;
+              const masterKeyRng      = sn.master_key_rng ?? null;
               // EMA200 loaded: for CRASH need price above EMA200 (dev ≥ +0.008% fraction)
               //                for BOOM  need price below EMA200 (dev ≤ −0.008% fraction)
               const _isCrashSym = s.symbol.toUpperCase().includes("CRASH");
@@ -710,8 +725,9 @@ function SymbolCard({ s }) {
                 : fvgTier === "fvg_mitigated" ? "MITIG"
                 : fvgTier === "dynamic_soft_veto_no_fvg" ? "SIN_FVG" : (fvgTier ? fvgTier.toUpperCase().slice(0,8) : "–");
 
-              // Score raw color
+              // Score raw color — master key bypass: score válido aunque bajo para el gate
               const scoreRawColor = scoreRaw == null ? T.mute
+                : masterKeyBypass ? T.violet
                 : scoreRaw >= 7.8 ? T.green : scoreRaw >= 7.0 ? T.amber : T.red;
 
               // Chips dim only when data is stale
@@ -732,7 +748,11 @@ function SymbolCard({ s }) {
               const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
 
               const _isRed   = _redConflict || _redSeco || _redVencido || _redGrade || _redEma;
-              const _isGreen = !_isRed && _goodRng && _goodGrade && _goodScarcity && _goodEma;
+              // Master key bypass: score+rng ya validados por el bot — permite entrada aunque gate exigía más
+              const _isGreen = !_isRed && (
+                (masterKeyBypass && masterKeyRng != null && masterKeyRng >= rngThreshold && _goodGrade) ||
+                (_goodRng && _goodGrade && _goodScarcity && _goodEma)
+              );
               const _isAmber = !_isRed && !_isGreen;
 
               const _semColor = _isRed ? T.red : _isGreen ? T.green : T.amber;
@@ -829,6 +849,36 @@ function SymbolCard({ s }) {
                     </div>
                   )}
 
+                  {/* ── MASTER KEY bypass banner ─────────────────────────── */}
+                  {masterKeyBypass && (
+                    <div style={{
+                      background: T.violet + "22",
+                      border: `2px solid ${T.violet}88`,
+                      borderRadius: 7, padding: "7px 10px", marginBottom: 6,
+                      boxShadow: `0 0 10px ${T.violet}22`,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800,
+                            color: T.violet, letterSpacing: "0.12em" }}>
+                            MASTER KEY ACTIVO
+                          </div>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.textD, marginTop: 2 }}>
+                            {masterKeyBypass.replace(/_GATE$/,"").replace(/_/g," ")} bypassed
+                            {masterKeyRng != null ? ` · rng=${masterKeyRng}/100` : ""}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>SCORE</div>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800,
+                            color: T.violet, lineHeight: 1 }}>
+                            {scoreRaw?.toFixed(2) ?? "–"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* ── RNG Probability — métrica principal ───────────────── */}
                   {rngProb != null && (() => {
                     const pct = Math.min(100, rngProb);
@@ -876,7 +926,8 @@ function SymbolCard({ s }) {
                     {setupType && chip("SETUP", setupLabel, setupColor)}
                     {grade && chip("GRADE", grade, gradeColor)}
                     {scarcity && chip("SCAR", scarcity, scarColor)}
-                    {scoreRaw != null && chip("SCORE", scoreRaw.toFixed(1), scoreRawColor)}
+                    {scoreRaw != null && chip("SCORE", scoreRaw.toFixed(2), scoreRawColor)}
+                    {masterKeyBypass && chip("MK", masterKeyBypass.replace(/_GATE$/,"").replace(/SCARCITY_/,"").replace(/_/g,"-"), T.violet)}
                   </div>
                 </div>
               );
