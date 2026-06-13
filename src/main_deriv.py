@@ -248,7 +248,8 @@ def _calculate_rng_probability(
     elif scarcity_state == "CARGANDO":
         score += 3
     else:
-        missing.append(f"scarcity={scarcity_state or 'desconocida'} muy temprana (ratio={scarcity_ratio:.2f}×)")
+        _scar_label = scarcity_state if scarcity_state and scarcity_state not in ("SIN_DATOS", "") else "SIN_DATOS"
+        missing.append(f"scarcity={_scar_label} ({scarcity_ratio:.2f}×)")
 
     if cooldown_active:
         score = round(score * 0.3)
@@ -3993,10 +3994,24 @@ class DerivDaemon:
             except Exception:
                 _scar = {}
             _scar_state = str(_scar.get("state") or "")
-            if _scar_state:
+            if _scar_state and _scar_state != "SIN_DATOS":
                 snap.score_breakdown["scarcity_state"]     = _scar_state
                 snap.score_breakdown["scarcity_ratio"]     = _scar.get("ratio")
                 snap.score_breakdown["scarcity_elapsed_s"] = _scar.get("elapsed_s")
+            else:
+                # SIN_DATOS or exception path (ratio=None): fall back to last known
+                # from eager cache (set at line ~3171 with the SIN_DATOS guard).
+                _fb_scar = self._last_fvg_state.get(_cache_sym) or {}
+                _fb_st   = str(_fb_scar.get("scarcity_state") or "")
+                _fb_rt   = _fb_scar.get("scarcity_ratio")
+                if _fb_st and _fb_st != "SIN_DATOS":
+                    snap.score_breakdown["scarcity_state"] = _fb_st
+                    if _fb_rt is not None:
+                        snap.score_breakdown["scarcity_ratio"] = _fb_rt
+                    _LOGGER.debug(
+                        "[SCARCITY_FALLBACK] %s live=%s→SIN_DATOS, using cached %s ratio=%.2f",
+                        tick.symbol, _scar_state or "?", _fb_st, float(_fb_rt or 0.0),
+                    )
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
