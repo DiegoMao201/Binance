@@ -3734,6 +3734,43 @@ class DerivDaemon:
                         _hot_bon, snap.score,
                     )
 
+        # ── MASTER KEY — pre-gate RNG preview ────────────────────────────────
+        # Si score ≥ DERIV_MASTER_KEY_SCORE (default 6.25) Y rng_prob ≥
+        # DERIV_MASTER_KEY_RNG (default 65), cualquier gate que exija un
+        # effective_min mayor es bypasseado y el trade avanza al LLM/ejecución.
+        # El gate final RNG_PROBABILITY_GATE sigue siendo el filtro autoritativo.
+        # Scarcity puede no estar resuelta aquí; RNG será conservador (sin componente
+        # de escasez = underestimate): kinetic(35)+fvg_bos(30)+vision(20)=85 max.
+        _mk_kinetic = bool(snap.score_breakdown.get("kinetic_compressed", False))
+        _mk_fvg_bos = bool(snap.score_breakdown.get("fvg_bos_validated", False))
+        _mk_vision  = bool(
+            (self._last_vision_context or {})
+            .get(tick.symbol.upper(), {})
+            .get("zona_liquidez_macro", False)
+        )
+        _mk_scar    = str(snap.score_breakdown.get("scarcity_state") or "")
+        _mk_rng, _  = _calculate_rng_probability(
+            kinetic_compressed=_mk_kinetic,
+            fvg_bos_validated=_mk_fvg_bos,
+            zona_liquidez_macro=_mk_vision,
+            scarcity_state=_mk_scar,
+            cooldown_active=False,
+        )
+        _mk_score_thr = float(os.getenv("DERIV_MASTER_KEY_SCORE", "6.25") or "6.25")
+        _mk_rng_thr   = int(float(os.getenv("DERIV_MASTER_KEY_RNG", "65") or "65"))
+        _master_key   = (
+            is_spike_market(tick.symbol)
+            and snap.score >= _mk_score_thr
+            and _mk_rng >= _mk_rng_thr
+        )
+        if _master_key:
+            _LOGGER.debug(
+                "[PIPELINE] MASTER_KEY armed %s | score=%.2f≥%.2f rng=%d≥%d"
+                " kinetic=%s fvg=%s scar=%s",
+                tick.symbol, snap.score, _mk_score_thr, _mk_rng, _mk_rng_thr,
+                _mk_kinetic, _mk_fvg_bos, _mk_scar or "unknown",
+            )
+
         # ── 2026-06-01 SPIKE-IMMINENCE ("malicia": ¿esta cargado para tirar?) ─
         # Predictive layer: when the live ticks_since_last_spike sits in the
         # modal firing band (RIPE p50..p75) the symbol is statistically loaded.
@@ -3816,7 +3853,17 @@ class DerivDaemon:
                                 imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
                                 imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
                             )
-                        return
+                        if _master_key:
+                            _LOGGER.info(
+                                "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=IMMINENCE_RIPE_GATE"
+                                " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.2f",
+                                tick.symbol, snap.score, _mk_score_thr,
+                                _mk_rng, _mk_rng_thr, _ripe_min,
+                            )
+                            snap.score_breakdown["master_key_bypass"] = "IMMINENCE_RIPE_GATE"
+                            snap.score_breakdown["master_key_rng"] = _mk_rng
+                        else:
+                            return
                     # Passed RIPE gate: tag but no bonus
                     snap.score_breakdown["spike_imminence_bonus"] = 0.0
                     snap.reasons.append(
@@ -3935,7 +3982,17 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False,
                         block_reason="scarcity_dry_gate", score=snap.score,
                     )
-                    return
+                    if _master_key:
+                        _LOGGER.info(
+                            "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=SCARCITY_DRY_GATE"
+                            " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.1f",
+                            tick.symbol, snap.score, _mk_score_thr,
+                            _mk_rng, _mk_rng_thr, _dry_override,
+                        )
+                        snap.score_breakdown["master_key_bypass"] = "SCARCITY_DRY_GATE"
+                        snap.score_breakdown["master_key_rng"] = _mk_rng
+                    else:
+                        return
                 snap.score_breakdown["scarcity_dry_override_fired"] = round(snap.score, 2)
                 snap.score_breakdown["scarcity_dry_override_gate"] = round(_dry_override, 2)
                 _LOGGER.info(
@@ -3995,7 +4052,17 @@ class DerivDaemon:
                             imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
                             imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
                         )
-                    return
+                    if _master_key:
+                        _LOGGER.info(
+                            "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=SCARCITY_VENCIDO_GATE"
+                            " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.1f",
+                            tick.symbol, snap.score, _mk_score_thr,
+                            _mk_rng, _mk_rng_thr, _vencido_thr,
+                        )
+                        snap.score_breakdown["master_key_bypass"] = "SCARCITY_VENCIDO_GATE"
+                        snap.score_breakdown["master_key_rng"] = _mk_rng
+                    else:
+                        return
                 snap.score_breakdown["scarcity_vencido_override_fired"] = round(snap.score, 2)
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
@@ -4132,7 +4199,17 @@ class DerivDaemon:
                     ),
                     extra={"regime": snap.regime},
                 )
-                return
+                if _master_key:
+                    _LOGGER.info(
+                        "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=REGIME_SCORE_GATE"
+                        " score=%.2f≥%.2f AND rng=%d≥%d → bypassing effective_min=%.2f",
+                        tick.symbol, snap.score, _mk_score_thr,
+                        _mk_rng, _mk_rng_thr, _regime_min,
+                    )
+                    snap.score_breakdown["master_key_bypass"] = "REGIME_SCORE_GATE"
+                    snap.score_breakdown["master_key_rng"] = _mk_rng
+                else:
+                    return
 
         # BOOM600 safety override: trending regime needs extra score conviction.
         # BYPASS when scarcity is SECO — DRY override already validated the entry.

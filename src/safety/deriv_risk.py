@@ -2966,20 +2966,12 @@ class DerivRiskManager:
                 # Empirical evidence: 75%+ losses on BOOM/CRASH entries without
                 # FVG or EMA200 spike-hunter structural setup.
                 # Exception: DERIV_BOOM_CRASH_ESCAPE_VALVE=true (debug/research only).
-                _bc_escape_env = (
-                    os.getenv("DERIV_BOOM_CRASH_ESCAPE_VALVE", "").lower()
-                    in ("1", "true", "yes")
-                )
-                # Per-profile override: block_bc_escape_env=True → hard veto even if escape valve open.
-                # Muestra02: BOOM600 bc_escape_env 32t → WR=25%, PnL=-$3.15; score does NOT predict.
-                _profile_blocks_bc = bool(_get_asset_profile(symbol).get("block_bc_escape_env", False))
-                _bc_env_key = f"DERIV_BLOCK_BC_ESCAPE_{str(symbol).upper()}"
-                _bc_env_raw = os.getenv(_bc_env_key, "").strip().lower()
-                if _bc_env_raw in ("1", "true", "yes"):
-                    _profile_blocks_bc = True
-                elif _bc_env_raw in ("0", "false", "no"):
-                    _profile_blocks_bc = False
-                if not _bc_escape_env or _profile_blocks_bc:
+                # Escape valve always open: RNG probabilistic motor penalizes no-FVG via scoring.
+                # DERIV_BOOM_CRASH_ESCAPE_VALVE=false/0/no to disable (default open).
+                _bc_escape_env = os.getenv(
+                    "DERIV_BOOM_CRASH_ESCAPE_VALVE", "true"
+                ).lower().strip() not in ("0", "false", "no")
+                if not _bc_escape_env:
                     if _dyn_relax_structural:
                         score = max(0.0, score - _dyn_relax_no_fvg_penalty)
                         snap.score = round(score, 3)
@@ -3009,8 +3001,6 @@ class DerivRiskManager:
                             snap.score_breakdown["dynamic_structural_relax_blocked"] = True
                         else:
                             _block_reason = (
-                                f"boom_crash_bc_escape_blocked_by_profile: {symbol} no active FVG + block_bc_escape_env=True"
-                                if _profile_blocks_bc else
                                 f"boom_crash_structural_veto: {symbol} no active FVG + no EMA200 spike-hunter → hard veto"
                             )
                         snap.score_breakdown["fvg_tier"] = "no_fvg_hard_veto"
