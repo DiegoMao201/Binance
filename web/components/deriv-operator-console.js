@@ -621,6 +621,21 @@ function SymbolCard({ s }) {
               const rngThreshold      = sn.rng_threshold ?? 65;
               const masterKeyBypass   = sn.master_key_bypass ?? null;
               const masterKeyRng      = sn.master_key_rng ?? null;
+              // ── Pipeline state (new motor fields) ─────────────────────────
+              const tripleLockFired   = sn.triple_lock_fired ?? false;
+              const tripleLockZ       = sn.triple_lock_z ?? null;
+              const tripleLockElapsed = sn.triple_lock_elapsed ?? null;
+              const tripleLockKinetic = sn.triple_lock_kinetic ?? null;
+              const tripleLockBlocked = sn.triple_lock_blocked ?? null;
+              const elasticityZ       = sn.elasticity_z ?? null;
+              const elasticityOrig    = sn.elasticity_regime_min_original ?? null;
+              const elasticityElastic = sn.elasticity_regime_min_elastic ?? null;
+              const elasticityTimePct = sn.elasticity_time_pressure ?? null;
+              const elasticityTimeTriggered = sn.elasticity_time_triggered ?? false;
+              const marketContext     = sn.market_context ?? null;
+              const fvgLookbackUsed   = sn.fvg_lookback_used ?? null;
+              const scarcityElapsedS  = sn.scarcity_elapsed_s ?? null;
+              const postClusterExhaustion = sn.post_cluster_exhaustion ?? false;
               // EMA200 loaded: for CRASH need price above EMA200 (dev ≥ +0.008% fraction)
               //                for BOOM  need price below EMA200 (dev ≤ −0.008% fraction)
               const _isCrashSym = s.symbol.toUpperCase().includes("CRASH");
@@ -713,47 +728,7 @@ function SymbolCard({ s }) {
               // Chips dim only when data is stale
               const chipOpacity = staleOpacity;
 
-              // ── SEÑAL MAESTRA — basada en RNG Probability ─────────────────
-              const _goodGrade    = grade === "A" || grade === "B";
-              const _goodRng      = rngProb != null && rngProb >= rngThreshold;
-              // null scarcity = SIN_DATOS (fresh restart, no history) = neutral
-              const _goodScarcity = scarcity == null || ["FRESCO","CARGANDO","LISTO"].includes(scarcity);
-              const _emaOverridedByAnchor = fvgAnchorActive;
-              const _goodEma = ema200Loaded == null || ema200Loaded === true || _emaOverridedByAnchor;
-
-              const _redConflict = structFvgConflict;
-              const _redSeco     = scarcity === "SECO";
-              const _redVencido  = scarcity === "VENCIDO" && (scoreRaw == null || scoreRaw < 7.0);
-              const _redGrade    = grade === "C";
-              const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
-
-              const _isRed   = _redConflict || _redSeco || _redVencido || _redGrade || _redEma;
-              // Master key bypass: score+rng ya validados por el bot — permite entrada aunque gate exigía más
-              const _isGreen = !_isRed && (
-                (masterKeyBypass && masterKeyRng != null && masterKeyRng >= rngThreshold && _goodGrade) ||
-                (_goodRng && _goodGrade && _goodScarcity && _goodEma)
-              );
-              const _isAmber = !_isRed && !_isGreen;
-
-              const _semColor = _isRed ? T.red : _isGreen ? T.green : T.amber;
-              const _semLabel = _isRed ? "NO OPERAR" : _isGreen ? "GO" : "ESPERAR";
-
-              const _emaDevStr = ema200DistPct != null
-                ? ((ema200DistPct >= 0 ? "+" : "") + (ema200DistPct * 100).toFixed(3) + "%")
-                : null;
-              const _redReasons = [
-                _redConflict && "5m CONFLICTO",
-                _redSeco     && `SECO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr + " sin spike" : ""}`,
-                _redVencido  && `VENCIDO${_timeSinceSpiStr ? " · " + _timeSinceSpiStr : ""}`,
-                _redGrade    && "GRADE C",
-                _redEma      && `EMA DESCARGADO${_emaDevStr ? " " + _emaDevStr : ""}`,
-              ].filter(Boolean);
-              const _missing = [
-                !_goodRng      && `RNG ${rngProb ?? "?"}% < ${rngThreshold}%`,
-                !_goodGrade    && "GRADE",
-                scarcity && !_goodScarcity && `SCAR ${scarcity}`,
-                !_goodEma      && `EMA${_emaDevStr ? " " + _emaDevStr : ""}`,
-              ].filter(Boolean);
+              // ── Chip opacity ──────────────────────────────────────────────
 
               const chip = (label, value, color) => (
                 <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 3,
@@ -766,39 +741,73 @@ function SymbolCard({ s }) {
 
               return (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5 }}>
-                  {/* ── SEÑAL MAESTRA ──────────────────────────────────────── */}
-                  <div style={{
-                    background: _semColor + "1a",
-                    border: `2px solid ${_semColor}77`,
-                    borderRadius: 5, padding: "5px 8px", marginBottom: 6,
-                    display: "flex", alignItems: "center", gap: 7,
-                  }}>
+                  {/* ── TRIPLE LOCK banner ─────────────────────────────────── */}
+                  {tripleLockFired && (
                     <div style={{
-                      width: 11, height: 11, borderRadius: "50%",
-                      background: _semColor, flexShrink: 0,
-                      boxShadow: _isGreen ? `0 0 7px ${T.green}` : "none",
-                    }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ color: _semColor, fontSize: 9, fontWeight: 800, letterSpacing: "0.12em" }}>
-                        {_semLabel}
+                      background: T.cyan + "18", border: `2px solid ${T.cyan}88`,
+                      borderRadius: 5, padding: "4px 8px", marginBottom: 5,
+                      display: "flex", alignItems: "center", gap: 6,
+                    }}>
+                      <div style={{ width: 9, height: 9, borderRadius: "50%", background: T.cyan,
+                        boxShadow: `0 0 6px ${T.cyan}`, flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: T.cyan, fontSize: 8, fontWeight: 800, letterSpacing: "0.10em" }}>
+                          TRIPLE LOCK
+                        </div>
+                        <div style={{ color: T.textD, fontSize: 6, marginTop: 1 }}>
+                          {`Z=${(tripleLockZ ?? 0).toFixed(2)} · ${tripleLockElapsed != null ? Math.round(tripleLockElapsed) + "s" : "–"} · kin=${(tripleLockKinetic ?? 0).toFixed(3)}`}
+                        </div>
                       </div>
-                      {_isRed && _redReasons.length > 0 && (
-                        <div style={{ color: _semColor, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
-                          {_redReasons.join(" · ")}
-                        </div>
-                      )}
-                      {_isAmber && _missing.length > 0 && (
-                        <div style={{ color: T.amber, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
-                          Falta: {_missing.join(", ")}
-                        </div>
-                      )}
-                      {_isGreen && (
-                        <div style={{ color: T.green, fontSize: 6, opacity: 0.9, marginTop: 1 }}>
-                          Todos los filtros OK
-                        </div>
-                      )}
+                      <div style={{ color: T.cyan, fontSize: 7, fontWeight: 700 }}>+30 impl</div>
                     </div>
-                  </div>
+                  )}
+                  {/* ── TRIPLE LOCK parcialmente bloqueado ─────────────────── */}
+                  {!tripleLockFired && tripleLockBlocked && tripleLockBlocked.length > 0 && (
+                    <div style={{
+                      background: T.orange + "10", border: `1px solid ${T.orange}44`,
+                      borderRadius: 4, padding: "3px 7px", marginBottom: 4,
+                    }}>
+                      <div style={{ color: T.orange, fontSize: 6, fontWeight: 700 }}>
+                        TRIPLE LOCK: {tripleLockBlocked.join(" · ")}
+                      </div>
+                    </div>
+                  )}
+                  {/* ── ELASTICITY banner ──────────────────────────────────── */}
+                  {elasticityZ != null && !tripleLockFired && (
+                    <div style={{
+                      background: T.violet + "14", border: `1px solid ${T.violet}55`,
+                      borderRadius: 4, padding: "3px 7px", marginBottom: 4,
+                      display: "flex", alignItems: "center", gap: 6,
+                    }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: T.violet, fontSize: 7, fontWeight: 700, letterSpacing: "0.08em" }}>
+                          {marketContext === "EXTREME_OVERPRESSURE" ? "EXTREME OVERPRESSURE" : "PRESIÓN ALTA"}
+                          {elasticityTimeTriggered ? " · TIME" : ""}
+                        </div>
+                        <div style={{ color: T.textD, fontSize: 6, marginTop: 1 }}>
+                          {elasticityOrig != null && elasticityElastic != null
+                            ? `gate ${elasticityOrig.toFixed(2)}→${elasticityElastic.toFixed(2)}`
+                            : `Z=${elasticityZ.toFixed(2)}`}
+                          {elasticityTimePct != null ? ` · ${(elasticityTimePct * 100).toFixed(0)}% ciclo` : ""}
+                        </div>
+                      </div>
+                      <div style={{ color: T.violet, fontSize: 8, fontWeight: 800 }}>
+                        Z+{elasticityZ.toFixed(2)}
+                      </div>
+                    </div>
+                  )}
+                  {/* ── DYNAMIC ANCHOR info ────────────────────────────────── */}
+                  {fvgLookbackUsed != null && fvgLookbackUsed > 200 && (
+                    <div style={{
+                      background: T.mute + "0a", border: `1px solid ${T.border}`,
+                      borderRadius: 4, padding: "2px 7px", marginBottom: 4,
+                    }}>
+                      <div style={{ color: T.mute, fontSize: 6 }}>
+                        {`FVG ventana: ${fvgLookbackUsed}t (dinámico)`}
+                        {scarcityElapsedS != null ? ` · ${Math.round(scarcityElapsedS)}s sin spike` : ""}
+                      </div>
+                    </div>
+                  )}
 
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isBlindZone || isNormalizingZone ? 3 : 4 }}>
                     <span style={{ fontSize: 7, color: headerColor, letterSpacing: "0.08em", fontWeight: 600 }}>
