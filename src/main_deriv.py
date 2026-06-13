@@ -3772,7 +3772,7 @@ class DerivDaemon:
             .get("zona_liquidez_macro", False)
         )
         _mk_scar    = str(snap.score_breakdown.get("scarcity_state") or "")
-        _mk_rng, _  = _calculate_rng_probability(
+        _mk_rng, _mk_missing = _calculate_rng_probability(
             kinetic_compressed=_mk_kinetic,
             fvg_bos_validated=_mk_fvg_bos,
             zona_liquidez_macro=_mk_vision,
@@ -3786,6 +3786,15 @@ class DerivDaemon:
             and snap.score >= _mk_score_thr
             and _mk_rng >= _mk_rng_thr
         )
+        # Persist preliminary RNG estimate immediately — so market context always
+        # has a value even when the pipeline blocks at a downstream gate.
+        # The full _rng_prob at line ~4710 overwrites this with cooldown-adjusted value.
+        if _cache_sym in self._last_fvg_state:
+            self._last_fvg_state[_cache_sym].update({
+                "rng_probability": _mk_rng,
+                "rng_threshold":   _mk_rng_thr,
+                "rng_missing":     _mk_missing,
+            })
         if _master_key:
             _LOGGER.debug(
                 "[PIPELINE] MASTER_KEY armed %s | score=%.2f≥%.2f rng=%d≥%d"
