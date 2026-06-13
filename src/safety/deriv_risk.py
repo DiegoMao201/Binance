@@ -48,10 +48,30 @@ from src.strategies.deriv_signals import (
     get_asset_profile as _get_asset_profile,
 )
 from src.utils.deriv_config import DerivSettings
-from src.analysis.market_geometry import compute_geometry as _compute_geometry
+from src.analysis.market_geometry import (
+    compute_geometry as _compute_geometry,
+    FVG_LOOKBACK as _FVG_LOOKBACK_DEFAULT,
+)
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ── FASE 2: Per-symbol extreme tension limits (seconds) ──────────────────────
+# Maximum elapsed time before a symbol is considered in EXTREME_OVERPRESSURE
+# regardless of Z-score. Calibrated from forensic inter-spike gap distributions
+# (p90 values × 3× margin to avoid false positives on normal dry spells).
+# Used by: elastic thresholds (main_deriv.py) + dynamic FVG lookback (here).
+EXTREME_TENSION_LIMITS_SEC: dict[str, int] = {
+    "BOOM500":  2000,   # p90≈1021s, ×2 → 2000 (35 min)
+    "CRASH500": 2000,   # p90≈915s,  ×2 → 2000
+    "BOOM600":  3300,   # p90≈1225s, ×2.7 → 3300 (55 min)
+    "CRASH600": 3300,   # p90≈1097s, ×3   → 3300
+    "CRASH900": 4800,   # p90≈1593s, ×3   → 4800 (80 min)
+    "BOOM1000": 3600,   # baseline estimate
+    "CRASH1000":3600,
+    "CRASH300": 1800,   # faster cycle → lower cap
+}
 
 
 # ── EMA-200 Spike Hunter helper ───────────────────────────────────────────────
@@ -526,7 +546,7 @@ class DerivRiskManager:
         self._daily_anchor_date = datetime.now(timezone.utc).date()
         # Per-symbol rolling tick window for synthetic ATR / trend.
         self._ticks: dict[str, list[float]] = {}
-        self._max_window = 1000  # enlarged for multi-TF geometry (was 270)
+        self._max_window = 5000  # enlarged for dynamic anchor lookback (FASE 1: was 1000)
         # Per-symbol rolling ATR history (FIX-8: 50→500 for accurate percentile over days not hours)
         self._atr_history: dict[str, list[float]] = {}
         self._MAX_ATR_HISTORY = 500
@@ -2351,12 +2371,34 @@ class DerivRiskManager:
         # Vectorised in NumPy — adds/removes score based on price position
         # within the macro regression channel.  Wrapped in try/except so
         # any calculation error cannot crash the live pipeline.
+        #
+        # FASE 1: Dynamic anchor lookback — window accumulates from last spike.
+        # Instead of a fixed 200-tick FVG scan, we look back as far as the spike
+        # origin so structure formed at minute 1 is still visible at minute 30.
         _geo = None
+        _dyn_lb_ticks = _FVG_LOOKBACK_DEFAULT
+        if _is_spike:
+            _dyn_last_spike_tick = int(self._last_spike_tick.get(symbol.upper(), 0) or 0)
+            _dyn_cur_tick = int(self._ingest_tick_count.get(symbol.upper(), 0) or 0)
+            _dyn_elapsed_ticks = max(0, _dyn_cur_tick - _dyn_last_spike_tick) if _dyn_last_spike_tick > 0 else 0
+            _dyn_elapsed_sec = max(0.0, time.time() - float(self._last_spike_ts.get(symbol.upper(), 0) or 0))
+            _dyn_sym_max = EXTREME_TENSION_LIMITS_SEC.get(symbol.upper(), 2000)
+            _dyn_lb_ticks = max(
+                _FVG_LOOKBACK_DEFAULT,
+                min(
+                    _dyn_elapsed_ticks if _dyn_elapsed_ticks > 0 else _FVG_LOOKBACK_DEFAULT,
+                    _dyn_sym_max,
+                    len(ticks),
+                ),
+            )
         try:
             # Spike markets use 15% FVG mitigation — spikes graze FVGs without
             # deep penetration. R_* use env-var default (50%).
             _fvg_mit_override = 0.15 if _is_spike else None
-            _geo = _compute_geometry(ticks, hurst=hurst, fvg_mit_pct=_fvg_mit_override)
+            _geo = _compute_geometry(
+                ticks, hurst=hurst, fvg_mit_pct=_fvg_mit_override,
+                dynamic_fvg_lookback=_dyn_lb_ticks if _is_spike else None,
+            )
 
             # ── Spike FVG Anchor — reinstates the spike's FVG when retroceso
             # fills the 200-tick rolling window with opposite-direction micro-FVGs.
@@ -2626,6 +2668,16 @@ class DerivRiskManager:
             snap.score_breakdown["kinetic_acceleration"] = _geo.kinetic_acceleration
             snap.score_breakdown["kinetic_compressed"]   = _geo.kinetic_compressed
             snap.score_breakdown["fvg_bos_validated"]    = _geo.fvg_bos_validated
+            # FASE 1 telemetry: log the dynamic window used for FVG scan
+            if _geo.fvg_lookback_used > 0:
+                snap.score_breakdown["fvg_lookback_used"] = _geo.fvg_lookback_used
+                if _geo.fvg_lookback_used > _FVG_LOOKBACK_DEFAULT:
+                    _LOGGER.info(
+                        "[DYNAMIC_ANCHOR] %s FVG scan window=%dt (default=%d) "
+                        "elapsed_ticks≈%d elapsed_sec=%.0f",
+                        symbol, _geo.fvg_lookback_used, _FVG_LOOKBACK_DEFAULT,
+                        _dyn_lb_ticks, _dyn_elapsed_sec if _is_spike else 0.0,
+                    )
             # Update ghost_mad with the geometry engine's value (uses same algo)
             if _geo.ghost_mad > 0:
                 snap.score_breakdown["ghost_mad"] = round(_geo.ghost_mad, 8)

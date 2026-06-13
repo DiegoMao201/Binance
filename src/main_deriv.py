@@ -40,7 +40,10 @@ from src.data.deriv_client import DerivClient, DerivClientError, NormalisedTick
 from src.execution.deriv_mirror_client import DerivMirrorClient
 from src.execution.deriv_trader import DerivTradeExecutor
 from src.execution.order_router import OrderRouter, OrderRouterError
-from src.safety.deriv_risk import DerivRiskManager, HurstCalibrator, MacroHDCalibrator
+from src.safety.deriv_risk import (
+    DerivRiskManager, HurstCalibrator, MacroHDCalibrator,
+    EXTREME_TENSION_LIMITS_SEC,
+)
 from src.safety.ghost_logger import GhostLogger
 from src.execution.position_manager import SYMBOL_RATCHET_PARAMS as _DPM_PARAMS
 from src.strategies.deriv_signals import (
@@ -198,18 +201,22 @@ def _calculate_rng_probability(
     scarcity_state: str,
     scarcity_ratio: float,
     cooldown_active: bool,
+    implied_structure: bool = False,
 ) -> tuple[int, list[str]]:
     """Probabilistic RNG alignment score (0-100).
 
     Weights:
       35  kinetic_score (0.0–1.0) — continuous compression: tight drift + deceleration
       30  fvg_bos_validated       — structural algorithm reset confirmed
+              OR implied_structure (FASE 4 triple lock: extreme pressure + kinetic giro)
       20  zona_liquidez_macro     — macro liquidity zone (Vision LLM)
       15  scarcity (inverted)     — overdue = higher spike probability:
             FRESCO(<0.5×)→0  CARGANDO(<0.9×)→3  LISTO(<1.4×)→8
             VENCIDO(<2.2×)→12  SECO(≥2.2×)→15  extreme(≥2.8×)→+2
 
     Cooldown veto: if burst retrace < 50%, multiply score by 0.3 (energy not reset).
+    implied_structure: FASE 4 — FVG absent but triple lock (extreme pressure + kinetic
+        compression) authorises the structural bonus without real BOS confirmation.
     """
     score = 0
     missing: list[str] = []
@@ -221,6 +228,8 @@ def _calculate_rng_probability(
 
     if fvg_bos_validated:
         score += 30
+    elif implied_structure:
+        score += 30  # FASE 4: triple lock — physical tension replaces structural confirmation
     else:
         missing.append("FVG sin BOS estructural")
 
@@ -3985,8 +3994,9 @@ class DerivDaemon:
                 _scar = {}
             _scar_state = str(_scar.get("state") or "")
             if _scar_state:
-                snap.score_breakdown["scarcity_state"] = _scar_state
-                snap.score_breakdown["scarcity_ratio"] = _scar.get("ratio")
+                snap.score_breakdown["scarcity_state"]     = _scar_state
+                snap.score_breakdown["scarcity_ratio"]     = _scar.get("ratio")
+                snap.score_breakdown["scarcity_elapsed_s"] = _scar.get("elapsed_s")
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
@@ -4034,23 +4044,41 @@ class DerivDaemon:
 
 
         # ── ELASTIC THRESHOLDS: Overpressure Discount ────────────────────────
-        # Z-score proxy = scarcity_ratio (temporal pressure — how overdue the spike is).
-        # VENCIDO/SECO states accumulate RNG tension that more than compensates for
-        # missing structural confirmation. Two levels:
-        #   Z ≥ DERIV_ELASTIC_Z1 (1.5) → partial discount (14%) on regime effective_min
-        #   Z ≥ DERIV_ELASTIC_Z2 (2.0) + kinetic giro → full discount (28%) + structure bypass
+        # FASE 3 enhanced: two axes of pressure detection:
+        #   Axis A (Z-score proxy): scarcity_ratio ≥ 1.5 / 2.0
+        #   Axis B (time pressure): elapsed_s ≥ EXTREME_TENSION_LIMITS_SEC[symbol]
+        # Either axis alone triggers the discount. Combined, they stack.
+        #   Z1 / time≥70%: partial discount (14%) on regime effective_min
+        #   Z2 / time≥100%: full discount (28%) + structure bypass + fast-track
         # Floor DERIV_ELASTIC_FLOOR (5.50) prevents infinite collapse.
         _elasticity_z = 0.0
         _elasticity_fast_track = False
+        _is_z1 = False
+        _is_z2 = False
         if _is_bc_bias:
-            _op_ratio   = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
-            _op_kinetic = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
-            _el_z1      = float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5)
-            _el_z2      = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
-            _elasticity_z = _op_ratio
-            if _op_ratio >= _el_z2:
+            _op_ratio       = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
+            _op_kinetic     = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
+            _op_elapsed_s   = float(snap.score_breakdown.get("scarcity_elapsed_s") or 0.0)
+            _op_sym_limit   = float(EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000))
+            _el_z1          = float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5)
+            _el_z2          = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
+            # Time pressure: full when elapsed ≥ limit, partial at ≥ 70%
+            _time_pressure_full    = _op_elapsed_s > 0 and _op_elapsed_s >= _op_sym_limit
+            _time_pressure_partial = _op_elapsed_s > 0 and _op_elapsed_s >= _op_sym_limit * 0.70
+            # Choose the stronger signal between Z-score and time pressure
+            _is_z2 = _op_ratio >= _el_z2 or _time_pressure_full
+            _is_z1 = _op_ratio >= _el_z1 or _time_pressure_partial
+            # Effective Z for logging (use ratio if higher, else normalize time)
+            _elasticity_z = max(
+                _op_ratio,
+                round(_op_elapsed_s / _op_sym_limit * _el_z2, 2) if _op_sym_limit > 0 else 0.0,
+            )
+            snap.score_breakdown["elasticity_time_pressure"] = round(_op_elapsed_s / _op_sym_limit, 3) if _op_sym_limit > 0 else 0.0
+            if _is_z2:
                 snap.score_breakdown["market_context"] = "EXTREME_OVERPRESSURE"
-                snap.score_breakdown["elasticity_z"]   = round(_op_ratio, 2)
+                snap.score_breakdown["elasticity_z"]   = round(_elasticity_z, 2)
+                if _time_pressure_full:
+                    snap.score_breakdown["elasticity_time_triggered"] = True
                 if _op_kinetic > 0:
                     _elasticity_fast_track = True
                     snap.score_breakdown["elasticity_fast_track"] = True
@@ -4060,10 +4088,12 @@ class DerivDaemon:
                         _LOGGER.info(
                             "[ELASTICITY] %s Z=+%.2f fast-track: structural conflict"
                             " bypassed (kinetic=%.2f)",
-                            tick.symbol, _op_ratio, _op_kinetic,
+                            tick.symbol, _elasticity_z, _op_kinetic,
                         )
-            elif _op_ratio >= _el_z1:
-                snap.score_breakdown["elasticity_z"] = round(_op_ratio, 2)
+            elif _is_z1:
+                snap.score_breakdown["elasticity_z"] = round(_elasticity_z, 2)
+                if _time_pressure_partial:
+                    snap.score_breakdown["elasticity_time_triggered"] = True
 
         # ── Structural FVG conflict gate ──────────────────────────────────────
         # Si el FVG de ticks apunta en dirección opuesta a la del candle de 5m,
@@ -4138,28 +4168,34 @@ class DerivDaemon:
             )
 
         # ── Apply elasticity discount to regime gate threshold ───────────────
+        # Uses pre-computed _is_z2/_is_z1 booleans (FASE 3) that combine both
+        # Z-score and time-pressure axes instead of raw ratio thresholds.
         _original_regime_min = _regime_min
-        if _elasticity_z >= float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0):
-            _el_pct   = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28)
-            _el_floor = float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50)
+        _el_floor = float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50)
+        if _is_bc_bias and _is_z2:
+            _el_pct     = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28)
             _regime_min = max(_el_floor, _regime_min * (1.0 - _el_pct))
             snap.score_breakdown["elasticity_regime_min_original"] = round(_original_regime_min, 2)
             snap.score_breakdown["elasticity_regime_min_elastic"]  = round(_regime_min, 2)
             _LOGGER.info(
-                "[ELASTICITY] %s Z=+%.2f -> Required Score lowered from %.2f to %.2f.%s",
-                tick.symbol, _elasticity_z, _original_regime_min, _regime_min,
+                "[ELASTICITY] %s Z=+%.2f elapsed=%.0fs/%.0fs -> Required Score lowered from %.2f to %.2f.%s",
+                tick.symbol, _elasticity_z,
+                snap.score_breakdown.get("scarcity_elapsed_s") or 0.0,
+                EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000),
+                _original_regime_min, _regime_min,
                 " ENTRY AUTHORIZED." if snap.score >= _regime_min else "",
             )
-        elif _elasticity_z >= float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5):
-            _el_pct   = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28) * 0.5
-            _el_floor = float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50)
+        elif _is_bc_bias and _is_z1:
+            _el_pct     = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28) * 0.5
             _regime_min = max(_el_floor, _regime_min * (1.0 - _el_pct))
             snap.score_breakdown["elasticity_regime_min_original"] = round(_original_regime_min, 2)
             snap.score_breakdown["elasticity_regime_min_elastic"]  = round(_regime_min, 2)
             _LOGGER.info(
-                "[ELASTICITY] %s Z=+%.2f (partial) -> Required Score lowered from"
-                " %.2f to %.2f",
-                tick.symbol, _elasticity_z, _original_regime_min, _regime_min,
+                "[ELASTICITY] %s Z=+%.2f elapsed=%.0fs/%.0fs (partial) -> Required Score lowered from %.2f to %.2f",
+                tick.symbol, _elasticity_z,
+                snap.score_breakdown.get("scarcity_elapsed_s") or 0.0,
+                EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000),
+                _original_regime_min, _regime_min,
             )
 
         if snap.score < _regime_min:
@@ -4700,6 +4736,45 @@ class DerivDaemon:
         if _cluster_exhausted:
             _rng_kinetic = 0.0
 
+        # ── FASE 4: TRIPLE LOCK — Implied Structure Bonus ──────────────────────
+        # Substitutes the missing +30 FVG pts ONLY when three independent
+        # conditions simultaneously confirm that physical RNG tension is extreme.
+        # This prevents gifting structural points just because time passed.
+        #
+        #   Condition A: FVG truly absent in the (now dynamic) scan window.
+        #   Condition B: Extreme pressure — Z≥2.5 (deep SECO) OR elapsed_s ≥ limit.
+        #   Condition C: Kinetic giro is active (compression score > 0).
+        #                If price is free-falling fast, kinetic=0 → candado OFF.
+        _tl_fvg_absent  = not bool(snap.score_breakdown.get("fvg_active", False))
+        _tl_z_val       = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
+        _tl_elapsed_s   = float(snap.score_breakdown.get("scarcity_elapsed_s") or 0.0)
+        _tl_sym_limit   = float(EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000))
+        _tl_kinetic     = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
+        _tl_cond_a      = _tl_fvg_absent
+        _tl_cond_b      = _tl_z_val >= 2.5 or (_tl_sym_limit > 0 and _tl_elapsed_s >= _tl_sym_limit)
+        _tl_cond_c      = _tl_kinetic > 0 and not _cluster_exhausted
+        _triple_lock_fired = _is_bc_bias and _tl_cond_a and _tl_cond_b and _tl_cond_c
+        if _triple_lock_fired:
+            snap.score_breakdown["market_context"]     = "EXTREME_OVERPRESSURE_KINETIC_LOCKED"
+            snap.score_breakdown["triple_lock_fired"]  = True
+            snap.score_breakdown["triple_lock_z"]      = round(_tl_z_val, 2)
+            snap.score_breakdown["triple_lock_elapsed"] = round(_tl_elapsed_s, 0)
+            snap.score_breakdown["triple_lock_kinetic"] = round(_tl_kinetic, 3)
+            _LOGGER.info(
+                "[TRIPLE_LOCK] %s FIRED — implied +30 structural pts | "
+                "Z=%.2f elapsed=%.0fs/%.0fs kinetic=%.3f | "
+                "condA(fvg_absent)=%s condB(pressure)=%s condC(kinetic)=%s",
+                tick.symbol, _tl_z_val, _tl_elapsed_s, _tl_sym_limit, _tl_kinetic,
+                _tl_cond_a, _tl_cond_b, _tl_cond_c,
+            )
+        elif _is_bc_bias and _tl_cond_a and (_tl_cond_b or _tl_cond_c):
+            _tl_missing = []
+            if not _tl_cond_b:
+                _tl_missing.append(f"pressure_low(Z={_tl_z_val:.2f} elapsed={_tl_elapsed_s:.0f}s/{_tl_sym_limit:.0f}s)")
+            if not _tl_cond_c:
+                _tl_missing.append(f"kinetic_absent(score={_tl_kinetic:.3f})")
+            snap.score_breakdown["triple_lock_blocked"] = _tl_missing
+
         _rng_prob, _rng_missing = _calculate_rng_probability(
             kinetic_score=_rng_kinetic,
             fvg_bos_validated=bool(snap.score_breakdown.get("fvg_bos_validated", False)),
@@ -4707,6 +4782,7 @@ class DerivDaemon:
             scarcity_state=str(snap.score_breakdown.get("scarcity_state") or ""),
             scarcity_ratio=float(snap.score_breakdown.get("scarcity_ratio") or 0.0),
             cooldown_active=_rng_cooldown_active,
+            implied_structure=_triple_lock_fired,
         )
         _rng_threshold = int(float(os.getenv("DERIV_PROBABILITY_THRESHOLD", "65") or "65"))
 

@@ -816,7 +816,27 @@ def _build_ai_prompt(
     _el_z_bd   = float((breakdown or {}).get("elasticity_z") or 0.0)
     _mkt_ctx   = str((breakdown or {}).get("market_context") or "")
     _op_ctx    = ""
-    if _el_z_bd >= 2.0 or _mkt_ctx == "EXTREME_OVERPRESSURE":
+    if _mkt_ctx == "EXTREME_OVERPRESSURE_KINETIC_LOCKED":
+        # FASE 4: Triple lock fired — implied structure approved, FVG absent but
+        # physical kinetic compression + extreme pressure justify the entry.
+        _tl_z      = float((breakdown or {}).get("triple_lock_z") or _el_z_bd)
+        _tl_el     = float((breakdown or {}).get("triple_lock_elapsed") or 0.0)
+        _tl_kin    = float((breakdown or {}).get("triple_lock_kinetic") or 0.0)
+        _tl_orig   = float((breakdown or {}).get("elasticity_regime_min_original") or 0.0)
+        _tl_new    = float((breakdown or {}).get("elasticity_regime_min_elastic") or 0.0)
+        _op_ctx    = (
+            f"\n🔒 EXTREME_OVERPRESSURE_KINETIC_LOCKED (Z=+{_tl_z:.2f} elapsed={_tl_el:.0f}s):\n"
+            "The TRIPLE LOCK has FIRED. Three independent conditions were verified simultaneously:\n"
+            "  A) No real FVG structure found in the dynamic anchor window.\n"
+            f"  B) Extreme RNG tension — Z={_tl_z:.2f} OR elapsed {_tl_el:.0f}s vs symbol limit.\n"
+            f"  C) Active kinetic compression (score={_tl_kin:.3f}) — price is NOT free-falling.\n"
+            f"Threshold lowered: {_tl_orig:.2f} → {_tl_new:.2f} (implied structure bonus +30 pts applied).\n"
+            "MANDATORY: DO NOT veto for absence of FVG, BOS, or below-normal score.\n"
+            "The physical kinetic state REPLACES the structural requirement.\n"
+            "APPROVE if: no active COOLDOWN AND no visible post-spike retrace.\n"
+            "DENY ONLY if: COOLDOWN is active OR kinetic is decelerating into a knife-catch.\n"
+        )
+    elif _el_z_bd >= 2.0 or _mkt_ctx == "EXTREME_OVERPRESSURE":
         _el_orig = float((breakdown or {}).get("elasticity_regime_min_original") or 0.0)
         _el_new  = float((breakdown or {}).get("elasticity_regime_min_elastic") or 0.0)
         _op_ctx  = (

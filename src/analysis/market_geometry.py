@@ -110,6 +110,8 @@ class GeometryResult:
     ghost_mad: float = 0.0             # MAD of tick-sizes on ghost window
     # ── BOS-validated FVG ────────────────────────────────────────────────────
     fvg_bos_validated: bool = False    # FVG active AND BOS confirmed in same window
+    # ── Dynamic anchor lookback telemetry ────────────────────────────────────
+    fvg_lookback_used: int = 0         # actual FVG scan window used (0 = default)
 
 
 # ── Microstructure parameters (SMC + Momentum) ───────────────────────────────
@@ -215,12 +217,21 @@ def _pivot_sr_zones(prices: np.ndarray, current_price: float) -> SRZones:
 
 # ── SMC / Microstructure detectors (vectorised, < 0.5 ms) ────────────────────
 
-def _detect_fvg(prices: np.ndarray) -> tuple[bool, float, float, str]:
+def _detect_fvg(
+    prices: np.ndarray,
+    lookback: int = FVG_LOOKBACK,
+) -> tuple[bool, float, float, str]:
     """Detect the most recent unmitigated Fair Value Gap (3-tick imbalance).
 
     A bullish FVG is registered when prices[i+2].low > prices[i].high
     (we approximate low/high using rolling min/max over a 3-tick block).
     Conversely for bearish FVGs.
+
+    Parameters
+    ----------
+    lookback : int
+        How many ticks to scan. Defaults to FVG_LOOKBACK (200).
+        Pass a larger value (dynamic anchor) to search from the spike origin.
 
     Returns
     -------
@@ -231,10 +242,11 @@ def _detect_fvg(prices: np.ndarray) -> tuple[bool, float, float, str]:
         direction  : "bullish" / "bearish" / ""
     """
     n = len(prices)
-    if n < FVG_LOOKBACK + 3:
+    _lb = max(FVG_LOOKBACK, min(lookback, n))
+    if n < _lb + 3:
         return False, 0.0, 0.0, ""
 
-    seg = prices[-FVG_LOOKBACK:]
+    seg = prices[-_lb:]
     current = float(prices[-1])
     # Iterate newest → oldest so we return the most recent unmitigated gap
     for i in range(len(seg) - 3, 1, -1):
@@ -315,10 +327,10 @@ def _micro_band_signal(micro: ChannelGeometry, current_price: float) -> str | No
     return None
 
 
-def _detect_bos(prices: np.ndarray) -> tuple[bool, str]:
+def _detect_bos(prices: np.ndarray, lookback: int = BOS_LOOKBACK) -> tuple[bool, str]:
     """Break of Structure (BOS) detector.
 
-    Scans the last BOS_LOOKBACK ticks for swing pivots and checks if the
+    Scans the last `lookback` ticks for swing pivots and checks if the
     current price has broken the most recent swing structure:
 
     Bullish BOS  — last confirmed Higher Low sequence (swing_lows[-1] >
@@ -330,10 +342,11 @@ def _detect_bos(prices: np.ndarray) -> tuple[bool, str]:
     "bullish", "bearish", or "" when not confirmed.
     """
     n = len(prices)
-    if n < BOS_LOOKBACK + BOS_PIVOT_ORDER * 2:
+    _lb = max(BOS_LOOKBACK, min(lookback, n))
+    if n < _lb + BOS_PIVOT_ORDER * 2:
         return False, ""
 
-    seg = prices[-BOS_LOOKBACK:]
+    seg = prices[-_lb:]
     order = BOS_PIVOT_ORDER
     seg_n = len(seg)
 
@@ -503,6 +516,7 @@ def compute_geometry(
     ticks: Sequence[float],
     hurst: float | None = None,
     fvg_mit_pct: float | None = None,
+    dynamic_fvg_lookback: int | None = None,
 ) -> GeometryResult:
     """
     Compute multi-timeframe channel geometry and Hurst-adaptive signal.
@@ -521,6 +535,10 @@ def compute_geometry(
         When None, falls back to DERIV_FVG_MIT_PCT env var (default 0.50).
         Spike markets (BOOM/CRASH) should pass 0.15 — spikes graze FVGs
         without fully penetrating them.
+    dynamic_fvg_lookback : int | None
+        When set, overrides FVG_LOOKBACK for this call (FASE 1: dynamic anchor
+        lookback). The actual window is clamped to [FVG_LOOKBACK, len(ticks)].
+        BOS lookback is scaled proportionally (dynamic // 3, min BOS_LOOKBACK).
     """
     arr = np.asarray(ticks, dtype=np.float64)
     n = len(arr)
@@ -671,7 +689,10 @@ def compute_geometry(
 
     # ── SMC / Microstructure layer (advisory) ────────────────────────────
     # FVG and BOS run on RAW prices (spikes create the fair-value gaps).
-    fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr)
+    # FASE 1: dynamic anchor lookback — window grows from spike origin.
+    _dyn_fvg_lb = max(FVG_LOOKBACK, min(dynamic_fvg_lookback, n)) if dynamic_fvg_lookback else FVG_LOOKBACK
+    _dyn_bos_lb = max(BOS_LOOKBACK, _dyn_fvg_lb // 3) if dynamic_fvg_lookback else BOS_LOOKBACK
+    fvg_active, fvg_top, fvg_bot, fvg_dir = _detect_fvg(arr, lookback=_dyn_fvg_lb)
     fvg_mid = (fvg_top + fvg_bot) / 2.0 if fvg_active else 0.0
     gap_mitigated = False
     if fvg_active and fvg_top > fvg_bot:
@@ -692,7 +713,7 @@ def compute_geometry(
     micro_band_sig = _micro_band_signal(micro, current_price) if micro else None
 
     # ── BOS detection (raw prices — breaks are real price events) ─────────
-    bos_ok, bos_dir = _detect_bos(arr)
+    bos_ok, bos_dir = _detect_bos(arr, lookback=_dyn_bos_lb)
 
     # BOS-validated FVG: FVG is structurally significant when a BOS exists
     # in the same lookback window. Without BOS, the FVG is in a consolidation
@@ -771,4 +792,5 @@ def compute_geometry(
         kinetic_compressed=kin_score,
         ghost_mad=_ghost_mad,
         fvg_bos_validated=fvg_bos_validated,
+        fvg_lookback_used=_dyn_fvg_lb,
     )
