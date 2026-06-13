@@ -2984,6 +2984,16 @@ class DerivRiskManager:
                 ).split(",")
                 if s.strip()
             }
+            # Symbols that can't realistically reach the 60%-of-limit tension bypass
+            # (CRASH900 spikes ~10/hr, so 2880s gap almost never happens) must not be
+            # in the hard-block list — they always get soft relax via the normal path.
+            _never_hard_block = {
+                s.strip().upper()
+                for s in os.getenv(
+                    "DERIV_DYNAMIC_STRUCTURAL_SOFT_ONLY_SYMBOLS", "CRASH900"
+                ).split(",")
+                if s.strip()
+            }
             _dyn_relax_block_symbols = {
                 s.strip().upper()
                 for s in os.getenv(
@@ -2991,7 +3001,7 @@ class DerivRiskManager:
                     "",
                 ).split(",")
                 if s.strip()
-            }
+            } - _never_hard_block
             _dyn_relax_score_margin = float(
                 os.getenv("DERIV_DYNAMIC_STRUCTURAL_RELAX_SCORE_MARGIN", "0.40") or 0.40
             )
