@@ -535,6 +535,10 @@ class DerivDaemon:
         # is detected so we can compute retroceso (price recovery from spike) in real time.
         self._last_burst_spike_ts: dict[str, float] = {}
         self._last_burst_spike_px: dict[str, float] = {}
+        # Burst start timestamp — used to enforce DERIV_BURST_MAX_AGE_SEC safety valve.
+        # Prevents POST_SPIKE_COOLDOWN from locking the bot permanently when price
+        # lateralises without recovering 50% ATR and new spikes keep the burst window alive.
+        self._burst_start_ts: dict[str, float] = {}
         self._ctx_state_dir = Path(
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
@@ -1410,8 +1414,12 @@ class DerivDaemon:
             len(self._dynamic_configs),
         )
 
-    def _try_load_vision_context(self) -> None:
-        """Load deriv_vision.json written by the orchestrator (best-effort, TTL-cached)."""
+    async def _try_load_vision_context(self) -> None:
+        """Load deriv_vision.json written by the orchestrator (best-effort, TTL-cached).
+
+        Runs the file I/O in a thread pool via asyncio.to_thread so the event loop
+        is never blocked — even on TTL expiry the WS tick handler stays responsive.
+        """
         now = time.time()
         if now - self._vision_file_loaded_at < self._vision_file_ttl_sec:
             return
@@ -1420,11 +1428,15 @@ class DerivDaemon:
             import json as _json  # noqa: PLC0415
             from pathlib import Path as _Path  # noqa: PLC0415
             _vf = _Path(vision_path)
-            if _vf.exists():
-                raw = _json.loads(_vf.read_text())
-                if isinstance(raw, dict):
-                    self._last_vision_context = {k.upper(): v for k, v in raw.items()}
-                    self._vision_file_loaded_at = now
+            # asyncio.to_thread offloads the blocking read to a ThreadPoolExecutor,
+            # keeping the event loop free to process ticks from other symbols.
+            raw_text = await asyncio.to_thread(_vf.read_text)
+            raw = _json.loads(raw_text)
+            if isinstance(raw, dict):
+                self._last_vision_context = {k.upper(): v for k, v in raw.items()}
+                self._vision_file_loaded_at = now
+        except FileNotFoundError:
+            pass  # orchestrator hasn't written the file yet — use empty context
         except Exception as _ve:
             _LOGGER.debug("[vision-ctx] load failed: %s", _ve)
 
@@ -2199,7 +2211,6 @@ class DerivDaemon:
         self._risk.ingest_tick(tick.symbol, tick.price)
         self._analyst.ingest_live_tick(tick.symbol, tick.price)
         self._velocity.ingest_tick(tick.symbol, tick.price)
-        self._velocity.ingest_tick(tick.symbol, tick.price)
         _ghost_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         self._ghost_logger.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
 
@@ -2247,8 +2258,8 @@ class DerivDaemon:
                 _LOGGER.exception("[deriv-daemon] pipeline error for %s (suppressed)", tick.symbol)
 
     async def _pipeline(self, tick: NormalisedTick) -> None:
-        # Refresh vision context file (TTL-cached, non-blocking)
-        self._try_load_vision_context()
+        # Refresh vision context file (TTL-cached, offloaded to thread pool)
+        await self._try_load_vision_context()
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
@@ -2437,14 +2448,36 @@ class DerivDaemon:
             _burst_retroceso: float | None = None
             _burst_active: bool = False
             with suppress(Exception):
+                _BURST_MAX_AGE_SEC = float(os.getenv("DERIV_BURST_MAX_AGE_SEC", "600") or "600")
+                _now_burst = time.time()
                 if _is_burst:
-                    _burst_active = True
-                    _burst_depth = int(_count_recent)
-                elif _last_spike_age is not None and _last_spike_age <= float(
-                    self._spike_density_burst_window_sec
-                ):
-                    # Within the burst window but below threshold — surface depth anyway
-                    _burst_depth = int(_count_recent)
+                    _burst_start = self._burst_start_ts.get(_sym_sd, 0.0)
+                    if _burst_start == 0.0:
+                        # Primer tick del burst — registrar inicio
+                        self._burst_start_ts[_sym_sd] = _now_burst
+                        _burst_active = True
+                        _burst_depth = int(_count_recent)
+                    elif _now_burst - _burst_start > _BURST_MAX_AGE_SEC:
+                        # Safety valve: el burst lleva demasiado tiempo activo sin
+                        # recuperación. Forzar reset para evitar POST_SPIKE_COOLDOWN perpetuo.
+                        _burst_active = False
+                        self._burst_start_ts[_sym_sd] = 0.0
+                        _LOGGER.warning(
+                            "[BURST_TIMEOUT] %s burst activo > %.0fs sin recuperación → "
+                            "forzando reset (DERIV_BURST_MAX_AGE_SEC=%.0f)",
+                            _sym_sd, _now_burst - _burst_start, _BURST_MAX_AGE_SEC,
+                        )
+                    else:
+                        _burst_active = True
+                        _burst_depth = int(_count_recent)
+                else:
+                    # Burst expiró por ventana natural — limpiar timestamp
+                    self._burst_start_ts[_sym_sd] = 0.0
+                    if _last_spike_age is not None and _last_spike_age <= float(
+                        self._spike_density_burst_window_sec
+                    ):
+                        # Within the burst window but below threshold — surface depth anyway
+                        _burst_depth = int(_count_recent)
             with suppress(Exception):
                 # Retroceso: use daemon's _last_spike_px cache to compare current price.
                 # Populated below when we detect a new spike_ts.
@@ -4723,7 +4756,7 @@ class DerivDaemon:
         snap.score_breakdown["trifecta_scarcity"] = _trifecta_scarcity
         snap.score_breakdown["trifecta_fvg_bos"]  = _trifecta_fvg_bos
 
-        _LOGGER.info(
+        _LOGGER.debug(
             "[RNG_PROB] %s prob=%d/100 threshold=%d trifecta=%s missing=%s",
             tick.symbol, _rng_prob, _rng_threshold,
             "✓" if _trifecta_met else "✗",
