@@ -4187,7 +4187,11 @@ class DerivDaemon:
                 return
 
         # BOOM600 safety override: trending regime needs extra score conviction.
-        if tick.symbol.upper() == "BOOM600" and str(snap.regime or "").lower() == "trending":
+        # BYPASS when scarcity is SECO — DRY override already validated the entry.
+        # In drought the spike is statistically overdue; trending gate would double-block.
+        _b600_scarcity = str(snap.score_breakdown.get("scarcity_state") or "")
+        _b600_dry_bypass = tick.symbol.upper() == "BOOM600" and _b600_scarcity == "SECO"
+        if tick.symbol.upper() == "BOOM600" and str(snap.regime or "").lower() == "trending" and not _b600_dry_bypass:
             # 2026-05-29: gate is now IA-managed via dynamic_symbol_config.
             # Floor at 8.5 to prevent IA from collapsing the gate too low.
             # Ceiling at 9.5 to stay within sane bounds. IA tunes inside that band

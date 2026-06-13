@@ -561,57 +561,6 @@ function SymbolCard({ s }) {
       </div>
       )}
 
-      {/* ══ HURST — fuerza del mercado ══ */}
-      {!_isBlindZone && (
-      <div style={{ padding: "10px 12px 10px", borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 700, color: T.mute, letterSpacing: "0.10em", textTransform: "uppercase" }}>
-            Fuerza del mercado (Hurst)
-          </span>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: hurstColor, lineHeight: 1 }}>
-              {hurst != null ? hurst.toFixed(3) : "–"}
-            </span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 600, color: hurstColor }}>{hurstLabel}</span>
-          </div>
-        </div>
-        <div style={{ position: "relative", height: 8, marginBottom: 5 }}>
-          <div style={{
-            height: "100%", borderRadius: 99,
-            background: `linear-gradient(to right, ${T.green} 0%, ${T.amber} 50%, ${T.red} 100%)`,
-          }} />
-          {hurst != null && (
-            <div style={{
-              position: "absolute", top: "50%", transform: "translate(-50%, -50%)",
-              left: `${hurstPos}%`, width: 14, height: 14, borderRadius: "50%",
-              background: T.panel2, border: `2.5px solid ${hurstColor}`,
-              boxShadow: `0 0 7px ${hurstColor}`,
-            }} />
-          )}
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 8.5, color: T.green }}>sin fuerza · entra</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 8.5, color: T.mute }}>neutro</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 8.5, color: T.red }}>con fuerza · espera</span>
-        </div>
-        {hurstH.length > 0 && (
-          <div style={{ display: "flex", gap: 2 }}>
-            {hurstH.map((h, i) => {
-              const isLast = i === hurstH.length - 1;
-              const hc = hurstBarColor(h);
-              return (
-                <div key={i} style={{
-                  flex: 1, height: 16, borderRadius: 3,
-                  background: hc + (isLast ? "ff" : "6a"),
-                  border: isLast ? `1.5px solid ${hc}` : "none",
-                  boxShadow: isLast ? `0 0 5px ${hc}` : "none",
-                }} />
-              );
-            })}
-          </div>
-        )}
-      </div>
-      )}
 
       {/* ══ tiempo + ticks (grande) ══ */}
       <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
@@ -651,77 +600,10 @@ function SymbolCard({ s }) {
           <Stat label="prom/h 24h" value={num(s.ratePerHour?.h24, 1)} color={T.cyan} />
         </div>
 
-        {/* razones (por qué el bot no entró) */}
-        {!_isBlindZone && s.topReasons?.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-              Notas (por qué el bot no entró)
-            </span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-              {s.topReasons.map((r) => (
-                <span key={r.reason} style={{
-                  fontFamily: FONT_MONO, fontSize: 9.5, color: T.amber,
-                  background: T.amber + "12", border: `1px solid ${T.amber}33`,
-                  borderRadius: 4, padding: "2px 6px",
-                }}>{r.reason} ×{r.n}</span>
-              ))}
-            </div>
-          </div>
-        )}
 
-        {/* analytics inline — ATR · EMA200 · CLSTR · FVG · Z · PROB */}
+        {/* analytics — Vision 15M + ENTRY QUALITY */}
         {!_isBlindZone && analytics?.snapshot && (
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-              {"ATR "}
-              <span style={{ color: T.text }}>{analytics.snapshot.atr != null ? analytics.snapshot.atr.toFixed(4) : "–"}</span>
-              {" Pct "}
-              <span style={{ color: (analytics.snapshot.atr_percentile ?? 50) > 75 ? T.red : (analytics.snapshot.atr_percentile ?? 50) > 40 ? T.amber : T.green }}>
-                {analytics.snapshot.atr_percentile ?? "–"}%
-              </span>
-              {" · EMA200 "}
-              {/* BOOM500: price BELOW EMA200 (negative %) = bullish context for UP spike */}
-              {/* CRASH500: price ABOVE EMA200 (positive %) = bearish context for DOWN spike */}
-              {(() => {
-                const d = analytics.snapshot.ema200_distance_pct;
-                const isBoom = s.symbol?.startsWith("BOOM");
-                const bullish = isBoom ? (d != null && d < 0) : (d != null && d > 0);
-                return (
-                  <span style={{ color: bullish ? T.green : T.red }}>
-                    {d != null ? (d * 100).toFixed(3) + "%" : "–"}
-                  </span>
-                );
-              })()}
-              {" · CLSTR "}
-              <span style={{ color: cluster ? T.red : T.textD, fontWeight: 700 }}>
-                {cluster ? "●ON" : "○OFF"}
-              </span>
-            </span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
-              {"TICK "}
-              <span style={{ color: T.cyan }}>{analytics.snapshot.tick_rate_5s != null ? analytics.snapshot.tick_rate_5s.toFixed(2) : "–"}/5s</span>
-              {" · RANGE60s "}
-              <span style={{ color: T.cyan }}>{analytics.snapshot.range_rolling_pct_60s != null ? (analytics.snapshot.range_rolling_pct_60s * 100).toFixed(2) + "%" : "–"}</span>
-              {analytics.snapshot.fvg_active != null && (() => {
-                const fvgOn   = analytics.snapshot.fvg_active === true;
-                const fvgDir  = analytics.snapshot.fvg_direction || "";
-                const fvgMid  = analytics.snapshot.fvg_mid;
-                const smc     = analytics.snapshot.smc_bonus;
-                const isBoom  = s.symbol?.startsWith("BOOM");
-                // FVG bullish = good for BOOM (spike UP); FVG bearish = good for CRASH (spike DOWN)
-                const aligned = fvgOn && ((isBoom && fvgDir === "bullish") || (!isBoom && fvgDir === "bearish"));
-                const fvgColor = fvgOn ? (aligned ? T.green : T.amber) : T.mute;
-                return (
-                  <>
-                    {" · FVG "}
-                    <span style={{ color: fvgColor, fontWeight: fvgOn ? 700 : 400 }}>
-                      {fvgOn ? `●${fvgDir.slice(0, 4).toUpperCase()}${fvgMid != null ? " @" + fvgMid.toFixed(1) : ""}` : "○OFF"}
-                    </span>
-                    {smc != null && smc > 0 && <span style={{ color: T.violet }}>{" SMC+" + smc.toFixed(1)}</span>}
-                  </>
-                );
-              })()}
-            </span>
             {analytics.spike_stats && (() => {
               const st = analytics.spike_stats;
               const zColor = st.z_score > 2 ? T.red : st.z_score > 1 ? T.amber : st.z_score < -0.5 ? T.green : T.textD;
@@ -729,165 +611,69 @@ function SymbolCard({ s }) {
                 <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
                   {"Z "}
                   <span style={{ color: zColor }}>{st.z_score > 0 ? "+" : ""}{st.z_score.toFixed(2)}</span>
-                  {" · PROB "}
-                  <span style={{ color: st.prob_100 > 0.65 ? T.green : st.prob_100 > 0.35 ? T.amber : T.textD }}>100t:{(st.prob_100 * 100).toFixed(0)}%</span>
-                  {" "}
-                  <span style={{ color: st.prob_200 > 0.65 ? T.green : st.prob_200 > 0.35 ? T.amber : T.textD }}>200t:{(st.prob_200 * 100).toFixed(0)}%</span>
-                  {" "}
-                  <span style={{ color: st.prob_500 > 0.65 ? T.green : st.prob_500 > 0.35 ? T.amber : T.textD }}>500t:{(st.prob_500 * 100).toFixed(0)}%</span>
+                  {" · típico "}
+                  <span style={{ color: T.textD }}>{st.p50_gap}t</span>
+                  {" · p75 "}
+                  <span style={{ color: T.textD }}>{st.p75_gap}t</span>
                   <span style={{ color: T.mute }}>{" ·n="}{st.sample_size}</span>
                 </span>
               );
             })()}
-            {/* ── ESTRUCTURA MACRO 15M (Vision LLM) ────────────────────── */}
+            {/* ── ESTRUCTURA 15M (Vision LLM — 1 línea) ─────────────── */}
             {s.vision && (() => {
               const v = s.vision;
               const trend = v.trend_15m || "ranging";
-              const strength = v.trend_strength || "weak";
-              const bias = v.bias || "NEUTRAL";
               const conf = typeof v.confidence === "number" ? v.confidence : 0;
               const isBoom = s.symbol?.startsWith("BOOM");
-              // Para índices de spike: CRASH sube lento y crashea DOWN → alcista = acumulando energía = FAVORABLE
-              // BOOM baja lento y boomea UP → bajista = acumulando energía = FAVORABLE
-              // Conflicto real: CRASH bajista = crash ya ocurrió | BOOM alcista = boom ya ocurrió
               const biasAligned = (isBoom && trend === "downtrend") || (!isBoom && trend === "uptrend");
               const biasConflict = (isBoom && trend === "uptrend") || (!isBoom && trend === "downtrend");
               const trendColor = biasAligned ? T.green : biasConflict ? T.red : T.amber;
-              const biasColor = trendColor;
               const trendArrow = trend === "uptrend" ? "▲" : trend === "downtrend" ? "▼" : "◆";
-              const strengthDot = strength === "strong" ? "●●●" : strength === "moderate" ? "●●○" : "●○○";
+              const biasLabel = trend === "ranging" ? "LATERAL"
+                : isBoom ? (trend === "downtrend" ? "CARGANDO ✓" : "YA SUBIÓ ✗")
+                : (trend === "uptrend" ? "CARGANDO ✓" : "YA CAYÓ ✗");
               const ageMin = v.updated_at ? Math.round((Date.now() / 1000 - v.updated_at) / 60) : null;
               return (
-                <div style={{
-                  margin: "8px 0 4px",
-                  padding: "8px 10px",
-                  background: `${trendColor}0d`,
-                  border: `1px solid ${trendColor}30`,
-                  borderRadius: 6,
-                }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                    <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.08em", fontWeight: 700 }}>ESTRUCTURA 15M</span>
-                    {ageMin !== null && <span style={{ fontSize: 8, color: T.mute }}>hace {ageMin}m</span>}
-                    {conf > 0 && (
-                      <span style={{ fontSize: 8, color: conf >= 0.7 ? T.green : conf >= 0.45 ? T.amber : T.mute, marginLeft: "auto" }}>
-                        conf {Math.round(conf * 100)}%
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                    {/* Trend direction */}
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                      <span style={{ fontSize: 18, fontWeight: 900, color: trendColor, lineHeight: 1 }}>{trendArrow}</span>
-                      <span style={{ fontSize: 11, fontWeight: 700, color: trendColor, letterSpacing: "0.04em" }}>
-                        {trend === "uptrend" ? "ALCISTA" : trend === "downtrend" ? "BAJISTA" : "LATERAL"}
-                      </span>
-                      <span style={{ fontSize: 9, color: trendColor, opacity: 0.8 }}>{strengthDot}</span>
-                    </div>
-                    {/* Bot bias alignment */}
-                    <div style={{
-                      padding: "2px 8px",
-                      borderRadius: 4,
-                      background: `${biasColor}18`,
-                      border: `1px solid ${biasColor}40`,
-                      fontSize: 9,
-                      fontWeight: 800,
-                      color: biasColor,
-                      letterSpacing: "0.06em",
-                    }}>
-                      {trend === "ranging" ? "LATERAL" : isBoom
-                        ? (trend === "downtrend" ? "CARGANDO ▼ ✓" : "YA SUBIÓ ▲ ✗")
-                        : (trend === "uptrend"   ? "CARGANDO ▲ ✓" : "YA CAYÓ ▼ ✗")}
-                      {trend === "ranging" ? "" : ""}
-                    </div>
-                    {/* Pattern */}
-                    {v.pattern && (
-                      <span style={{ fontSize: 9, color: T.mute, fontStyle: "italic" }}>{v.pattern}</span>
-                    )}
-                  </div>
-                  {/* Key levels */}
-                  {(v.key_resistance != null || v.key_support != null) && (
-                    <div style={{ display: "flex", gap: 14, marginTop: 5 }}>
-                      {v.key_resistance != null && (
-                        <span style={{ fontSize: 9, color: T.red }}>
-                          RESIST <span style={{ fontWeight: 700, fontFamily: FONT_MONO }}>{Number(v.key_resistance).toFixed(0)}</span>
-                        </span>
-                      )}
-                      {v.key_support != null && (
-                        <span style={{ fontSize: 9, color: T.green }}>
-                          SOPORT <span style={{ fontWeight: 700, fontFamily: FONT_MONO }}>{Number(v.key_support).toFixed(0)}</span>
-                        </span>
-                      )}
-                    </div>
-                  )}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: FONT_MONO, fontSize: 9 }}>
+                  <span style={{ color: T.mute, fontSize: 8 }}>15M</span>
+                  <span style={{ color: trendColor, fontWeight: 900 }}>{trendArrow}</span>
+                  <span style={{ color: trendColor, fontWeight: 800 }}>{biasLabel}</span>
+                  {conf > 0 && <span style={{ color: T.mute, fontSize: 8 }}>conf {Math.round(conf * 100)}%</span>}
+                  {ageMin !== null && <span style={{ color: T.mute, fontSize: 7 }}>hace {ageMin}m</span>}
                 </div>
               );
             })()}
 
-            {/* ── PRESIÓN REAL ──────────────────────────────────────────── */}
-            {_presionScore != null && (
-              <div style={{ padding: "8px 0 4px" }}>
-                {/* CASCADE alert banner — overrides blind zone */}
-                {_inCascade && (
-                  <div style={{
-                    marginBottom: 6, padding: "6px 10px",
-                    background: T.orange + "18", border: `1px solid ${T.orange}55`,
-                    borderRadius: 6, display: "flex", alignItems: "center", gap: 8,
-                  }}>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: T.orange, letterSpacing: "0.10em" }}>
-                      ⚡ CASCADE ACTIVA
-                    </span>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>
-                      {_cascadeDepth ?? "?"}x · {_cascadeGapTicks ?? "?"}t entre spikes · SIN RETROCESO
-                    </span>
-                  </div>
-                )}
-                {/* SOBREPRESIÓN warning — Z > 1.5 in slow market */}
-                {(_isOverdueExtreme || _isOverdueHigh) && !_isBlindZone && (
-                  <div style={{
-                    marginBottom: 6, padding: "5px 10px",
-                    background: (_isOverdueExtreme ? T.red : T.amber) + "14",
-                    border: `1px solid ${(_isOverdueExtreme ? T.red : T.amber)}44`,
-                    borderRadius: 6, display: "flex", alignItems: "center", gap: 8,
-                  }}>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800,
-                      color: _isOverdueExtreme ? T.red : T.amber, letterSpacing: "0.08em" }}>
-                      {_isOverdueExtreme ? "SOBREPRESIÓN" : "PRESIÓN ALTA"}
-                    </span>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>
-                      Z={_zScore != null ? (_zScore > 0 ? "+" : "") + _zScore.toFixed(2) : "?"}
-                      {_ticksWait != null && ` · ${_ticksWait}t esperados`}
-                      {_p90Ticks != null && ` · p90=${_p90Ticks}t`}
-                    </span>
-                  </div>
-                )}
-                {/* PRESIÓN bar */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, minWidth: 52, letterSpacing: "0.06em" }}>PRESIÓN</span>
-                  <div style={{ flex: 1, height: 6, borderRadius: 3, background: T.border, overflow: "hidden" }}>
-                    <div style={{
-                      height: "100%", borderRadius: 3,
-                      width: `${Math.min(100, (_presionScore / 10) * 100)}%`,
-                      background: _presionColor,
-                      transition: "width 0.6s ease",
-                    }} />
-                  </div>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: _presionColor, minWidth: 42 }}>
-                    {_presionScore?.toFixed(1)} <span style={{ fontSize: 8, color: T.mute }}>{_presionLabel}</span>
-                  </span>
-                </div>
-                {/* Component detail row */}
-                <div style={{ display: "flex", gap: 10, marginTop: 4, paddingLeft: 60 }}>
-                  {[
-                    { label: "Z", val: _presion?.z_component },
-                    { label: "VEL", val: _presion?.velocity_component },
-                    { label: "COMP", val: _presion?.compression_component },
-                    { label: "SCAR", val: _presion?.scarcity_component },
-                  ].map(({ label, val }) => (
-                    <span key={label} style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>
-                      {label}:<span style={{ color: T.textD }}>{val?.toFixed(1) ?? "–"}</span>
-                    </span>
-                  ))}
-                </div>
+            {/* ── Alertas operacionales ─────────────────────────────────── */}
+            {_inCascade && (
+              <div style={{
+                padding: "5px 8px",
+                background: T.orange + "18", border: `1px solid ${T.orange}55`,
+                borderRadius: 5, display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800, color: T.orange, letterSpacing: "0.10em" }}>
+                  ⚡ CASCADE
+                </span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
+                  {_cascadeDepth ?? "?"}x · {_cascadeGapTicks ?? "?"}t entre spikes
+                </span>
+              </div>
+            )}
+            {(_isOverdueExtreme || _isOverdueHigh) && !_isBlindZone && (
+              <div style={{
+                padding: "4px 8px",
+                background: (_isOverdueExtreme ? T.red : T.amber) + "14",
+                border: `1px solid ${(_isOverdueExtreme ? T.red : T.amber)}44`,
+                borderRadius: 5, display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800,
+                  color: _isOverdueExtreme ? T.red : T.amber }}>
+                  {_isOverdueExtreme ? "SOBREPRESIÓN" : "PRESIÓN ALTA"}
+                </span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
+                  Z={_zScore != null ? (_zScore > 0 ? "+" : "") + _zScore.toFixed(2) : "?"}
+                  {_p90Ticks != null && ` · p90=${_p90Ticks}t`}
+                </span>
               </div>
             )}
             {/* ── ENTRY QUALITY INDICATORS ─────────────────────────────── */}
@@ -1220,68 +1006,11 @@ function SymbolCard({ s }) {
                     );
                   })()}
 
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                     {setupType && chip("SETUP", setupLabel, setupColor)}
                     {grade && chip("GRADE", grade, gradeColor)}
                     {scarcity && chip("SCAR", scarcity, scarColor)}
-                    {immState && chip("IMM", `${immState}${immScore != null ? " " + immScore.toFixed(2) : ""}`, immScore != null ? immColor : immStateColor)}
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {fvgAnchorActive
-                      ? chip("FVG", `ANCLADO${fvgAnchorAgeS != null ? " " + Math.round(fvgAnchorAgeS) + "s" : ""}`, T.violet)
-                      : fvgTier && chip("FVG", fvgTierLabel, fvgTierColor)}
-                    {fvgAnchorWick != null && chip(
-                      "ZONA TOL",
-                      `+${fvgAnchorWick.toFixed(3)}%${fvgAnchorMomPen != null ? " ↑" : ""}`,
-                      fvgAnchorMomPen != null ? T.red : T.amber
-                    )}
-                    {geoPos != null && chip("GEO", geoPct, geoColor)}
-                    {scoreRaw != null && chip("SCORE_RAW", scoreRaw.toFixed(1), scoreRawColor)}
-                    {burstDepth != null && chip("BURST", `${burstDepth}x`, burstDepth >= 2 ? T.cyan : T.amber)}
-                    {burstRetroceso != null && chip("RETR", `${(burstRetroceso * 100).toFixed(0)}%`, burstRetroceso > 0.35 ? T.red : T.green)}
-                    {_cascadeActive && chip("CASCADE", `${_cascadeDepth ?? "?"}x·${_cascadeGapTicks ?? "?"}t`, T.orange)}
-                    {structFvgConfirm && chip("5m FVG", "✓" + (structFvgDir ? " " + structFvgDir.slice(0,4).toUpperCase() : ""), T.green)}
-                    {structFvgConflict && chip("5m FVG", "⚡CONF", T.red)}
-                    {structFvgAbsent && chip("5m FVG", "ABSENT", T.amber)}
-                    {atrAnchored && chip("ATR", "PRE-SPI", T.violet)}
-                    {ema200Anchored && chip("EMA200", "ANCLADO", T.violet)}
-                    {ema200DistPct != null && chip(
-                      "EMA",
-                      `${_emaOverridedByAnchor ? "~" : (ema200Loaded ? "✓" : "✗")} ${_emaDevStr}`,
-                      _emaOverridedByAnchor ? T.mute : (ema200Loaded ? T.green : T.red)
-                    )}
-                  </div>
-
-                  {/* ── Quant row: KINETIC · BOS_FVG · TRIFECTA · GHOST_MAD ── */}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
-                    {kineticVelocity != null && chip(
-                      "KINETIC",
-                      `V${(kineticVelocity >= 0 ? "+" : "") + kineticVelocity.toFixed(1)} A${(kineticAccel >= 0 ? "+" : "") + (kineticAccel ?? 0).toFixed(1)}${kineticCompressed ? " ●" : ""}`,
-                      kineticCompressed ? T.green : T.mute
-                    )}
-                    {chip(
-                      "BOS_FVG",
-                      fvgBosValidated ? "✓ BOS+FVG" : "✗ SIN BOS",
-                      fvgBosValidated ? T.green : T.red
-                    )}
-                    {ghostMad != null && chip(
-                      "MAD",
-                      ghostMad.toFixed(4),
-                      ghostMad < 0.05 ? T.green : ghostMad < 0.15 ? T.amber : T.red
-                    )}
-                    {/* TRIFECTA — glows when all 4 conditions met */}
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 3,
-                      background: trifectaMet ? T.green + "28" : T.mute + "10",
-                      border: trifectaMet ? `2px solid ${T.green}` : `1px solid ${T.mute}22`,
-                      borderRadius: 4, padding: "1px 5px", opacity: chipOpacity,
-                      boxShadow: trifectaMet ? `0 0 8px ${T.green}88` : "none",
-                    }}>
-                      <span style={{ color: T.mute, fontSize: 7, fontWeight: 600 }}>TRIFECTA</span>
-                      <span style={{ color: trifectaMet ? T.green : T.mute, fontSize: 8, fontWeight: trifectaMet ? 800 : 400 }}>
-                        {trifectaMet ? "✦ MET" : `${trifectaVision?"V":"v"}${trifectaKinetic?"K":"k"}${trifectaScarcity?"S":"s"}${trifectaFvgBos?"B":"b"}`}
-                      </span>
-                    </span>
+                    {scoreRaw != null && chip("SCORE", scoreRaw.toFixed(1), scoreRawColor)}
                   </div>
                 </div>
               );
