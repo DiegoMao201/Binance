@@ -3778,8 +3778,17 @@ class DerivDaemon:
             .get(tick.symbol.upper(), {})
             .get("zona_liquidez_macro", False)
         )
-        _mk_scar      = str(snap.score_breakdown.get("scarcity_state") or "")
-        _mk_scar_ratio = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
+        # FASE 3: fallback to eager _last_fvg_state cache — scarcity loading at
+        # line ~3978 runs AFTER MASTER KEY, so score_breakdown may not have it yet.
+        _mk_scar_raw   = (
+            snap.score_breakdown.get("scarcity_state")
+            or (self._last_fvg_state.get(_cache_sym) or {}).get("scarcity_state")
+        )
+        _mk_scar       = str(_mk_scar_raw or "")
+        _mk_scar_ratio_raw = snap.score_breakdown.get("scarcity_ratio")
+        if _mk_scar_ratio_raw is None:
+            _mk_scar_ratio_raw = (self._last_fvg_state.get(_cache_sym) or {}).get("scarcity_ratio")
+        _mk_scar_ratio = float(_mk_scar_ratio_raw or 0.0)
         _mk_rng, _mk_missing = _calculate_rng_probability(
             kinetic_score=_mk_kinetic,
             fvg_bos_validated=_mk_fvg_bos,
@@ -4024,6 +4033,38 @@ class DerivDaemon:
             )
 
 
+        # ── ELASTIC THRESHOLDS: Overpressure Discount ────────────────────────
+        # Z-score proxy = scarcity_ratio (temporal pressure — how overdue the spike is).
+        # VENCIDO/SECO states accumulate RNG tension that more than compensates for
+        # missing structural confirmation. Two levels:
+        #   Z ≥ DERIV_ELASTIC_Z1 (1.5) → partial discount (14%) on regime effective_min
+        #   Z ≥ DERIV_ELASTIC_Z2 (2.0) + kinetic giro → full discount (28%) + structure bypass
+        # Floor DERIV_ELASTIC_FLOOR (5.50) prevents infinite collapse.
+        _elasticity_z = 0.0
+        _elasticity_fast_track = False
+        if _is_bc_bias:
+            _op_ratio   = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
+            _op_kinetic = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
+            _el_z1      = float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5)
+            _el_z2      = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
+            _elasticity_z = _op_ratio
+            if _op_ratio >= _el_z2:
+                snap.score_breakdown["market_context"] = "EXTREME_OVERPRESSURE"
+                snap.score_breakdown["elasticity_z"]   = round(_op_ratio, 2)
+                if _op_kinetic > 0:
+                    _elasticity_fast_track = True
+                    snap.score_breakdown["elasticity_fast_track"] = True
+                    if snap.score_breakdown.get("structural_fvg_conflict"):
+                        snap.score_breakdown["elasticity_struct_bypass"] = True
+                        snap.score_breakdown.pop("structural_fvg_conflict", None)
+                        _LOGGER.info(
+                            "[ELASTICITY] %s Z=+%.2f fast-track: structural conflict"
+                            " bypassed (kinetic=%.2f)",
+                            tick.symbol, _op_ratio, _op_kinetic,
+                        )
+            elif _op_ratio >= _el_z1:
+                snap.score_breakdown["elasticity_z"] = round(_op_ratio, 2)
+
         # ── Structural FVG conflict gate ──────────────────────────────────────
         # Si el FVG de ticks apunta en dirección opuesta a la del candle de 5m,
         # tenemos micro vs macro en conflicto. El bot puede entrar, pero solo con
@@ -4094,6 +4135,31 @@ class DerivDaemon:
                 "boost=+%.2f score→%.2f",
                 tick.symbol, _vel_score, _vel_dir or "?", _hd_bonus_val,
                 _vel_boost, snap.score,
+            )
+
+        # ── Apply elasticity discount to regime gate threshold ───────────────
+        _original_regime_min = _regime_min
+        if _elasticity_z >= float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0):
+            _el_pct   = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28)
+            _el_floor = float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50)
+            _regime_min = max(_el_floor, _regime_min * (1.0 - _el_pct))
+            snap.score_breakdown["elasticity_regime_min_original"] = round(_original_regime_min, 2)
+            snap.score_breakdown["elasticity_regime_min_elastic"]  = round(_regime_min, 2)
+            _LOGGER.info(
+                "[ELASTICITY] %s Z=+%.2f -> Required Score lowered from %.2f to %.2f.%s",
+                tick.symbol, _elasticity_z, _original_regime_min, _regime_min,
+                " ENTRY AUTHORIZED." if snap.score >= _regime_min else "",
+            )
+        elif _elasticity_z >= float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5):
+            _el_pct   = float(os.getenv("DERIV_ELASTIC_DISCOUNT_PCT", "0.28") or 0.28) * 0.5
+            _el_floor = float(os.getenv("DERIV_ELASTIC_FLOOR", "5.50") or 5.50)
+            _regime_min = max(_el_floor, _regime_min * (1.0 - _el_pct))
+            snap.score_breakdown["elasticity_regime_min_original"] = round(_original_regime_min, 2)
+            snap.score_breakdown["elasticity_regime_min_elastic"]  = round(_regime_min, 2)
+            _LOGGER.info(
+                "[ELASTICITY] %s Z=+%.2f (partial) -> Required Score lowered from"
+                " %.2f to %.2f",
+                tick.symbol, _elasticity_z, _original_regime_min, _regime_min,
             )
 
         if snap.score < _regime_min:

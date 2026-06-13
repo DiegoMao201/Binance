@@ -809,13 +809,33 @@ def _build_ai_prompt(
     else:
         _rng_section = ""
 
+    # ── EXTREME_OVERPRESSURE context (FASE 2) ────────────────────────────────
+    # Injected when elasticity logic lowered the regime threshold due to high
+    # scarcity ratio (spike very overdue). The LLM must NOT veto on missing
+    # structure when overpressure justifies the entry.
+    _el_z_bd   = float((breakdown or {}).get("elasticity_z") or 0.0)
+    _mkt_ctx   = str((breakdown or {}).get("market_context") or "")
+    _op_ctx    = ""
+    if _el_z_bd >= 2.0 or _mkt_ctx == "EXTREME_OVERPRESSURE":
+        _el_orig = float((breakdown or {}).get("elasticity_regime_min_original") or 0.0)
+        _el_new  = float((breakdown or {}).get("elasticity_regime_min_elastic") or 0.0)
+        _op_ctx  = (
+            f"\n⚠️ EXTREME_OVERPRESSURE (Z=+{_el_z_bd:.2f}): "
+            f"regime threshold lowered {_el_orig:.2f}→{_el_new:.2f}.\n"
+            "The spike is statistically VERY OVERDUE. Deriv RNG accumulates internal\n"
+            "tension during droughts that compensates for missing structural confirmation.\n"
+            "DO NOT veto for missing FVG or below-normal score alone.\n"
+            "APPROVE if: any kinetic compression is visible AND no active COOLDOWN.\n"
+            "Absence of FVG ≠ bad entry. Extreme temporal tension = high spike probability.\n"
+        )
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
 PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
-Score breakdown: {json.dumps(breakdown)}{_struct_ctx}{_rng_section}
+Score breakdown: {json.dumps(breakdown)}{_op_ctx}{_struct_ctx}{_rng_section}
 
 SYMBOL_GUARDRAIL:
 - symbol_bleed_bonus: {_bleed_bonus:.2f}
