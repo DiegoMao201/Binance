@@ -920,7 +920,7 @@ class DerivDaemon:
             # Symbol is "hot" only while the last spike is still fresh in ticks
             # (it just fired) — beyond that the move already played out.
             _hot_fresh_ticks = float(
-                os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "200") or 200
+                os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "300") or 300
             )
             _hot_win_sec = float(
                 os.getenv("DERIV_HOT_REENTRY_WINDOW_SEC", "300") or 300
@@ -2929,7 +2929,7 @@ class DerivDaemon:
                     # guard there). SL protections cut any bad re-entry small.
                     _hot_ok = False
                     if str(os.getenv("DERIV_HOT_REENTRY_ENABLE", "true") or "true").strip().lower() in {"1", "true", "yes", "on"}:
-                        _hot_fresh = float(os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "200") or 200)
+                        _hot_fresh = float(os.getenv("DERIV_HOT_REENTRY_FRESH_TICKS", "300") or 300)
                         _hot_win = float(os.getenv("DERIV_HOT_REENTRY_WINDOW_SEC", "300") or 300)
                         _hot_min_sp = max(1, int(float(os.getenv("DERIV_HOT_REENTRY_MIN_SPIKES", "1") or 1)))
                         try:
