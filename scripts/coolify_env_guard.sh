@@ -64,14 +64,15 @@ REQUIRED_VARS=(
   # 2026-06-12: estructura 15m cada 5min (era 900s=15min, demasiado lenta para contexto bot)
   "DYNAMIC_AI_VISION_CACHE_SEC=300"
   # 2026-06-12: LISTO_RIPE_BYPASS — entra ANTES del spike cuando LISTO+RIPE+score≥6.0
-  # Problema raíz: IMMINENCE_RIPE_GATE bloqueaba exactamente cuando el spike está cargado.
-  # HOT_REENTRY entraba POST-spike (score=10) y comía todo el retroceso.
   "DERIV_LISTO_RIPE_BYPASS_MIN_SCORE=6.0"
   # HOT_REENTRY: requiere cluster ≥2 spikes — no re-entrada tras spike solitario
   "DERIV_HOT_REENTRY_MIN_SPIKES=2"
-  # MATURITY_GATE: single-spike espera P75 (1.80×P50) antes de entrar — era 0.70×P50
-  # Objetivo: no entrar a los 2-3 min post-spike solitario, esperar zona óptima P75
-  "DERIV_MATURITY_GATE_FRAC=1.80"
+  # MATURITY_GATE: revertido a 0.70 — 1.80 creaba gap imposible (FVG TTL=600s < threshold 795s)
+  # El FVG ancla dura 600s. Con 0.70×P50 (244-400s), el FVG sigue activo al pasar el gate.
+  "DERIV_MATURITY_GATE_FRAC=0.70"
+  # DRY_GATE por símbolo: BOOM600 en SECO puede entrar a score≥6.5 (sin FVG activo)
+  # CRASH900 ya estaba en 6.0. Ahora BOOM600 también puede entrar en sequía.
+  "DERIV_DRY_OVERRIDE_SCORE_MAP=CRASH900:6.0,BOOM600:6.5"
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
