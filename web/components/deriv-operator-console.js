@@ -220,17 +220,8 @@ function SymbolCard({ s }) {
   const _lastSpikeWTs = _sn?.last_spike_wall_ts ?? null;
   const _secsSinceSpk = _lastSpikeWTs ? Math.floor(now / 1000 - _lastSpikeWTs) : null;
   const _isBlindZone  = _secsSinceSpk != null && _secsSinceSpk < 120;
-  const _isNormZone   = _secsSinceSpk != null && _secsSinceSpk >= 120 && _secsSinceSpk < 300;
-  const _isBurstWin   = _secsSinceSpk != null && _secsSinceSpk < 30;
   const _burstActive  = _sn?.burst_active ?? false;
-  const _burstRetr    = _sn?.burst_retroceso ?? null;
   const _burstDepth   = _sn?.burst_depth ?? null;
-  // Live countdown (updates every second via `now`)
-  const _cdTarget     = _isBlindZone ? 120 : _isNormZone ? 300 : null;
-  const _cdRemain     = _cdTarget != null ? Math.max(0, _cdTarget - (_secsSinceSpk ?? _cdTarget)) : null;
-  const _cdLabel      = _cdRemain != null
-    ? `${String(Math.floor(_cdRemain / 60)).padStart(2,"0")}:${String(_cdRemain % 60).padStart(2,"0")}`
-    : null;
   // SEÑAL MAESTRA variables (mirrors inner block logic)
   const _scoreRawC    = _sn?.score_raw ?? null;
   const _setupTypeC   = _sn?.setup_type ?? null;
@@ -361,31 +352,20 @@ function SymbolCard({ s }) {
         </span>
       </div>
 
-      {/* ══ POST-SPIKE INFO — informacional, no bloqueante ══ */}
-      {(_isBlindZone || _isNormZone) && (
+      {/* ══ CASCADE MOMENTUM (solo cuando está activo) ══ */}
+      {_inCascade && (
         <div style={{ padding: "6px 12px", borderBottom: `1px solid ${T.border}` }}>
           <div style={{
-            background: T.cyan + "0d", border: `1px solid ${T.cyan}33`,
+            background: T.orange + "0d", border: `1px solid ${T.orange}33`,
             borderRadius: 6, padding: "5px 10px",
-            display: "flex", alignItems: "center", justifyContent: "space-between",
           }}>
-            <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800,
-                color: _inCascade ? T.orange : T.cyan, letterSpacing: "0.08em" }}>
-                {_inCascade ? "CASCADE — MOMENTUM ACTIVO" : "POST-SPIKE · anclajes activos"}
-              </div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
-                {_inCascade
-                  ? `${_cascadeDepth ?? "?"}x spikes · gap ${_cascadeGapTicks ?? "?"}t`
-                  : "Probabilidad RNG actualizada — confiar en el score"}
-              </div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800,
+              color: T.orange, letterSpacing: "0.08em" }}>
+              CASCADE — MOMENTUM ACTIVO
             </div>
-            {_cdLabel && (
-              <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 12 }}>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 6, color: T.mute, textTransform: "uppercase" }}>desde spike</div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 800, color: T.cyan, lineHeight: 1 }}>{_cdLabel}</div>
-              </div>
-            )}
+            <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, marginTop: 1 }}>
+              {`${_cascadeDepth ?? "?"}x spikes · gap ${_cascadeGapTicks ?? "?"}t`}
+            </div>
           </div>
         </div>
       )}

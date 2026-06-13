@@ -1631,6 +1631,29 @@ class DerivDaemon:
                 "atr_anchored":             _fvg_cache.get("atr_anchored"),
                 "atr_pre_spike":            _fvg_cache.get("atr_pre_spike"),
                 "geo_post_spike_nullified": _fvg_cache.get("geo_post_spike_nullified"),
+                # Kinetic + RNG inputs
+                "ema200_anchored":          _fvg_cache.get("ema200_anchored"),
+                "kinetic_velocity":         _fvg_cache.get("kinetic_velocity"),
+                "kinetic_acceleration":     _fvg_cache.get("kinetic_acceleration"),
+                "kinetic_compressed":       _fvg_cache.get("kinetic_compressed"),
+                "ghost_mad":                _fvg_cache.get("ghost_mad"),
+                "fvg_bos_validated":        _fvg_cache.get("fvg_bos_validated"),
+                "fvg_anchor_wick_survived": _fvg_cache.get("fvg_anchor_wick_survived"),
+                "fvg_anchor_tol_penalty":   _fvg_cache.get("fvg_anchor_tol_penalty"),
+                "fvg_anchor_mom_penalty":   _fvg_cache.get("fvg_anchor_mom_penalty"),
+                # RNG probability (last known — persisted after each full pipeline run)
+                "rng_probability":          _fvg_cache.get("rng_probability"),
+                "rng_threshold":            _fvg_cache.get("rng_threshold", 65),
+                "rng_missing":              _fvg_cache.get("rng_missing") or [],
+                # Trifecta confirmations
+                "trifecta_met":             _fvg_cache.get("trifecta_met"),
+                "trifecta_vision":          _fvg_cache.get("trifecta_vision"),
+                "trifecta_kinetic":         _fvg_cache.get("trifecta_kinetic"),
+                "trifecta_scarcity":        _fvg_cache.get("trifecta_scarcity"),
+                "trifecta_fvg_bos":         _fvg_cache.get("trifecta_fvg_bos"),
+                # Master Key bypass indicator
+                "master_key_bypass":        _fvg_cache.get("master_key_bypass"),
+                "master_key_rng":           _fvg_cache.get("master_key_rng"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -4082,6 +4105,9 @@ class DerivDaemon:
                 "score_raw":               _sb_tel.get("score_raw"),
                 "fvg_anchor_active":       _sb_tel.get("fvg_anchor_active"),
                 "fvg_anchor_age_s":        _sb_tel.get("fvg_anchor_age_s"),
+                "fvg_anchor_wick_survived":_sb_tel.get("fvg_anchor_wick_survived"),
+                "fvg_anchor_tol_penalty":  _sb_tel.get("fvg_anchor_tol_penalty"),
+                "fvg_anchor_mom_penalty":  _sb_tel.get("fvg_anchor_mom_penalty"),
                 # Dual-path structural fields
                 "structural_fvg_active":   _sb_tel.get("structural_fvg_active"),
                 "structural_fvg_direction":_sb_tel.get("structural_fvg_direction"),
@@ -4091,6 +4117,16 @@ class DerivDaemon:
                 "atr_anchored":            _sb_tel.get("atr_anchored"),
                 "atr_pre_spike":           _sb_tel.get("atr_pre_spike"),
                 "geo_post_spike_nullified":_sb_tel.get("geo_post_spike_nullified"),
+                # Kinetic / RNG inputs (set by deriv_risk before this block)
+                "kinetic_compressed":      _sb_tel.get("kinetic_compressed"),
+                "kinetic_velocity":        _sb_tel.get("kinetic_velocity"),
+                "kinetic_acceleration":    _sb_tel.get("kinetic_acceleration"),
+                "ghost_mad":               _sb_tel.get("ghost_mad"),
+                "fvg_bos_validated":       _sb_tel.get("fvg_bos_validated"),
+                "ema200_anchored":         _sb_tel.get("ema200_anchored"),
+                # Master Key bypass (set at individual gate bypasses, always before this point)
+                "master_key_bypass":       _sb_tel.get("master_key_bypass"),
+                "master_key_rng":          _sb_tel.get("master_key_rng"),
             }
             self._last_fvg_state[_cache_sym].update(
                 {k: v for k, v in _tel_fields.items() if v is not None}
@@ -4707,6 +4743,19 @@ class DerivDaemon:
         snap.score_breakdown["trifecta_kinetic"]  = _trifecta_kinetic
         snap.score_breakdown["trifecta_scarcity"] = _trifecta_scarcity
         snap.score_breakdown["trifecta_fvg_bos"]  = _trifecta_fvg_bos
+
+        # Persist rng + trifecta to _last_fvg_state so market context file picks them up.
+        if _cache_sym in self._last_fvg_state:
+            self._last_fvg_state[_cache_sym].update({
+                "rng_probability":  _rng_prob,
+                "rng_threshold":    _rng_threshold,
+                "rng_missing":      _rng_missing,
+                "trifecta_met":     _trifecta_met,
+                "trifecta_vision":  _trifecta_vision,
+                "trifecta_kinetic": _trifecta_kinetic,
+                "trifecta_scarcity":_trifecta_scarcity,
+                "trifecta_fvg_bos": _trifecta_fvg_bos,
+            })
 
         _LOGGER.debug(
             "[RNG_PROB] %s prob=%d/100 threshold=%d trifecta=%s missing=%s",
