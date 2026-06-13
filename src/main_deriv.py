@@ -192,6 +192,56 @@ def _compute_atr_hold_extension(
     return round(min(_ATR_HOLD_EXTENSION_MAX_SEC, extra), 1)
 
 
+def _calculate_rng_probability(
+    kinetic_compressed: bool,
+    fvg_bos_validated: bool,
+    zona_liquidez_macro: bool,
+    scarcity_state: str,
+    cooldown_active: bool,
+) -> tuple[int, list[str]]:
+    """Probabilistic RNG alignment score (0-100).
+
+    Replaces binary Trifecta with weighted scoring.  No gate requires all four
+    conditions simultaneously — asymmetric edge only needs statistical tilt.
+
+    Weights derived from empirical impact on spike probability:
+      35  kinetic_compressed  — drift decelerating = RNG exhaustion
+      30  fvg_bos_validated   — structural algorithm reset confirmed
+      20  zona_liquidez_macro — macro liquidity zone (Vision LLM)
+      15  scarcity LISTO/CARGANDO — cycle maturity in optimal window
+
+    Cooldown veto: if burst retrace < 50%, multiply score by 0.3 (energy not reset).
+    """
+    score = 0
+    missing: list[str] = []
+
+    if kinetic_compressed:
+        score += 35
+    else:
+        missing.append("compresión cinética ausente")
+
+    if fvg_bos_validated:
+        score += 30
+    else:
+        missing.append("FVG sin BOS estructural")
+
+    if zona_liquidez_macro:
+        score += 20
+    else:
+        missing.append("zona macro no confirmada")
+
+    if scarcity_state in ("LISTO", "CARGANDO"):
+        score += 15
+    else:
+        missing.append(f"scarcity={scarcity_state or 'desconocida'} fuera de ventana óptima")
+
+    if cooldown_active:
+        score = round(score * 0.3)
+        missing.append("COOLDOWN activo — retroceso <50%")
+
+    return score, missing
+
+
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
 class _CooldownGate:
     """Per-symbol trade cooldown measured in ingested ticks.
@@ -4630,34 +4680,79 @@ class DerivDaemon:
                 tick.symbol, float(_ps_ret), _ps_thresh,
             )
 
-        # ── TRIFECTA TRACKER ─────────────────────────────────────────────────────
-        # Trifecta = ideal setup: macro liquidity zone confirmed by Vision LLM
-        # + kinetic compression on ghost series + scarcity LISTO/CARGANDO
-        # + BOS-validated FVG.  All four together = highest-conviction entry.
-        #
-        # Currently INFORMATIONAL only (trifecta_met flag surfaced in logs/UI).
-        # Enable as hard gate via: DERIV_TRIFECTA_GATE_ENABLED=true
-        # (when enabled, non-trifecta setups still allowed but skip LLM call
-        #  and go straight to math score gate — cheaper and faster).
-        _trifecta_vision = bool(
+        # ── RNG PROBABILITY SCORE ─────────────────────────────────────────────────
+        # Replaces binary Trifecta gate.  Deriv synthetics are Poisson-distributed
+        # RNG: no entry is ever "perfect" — we need statistical tilt, not certainty.
+        # Weighted scoring: kinetic=35 + fvg_bos=30 + vision=20 + scarcity=15 = 100.
+        # Cooldown multiplier: ×0.3 when burst retrace < 50% (energy not reset).
+        # Gate: DERIV_PROBABILITY_THRESHOLD (default 65) — blocks low-conviction setups.
+        _rng_vision = bool(
             (self._last_vision_context or {})
             .get(tick.symbol.upper(), {})
             .get("zona_liquidez_macro", False)
         )
+        _rng_cooldown_active = (
+            str(snap.score_breakdown.get("setup_type", "")) == "POST_SPIKE_COOLDOWN"
+        )
+        _rng_prob, _rng_missing = _calculate_rng_probability(
+            kinetic_compressed=bool(snap.score_breakdown.get("kinetic_compressed", False)),
+            fvg_bos_validated=bool(snap.score_breakdown.get("fvg_bos_validated", False)),
+            zona_liquidez_macro=_rng_vision,
+            scarcity_state=str(snap.score_breakdown.get("scarcity_state") or ""),
+            cooldown_active=_rng_cooldown_active,
+        )
+        _rng_threshold = int(float(os.getenv("DERIV_PROBABILITY_THRESHOLD", "65") or "65"))
+
+        snap.score_breakdown["rng_probability"]  = _rng_prob
+        snap.score_breakdown["rng_missing"]      = _rng_missing
+        snap.score_breakdown["rng_threshold"]    = _rng_threshold
+
+        # Keep trifecta fields for UI chip display
+        _trifecta_vision   = _rng_vision
         _trifecta_kinetic  = bool(snap.score_breakdown.get("kinetic_compressed", False))
         _trifecta_scarcity = str(snap.score_breakdown.get("scarcity_state") or "") in ("LISTO", "CARGANDO")
         _trifecta_fvg_bos  = bool(snap.score_breakdown.get("fvg_bos_validated", False))
-        _trifecta_met = _trifecta_vision and _trifecta_kinetic and _trifecta_scarcity and _trifecta_fvg_bos
+        _trifecta_met      = _trifecta_vision and _trifecta_kinetic and _trifecta_scarcity and _trifecta_fvg_bos
         snap.score_breakdown["trifecta_met"]      = _trifecta_met
         snap.score_breakdown["trifecta_vision"]   = _trifecta_vision
         snap.score_breakdown["trifecta_kinetic"]  = _trifecta_kinetic
         snap.score_breakdown["trifecta_scarcity"] = _trifecta_scarcity
         snap.score_breakdown["trifecta_fvg_bos"]  = _trifecta_fvg_bos
-        if _trifecta_met:
-            _LOGGER.info(
-                "[TRIFECTA] %s ✓ ALL FOUR met — vision+kinetic+scarcity+fvg_bos | score=%.2f",
-                tick.symbol, float(snap.score or 0.0),
+
+        _LOGGER.info(
+            "[RNG_PROB] %s prob=%d/100 threshold=%d trifecta=%s missing=%s",
+            tick.symbol, _rng_prob, _rng_threshold,
+            "✓" if _trifecta_met else "✗",
+            _rng_missing or "none",
+        )
+
+        if is_spike_market(tick.symbol) and _rng_prob < _rng_threshold:
+            _sb_rng = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            self._log_entry_block(
+                tick.symbol, "RNG_PROBABILITY_GATE",
+                score=snap.score, effective_min_score=snap.effective_min_score,
+                side=snap.side, regime=snap.regime,
+                hurst=_eval_hurst,
+                score_breakdown=_sb_rng,
             )
+            _LOGGER.info(
+                "[RNG_PROBABILITY_GATE] %s BLOCKED prob=%d/100 < threshold=%d | missing=%s",
+                tick.symbol, _rng_prob, _rng_threshold, _rng_missing,
+            )
+            self._record_decision(
+                symbol=tick.symbol, allowed=False, side=snap.side,
+                score=snap.score,
+                reason=(
+                    f"RNG_PROBABILITY_GATE: {_rng_prob}/100 < {_rng_threshold}"
+                    f" | missing={_rng_missing}"
+                ),
+                extra={**decision_extra, "rng_probability": _rng_prob, "rng_missing": _rng_missing},
+            )
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason=f"rng_probability:{_rng_prob}/100<{_rng_threshold}",
+            )
+            return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2b — HARD MATH OVERRIDE FAST PATH

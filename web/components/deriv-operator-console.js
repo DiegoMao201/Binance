@@ -272,6 +272,8 @@ function SymbolCard({ s }) {
     || (_scoreRawC != null && _scoreRawC < 7.5)
     || _gradeC === "C"
     || _setupTypeC === "TREND"
+    || _setupTypeC === "TREND_NO_STRUCT"
+    || _setupTypeC === "POST_SPIKE_COOLDOWN"
     || _ema200LoadedC === false;
   const _masterGreen  = !_masterRed && _sn != null
     && (_setupTypeC === "SMC_FVG" || _setupTypeC === "EMA200_SPIKE")
@@ -915,6 +917,19 @@ function SymbolCard({ s }) {
               const atrAnchored       = sn.atr_anchored ?? false;
               const ema200Anchored    = sn.ema200_anchored ?? false;
               const ema200DistPct     = sn.ema200_distance_pct ?? null;
+              const kineticVelocity   = sn.kinetic_velocity ?? null;
+              const kineticAccel      = sn.kinetic_acceleration ?? null;
+              const kineticCompressed = sn.kinetic_compressed ?? false;
+              const ghostMad          = sn.ghost_mad ?? null;
+              const fvgBosValidated   = sn.fvg_bos_validated ?? false;
+              const trifectaMet       = sn.trifecta_met ?? false;
+              const trifectaVision    = sn.trifecta_vision ?? false;
+              const trifectaKinetic   = sn.trifecta_kinetic ?? false;
+              const trifectaScarcity  = sn.trifecta_scarcity ?? false;
+              const trifectaFvgBos    = sn.trifecta_fvg_bos ?? false;
+              const rngProb           = sn.rng_probability ?? null;
+              const rngMissing        = sn.rng_missing ?? [];
+              const rngThreshold      = sn.rng_threshold ?? 65;
               // EMA200 loaded: for CRASH need price above EMA200 (dev ≥ +0.008% fraction)
               //                for BOOM  need price below EMA200 (dev ≤ −0.008% fraction)
               const _isCrashSym = s.symbol.toUpperCase().includes("CRASH");
@@ -962,9 +977,13 @@ function SymbolCard({ s }) {
               // Setup color
               const setupColor = setupType === "SMC_FVG" ? T.green
                 : setupType === "TREND" ? T.red
+                : setupType === "TREND_NO_STRUCT" ? T.orange
+                : setupType === "POST_SPIKE_COOLDOWN" ? T.cyan
                 : setupType === "EMA200_SPIKE" ? T.cyan : T.mute;
               const setupLabel = setupType === "SMC_FVG" ? "SMC_FVG"
                 : setupType === "TREND" ? "TREND"
+                : setupType === "TREND_NO_STRUCT" ? "SIN BOS"
+                : setupType === "POST_SPIKE_COOLDOWN" ? "COOLDOWN"
                 : setupType === "EMA200_SPIKE" ? "EMA200" : (setupType || "–");
 
               // Grade color
@@ -1006,6 +1025,7 @@ function SymbolCard({ s }) {
 
               // ── SEÑAL MAESTRA ─────────────────────────────────────────────
               const _goodSetup    = setupType === "SMC_FVG" || setupType === "EMA200_SPIKE";
+              const _redSetupType = setupType === "TREND" || setupType === "TREND_NO_STRUCT" || setupType === "POST_SPIKE_COOLDOWN";
               const _goodGrade    = grade === "A" || grade === "B";
               const _goodScore    = scoreRaw != null && +scoreRaw.toFixed(1) >= 7.8;
               const _goodFvg      = fvgAnchorActive || structFvgConfirm;
@@ -1026,7 +1046,7 @@ function SymbolCard({ s }) {
               const _redRipe     = immState === "RIPE";
               const _redScore    = scoreRaw != null && scoreRaw < 7.5;
               const _redGrade    = grade === "C";
-              const _redSetup    = setupType === "TREND";
+              const _redSetup    = _redSetupType;
               // EMA sólo bloquea si no hay FVG anchor activo (anchor = señal primaria post-spike)
               const _redEma      = ema200Loaded === false && !_emaOverridedByAnchor;
 
@@ -1050,7 +1070,7 @@ function SymbolCard({ s }) {
                 _redRipe     && "INMINENTE · no cazar spike",
                 _redScore    && `SCORE ${scoreRaw?.toFixed(1) ?? "?"} < 7.5`,
                 _redGrade    && "GRADE C",
-                _redSetup    && "SETUP TREND sin FVG",
+                _redSetup    && (setupType === "POST_SPIKE_COOLDOWN" ? "COOLDOWN — retroceso activo" : setupType === "TREND_NO_STRUCT" ? "TREND sin BOS estructural" : "SETUP TREND sin FVG"),
                 _redEma      && `EMA DESCARGADO${_emaDevStr ? " " + _emaDevStr : ""}`,
               ].filter(Boolean);
               const _missing = [
@@ -1158,6 +1178,48 @@ function SymbolCard({ s }) {
                     </div>
                   )}
 
+                  {/* ── RNG Probability bar ──────────────────────────────── */}
+                  {rngProb != null && (() => {
+                    const pct = Math.min(100, rngProb);
+                    const passed = rngProb >= rngThreshold;
+                    const barCol = rngProb >= 85 ? T.green
+                      : rngProb >= rngThreshold ? T.amber
+                      : rngProb >= 45 ? T.orange : T.red;
+                    return (
+                      <div style={{
+                        background: barCol + "12",
+                        border: `1px solid ${barCol}44`,
+                        borderRadius: 5, padding: "5px 8px", marginBottom: 6,
+                        opacity: chipOpacity,
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                          <span style={{ fontSize: 7, color: T.mute, fontWeight: 700, letterSpacing: "0.08em" }}>
+                            PROB RNG
+                          </span>
+                          <span style={{ fontSize: 9, fontWeight: 800, color: barCol }}>
+                            {rngProb}
+                            <span style={{ fontSize: 7, color: T.mute }}>/100</span>
+                            {" "}
+                            <span style={{ fontSize: 7, color: passed ? barCol : T.mute }}>
+                              {passed ? "✓ PASA" : `✗ <${rngThreshold}`}
+                            </span>
+                          </span>
+                        </div>
+                        <div style={{ height: 4, borderRadius: 3, background: T.bg, overflow: "hidden", marginBottom: rngMissing.length > 0 ? 3 : 0 }}>
+                          <div style={{
+                            height: "100%", borderRadius: 3, width: `${pct}%`,
+                            background: barCol, transition: "width 0.5s ease",
+                          }} />
+                        </div>
+                        {rngMissing.length > 0 && (
+                          <div style={{ fontSize: 6, color: T.mute, marginTop: 1 }}>
+                            Falta: {rngMissing.join(" · ")}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
                     {setupType && chip("SETUP", setupLabel, setupColor)}
                     {grade && chip("GRADE", grade, gradeColor)}
@@ -1188,6 +1250,38 @@ function SymbolCard({ s }) {
                       `${_emaOverridedByAnchor ? "~" : (ema200Loaded ? "✓" : "✗")} ${_emaDevStr}`,
                       _emaOverridedByAnchor ? T.mute : (ema200Loaded ? T.green : T.red)
                     )}
+                  </div>
+
+                  {/* ── Quant row: KINETIC · BOS_FVG · TRIFECTA · GHOST_MAD ── */}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                    {kineticVelocity != null && chip(
+                      "KINETIC",
+                      `V${(kineticVelocity >= 0 ? "+" : "") + kineticVelocity.toFixed(1)} A${(kineticAccel >= 0 ? "+" : "") + (kineticAccel ?? 0).toFixed(1)}${kineticCompressed ? " ●" : ""}`,
+                      kineticCompressed ? T.green : T.mute
+                    )}
+                    {chip(
+                      "BOS_FVG",
+                      fvgBosValidated ? "✓ BOS+FVG" : "✗ SIN BOS",
+                      fvgBosValidated ? T.green : T.red
+                    )}
+                    {ghostMad != null && chip(
+                      "MAD",
+                      ghostMad.toFixed(4),
+                      ghostMad < 0.05 ? T.green : ghostMad < 0.15 ? T.amber : T.red
+                    )}
+                    {/* TRIFECTA — glows when all 4 conditions met */}
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 3,
+                      background: trifectaMet ? T.green + "28" : T.mute + "10",
+                      border: trifectaMet ? `2px solid ${T.green}` : `1px solid ${T.mute}22`,
+                      borderRadius: 4, padding: "1px 5px", opacity: chipOpacity,
+                      boxShadow: trifectaMet ? `0 0 8px ${T.green}88` : "none",
+                    }}>
+                      <span style={{ color: T.mute, fontSize: 7, fontWeight: 600 }}>TRIFECTA</span>
+                      <span style={{ color: trifectaMet ? T.green : T.mute, fontSize: 8, fontWeight: trifectaMet ? 800 : 400 }}>
+                        {trifectaMet ? "✦ MET" : `${trifectaVision?"V":"v"}${trifectaKinetic?"K":"k"}${trifectaScarcity?"S":"s"}${trifectaFvgBos?"B":"b"}`}
+                      </span>
+                    </span>
                   </div>
                 </div>
               );

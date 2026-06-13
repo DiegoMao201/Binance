@@ -776,13 +776,46 @@ def _build_ai_prompt(
                 + "Always weight structural_fvg_CONFIRMED above tick-level FVG alone."
             )
 
+    # ── RNG probability context (probabilistic scoring engine) ────────────────
+    _rng_prob = int((breakdown or {}).get("rng_probability", -1))
+    _rng_missing = list((breakdown or {}).get("rng_missing") or [])
+    _rng_threshold = int((breakdown or {}).get("rng_threshold", 65))
+    _has_rng = _rng_prob >= 0
+    if _has_rng:
+        _rng_pct_str = f"{_rng_prob}/100"
+        _rng_missing_str = ", ".join(_rng_missing) if _rng_missing else "ninguna"
+        _rng_section = (
+            f"\nRNG ALIGNMENT PROBABILITY: {_rng_pct_str} (threshold={_rng_threshold})\n"
+            f"Missing confirmations: {_rng_missing_str}\n"
+            f"This score reached you because {_rng_prob}>={_rng_threshold} — the math already\n"
+            f"validated sufficient asymmetry. Your role is NOT to require perfection.\n"
+            f"Your role: evaluate whether the MISSING confirmations are CRITICAL in this\n"
+            f"micro-context, or whether the present confirmations provide enough kinetic\n"
+            f"inertia to justify the entry. Imperfect setups with strong kinetic compression\n"
+            f"and structural BOS are statistically valid — Deriv RNG operates on Poisson\n"
+            f"intervals and does not require macro alignment to spike.\n"
+            f"Only veto if the missing items represent a DIRECT contradiction (e.g. price\n"
+            f"in wrong zone, active COOLDOWN, or score breakdown shows structural conflict).\n"
+        )
+        if _is_spike:
+            _approve_cond = (
+                f"Approve (true) if: score>={ai_threshold} AND the present confirmations\n"
+                f"provide meaningful kinetic or structural edge.\n"
+                f"NOTE: {_rng_prob}/100 RNG alignment already passed math gate ({_rng_threshold} threshold).\n"
+                f"MISSING: {_rng_missing_str}. Only veto if these missing items are\n"
+                f"DIRECTLY contradicted by other signals in the breakdown (not just absent).\n"
+                f"Absence ≠ veto. Contradiction = veto."
+            )
+    else:
+        _rng_section = ""
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
 PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
-Score breakdown: {json.dumps(breakdown)}{_struct_ctx}
+Score breakdown: {json.dumps(breakdown)}{_struct_ctx}{_rng_section}
 
 SYMBOL_GUARDRAIL:
 - symbol_bleed_bonus: {_bleed_bonus:.2f}
@@ -798,7 +831,9 @@ STATISTICAL ANALYSIS ({n_ticks} ticks):
 - R² of linear fit: {r2:.4f}
 
 CONTEXT: This is a STATISTICAL synthetic index (not crypto, not forex). It has no macro exposure.
-Edge comes from autocorrelation and short-term momentum patterns.
+Deriv spike indices are Poisson-distributed RNG — no entry is ever "perfect." Edge comes
+from statistical tilt: kinetic compression, structural BOS, cycle maturity, scarcity.
+The goal is asymmetric probability, not certainty.
 
 Respond ONLY with a JSON object:
 {{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
