@@ -3038,6 +3038,17 @@ class DerivDaemon:
                             _mat_remain_s,
                             _mat_cl_n,
                         )
+                        self._record_decision(
+                            symbol=tick.symbol, allowed=False, side=None, score=0.0,
+                            reason=(
+                                f"EARLY_ENTRY_GATE: warmup_remain={_mat_remain_s:.0f}s "
+                                f"(elapsed={_mat_elapsed_s:.0f}s < threshold={_mat_threshold_s:.0f}s)"
+                            ),
+                            extra={
+                                "gate_name": "EARLY_ENTRY_GATE",
+                                "remain_sec": max(0, int(_mat_remain_s)),
+                            },
+                        )
                     self._spike_enrich(
                         tick.symbol, bot_entered=False, block_reason="early_entry_gate"
                     )
@@ -3934,6 +3945,11 @@ class DerivDaemon:
                                 f"requires score≥{_ripe_min:.1f} got={snap.score:.2f} "
                                 f"(datos: RIPE=30%WR)"
                             ),
+                            extra={
+                                "gate_name": "IMMINENCE_RIPE",
+                                "effective_min": round(_ripe_min, 2),
+                                "fvg_bos_validated": bool(snap.score_breakdown.get("fvg_bos_validated", False)),
+                            },
                         )
                         self._spike_enrich(
                             tick.symbol, bot_entered=False,
@@ -4303,7 +4319,12 @@ class DerivDaemon:
                         if _dyn_active else
                         f"REGIME_SCORE_GATE: {snap.regime} requires≥{_regime_min:.2f} got={snap.score:.2f}"
                     ),
-                    extra={"regime": snap.regime},
+                    extra={
+                        "regime": snap.regime,
+                        "gate_name": "REGIME",
+                        "effective_min": round(_regime_min, 2),
+                        "fvg_bos_validated": bool(snap.score_breakdown.get("fvg_bos_validated", False)),
+                    },
                 )
                 if _master_key:
                     _LOGGER.info(

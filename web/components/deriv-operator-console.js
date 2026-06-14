@@ -195,6 +195,10 @@ function SymbolCard({ s }) {
   const score = live?.score;
   const gate  = live?.gate;
   const gap   = live?.scoreGap;
+  const liveGateName = live?.gateName ?? null;
+  const liveFvgBos   = live?.fvgBosValidated ?? null;
+  const liveEarlyActive  = live?.earlyEntryActive ?? false;
+  const liveEarlyRemain  = live?.earlyEntryRemainSec ?? null;
   const liveKind = live?.kind;
   const isVetado = liveKind === "BLOQUEADO" && gap != null && gap <= 0;
   const pctToGate    = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
@@ -427,6 +431,9 @@ function SymbolCard({ s }) {
           <div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>≥ {num(gate)}</div>
+            {liveGateName && (
+              <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, marginTop: 1, letterSpacing: "0.04em" }}>{liveGateName}</div>
+            )}
           </div>
           {_rngProbC != null && (
             <div>
@@ -458,6 +465,38 @@ function SymbolCard({ s }) {
             {isVetado && live?.label && (
               <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, background: T.amber + "12", border: `1px solid ${T.amber}33`, borderRadius: 4, padding: "1px 5px" }}>
                 ⛔ {live.label}
+              </span>
+            )}
+          </div>
+        )}
+        {/* ── Gate diagnostics row ── */}
+        {(liveEarlyActive || liveFvgBos != null) && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 5 }}>
+            {liveEarlyActive && (
+              <span style={{
+                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
+                color: T.amber, background: T.amber + "14",
+                border: `1px solid ${T.amber}44`, borderRadius: 4, padding: "2px 6px",
+              }}>
+                ⏱ WARMUP {liveEarlyRemain != null ? `${liveEarlyRemain}s` : "activo"}
+              </span>
+            )}
+            {liveFvgBos === true && (
+              <span style={{
+                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
+                color: T.green, background: T.green + "14",
+                border: `1px solid ${T.green}44`, borderRadius: 4, padding: "2px 6px",
+              }}>
+                BOS ✓
+              </span>
+            )}
+            {liveFvgBos === false && (
+              <span style={{
+                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
+                color: T.red, background: T.red + "14",
+                border: `1px solid ${T.red}44`, borderRadius: 4, padding: "2px 6px",
+              }}>
+                BOS ✗ sin confirmar
               </span>
             )}
           </div>

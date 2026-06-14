@@ -59,14 +59,22 @@ function classifyDecision(d) {
   let gate = null;
   const gm = reason.match(/requires?≥?\s*([\d.]+)/i) || reason.match(/≥\s*([\d.]+)/) || reason.match(/strict_min[=:]\s*([\d.]+)/i);
   if (gm) gate = parseFloat(gm[1]);
+  // Prefer explicit effective_min from bot (no regex guessing needed).
+  if (d?.effective_min != null && Number.isFinite(Number(d.effective_min))) {
+    gate = Number(d.effective_min);
+  }
 
   let kind, label, level; // level: 0 idle .. 4 confirmed
   if (d?.allowed === true || /^GO\b/.test(reason)) {
     kind = "CONFIRMADO"; label = "CONFIRMADO — el bot entró"; level = 4;
   } else if (/spike_forced_dir|spike_forced/i.test(reason)) {
     kind = "SPIKE"; label = "SPIKE detectado"; level = 3;
+  } else if (/EARLY_ENTRY_GATE/i.test(reason)) {
+    kind = "MATURITY"; label = "Warmup activo (EARLY_ENTRY)"; level = 1;
   } else if (/REGIME_SCORE_GATE|SCORE_TOO_LOW|SCORE_GATE/i.test(reason)) {
-    kind = "SCORE"; label = "Setup formándose (score)"; level = 2;
+    kind = "SCORE"; label = "Score bajo para régimen"; level = 2;
+  } else if (/IMMINENCE_RIPE_GATE/i.test(reason)) {
+    kind = "SCORE"; label = "RIPE: score insuficiente"; level = 2;
   } else if (/SCARCITY_DRY_GATE/i.test(reason)) {
     kind = "SECO"; label = "Mercado seco (umbral reducido)"; level = 2;
   } else if (/TREND_SETUP_GATE/i.test(reason)) {
@@ -91,7 +99,12 @@ function classifyDecision(d) {
     kind = "INFO"; label = reason.split(":")[0] || "—"; level = 0;
   }
   const gap = gate != null && Number.isFinite(score) ? +(gate - score).toFixed(2) : null;
-  return { kind, label, level, gate, gap };
+  return {
+    kind, label, level, gate, gap,
+    gateName: d?.gate_name ?? null,
+    fvgBosValidated: d?.fvg_bos_validated ?? null,
+    remainSec: d?.remain_sec ?? null,
+  };
 }
 
 export async function GET() {
@@ -193,10 +206,30 @@ export async function GET() {
     // ── Live confirmation/score state from the bot's decision stream ──────
     const symDecisions = decisionsBySymbol.get(symbol) || [];
     const liveDecision = symDecisions.length ? symDecisions[symDecisions.length - 1] : null;
-    // Latest known score gate (parse from any recent gated decision).
+    // Latest known score gate + gate diagnostics from recent decisions.
     let liveGate = null;
+    let liveGateName = null;
+    let liveFvgBosValidated = null;
+    let liveEarlyEntryActive = false;
+    let liveEarlyEntryRemainSec = null;
     for (let i = symDecisions.length - 1; i >= 0 && i >= symDecisions.length - 30; i--) {
-      if (symDecisions[i].gate != null) { liveGate = symDecisions[i].gate; break; }
+      const _d = symDecisions[i];
+      // EARLY_ENTRY_GATE: only valid if decision is fresh (< 35s — emits every 30s)
+      if (!liveEarlyEntryActive && _d.gateName === "EARLY_ENTRY_GATE") {
+        if (_d.ts && (nowSec - _d.ts) < 35) {
+          liveEarlyEntryActive = true;
+          liveEarlyEntryRemainSec = _d.remainSec ?? null;
+        }
+      }
+      if (liveGate == null && _d.gate != null) {
+        liveGate = _d.gate;
+        liveGateName = _d.gateName ?? null;
+      }
+      if (liveFvgBosValidated == null && _d.fvgBosValidated != null) {
+        liveFvgBosValidated = _d.fvgBosValidated;
+      } else if (liveFvgBosValidated == null && _d.score_breakdown?.fvg_bos_validated != null) {
+        liveFvgBosValidated = Boolean(_d.score_breakdown.fvg_bos_validated);
+      }
     }
     // Walk back up to 20 decisions to find the last one with a real score.
     // Cooldown/geo decisions often have no score field — don't show "—" because of them.
@@ -228,6 +261,10 @@ export async function GET() {
         score: liveScore,
         gate: liveGate,
         scoreGap,
+        gateName: liveGateName,
+        fvgBosValidated: liveFvgBosValidated,
+        earlyEntryActive: liveEarlyEntryActive,
+        earlyEntryRemainSec: liveEarlyEntryRemainSec,
         regime: liveScoreDecision?.regime || liveDecision?.regime || null,
         kind: liveDecision?.kind || null,
         label: liveDecision?.label || null,
