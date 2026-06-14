@@ -4390,6 +4390,12 @@ class DerivDaemon:
         _profile_min_score = _dyn_score_min if _dyn_active else min_score_for(tick.symbol)
         if _sym_bleed_bonus > 0.0:
             _profile_min_score = min(10.0, _profile_min_score + _sym_bleed_bonus)
+        # Mirror calm-regime bonus on profile gate so it stays coherent with regime gate.
+        # Without this, regime_min gets the -0.30 calm discount but profile_min keeps the
+        # higher raw value — profile becomes the tighter gate on calm-regime symbols (CRASH900).
+        _profile_calm_bon = float(snap.score_breakdown.get("regime_calm_bonus") or 0.0)
+        if _profile_calm_bon > 0.0:
+            _profile_min_score = max(0.0, _profile_min_score - _profile_calm_bon)
         # FASE 3 elastic: also discount the PROFILE gate under extreme tension so
         # it doesn't remain a hard floor when the REGIME gate was already relaxed.
         if _is_bc_bias and _is_z2:
