@@ -3973,6 +3973,10 @@ class DerivDaemon:
                                 imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
                                 imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
                             )
+                        _bc_z2_ripe_bypass = (
+                            _is_bc_bias
+                            and _scarcity_ratio_early >= _el_z2_early
+                        )
                         if _master_key:
                             _LOGGER.info(
                                 "[PIPELINE] GATE_BYPASS MASTER_KEY %s | gate=IMMINENCE_RIPE_GATE"
@@ -3982,6 +3986,16 @@ class DerivDaemon:
                             )
                             snap.score_breakdown["master_key_bypass"] = "IMMINENCE_RIPE_GATE"
                             snap.score_breakdown["master_key_rng"] = _mk_rng
+                        elif _bc_z2_ripe_bypass:
+                            # BOOM/CRASH in Z2 extreme scarcity: spike is BOTH imminent
+                            # AND statistically overdue. RIPE + overdue = best setup.
+                            # The 30%WR stat was computed without the Z2 filter.
+                            _LOGGER.info(
+                                "[PIPELINE] BC_Z2_RIPE_BYPASS %s | score=%.2f"
+                                " scarcity_ratio=%.2f ≥ Z2=%.1f → bypass IMMINENCE_RIPE_GATE",
+                                tick.symbol, snap.score, _scarcity_ratio_early, _el_z2_early,
+                            )
+                            snap.score_breakdown["bc_z2_ripe_bypass"] = "IMMINENCE_RIPE_GATE"
                         else:
                             return
                     # Passed RIPE gate: tag but no bonus
