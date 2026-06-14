@@ -2053,7 +2053,8 @@ class DerivRiskManager:
                     _high_spread, _atr_calm_bypassed,
                 )
             else:
-                effective_min_score = min(effective_min_score, 5.8)  # spike edge ≠ trend edge
+                _spike_eff_cap = float(os.getenv("DERIV_SPIKE_EFFECTIVE_MIN_CAP", "5.8"))
+                effective_min_score = min(effective_min_score, _spike_eff_cap)  # spike edge ≠ trend edge
         elif not _is_boom_crash_sym:
             # ── R_* and other non-spike symbols: Hurst-based dynamic effective_min ──
             # Dynamic scaling: the Hurst regime directly informs the confidence bar.
