@@ -1732,14 +1732,14 @@ class DerivDaemon:
             "score=%.2f effective_min=%.2f | side=%s | regime=%s | H=%.3f | "
             "ai_veto=%s ai_conf=%.2f ai_reason=%s | "
             "cooldown=%s elapsed=%.0fs/%.0fs | "
-            "score_breakdown={trend=%.2f mom=%.2f atr=%.2f spread=%.2f stab=%.2f "
+            "score_breakdown={trend=%.2f atr=%.2f spread=%.2f stab=%.2f "
             "streak=%.2f cd=%.2f hd=%.2f smc=%s geo=%s geo_pos=%s}",
             symbol, block_reason,
             score, effective_min_score,
             side or "?", regime, hurst,
             ai_veto, ai_confidence, ai_reason or "—",
             cooldown, cooldown_elapsed, cooldown_required,
-            bd.get("trend", 0), bd.get("momentum", 0), bd.get("atr", 0),
+            bd.get("trend", 0), bd.get("atr", 0),
             bd.get("spread", 0), bd.get("stability", 0),
             bd.get("streak_penalty", 0), bd.get("cooldown", 0),
             bd.get("hd_bonus", 0),   # HD = Higher Direction (macro alignment)
