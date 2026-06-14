@@ -471,6 +471,9 @@ class DerivTradeExecutor:
         self._sym_stats: dict[str, dict[str, Any]] = {}
         self._session_pnl: float = 0.0
         self._session_trades: int = 0
+        # Per-symbol last closed trade — used by DRY_EXIT_RELAX gate in main_deriv.
+        self._last_closed_sym: dict[str, dict[str, Any]] = {}
+        self._dry_exit_consecutive: dict[str, int] = {}
         # DynamicPositionManager — replaces static tiered trailing stop.
         # Manages ratchet SL + momentum-based exit for every open contract.
         self._dpm = DynamicPositionManager()
@@ -2489,6 +2492,43 @@ class DerivTradeExecutor:
                 _gs["losses"] += 1
         self._session_pnl = round(self._session_pnl + pnl, 6)
         self._session_trades += 1
+        # Track last close per symbol for DRY_EXIT_RELAX in daemon pipeline.
+        _sym_key = sym.upper()
+        self._last_closed_sym[_sym_key] = {
+            "exit_reason": record.get("exit_reason"),
+            "peak_profit": float(record.get("peak_profit") or 0),
+            "realized_pnl_usdt": pnl,
+            "closed_at_ts": float(record.get("closed_at_ts") or 0),
+        }
+        _is_dry = (
+            record.get("exit_reason") == "max_hold_timeout"
+            and float(record.get("peak_profit") or 0) == 0.0
+        )
+        if _is_dry:
+            self._dry_exit_consecutive[_sym_key] = (
+                self._dry_exit_consecutive.get(_sym_key, 0) + 1
+            )
+        else:
+            self._dry_exit_consecutive[_sym_key] = 0
+
+    def get_dry_exit_info(self, symbol: str) -> dict[str, Any]:
+        """Return dry exit state for *symbol* used by DRY_EXIT_RELAX gate.
+
+        Returns dict with keys: is_dry, consecutive, closed_at_ts.
+        """
+        sym_key = symbol.upper()
+        last = self._last_closed_sym.get(sym_key)
+        if last is None:
+            return {"is_dry": False, "consecutive": 0, "closed_at_ts": 0.0}
+        is_dry = (
+            last.get("exit_reason") == "max_hold_timeout"
+            and float(last.get("peak_profit") or 0) == 0.0
+        )
+        return {
+            "is_dry": is_dry,
+            "consecutive": self._dry_exit_consecutive.get(sym_key, 0) if is_dry else 0,
+            "closed_at_ts": float(last.get("closed_at_ts") or 0),
+        }
 
     def get_per_symbol_stats(self) -> dict[str, Any]:
         """Return a snapshot of per-symbol performance and session totals."""
