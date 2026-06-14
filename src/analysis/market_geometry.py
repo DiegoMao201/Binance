@@ -438,10 +438,12 @@ def _kinetic_state(
 ) -> tuple[float, float, float]:
     """Continuous kinetic compression score (0.0–1.0) on the ghost price series.
 
-    Three weighted components:
-      0.40 × direction  — counter-trend drift + deceleration (original V/A logic)
-      0.30 × variance   — low tick variance = tight coiling (price holding tension)
-      0.30 × consistency — fraction of recent micro-moves in compression direction
+    Two weighted components (PRNG-safe: no momentum/consistency derivatives):
+      0.50 × direction  — counter-trend drift + deceleration (V/A logic)
+      0.50 × variance   — low tick variance = tight coiling; thresholds normalized
+                          by the rolling mean absolute change (ATR proxy) so the
+                          score is comparable across symbols with different price
+                          levels (CRASH900 ~16k vs BOOM500 ~5k).
 
     Returns (velocity_e4, acceleration_e4, kinetic_score)
     where kinetic_score ∈ [0.0, 1.0].  0.5+ = meaningful compression.
@@ -460,32 +462,24 @@ def _kinetic_state(
     crash_compressed = v_now > +1e-6 and a_now <= 0.0
     direction_score  = 1.0 if (boom_compressed or crash_compressed) else 0.0
 
-    # Variance component: tight ghost drift → low std → high score
+    # Variance component: tight ghost drift → low std → high score.
+    # Thresholds are ATR-normalized using the rolling mean |Δp/p| so the scale
+    # is invariant to symbol price level. TIGHT = 25% of ATR-pct, LOOSE = 150%.
     _var_window = ghost[max(0, n - 20):]
     if ref > 0 and len(_var_window) > 1:
         _pct_ch = np.diff(_var_window.astype(float)) / ref
         _std = float(np.std(_pct_ch))
-        _TIGHT, _LOOSE = 1e-4, 8e-4
-        variance_score = max(0.0, min(1.0, (_LOOSE - _std) / (_LOOSE - _TIGHT)))
+        _atr_pct = float(np.mean(np.abs(_pct_ch))) if len(_pct_ch) > 0 else 0.0
+        if _atr_pct > 0:
+            _TIGHT = _atr_pct * 0.25
+            _LOOSE = _atr_pct * 1.50
+        else:
+            _TIGHT, _LOOSE = 1e-4, 8e-4
+        variance_score = max(0.0, min(1.0, (_LOOSE - _std) / max(_LOOSE - _TIGHT, 1e-12)))
     else:
         variance_score = 0.0
 
-    # Consistency: ratio of recent micro-moves aligned with compression direction
-    _recent_diffs = np.diff(ghost[-period - 1:].astype(float))
-    if len(_recent_diffs) > 0 and (boom_compressed or crash_compressed):
-        if boom_compressed:
-            _aligned = float(np.sum(_recent_diffs < 0))
-        else:
-            _aligned = float(np.sum(_recent_diffs > 0))
-        consistency_score = _aligned / len(_recent_diffs)
-    else:
-        consistency_score = 0.0
-
-    kinetic_score = (
-        0.40 * direction_score +
-        0.30 * variance_score +
-        0.30 * consistency_score
-    )
+    kinetic_score = 0.50 * direction_score + 0.50 * variance_score
     return round(v_now * 1e4, 4), round(a_now * 1e4, 4), round(kinetic_score, 4)
 
 

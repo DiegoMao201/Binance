@@ -126,7 +126,6 @@ _STREAK_SIZE_BAD_GUARD_BONUS: float = float(os.getenv("DERIV_STREAK_BAD_GUARD_BO
 _AI_VETO_RECOVERY_PROBE_ENABLED: bool = _env_flag("DERIV_AI_VETO_RECOVERY_PROBE_ENABLED", "true")
 _AI_VETO_RECOVERY_MARGIN_MIN: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MARGIN_MIN", "1.00"))
 _AI_VETO_RECOVERY_MIN_CONF: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_CONF", "0.25"))
-_AI_VETO_RECOVERY_MIN_MOMENTUM: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_MOMENTUM", "0.85"))
 _AI_VETO_RECOVERY_MIN_ATR_SCORE: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_ATR_SCORE", "0.90"))
 _AI_VETO_RECOVERY_MAX_GUARD_BONUS: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MAX_GUARD_BONUS", "0.75"))
 _AI_VETO_RECOVERY_MIN_PNL_WINDOW: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_PNL_WINDOW", "-0.60"))
@@ -2008,7 +2007,6 @@ class DerivDaemon:
         score_margin = float(getattr(snap, "score", 0.0) or 0.0) - float(
             getattr(snap, "effective_min_score", 0.0) or 0.0
         )
-        momentum_score = float(sb.get("momentum") or 0.0)
         atr_score = float(sb.get("atr") or 0.0)
         guard_bonus = float(self._risk.symbol_score_floor_bonus(symbol))
         pnl_window = float(self._risk.symbol_pnl_window(symbol))
@@ -2017,8 +2015,6 @@ class DerivDaemon:
             return False, f"ai_conf_low:{ai_conf:.2f}"
         if score_margin < _AI_VETO_RECOVERY_MARGIN_MIN:
             return False, f"score_margin_low:{score_margin:.2f}"
-        if momentum_score < _AI_VETO_RECOVERY_MIN_MOMENTUM:
-            return False, f"momentum_low:{momentum_score:.2f}"
         if atr_score < _AI_VETO_RECOVERY_MIN_ATR_SCORE:
             return False, f"atr_score_low:{atr_score:.2f}"
         if guard_bonus > _AI_VETO_RECOVERY_MAX_GUARD_BONUS:
@@ -2031,7 +2027,6 @@ class DerivDaemon:
             "recovery_probe"
             f":margin={score_margin:.2f}"
             f"|conf={ai_conf:.2f}"
-            f"|mom={momentum_score:.2f}"
             f"|atr={atr_score:.2f}"
             f"|guard={guard_bonus:.2f}"
             f"|pnlw={pnl_window:.2f}",
@@ -3899,8 +3894,14 @@ class DerivDaemon:
                     # RIPE: inminencia alta → spike próximo en ~3 min (ghost WR 86.7% para
                     # SMC_FVG Grade A/B score≥7.0). Umbral bajado 8.5→7.5 por evidencia ghost.
                     # DERIV_IMMINENCE_RIPE_MIN_SCORE controla (default 7.5).
+                    # Ceiling-aware: si el orquestador IA fijó un ceiling < 7.5
+                    # para este símbolo/régimen, bajamos _ripe_min al ceiling - margen
+                    # para evitar el bloqueo matemático (score máximo < gate mínimo).
                     _imm_boost = 0.0
-                    _ripe_min = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "7.5") or 7.5)
+                    _ripe_min_global = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "7.5") or 7.5)
+                    _ripe_ceiling_margin = float(os.getenv("DERIV_IMMINENCE_RIPE_CEILING_MARGIN", "0.10") or 0.10)
+                    _ripe_dyn_ceiling = float(snap.score_breakdown.get("dynamic_score_ceiling") or 99.0)
+                    _ripe_min = min(_ripe_min_global, max(6.0, _ripe_dyn_ceiling - _ripe_ceiling_margin))
                     # LISTO_RIPE_BYPASS: cuando scarcity=LISTO/CARGANDO Y spike RIPE, el mercado
                     # está estadísticamente cargado para disparar el PRIMER spike. Entramos
                     # ANTES del spike (no después como HOT_REENTRY). Disabled by default (0).
@@ -4757,10 +4758,19 @@ class DerivDaemon:
                         or (snap.side == "MULTUP" and _ar_delta_20t < -_ar_threshold)
                     )
                 )
+                _ar_master_key_min = float(
+                    os.getenv("DERIV_ANTI_RETRACE_MASTER_KEY_MIN_SCORE", "8.5") or "8.5"
+                )
                 _ar_hot_bypass = (
-                    bool(snap.score_breakdown.get("hot_reentry_fired"))
-                    and float(snap.score or 0.0) >= float(
-                        os.getenv("DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE", "8.0") or "8.0"
+                    (
+                        bool(snap.score_breakdown.get("hot_reentry_fired"))
+                        and float(snap.score or 0.0) >= float(
+                            os.getenv("DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE", "8.0") or "8.0"
+                        )
+                    )
+                    or (
+                        is_spike_market(tick.symbol)
+                        and float(snap.score or 0.0) >= _ar_master_key_min
                     )
                 )
                 if _ar_bounce:

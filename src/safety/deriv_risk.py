@@ -1920,7 +1920,6 @@ class DerivRiskManager:
         snap.regime = regime
 
         trend_score, trend_dir = self._trend_score_v2(_ghost_ticks)
-        momentum_score = self._momentum_score(_ghost_ticks)
         spread_score = self._spread_score(spread_pct)
         atr_score = self._atr_adaptive_score(atr, ticks[-1], symbol)
         stability_score = self._stability_score(_ghost_ticks)
@@ -1961,7 +1960,6 @@ class DerivRiskManager:
 
         score = (
             trend_score
-            + momentum_score
             + spread_score
             + atr_score
             + stability_score
@@ -2233,7 +2231,6 @@ class DerivRiskManager:
 
         snap.score_breakdown = {
             "trend": round(trend_score, 2),
-            "momentum": round(momentum_score, 2),
             "spread": round(spread_score, 2),
             "atr": round(atr_score, 2),
             "stability": round(stability_score, 2),
@@ -3843,34 +3840,6 @@ class DerivRiskManager:
         r2 = cls._r_squared(ticks[-min(60, len(ticks)):])
         trend_pts = 1.5 + 1.5 * r2  # 1.5 to 3.0 based on trend clarity
         return min(3.0, round(trend_pts, 2)), direction
-
-    @staticmethod
-    def _momentum_score(ticks: list[float]) -> float:
-        """Rate-of-change acceleration: 1.5 pts if recent price is accelerating in one direction.
-
-        Compares the slope of the last 10 ticks vs the slope of the 10 before that.
-        Consistent acceleration = momentum confirmation = 1.5 pts.
-        """
-        if len(ticks) < 25:
-            return 0.0
-        recent = ticks[-10:]
-        prior  = ticks[-20:-10]
-        recent_mean = mean(recent)
-        prior_mean  = mean(prior)
-        if recent_mean == 0 or prior_mean == 0:
-            return 0.0
-        # Net change in each window, normalised by price
-        delta_recent = (recent[-1] - recent[0]) / prior_mean
-        delta_prior  = (prior[-1]  - prior[0])  / prior_mean
-        # Acceleration: both windows moving in same direction
-        if delta_recent > 0 and delta_prior > 0:
-            accel = delta_recent / (abs(delta_prior) + 1e-12)
-            return min(1.5, 1.0 * accel)
-        if delta_recent < 0 and delta_prior < 0:
-            accel = abs(delta_recent) / (abs(delta_prior) + 1e-12)
-            return min(1.5, 1.0 * accel)
-        # Deceleration / reversal
-        return 0.0
 
     def _spread_score(self, spread_pct: float) -> float:
         cap = self._settings.max_spread_pct

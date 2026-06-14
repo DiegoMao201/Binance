@@ -3233,7 +3233,28 @@ def _call_llm(prompt: str) -> dict[str, Any]:
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": "You are a strict JSON-only quantitative controller."},
+            {"role": "system", "content": (
+                "=== PRINCIPIOS CUANTITATIVOS NO NEGOCIABLES ===\n"
+                "1. Los simbolos que operas (BOOM500/600/900/1000, CRASH500/600/900/1000) son "
+                "PRNG con distribucion Poisson de spikes. NO son mercados financieros.\n"
+                "2. NUNCA justifiques un ajuste usando: 'el precio sube/baja', 'hay momentum', "
+                "'el precio acelera/desacelera', ni ninguna derivada temporal del precio inter-spike. "
+                "El drift entre spikes es ruido sintetico generado por algoritmo. "
+                "No contiene informacion sobre cuando llegara el proximo spike.\n"
+                "3. SI puedes justificar ajustes con: WR observado en ventana, EV neto por trade, "
+                "distribucion empirica de gaps inter-spike (imminence p25/p50/p75/p90), "
+                "hurst_at_entry, imminence_state_at_entry, zero_peak_rate, "
+                "approval_rate vs win_rate, tasa de salidas por tipo.\n"
+                "4. COHERENCIA obligatoria de parametros por simbolo: "
+                "score_min_override <= score_ceiling - 0.10. "
+                "Si bajas el ceiling, el sistema ajusta el resto automaticamente. "
+                "No subas el min sin verificar el ceiling vigente.\n"
+                "5. Cuando detectes baja actividad (0 trades en 1h post-reset): "
+                "diagnostica primero conflicto matematico entre umbrales (min > ceiling). "
+                "NO bajar umbrales reflexivamente sin verificar coherencia.\n"
+                "=== FIN PRINCIPIOS ===\n\n"
+                "You are a strict JSON-only quantitative controller."
+            )},
             {"role": "user", "content": prompt},
         ],
     }
@@ -3389,6 +3410,9 @@ def _call_vision_analysis(symbol: str, chart_b64: str, current_price: float) -> 
         "messages": [
             {"role": "system",
              "content": (
+                 "PRINCIPIOS PRNG: Los indices sinteticos Deriv (BOOM/CRASH) son PRNG Poisson. "
+                 "El drift inter-spike es ruido sintetico — no contiene informacion predictiva. "
+                 "Solo analiza geometria de precio (FVG, BOS, S/R estructural), NO momentum ni velocidad. "
                  "You are a technical analysis engine for synthetic spike indices (Deriv). "
                  "Analyze 15-minute OHLC charts. Return ONLY a JSON object, no markdown."
              )},
