@@ -3699,31 +3699,73 @@ def _bucket(v: Any, step: float, ndigits: int = 3) -> float:
     return round(round(x / step) * step, ndigits)
 
 
-def _extract_pattern_key(row: dict[str, Any]) -> tuple[str, str, str, str, float, float, float, float]:
+def _fvg_tier_cat(raw: str) -> str:
+    t = (raw or "").lower().strip()
+    if "mitigat" in t:
+        return "mitigated"
+    if t and t not in ("none", "unknown", ""):
+        return "detected"
+    return "none"
+
+
+def _hurst_cat(h: float) -> str:
+    if h > 0.55:
+        return "persistent"
+    if h < 0.45:
+        return "antipersistent"
+    return "random"
+
+
+def _imminence_cat(raw: str) -> str:
+    t = (raw or "").lower().strip()
+    if "ripe" in t or "overdue" in t:
+        return "ripe_or_overdue"
+    if "build" in t or "warm" in t or "approach" in t:
+        return "building"
+    return "fresh_or_dry"
+
+
+def _score_cat(score: float) -> str:
+    if score >= 8.0:
+        return "excelente"
+    if score >= 6.8:
+        return "alto"
+    return "medio"
+
+
+def _extract_pattern_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    """Returns (symbol, side, fvg_tier, hurst_bucket, imminence_state, score_bucket).
+
+    v2 (2026-06-14): dimensiones correctas, bucketing grueso TEXT.
+    Eliminado: atr_bucket (siempre 0 en PRNG), setup_type genérico, buckets numéricos finos.
+    """
     symbol = str(row.get("symbol") or "").upper()
     side = str(row.get("side") or "").upper() or "UNKNOWN"
     sb = row.get("score_breakdown") if isinstance(row.get("score_breakdown"), dict) else {}
-    setup = str(sb.get("setup_type") or sb.get("entry_setup") or "unknown").lower()
-    regime = str(sb.get("market_regime") or sb.get("regime") or "normal").upper()
+
+    # Bug 1 fix: fvg_tier real (top-level) en lugar de setup_type genérico ("smc_fvg")
+    fvg_tier = _fvg_tier_cat(
+        str(row.get("fvg_tier") or sb.get("fvg_tier") or "")
+    )
+
+    # Bug 3 fix: imminence_state con nombre correcto del campo en contratos cerrados
+    imminence_state = _imminence_cat(
+        str(row.get("imminence_state_at_entry") or sb.get("spike_imminence_state") or "")
+    )
+
+    # Bucketing grueso TEXT — atr_bucket eliminado (ruido en PRNG, siempre 0)
     score_raw = row.get("score")
     if score_raw is None:
         score_raw = sb.get("score_raw")
-    hurst_raw = row.get("hurst")
-    if hurst_raw is None:
-        hurst_raw = sb.get("hurst")
-    atr_raw = sb.get("atr_pct_at_entry")
-    if atr_raw is None:
-        atr_raw = sb.get("atr_pct")
-    geo_raw = sb.get("geo_channel_pos")
+    hurst_raw = row.get("hurst_at_entry") or row.get("hurst") or sb.get("hurst")
+
     return (
         symbol,
         side,
-        setup,
-        regime,
-        _bucket(score_raw, 0.25, 2),
-        _bucket(hurst_raw, 0.02, 2),
-        _bucket(atr_raw, 0.001, 4),
-        _bucket(geo_raw, 0.1, 2),
+        fvg_tier,
+        _hurst_cat(float(hurst_raw) if hurst_raw is not None else 0.5),
+        imminence_state,
+        _score_cat(float(score_raw) if score_raw is not None else 0.0),
     )
 
 
@@ -3736,7 +3778,7 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
         return
 
     rows = closed[-PATTERN_MEMORY_LOOKBACK:]
-    agg: dict[tuple[str, str, str, str, float, float, float, float], dict[str, Any]] = {}
+    agg: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         key = _extract_pattern_key(row)
         symbol = key[0]
@@ -3772,7 +3814,7 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
 
     async with conn.transaction():
         for key, stats in agg.items():
-            symbol, side, setup, regime, score_bucket, hurst_bucket, atr_bucket, geo_bucket = key
+            symbol, side, fvg_tier, hurst_bucket, imminence_state, score_bucket = key
             trades = int(stats["sample_trades"])
             wins = int(stats["wins"])
             losses = int(stats["losses"])
@@ -3791,12 +3833,10 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
                 INSERT INTO ai_entry_pattern_memory (
                     symbol,
                     side,
-                    setup_type,
-                    regime,
-                    score_bucket,
+                    fvg_tier,
                     hurst_bucket,
-                    atr_bucket,
-                    geo_bucket,
+                    imminence_state,
+                    score_bucket,
                     sample_trades,
                     wins,
                     losses,
@@ -3806,13 +3846,11 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
                     updated_at
                 )
                 VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8,
-                    $9, $10, $11, $12, $13, $14, NOW()
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $9, $10, $11, $12, NOW()
                 )
-                ON CONFLICT (
-                    symbol, side, setup_type, regime,
-                    score_bucket, hurst_bucket, atr_bucket, geo_bucket
-                ) DO UPDATE SET
+                ON CONFLICT (symbol, side, fvg_tier, hurst_bucket, imminence_state, score_bucket)
+                DO UPDATE SET
                     sample_trades = EXCLUDED.sample_trades,
                     wins = EXCLUDED.wins,
                     losses = EXCLUDED.losses,
@@ -3823,12 +3861,10 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
                 """,
                 symbol,
                 side,
-                setup,
-                regime,
-                score_bucket,
+                fvg_tier,
                 hurst_bucket,
-                atr_bucket,
-                geo_bucket,
+                imminence_state,
+                score_bucket,
                 trades,
                 wins,
                 losses,
