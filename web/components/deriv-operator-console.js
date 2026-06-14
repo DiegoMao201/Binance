@@ -157,7 +157,8 @@ function SymbolCard({ s }) {
   const clusterDone   = recent >= 3 && !cluster;
 
   let sem;
-  if (isInactive || clusterDone) sem = "red";
+  if (isInactive) sem = "red";
+  else if (clusterDone) sem = "amber";  // post-cluster: informational only, bot gates handle kinetic suppression
   else if (isManualOnly && scoreGap0 != null && scoreGap0 <= 0) sem = "manual";
   else if (secs > 0 && p75Sec && secs > p75Sec && !hasChaseGuard) sem = "green";
   else sem = "amber";
