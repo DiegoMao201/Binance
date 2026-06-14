@@ -3688,6 +3688,13 @@ class DerivDaemon:
                     _pen_mult = float(os.getenv("DERIV_REGIME_TREND_PEN_RIPE_MULT", "0.25") or 0.25)
                 elif _imm_state_early == "BUILDING":
                     _pen_mult = float(os.getenv("DERIV_REGIME_TREND_PEN_BUILDING_MULT", "0.60") or 0.60)
+                # When spike is statistically overdue (Z2/SECO scarcity), the full
+                # trending penalty is double-counting danger already handled by Z2
+                # elasticity. Soften it so a high-pressure spike can enter.
+                _scarcity_ratio_early = float(snap.score_breakdown.get("scarcity_ratio") or 0.0)
+                _el_z2_early = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
+                if _pen_mult == 1.0 and _scarcity_ratio_early >= _el_z2_early:
+                    _pen_mult = float(os.getenv("DERIV_REGIME_TREND_PEN_SCARCE_MULT", "0.25") or 0.25)
                 _trend_pen_eff = round(_trend_pen * max(0.0, min(1.0, _pen_mult)), 3)
                 if _trend_pen_eff > 0.0:
                     _regime_min = min(10.0, _regime_min + _trend_pen_eff)
@@ -4798,6 +4805,13 @@ class DerivDaemon:
                     or (
                         is_spike_market(tick.symbol)
                         and float(snap.score or 0.0) >= _ar_master_key_min
+                    )
+                    or (
+                        # For BOOM/CRASH in Z2 extreme scarcity, price retracing
+                        # against trade direction IS the expected pre-spike signature.
+                        # Anti-retrace would block every good BOOM setup.
+                        _is_bc_bias
+                        and _is_z2
                     )
                 )
                 if _ar_bounce:
