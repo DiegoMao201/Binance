@@ -42,6 +42,17 @@ _HOLD_LLM_MIN_CLOSE_CONFIDENCE: float = float(
     os.getenv("DERIV_HOLD_LLM_MIN_CLOSE_CONFIDENCE", "0.70") or 0.70
 )
 
+# Paso 7 — MAX_HOLD respiro inteligente
+_RESPITE_ENABLED: bool = (
+    os.getenv("DERIV_MAX_HOLD_RESPITE_ENABLED", "true").lower().strip() in ("1", "true", "yes", "on")
+)
+_RESPITE_MAX_EXTENSION_SEC: float = float(
+    os.getenv("DERIV_MAX_HOLD_RESPITE_MAX_SEC", "120") or 120
+)
+_RESPITE_MIN_CONFIDENCE: float = float(
+    os.getenv("DERIV_MAX_HOLD_RESPITE_MIN_CONFIDENCE", "0.75") or 0.75
+)
+
 # Percentiles empíricos de ganadores por símbolo (data 2026-06-14)
 _WINNER_PERCENTILES: dict[str, dict[str, int]] = {
     "BOOM500":  {"p25": 81,  "p50": 381,  "p75": 610},
@@ -53,6 +64,14 @@ _WINNER_PERCENTILES: dict[str, dict[str, int]] = {
 
 # Rate limit: contract_id → last call ts
 _last_call_ts: dict[str | int, float] = {}
+
+
+@dataclass
+class RespiteDecision:
+    grant_respite: bool
+    extension_sec: int
+    confidence: float
+    reason: str
 
 
 @dataclass
@@ -221,3 +240,144 @@ async def evaluate_hold_with_llm(
     # Todos los modelos fallaron → HOLD seguro
     _LOGGER.warning("[HOLD_LLM] %s all models failed → default HOLD", sym)
     return HoldDecision("HOLD", 0.0, "all_models_failed", invoked=True)
+
+
+async def _call_llm_with_fallback(prompt: str, temperature: float = 0.1) -> str:
+    """Call LLM with fallback models. Returns content text or raises RuntimeError."""
+    import aiohttp
+    for model in _HOLD_LLM_MODELS:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": 120,
+        }
+        headers = {
+            "Authorization": f"Bearer {_OPENROUTER_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://optiferre.app",
+            "X-Title": "OptiFerre-Deriv-Hold",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    _OPENROUTER_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10.0),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("[LLM_CALL] HTTP %s on %s", resp.status, model)
+                        continue
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+        except asyncio.TimeoutError:
+            _LOGGER.warning("[LLM_CALL] timeout on %s", model)
+            continue
+        except Exception as exc:
+            _LOGGER.warning("[LLM_CALL] error on %s: %s", model, exc)
+            continue
+    raise RuntimeError("all_models_failed")
+
+
+async def evaluate_max_hold_respite(contract: object, current_state: dict) -> RespiteDecision:
+    """
+    Pregunta al LLM si vale la pena dar respiro al max_hold.
+    Solo se llama UNA vez por contrato (justo al llegar al max_hold base).
+    Si concede, extiende hasta DERIV_MAX_HOLD_RESPITE_MAX_SEC (default 120s).
+    Fallback seguro: DENY si el LLM falla o no hay clave.
+    """
+    if not _RESPITE_ENABLED:
+        return RespiteDecision(grant_respite=False, extension_sec=0, confidence=0.0, reason="feature_disabled")
+
+    if not _OPENROUTER_KEY:
+        return RespiteDecision(grant_respite=False, extension_sec=0, confidence=0.0, reason="no_api_key")
+
+    sym: str = getattr(contract, "symbol", "")
+    pctls = _WINNER_PERCENTILES.get(sym, {"p25": 0, "p50": 0, "p75": 0})
+    held_sec = time.time() - float(getattr(contract, "opened_at_ts", 0) or 0)
+
+    prompt = f"""Eres especialista en índices sintéticos Deriv (PRNG Poisson).
+
+CONTEXTO: el contrato {sym} ({getattr(contract, 'side', '')}) llegó a su max_hold de {held_sec:.0f}s \
+sin capturar spike (peak_profit = $0.00).
+
+DECISIÓN A TOMAR: ¿le doy un RESPIRO corto (máximo 120s extra) o lo cierro ya?
+
+DATOS PARA TU DECISIÓN:
+- Imminence state actual: {current_state.get('imminence_state', 'unknown')}
+- Imminence score: {current_state.get('imminence_score', 'unknown')}
+- Scarcity state: {current_state.get('scarcity_state', 'unknown')}
+- Scarcity ratio: {current_state.get('scarcity_ratio', 'unknown')}
+- Spikes recientes en símbolos hermanos (mismo lado): {current_state.get('sibling_spikes_recent', 0)} en últimos 60s
+- market_phase: {current_state.get('market_phase', 'unknown')}
+- FVG estructural sigue válido: {current_state.get('fvg_still_valid', 'unknown')}
+
+PERCENTILES DE GANADORES {sym}:
+- p50: {pctls['p50']}s
+- p75: {pctls['p75']}s
+
+REGLAS:
+1. SOLO concede respiro si hay señales empíricas REALES de inminencia:
+   - imminence_state == "RIPE" o "OVERDUE" (pico modal de spikes)
+   - scarcity_state == "SECO" o "VENCIDO" (presión acumulada extrema)
+   - spike reciente en símbolo hermano del mismo lado
+2. NO concedas respiro por: score alto, RNG alto, intuición, "se siente cerca"
+3. Si NINGUNA de las señales empíricas dice inminencia → CIERRA (deny respite)
+4. Si hold_sec ya supera el p75 ({pctls['p75']}s) Y no hay señales fuertes → CIERRA
+5. Confianza alta (>= 0.75) requerida para conceder
+
+Responde JSON estricto sin markdown:
+{{
+  "grant_respite": true | false,
+  "extension_sec": 0-120,
+  "confidence": 0.0-1.0,
+  "reason": "frase corta basada en señales empíricas concretas"
+}}
+"""
+
+    try:
+        response_text = await _call_llm_with_fallback(prompt, temperature=0.1)
+
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+
+        data = json.loads(cleaned)
+
+        grant = bool(data.get("grant_respite", False))
+        extension = int(data.get("extension_sec", 0))
+        confidence = float(data.get("confidence", 0.0))
+        reason = str(data.get("reason", "no reason"))
+
+        extension = min(extension, int(_RESPITE_MAX_EXTENSION_SEC))
+
+        if grant and confidence < _RESPITE_MIN_CONFIDENCE:
+            _LOGGER.info(
+                "[MAX_HOLD_RESPITE] %s LLM concedió respiro pero conf=%.2f < %.2f → DENY",
+                sym, confidence, _RESPITE_MIN_CONFIDENCE,
+            )
+            grant = False
+            reason = f"low_confidence ({reason})"
+
+        if not grant:
+            extension = 0
+
+        return RespiteDecision(
+            grant_respite=grant,
+            extension_sec=extension,
+            confidence=confidence,
+            reason=reason,
+        )
+
+    except Exception as e:
+        _LOGGER.warning("[MAX_HOLD_RESPITE] %s error: %s → DENY por defecto", sym, e)
+        return RespiteDecision(
+            grant_respite=False,
+            extension_sec=0,
+            confidence=0.0,
+            reason=f"llm_error: {e}",
+        )

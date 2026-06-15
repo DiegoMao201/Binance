@@ -1005,28 +1005,93 @@ class DerivTradeExecutor:
             except Exception as _llm_exc:
                 _LOGGER.debug("[LLM_HOLD] eval error (safe ignore, HOLD): %s", _llm_exc)
 
-            # ── Max hold como red de seguridad final ─────────────────────────
+            # ── Max hold con respiro inteligente (Paso 7 — Filosofía A) ──────
+            # PRIORIDAD 3: max_hold → LLM respiro (UNA vez por contrato)
+            # PRIORIDAD 4: respiro expirado → cierre definitivo
             _sym_max_hold = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
                 oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
             )
             if _held_sec >= _sym_max_hold:
-                self._closing.add(cid)
-                oc.pending_close_reason = "max_hold_timeout"
-                _LOGGER.info(
-                    "[MAX-HOLD-TIMEOUT] %s cid=%s sym=%s held=%.0fs max=%.0fs "
-                    "pnl=%.4f → spike window p90 exhausted, cutting",
-                    source, cid, oc.symbol, _held_sec, _sym_max_hold,
-                    current_profit,
-                )
-                try:
-                    await self._client.sell(cid)
-                    return True
-                except DerivClientError as exc:
-                    _LOGGER.warning(
-                        "[MAX-HOLD-TIMEOUT] sell failed cid=%s: %s", cid, exc
-                    )
-                    self._closing.discard(cid)
-                    oc.pending_close_reason = None
+                if not getattr(oc, "_max_hold_respite_granted", False):
+                    # Primera vez al límite: preguntar al LLM (UNA sola vez)
+                    _respite_dec = None
+                    try:
+                        from src.analysis.llm_hold_decision import evaluate_max_hold_respite
+                        _respite_state = self._get_structural_state(oc.symbol)
+                        # Enrich con scarcity
+                        if self._risk is not None:
+                            with suppress(Exception):
+                                _scar = self._risk.get_scarcity_state(oc.symbol)
+                                _respite_state["scarcity_state"] = "SECO" if _scar.get("dry") else "CARGANDO"
+                                _respite_state["scarcity_ratio"] = _scar.get("ratio")
+                        # Enrich con imminence del dynamic config
+                        if self._dynamic_config_provider is not None:
+                            with suppress(Exception):
+                                _dcfg = self._dynamic_config_provider(oc.symbol) or {}
+                                _respite_state["imminence_state"] = _dcfg.get("spike_imminence_state")
+                                _respite_state["imminence_score"] = _dcfg.get("imminence_score")
+                        # Sibling spikes (mismo lado BOOM/CRASH, últimos 60s)
+                        _side_str = getattr(oc, "side", "")
+                        _sib_prefix = "BOOM" if _side_str == "MULTUP" else "CRASH"
+                        _recent_60 = self._get_recent_spike_events(seconds=60)
+                        _respite_state["sibling_spikes_recent"] = sum(
+                            1 for e in _recent_60
+                            if str(e.get("symbol", "")).startswith(_sib_prefix)
+                            and e.get("symbol") != oc.symbol
+                        )
+                        _respite_dec = await evaluate_max_hold_respite(oc, _respite_state)
+                    except Exception as _resp_exc:
+                        _LOGGER.warning("[MAX_HOLD_RESPITE] eval error → DENY: %s", _resp_exc)
+
+                    if _respite_dec is not None and _respite_dec.grant_respite:
+                        oc._max_hold_respite_granted = True
+                        oc._respite_extends_until = time.time() + _respite_dec.extension_sec
+                        _LOGGER.info(
+                            "[MAX_HOLD_RESPITE] %s cid=%s held=%.0fs respiro concedido +%ds "
+                            "reason='%s' conf=%.2f",
+                            oc.symbol, cid, _held_sec, _respite_dec.extension_sec,
+                            _respite_dec.reason, _respite_dec.confidence,
+                        )
+                        # NO cierra: sigue monitoreando hasta _respite_extends_until
+                    else:
+                        # LLM denegó, feature off, o error → cerrar normal
+                        self._closing.add(cid)
+                        oc.pending_close_reason = "max_hold_timeout"
+                        _LOGGER.info(
+                            "[MAX-HOLD-TIMEOUT] %s cid=%s sym=%s held=%.0fs max=%.0fs "
+                            "pnl=%.4f → spike window p90 exhausted, cutting",
+                            source, cid, oc.symbol, _held_sec, _sym_max_hold,
+                            current_profit,
+                        )
+                        try:
+                            await self._client.sell(cid)
+                            return True
+                        except DerivClientError as exc:
+                            _LOGGER.warning(
+                                "[MAX-HOLD-TIMEOUT] sell failed cid=%s: %s", cid, exc
+                            )
+                            self._closing.discard(cid)
+                            oc.pending_close_reason = None
+
+                elif getattr(oc, "_respite_extends_until", 0) > 0:
+                    if time.time() >= oc._respite_extends_until:
+                        # Respiro expirado sin spike → cierre definitivo
+                        self._closing.add(cid)
+                        oc.pending_close_reason = "max_hold_after_respite"
+                        _LOGGER.info(
+                            "[MAX_HOLD_RESPITE] %s cid=%s held=%.0fs respiro expirado sin spike → cerrando",
+                            oc.symbol, cid, _held_sec,
+                        )
+                        try:
+                            await self._client.sell(cid)
+                            return True
+                        except DerivClientError as exc:
+                            _LOGGER.warning(
+                                "[MAX_HOLD_RESPITE] sell failed cid=%s: %s", cid, exc
+                            )
+                            self._closing.discard(cid)
+                            oc.pending_close_reason = None
+                    # Si aún no expira el respiro → sigue esperando (no hace nada)
 
         # ─── SPIKE-ARRIVED DETECTION (2026-05-30 v3) ────────────────────────
         # The entry's own spike is considered "arrived" the first time
