@@ -7,7 +7,7 @@ NO reemplaza la lógica estructural — la complementa cuando hay ambigüedad.
 Principios:
 - Solo se invoca cuando hay un trigger concreto (no en cada tick)
 - Fallback siempre es HOLD (no cerrar por error del LLM)
-- Alta barra para CLOSE: confidence >= 0.70
+- Alta barra para CLOSE: confidence >= 0.80
 - Rate limit: 1 llamada por contrato cada 60s mínimo
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ _HOLD_LLM_MIN_INTERVAL_SEC: float = float(
     os.getenv("DERIV_HOLD_LLM_MIN_INTERVAL_SEC", "60") or 60
 )
 _HOLD_LLM_MIN_CLOSE_CONFIDENCE: float = float(
-    os.getenv("DERIV_HOLD_LLM_MIN_CLOSE_CONFIDENCE", "0.70") or 0.70
+    os.getenv("DERIV_HOLD_LLM_MIN_CLOSE_CONFIDENCE", "0.80") or 0.80
 )
 
 # Paso 7 — MAX_HOLD respiro inteligente
@@ -61,6 +61,14 @@ _WINNER_PERCENTILES: dict[str, dict[str, int]] = {
     "CRASH600": {"p25": 300, "p50": 400,  "p75": 600},
     "CRASH900": {"p25": 675, "p50": 708,  "p75": 1310},
 }
+
+# Razones estructurales válidas para CLOSE (anti-alucinación: cualquier otro código → HOLD)
+_VALID_CLOSE_REASONS: frozenset[str] = frozenset({
+    "SPIKE_OPUESTO",
+    "LIQUIDEZ_MACRO_ADVERSA",
+    "REGIMEN_MUERTO",
+    "FVG_INVALIDADO",
+})
 
 # Rate limit: contract_id → last call ts
 _last_call_ts: dict[str | int, float] = {}
@@ -126,8 +134,12 @@ async def evaluate_hold_with_llm(
     current_state: dict,
 ) -> HoldDecision:
     """
-    Invoca el LLM con contexto completo del trade.
+    Invoca el LLM con contexto estructural real del trade.
     Fallback seguro: HOLD si el LLM falla o no hay clave.
+
+    current_state debe contener (inyectado en el call site):
+        sym_max_hold, market_phase, fvg_still_valid,
+        opposite_spike_recent, liquidez_adversa, imminence_state_current
     """
     if not _OPENROUTER_KEY:
         return HoldDecision("HOLD", 0.0, "no_api_key", invoked=False)
@@ -138,45 +150,65 @@ async def evaluate_hold_with_llm(
     floating_pnl: float = float(getattr(contract, "floating_pnl", 0) or 0)
     opened_at_ts: float = float(getattr(contract, "opened_at_ts", 0) or 0)
     held_sec: float = time.time() - opened_at_ts
-    max_hold: float = float(getattr(contract, "max_hold_seconds", 0) or 0)
 
     score_bd: dict = getattr(contract, "score_breakdown", None) or {}
     entry_score = score_bd.get("score_at_entry") or score_bd.get("score") or "N/A"
-    entry_fvg_tier = score_bd.get("fvg_tier") or current_state.get("entry_fvg_tier", "N/A")
-    entry_imminence = score_bd.get("spike_imminence_state") or current_state.get("entry_imminence", "N/A")
-    entry_scarcity = score_bd.get("scarcity_state") or current_state.get("entry_scarcity", "N/A")
+    setup_type = score_bd.get("setup_type", "unknown") or "unknown"
+    entry_imminence = score_bd.get("spike_imminence_state") or "unknown"
 
+    sym_max_hold = float(current_state.get("sym_max_hold", 750) or 750)
     pctls = _WINNER_PERCENTILES.get(sym, {"p25": 0, "p50": 0, "p75": 600})
+    p75 = pctls.get("p75", 600)
+    effective_deadline = int(min(p75, sym_max_hold * 0.85))
+    time_to_max_hold = max(0, int(sym_max_hold - held_sec))
+
+    opposite_spike = bool(current_state.get("opposite_spike_recent", False))
+    liquidez_adversa = bool(current_state.get("liquidez_adversa", False))
+    imm_current = current_state.get("imminence_state_current", "unknown") or "unknown"
+    market_phase = current_state.get("market_phase", "unknown") or "unknown"
+    fvg_valid = current_state.get("fvg_still_valid", "unknown") or "unknown"
 
     prompt = (
-        f"Eres un especialista en trading de índices sintéticos Deriv (PRNG Poisson).\n\n"
-        f"CONTRATO ACTIVO:\n"
+        f"Eres especialista en trading de índices sintéticos Deriv (PRNG Poisson).\n\n"
+        f"CONTEXTO DEL TRADE ABIERTO:\n"
         f"- Símbolo: {sym}\n"
-        f"- Lado: {side}\n"
-        f"- Entró hace: {held_sec:.0f}s\n"
-        f"- max_hold: {max_hold:.0f}s\n"
-        f"- peak_profit actual: ${peak:.2f}\n"
-        f"- PnL flotante: ${floating_pnl:.2f}\n\n"
-        f"CONDICIONES AL ENTRAR:\n"
-        f"- score: {entry_score}\n"
-        f"- FVG tier: {entry_fvg_tier}\n"
-        f"- imminence: {entry_imminence}\n"
-        f"- scarcity: {entry_scarcity}\n\n"
-        f"CONDICIONES AHORA (las únicas que importan):\n"
-        f"- FVG estructural sigue válido: {current_state.get('fvg_still_valid', 'unknown')}\n"
-        f"- BOS opuesto detectado: {current_state.get('bos_opposite', False)}\n"
-        f"- Spike opuesto últimos 60s: {current_state.get('opposite_spike_recent', False)}\n"
-        f"- market_phase: {current_state.get('market_phase', 'unknown')}\n\n"
-        f"DATA HISTÓRICA GANADORES {sym}:\n"
-        f"- p25: {pctls['p25']}s  p50: {pctls['p50']}s  p75: {pctls['p75']}s\n\n"
-        f"REGLAS NO NEGOCIABLES:\n"
-        f"1. NO cierres por score/RNG bajos — drift normal del PRNG\n"
-        f"2. NO cierres por tiempo — solo por evento estructural\n"
-        f"3. SÍ cierra si: BOS opuesto confirmado, spike opuesto, market_phase=DEAD\n"
-        f"4. Si held_sec < p75 ({pctls['p75']}s), dar más tiempo salvo evento estructural claro\n"
-        f"5. Si held_sec > p75 y peak=0 y estructura degradada, considera CLOSE\n\n"
-        f"Responde JSON estricto sin markdown:\n"
-        f'{{\"action\": \"HOLD\" or \"CLOSE\", \"confidence\": 0.0-1.0, \"reason\": \"frase corta\"}}'
+        f"- Dirección: {side}\n"
+        f"- Held seconds: {held_sec:.0f}s de max {sym_max_hold:.0f}s\n"
+        f"- PnL flotante actual: ${floating_pnl:+.2f}\n"
+        f"- Peak profit alcanzado: ${peak:+.2f}\n"
+        f"- Score de entrada: {entry_score}\n"
+        f"- Setup type al entrar: {setup_type}\n"
+        f"- Imminence state al entrar: {entry_imminence}\n\n"
+        f"ESTADO ESTRUCTURAL ACTUAL:\n"
+        f"- Régimen actual (market_phase): {market_phase}\n"
+        f"- FVG todavía válido: {fvg_valid}\n"
+        f"- Imminence state actual: {imm_current}\n"
+        f"- Spike opuesto detectado últimos 60s: {opposite_spike}\n"
+        f"- Zona liquidez macro adversa (Vision LLM): {liquidez_adversa}\n\n"
+        f"REGLAS DE DECISIÓN (FILOSOFÍA PRNG NO NEGOCIABLE):\n\n"
+        f"REGLA 1 — DEFAULT ES HOLD\n"
+        f"A menos que veas EVIDENCIA ESTRUCTURAL ESPECÍFICA, responde HOLD.\n"
+        f"La paciencia tiene valor en PRNG. El drift inter-spike es ruido sin valor predictivo.\n\n"
+        f"REGLA 2 — RAZONES VÁLIDAS PARA CLOSE (deben ser estructurales):\n"
+        f"  (A) SPIKE_OPUESTO: opposite_spike_recent=true — un spike contra nuestro side acaba de ocurrir.\n"
+        f"  (B) LIQUIDEZ_MACRO_ADVERSA: liquidez_adversa=true — Vision LLM detectó macro contra nuestro side.\n"
+        f"  (C) REGIMEN_MUERTO: market_phase=DEAD + imminence_state en DRY/OVERDUE — sequía estructural.\n"
+        f"  (D) FVG_INVALIDADO: fvg_still_valid=no — la estructura que justificó la entrada ya no existe.\n\n"
+        f"REGLA 3 — RAZONES NO VÁLIDAS (rechazar incluso si parecen tentadoras):\n"
+        f"  NO: 'Lleva mucho tiempo' — tiempo solo NO es razón en PRNG\n"
+        f"  NO: 'PnL negativo' — flotante negativo es normal pre-spike\n"
+        f"  NO: 'Score bajó' — score post-entrada es ruido en PRNG\n"
+        f"  NO: 'Hurst cambió' — Hurst es para entrada, no para hold\n\n"
+        f"REGLA 4 — DEADLINE EFECTIVO DEL TRADE:\n"
+        f"  Deadline efectivo = min(p75={p75}s, max_hold*0.85={sym_max_hold*0.85:.0f}s) = {effective_deadline}s.\n"
+        f"  El bot cerrará en {time_to_max_hold}s de todos modos.\n"
+        f"  ANTES del deadline ({held_sec:.0f}s < {effective_deadline}s): bias hacia HOLD.\n"
+        f"  DESPUÉS del deadline: las razones (A)-(D) pesan más; evalúa con más rigor.\n\n"
+        f"REGLA 5 — CONFIDENCE: mínimo 0.80 para CLOSE. Menos → responde HOLD.\n\n"
+        f"RESPONDE JSON ESTRICTO SIN MARKDOWN:\n"
+        f'{{"action": "HOLD" or "CLOSE", "confidence": 0.0-1.0, '
+        f'"reason_code": "SPIKE_OPUESTO" | "LIQUIDEZ_MACRO_ADVERSA" | "REGIMEN_MUERTO" | "FVG_INVALIDADO" | "NO_STRUCTURAL_EVIDENCE", '
+        f'"reason": "frase corta basada en señales observables"}}'
     )
 
     import aiohttp
@@ -189,7 +221,7 @@ async def evaluate_hold_with_llm(
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
-            "max_tokens": 120,
+            "max_tokens": 200,
         }
         headers = {
             "Authorization": f"Bearer {_OPENROUTER_KEY}",
@@ -225,7 +257,18 @@ async def evaluate_hold_with_llm(
 
         action = str(parsed.get("action", "HOLD")).upper()
         confidence = float(parsed.get("confidence", 0.5))
+        reason_code = str(parsed.get("reason_code", "NO_STRUCTURAL_EVIDENCE")).upper()
         reason = str(parsed.get("reason", ""))
+
+        # Guard anti-alucinación: CLOSE solo si reason_code es uno de los 4 válidos
+        if action == "CLOSE" and reason_code not in _VALID_CLOSE_REASONS:
+            _LOGGER.warning(
+                "[HOLD_LLM] %s dijo CLOSE con reason_code='%s' no válido → HOLD (anti-alucinación)",
+                sym, reason_code,
+            )
+            action = "HOLD"
+            confidence = 0.5
+            reason = f"invalid_reason_code ({reason_code}): {reason}"
 
         # Alta barra para cerrar: requiere confidence >= threshold
         if action == "CLOSE" and confidence < _HOLD_LLM_MIN_CLOSE_CONFIDENCE:
@@ -237,10 +280,12 @@ async def evaluate_hold_with_llm(
             reason = f"low_confidence_close ({reason})"
 
         _LOGGER.info(
-            "[HOLD_LLM] %s held=%.0fs action=%s conf=%.2f reason='%s' model=%s",
-            sym, held_sec, action, confidence, reason, model,
+            "[HOLD_LLM] %s held=%.0fs action=%s conf=%.2f rc=%s reason='%s' "
+            "opp_spike=%s liq_adversa=%s imm=%s phase=%s model=%s",
+            sym, held_sec, action, confidence, reason_code, reason,
+            opposite_spike, liquidez_adversa, imm_current, market_phase, model,
         )
-        return HoldDecision(action=action, confidence=confidence, reason=reason, invoked=True)
+        return HoldDecision(action=action, confidence=confidence, reason=f"{reason_code}: {reason}", invoked=True)
 
     # Todos los modelos fallaron → HOLD seguro
     _LOGGER.warning("[HOLD_LLM] %s all models failed → default HOLD", sym)

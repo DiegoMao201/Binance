@@ -995,12 +995,63 @@ class DerivTradeExecutor:
             try:
                 from src.analysis.llm_hold_decision import should_invoke_hold_llm, evaluate_hold_with_llm
                 _hold_state = self._get_structural_state(oc.symbol)
-                # Inyectar el max_hold del símbolo para que should_invoke_hold_llm
-                # use el umbral correcto (el trigger p75*0.80 supera el max_hold
-                # para BOOM500/CRASH500/CRASH900, dejando el LLM sin disparar nunca).
                 _hold_state["sym_max_hold"] = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
                     oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
                 )
+
+                # ── Señales estructurales reales para el Hold LLM (PASO 1.4b) ──
+                # Señal 1: spike opuesto en los últimos 60s
+                try:
+                    _recent_60s = self._get_recent_spike_events(seconds=60) or []
+                    _expected_dir = "UP" if oc.side == "MULTUP" else "DOWN"
+                    _hold_state["opposite_spike_recent"] = any(
+                        str(e.get("symbol", "")) == oc.symbol
+                        and str(e.get("direction", "")).upper() not in ("", _expected_dir)
+                        for e in _recent_60s
+                    )
+                except Exception as _sp_exc:
+                    _LOGGER.debug("[HOLD_LLM_PREP] %s opposite_spike: %s", oc.symbol, _sp_exc)
+                    _hold_state["opposite_spike_recent"] = False
+
+                # Señal 2: zona_liquidez_macro adversa (Vision LLM, del JSON en disco)
+                try:
+                    import json as _j
+                    import os as _os
+                    _vpath = _os.getenv("DERIV_VISION_FILE", "/data/logs/deriv_vision.json")
+                    with open(_vpath) as _vf:
+                        _vdata = _j.load(_vf)
+                    _vsym = _vdata.get(oc.symbol.upper(), {})
+                    _zona = bool(_vsym.get("zona_liquidez_macro", False))
+                    _bias = str(_vsym.get("bias", ""))
+                    _hold_state["liquidez_adversa"] = (
+                        _zona
+                        and bool(_bias)
+                        and (
+                            (oc.side == "MULTUP" and _bias == "MULTDOWN")
+                            or (oc.side == "MULTDOWN" and _bias == "MULTUP")
+                        )
+                    )
+                except Exception as _vx_exc:
+                    _LOGGER.debug("[HOLD_LLM_PREP] %s vision: %s", oc.symbol, _vx_exc)
+                    _hold_state["liquidez_adversa"] = False
+
+                # Señal 3: imminence_state actual (dynamic_config → fallback score_breakdown)
+                try:
+                    _imm_cur = None
+                    if self._dynamic_config_provider is not None:
+                        _dcfg = self._dynamic_config_provider(oc.symbol) or {}
+                        _imm_cur = _dcfg.get("spike_imminence_state")
+                    if _imm_cur:
+                        _hold_state["imminence_state_current"] = _imm_cur
+                    else:
+                        _hold_state["imminence_state_current"] = (
+                            (getattr(oc, "score_breakdown", None) or {})
+                            .get("spike_imminence_state", "unknown") or "unknown"
+                        )
+                except Exception as _imm_exc:
+                    _LOGGER.debug("[HOLD_LLM_PREP] %s imminence: %s", oc.symbol, _imm_exc)
+                    _hold_state["imminence_state_current"] = "unknown"
+
                 if should_invoke_hold_llm(oc, _held_sec, _hold_state):
                     _hold_dec = await evaluate_hold_with_llm(oc, _hold_state)
                     if _hold_dec.action == "CLOSE" and cid not in self._closing:
@@ -2691,14 +2742,25 @@ class DerivTradeExecutor:
         return float(last.get("closed_at_ts") or 0) or None
 
     def _get_structural_state(self, symbol: str) -> dict[str, Any]:
-        """Build a state snapshot for structural_exit and llm_hold_decision."""
-        state: dict[str, Any] = {}
-        # Pull what we can from dynamic_config_provider
+        """
+        Retorna el estado estructural base del símbolo para structural_exit y Hold LLM.
+
+        Las señales adicionales (opposite_spike_recent, liquidez_adversa,
+        imminence_state_current) se inyectan en el call site del Hold LLM,
+        no aquí, para mantener esta función simple y sin IO externo.
+
+        Returns:
+            dict con: market_phase, fvg_still_valid (ambos con default explícito "unknown")
+        """
+        state: dict[str, Any] = {
+            "market_phase": "unknown",
+            "fvg_still_valid": "unknown",
+        }
         if self._dynamic_config_provider is not None:
             try:
                 cfg = self._dynamic_config_provider(symbol) or {}
-                state["market_phase"] = cfg.get("market_phase", "")
-                state["fvg_still_valid"] = cfg.get("fvg_still_valid", "unknown")
+                state["market_phase"] = cfg.get("market_phase", "unknown") or "unknown"
+                state["fvg_still_valid"] = cfg.get("fvg_still_valid", "unknown") or "unknown"
             except Exception:
                 pass
         return state
