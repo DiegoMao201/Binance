@@ -1148,90 +1148,11 @@ class DerivTradeExecutor:
             )
             oc.confirmations_at_peak = int(oc.post_entry_confirmations)
 
-        # ─── RULE 1 — POST-SPIKE NO-FOLLOWUP EXIT ───────────────────────────
-        # Only AFTER the entry's own spike materialized AND it was small
-        # (peak < $1) AND we waited _POST_SPIKE_WAIT_SEC for a new (post-spike)
-        # confirmation AND it didn't show up AND price degraded → close.
-        # If broker SL hits before this (because the spike never arrived),
-        # accept the loss — that's the explicit user contract.
-        if (
-            _POST_ENTRY_ENABLE
-            and cid not in self._closing
-            and float(oc.spike_arrived_ts or 0.0) > 0.0
-            and float(oc.peak_profit) < 1.0
-            and int(oc.post_spike_confirmations) == 0
-        ):
-            _time_since_spike = time.time() - float(oc.spike_arrived_ts)
-            _degrade_floor = float(oc.peak_profit) * (
-                1.0 - _POST_SPIKE_DEGRADE_RATIO
-            )
-            if (
-                _time_since_spike >= _POST_SPIKE_WAIT_SEC
-                and current_profit <= _degrade_floor
-            ):
-                self._closing.add(cid)
-                oc.pending_close_reason = "post_spike_no_followup"
-                _LOGGER.info(
-                    "[POST-SPIKE-NO-FOLLOWUP] %s cid=%s sym=%s peak=%.4f "
-                    "cur=%.4f degrade_floor=%.4f wait=%.1fs/%.0fs "
-                    "pre_conf=%d post_conf=0 → close "
-                    "(small spike, no new spike coming, price degraded)",
-                    source, cid, oc.symbol, float(oc.peak_profit),
-                    current_profit, _degrade_floor,
-                    _time_since_spike, _POST_SPIKE_WAIT_SEC,
-                    int(oc.pre_spike_confirmations),
-                )
-                try:
-                    await self._client.sell(cid)
-                    return True
-                except DerivClientError as exc:
-                    _LOGGER.warning(
-                        "[POST-SPIKE-NO-FOLLOWUP] %s sell failed cid=%s: %s",
-                        source, cid, exc,
-                    )
-                    self._closing.discard(cid)
-                    oc.pending_close_reason = None
-
-        # ─── RULE 1B — SPIKE-FIRED RED CUT (2026-06-02 operator) ────────────
-        # The "entré muy temprano / muy rojo" case: the awaited spike already
-        # FIRED (pre_spike_confirmations >= MIN_FIRED) but it was small and never
-        # lifted PnL to green (spike_arrived_ts == 0, so RULE 1 above never
-        # arms). Operator contract: cut it small ONLY if no NEW confirmation
-        # arrives within the follow-up window — and the window RESETS on every
-        # fresh spike (last_seen_spike_ts), so while spikes keep coming we KEEP
-        # HOLDING (the next one may push green: "1-2-3 min llega el otro y pum").
-        # We only cut once confirmations dry up AND we're already at a
-        # controlled loss, saving the gap to the -$2 broker SL.
-        if (
-            _POST_SPIKE_RED_CUT_ENABLE
-            and cid not in self._closing
-            and float(oc.spike_arrived_ts or 0.0) == 0.0
-            and int(oc.pre_spike_confirmations) >= _POST_SPIKE_RED_MIN_FIRED
-            and float(oc.last_seen_spike_ts or 0.0) > 0.0
-            and current_profit <= _POST_SPIKE_RED_MAX_LOSS
-        ):
-            _since_last_conf = time.time() - float(oc.last_seen_spike_ts)
-            if _since_last_conf >= _POST_SPIKE_RED_FOLLOWUP_SEC:
-                self._closing.add(cid)
-                oc.pending_close_reason = "post_spike_red_cut"
-                _LOGGER.info(
-                    "[POST-SPIKE-RED-CUT] %s cid=%s sym=%s cur=%.4f peak=%.4f "
-                    "pre_conf=%d since_last_conf=%.0fs/%.0fs max_loss=%.2f → cut "
-                    "(spike fired but stayed red, no new confirmation, don't bleed to SL)",
-                    source, cid, oc.symbol, current_profit, float(oc.peak_profit),
-                    int(oc.pre_spike_confirmations), _since_last_conf,
-                    _POST_SPIKE_RED_FOLLOWUP_SEC, _POST_SPIKE_RED_MAX_LOSS,
-                )
-                try:
-                    await self._client.sell(cid)
-                    return True
-                except DerivClientError as exc:
-                    _LOGGER.warning(
-                        "[POST-SPIKE-RED-CUT] %s sell failed cid=%s: %s",
-                        source, cid, exc,
-                    )
-                    self._closing.discard(cid)
-                    oc.pending_close_reason = None
+        # RULE 1 (post_spike_no_followup) y RULE 1B (post_spike_red_cut) eliminadas.
+        # Filosofía A: el cierre cuando seguimos en rojo post-spike lo decide el LLM
+        # (evaluate_hold_with_llm, evaluate_max_hold_respite) o los 4 eventos
+        # estructurales — nunca un timer automático.
+        # Los contadores pre/post_spike_confirmations siguen activos para telemetría.
 
         state = self._spike_tier_dynamic_state(
             oc.symbol,
