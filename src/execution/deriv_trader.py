@@ -434,6 +434,11 @@ class DerivOpenContract:
     post_entry_confirmations: int = field(default=0)
     # Confirmations count at the moment peak_profit was last updated (informative).
     confirmations_at_peak: int = field(default=0)
+    # ── MAX_HOLD_RESPITE state (Paso 7) ──────────────────────────
+    # Sin estos campos, setattr falla con AttributeError porque el
+    # dataclass usa slots=True. Deben estar declarados aquí.
+    _max_hold_respite_granted: bool = field(default=False)
+    _respite_extends_until: float = field(default=0.0)
 
 
 class DerivTradeExecutor:
