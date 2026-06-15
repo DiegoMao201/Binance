@@ -558,7 +558,9 @@ MARKET_PHASE_ACCEL_SCORE_RELAX = max(
     0.0,
     min(float(os.getenv("MARKET_PHASE_ACCEL_SCORE_RELAX", "0.20") or 0.20), 0.50),
 )
-MARKET_PHASE_DEAD_DISABLES = os.getenv("MARKET_PHASE_DEAD_DISABLES", "true").strip().lower() in {
+# DEPRECATED 2026-06-15 (Diego decisión PASO 2.3c-C): default cambiado de "true"
+# a "false". PHASE_DEAD ya no desactiva símbolos (filosofía PRNG).
+MARKET_PHASE_DEAD_DISABLES = os.getenv("MARKET_PHASE_DEAD_DISABLES", "false").strip().lower() in {
     "1", "true", "yes", "on"
 }
 MARKET_PHASE_DECEL_GRACE_BUMP = max(
@@ -2206,30 +2208,23 @@ def _apply_activity_policy(
         inactive_since_before = float(state.get("inactive_since_ts") or 0.0)
 
         next_active = current.is_active
+        # DEPRECATED 2026-06-15 (Diego decisión PASO 2.3c-C): severe_disable ya NO
+        # desactiva símbolos. Filosofía PRNG: spikes son procesos Poisson
+        # independientes; racha pasada ≠ pronóstico futuro. Desactivar por racha =
+        # falacia del jugador inversa. Reemplazado: score_min sube, símbolo sigue activo.
+        severe_disable_score_penalty = 0.0
         if severe_disable:
-            next_active = False
-            if current.is_active:
-                LOG.info(
-                    "[dynamic-ai][ACTIVITY_DISABLE] %s reasons=%s contracts=%d spikes15m=%d spikes1h=%d spikes3h=%d rate1h=%.2f/h ratio1h3h=%s cadence=%s guard=%s",
-                    sym,
-                    ",".join(disable_reasons) if disable_reasons else "unknown",
-                    contracts_n,
-                    spikes_15m,
-                    spikes_1h,
-                    spikes_3h,
-                    spike_rate_1h,
-                    f"{spike_rate_ratio_1h_3h:.2f}" if spike_rate_ratio_1h_3h is not None else "n/a",
-                    spike_cadence_regime,
-                    guard_active,
-                )
-            if inactive_since_before <= 0.0:
-                state["inactive_since_ts"] = now_ts
-            if streak_before > 0:
-                LOG.info(
-                    "[dynamic-ai][RECOVERY_RESET] %s streak %d -> 0 (severe_disable)",
-                    sym,
-                    streak_before,
-                )
+            # was: next_active = False
+            severe_disable_score_penalty = 1.0
+            LOG.info(
+                "[dynamic-ai][QUALITY_PENALTY] %s reasons=%s contracts=%d spikes15m=%d rate1h=%.2f/h cadence=%s — score+1.0 (NO desactivado, PRNG policy)",
+                sym,
+                ",".join(disable_reasons) if disable_reasons else "unknown",
+                contracts_n,
+                spikes_15m,
+                spike_rate_1h,
+                spike_cadence_regime,
+            )
             state["recovery_streak"] = 0
             state["spike_recovery_streak"] = 0
             state["stabilization_left"] = 0
@@ -2371,7 +2366,7 @@ def _apply_activity_policy(
 
         final_regime = candidate.regime
         final_grace = candidate.zero_peak_grace_sec
-        final_score = candidate.score_min_override
+        final_score = candidate.score_min_override + severe_disable_score_penalty
         stabilization_left_now = int(state.get("stabilization_left") or 0)
         strict_bonus_now = max(0.0, float(state.get("strict_bonus") or 0.0))
 
@@ -2815,8 +2810,13 @@ def _apply_symbol_risk_floor_policy(
             next_until = prior_until
 
         is_active_override = base.is_active
+        # DEPRECATED 2026-06-15 (Diego decisión PASO 2.3c-C): DD lockout ya NO
+        # desactiva símbolos. Filosofía PRNG: spikes Poisson independientes;
+        # DD pasado ≠ DD futuro. Reemplazado: score_min sube, símbolo activo.
+        dd_lockout_score_penalty = 0.0
         if next_until is not None and next_until > ts_now:
-            is_active_override = False
+            # was: is_active_override = False
+            dd_lockout_score_penalty = 1.0
             sym_report["lockout_active"] = True
             sym_report["lockout_until_ts"] = round(float(next_until), 1)
             updated_lockouts[sym] = {
@@ -2835,7 +2835,7 @@ def _apply_symbol_risk_floor_policy(
             }
 
         # 2) CRASH900 Hurst clamp on score_min_override.
-        next_score = float(base.score_min_override)
+        next_score = float(base.score_min_override) + dd_lockout_score_penalty
         if sym == "CRASH900" and len(crash900_hursts) >= CRASH900_HURST_MIN_SAMPLES:
             recent = crash900_hursts[-CRASH900_HURST_MIN_SAMPLES:]
             if all(h < CRASH900_HURST_CLAMP_THRESHOLD for h in recent):
