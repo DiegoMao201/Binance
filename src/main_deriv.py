@@ -4032,7 +4032,7 @@ class DerivDaemon:
                     # para este símbolo/régimen, bajamos _ripe_min al ceiling - margen
                     # para evitar el bloqueo matemático (score máximo < gate mínimo).
                     _imm_boost = 0.0
-                    _ripe_min_global = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "7.5") or 7.5)
+                    _ripe_min_global = float(os.getenv("DERIV_IMMINENCE_RIPE_MIN_SCORE", "5.5") or 5.5)
                     _ripe_ceiling_margin = float(os.getenv("DERIV_IMMINENCE_RIPE_CEILING_MARGIN", "0.10") or 0.10)
                     _ripe_dyn_ceiling = float(snap.score_breakdown.get("dynamic_score_ceiling") or 99.0)
                     _ripe_min = min(_ripe_min_global, max(6.0, _ripe_dyn_ceiling - _ripe_ceiling_margin))
