@@ -2225,6 +2225,7 @@ class DerivDaemon:
         timeout_task     = asyncio.create_task(self._executor.timeout_clock_loop(), name="deriv-timeout-clock")
         grim_reaper_task = asyncio.create_task(self._executor.verify_orphaned_contracts(), name="deriv-grim-reaper")
         heartbeat_task   = asyncio.create_task(self._executor.heartbeat_loop(), name="deriv-heartbeat")
+        ghost_watcher_task = asyncio.create_task(self._executor.ghost_watcher_loop(), name="deriv-tier-ghost")
         status_task      = asyncio.create_task(self._status_writer_loop(), name="deriv-status")
         balance_task     = asyncio.create_task(self._balance_refresh_loop(), name="deriv-balance")
         history_task     = asyncio.create_task(self._analyst.history_refresh_loop(), name="deriv-history")
@@ -2247,6 +2248,7 @@ class DerivDaemon:
             ws_task, reaper_task, recon_task, timeout_task, stop_task,
             status_task, balance_task, history_task, calibrator_task,
             macro_hd_task, dynamic_cfg_task, ttl_task, heartbeat_task,
+            ghost_watcher_task,
         }
         try:
             done, _pending = await asyncio.wait(

@@ -502,6 +502,10 @@ class DerivTradeExecutor:
         # 2026-05-30 POST-SL ENTRY GATE: timestamp of last broker_sl_hit per
         # spike symbol (used by main_deriv pipeline to enforce spike-await window).
         self._last_sl_ts: dict[str, float] = {}
+        # Telemetría pasiva — tier_staircase ghost watchers.
+        # Registra spikes que llegan <60s después de un cierre tier con peak<$1.
+        # Sin efecto en ejecución — solo observación para validar hipótesis cluster.
+        self._tier_ghost_watchers: list[dict] = []
         with suppress(Exception):
             if self._profit_lock_state_file.exists():
                 raw = json.loads(self._profit_lock_state_file.read_text())
@@ -1192,7 +1196,7 @@ class DerivTradeExecutor:
         _LOGGER.info(
             "[SPIKE-TIER-TP] %s cid=%s sym=%s close pnl=%.4f sl_floor=%.4f peak=%.4f "
             "tier_pct=%.2f tier_active=%s dollar_floor=%.2f spikes_1h=%d quota=%d/%d "
-            "avg=%.2f quota_done=%s wait_for_quota=%s",
+            "avg=%.2f quota_done=%s wait_for_quota=%s small_peak=%s",
             source,
             cid,
             oc.symbol,
@@ -1208,6 +1212,7 @@ class DerivTradeExecutor:
             float(state.get("spikes_avg_h") or 0.0),
             bool(state.get("quota_done")),
             bool(state.get("wait_for_quota")),
+            float(oc.peak_profit) < 1.00,
         )
         try:
             await self._client.sell(cid)
@@ -1222,7 +1227,99 @@ class DerivTradeExecutor:
             self._closing.discard(cid)
             oc.pending_close_reason = None
             raise
+        # ── Ghost watcher — telemetría pasiva (no modifica ejecución) ────────
+        # Si cerramos con peak < $1, observar 60s si llega otro spike.
+        # Datos van a deriv_tier_ghost_log.json para análisis posterior.
+        if float(oc.peak_profit) < 1.00:
+            _gw_now = time.time()
+            self._tier_ghost_watchers.append({
+                "closed_at_ts": _gw_now,
+                "symbol": oc.symbol,
+                "peak_profit": round(float(oc.peak_profit), 4),
+                "realized_pnl": round(current_profit, 4),
+                "tier_level": oc.pending_close_reason or "",
+                "quota_done": bool(state.get("quota_done")),
+                "stake_usdt": round(float(getattr(oc, "stake_usdt", 0) or 0), 2),
+                "watch_until": _gw_now + 60.0,
+                "spikes_after": [],
+            })
         return True
+
+    # ─── Tier ghost watchers — telemetría pasiva post-cierre ─────────────
+    def _check_tier_ghost_watchers(self) -> None:
+        """Actualiza watchers con spikes post-cierre y serializa los expirados.
+
+        Sin efecto en ejecución. Llamado cada 5s desde ghost_watcher_loop.
+        """
+        if not self._tier_ghost_watchers:
+            return
+        now = time.time()
+        recent_spikes = self._get_recent_spike_events(seconds=90)
+
+        completed: list[dict] = []
+        active: list[dict] = []
+
+        for watcher in self._tier_ghost_watchers:
+            sym: str = watcher.get("symbol") or ""
+            closed_ts: float = float(watcher.get("closed_at_ts") or 0.0)
+
+            for s in recent_spikes:
+                if (s.get("symbol") or "") != sym:
+                    continue
+                spike_ts = float(s.get("ts") or 0)
+                if not (closed_ts < spike_ts <= now):
+                    continue
+                gap = round(spike_ts - closed_ts, 1)
+                # Deduplicar: saltar si ya tenemos un evento a ±0.5s de distancia
+                if any(abs(e.get("gap_sec", 0) - gap) < 0.5 for e in watcher["spikes_after"]):
+                    continue
+                watcher["spikes_after"].append({
+                    "gap_sec": gap,
+                    "ratio": s.get("ratio"),
+                    "jump": s.get("jump"),
+                })
+
+            if now >= float(watcher.get("watch_until") or 0):
+                completed.append(watcher)
+            else:
+                active.append(watcher)
+
+        self._tier_ghost_watchers = active
+        if completed:
+            self._flush_tier_ghost_results(completed)
+
+    def _flush_tier_ghost_results(self, completed: list[dict]) -> None:
+        """Serializa resultados de ghost watchers expirados a disco (best-effort)."""
+        with suppress(Exception):
+            results_file = self._settings.logs_dir / "deriv_tier_ghost_log.json"
+            existing: list[dict] = []
+            with suppress(Exception):
+                if results_file.exists():
+                    raw = json.loads(results_file.read_text())
+                    if isinstance(raw, list):
+                        existing = raw
+            for w in completed:
+                spikes = w.get("spikes_after") or []
+                w["had_followup"] = len(spikes) > 0
+                w["followup_count"] = len(spikes)
+                w["min_gap_sec"] = min(s["gap_sec"] for s in spikes) if spikes else None
+                w["max_ratio"] = max((s.get("ratio") or 0) for s in spikes) if spikes else None
+                existing.append(w)
+                _LOGGER.info(
+                    "[TIER_GHOST] %s tier=%s peak=%.2f pnl=%.2f "
+                    "had_followup=%s followup_count=%d quota_done=%s",
+                    w.get("symbol"), w.get("tier_level"),
+                    float(w.get("peak_profit") or 0), float(w.get("realized_pnl") or 0),
+                    w["had_followup"], w["followup_count"], w.get("quota_done"),
+                )
+            results_file.write_text(json.dumps(existing[-500:], indent=2))
+
+    async def ghost_watcher_loop(self) -> None:
+        """Loop de telemetría pasiva — revisa tier ghost watchers cada 5s."""
+        while True:
+            await asyncio.sleep(5)
+            with suppress(Exception):
+                self._check_tier_ghost_watchers()
 
     # ─── Profit-lock per symbol (per-hour NET PnL) ───────────────────────
     def _persist_profit_lock(self) -> None:
