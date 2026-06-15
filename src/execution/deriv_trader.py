@@ -1017,7 +1017,12 @@ class DerivTradeExecutor:
             )
             if _held_sec >= _sym_max_hold:
                 if not getattr(oc, "_max_hold_respite_granted", False):
-                    # Primera vez al límite: preguntar al LLM (UNA sola vez)
+                    # Pre-mark intent BEFORE any await: si la liquidación llega durante
+                    # la llamada al LLM, el settlement path ya ve "max_hold_timeout".
+                    # Se revierte solo si el LLM concede el respiro.
+                    self._closing.add(cid)
+                    oc.pending_close_reason = "max_hold_timeout"
+
                     _respite_dec = None
                     try:
                         from src.analysis.llm_hold_decision import evaluate_max_hold_respite
@@ -1048,6 +1053,9 @@ class DerivTradeExecutor:
                         _LOGGER.warning("[MAX_HOLD_RESPITE] eval error → DENY: %s", _resp_exc)
 
                     if _respite_dec is not None and _respite_dec.grant_respite:
+                        # LLM concede respiro → revertir estado de cierre
+                        self._closing.discard(cid)
+                        oc.pending_close_reason = None
                         oc._max_hold_respite_granted = True
                         oc._respite_extends_until = time.time() + _respite_dec.extension_sec
                         _LOGGER.info(
@@ -1058,9 +1066,7 @@ class DerivTradeExecutor:
                         )
                         # NO cierra: sigue monitoreando hasta _respite_extends_until
                     else:
-                        # LLM denegó, feature off, o error → cerrar normal
-                        self._closing.add(cid)
-                        oc.pending_close_reason = "max_hold_timeout"
+                        # LLM denegó, feature off, o error → cerrar (pending_close_reason ya está)
                         _LOGGER.info(
                             "[MAX-HOLD-TIMEOUT] %s cid=%s sym=%s held=%.0fs max=%.0fs "
                             "pnl=%.4f → spike window p90 exhausted, cutting",
