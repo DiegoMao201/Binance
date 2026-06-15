@@ -301,7 +301,9 @@ def main() -> int:
     block_b900_raw = os.getenv("DERIV_BLOCK_BC_ESCAPE_BOOM900", "").strip().lower()
     block_b600_safe = block_b600_raw in {"", *TRUE_VALUES}
     block_b900_safe = block_b900_raw in {"", *TRUE_VALUES}
-    results.append(CheckResult("env_escape_valve", not valve, f"DERIV_BOOM_CRASH_ESCAPE_VALVE={valve}"))
+    # Post-838e3cd (2026-06-12): true = correcto (soft penalty -0.20 en vez de hard veto).
+    # FASE-6 (2026-05-23) requería false, pero fue revertido conscientemente.
+    results.append(CheckResult("env_escape_valve", valve, f"DERIV_BOOM_CRASH_ESCAPE_VALVE={valve}"))
     results.append(
         CheckResult(
             "env_block_boom600",

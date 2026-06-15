@@ -95,7 +95,7 @@ def _advice_for(name: str) -> str:
         "diff_log_freshness": "Revisar sidecar IA (fase-6: debe escribir heartbeat cada ~1200s). Reiniciar sidecar si mtime_age > 1500s.",
         "diff_log_json_parse": "Revisar corrupcion del JSONL de diffs y limpiar entradas truncadas.",
         "diff_log_recent_activity": "Validar que el orquestador IA este arriba y ejecutando ciclos (fase-6: escribe heartbeat aunque hysteresis bloquee cambios).",
-        "env_escape_valve": "FASE-6: DERIV_BOOM_CRASH_ESCAPE_VALVE debe ser FALSE. Si aparece este fallo es porque esta en true (incorrecto).",
+        "env_escape_valve": "Post-838e3cd (2026-06-12): DERIV_BOOM_CRASH_ESCAPE_VALVE debe ser TRUE (soft penalty -0.20 sin FVG). Si aparece este fallo es porque esta en false (politica FASE-6 obsoleta). Verificar si la regresion fue intencional.",
         "env_block_boom600": "FASE-6: DERIV_BLOCK_BC_ESCAPE_BOOM600 debe estar UNSET (sin definir). Si aparece este fallo es porque esta definida con valor incorrecto.",
         "env_block_boom900": "FASE-6: DERIV_BLOCK_BC_ESCAPE_BOOM900 debe estar UNSET (sin definir). Si aparece este fallo es porque esta definida con valor incorrecto.",
         "env_hysteresis_window": "Ajustar DYNAMIC_AI_MIN_STATE_LIFETIME_SEC (recomendado >= 600).",
