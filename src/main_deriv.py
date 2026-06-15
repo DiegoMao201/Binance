@@ -3736,6 +3736,8 @@ class DerivDaemon:
             except Exception:
                 _imm = {}
         _imm_state_early = str(_imm.get("state") or "")
+        _scarcity_ratio_early = 0.0
+        _el_z2_early = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
         if _is_bc_bias:
             if _risk_regime_bias == "trending":
                 _trend_pen = max(
