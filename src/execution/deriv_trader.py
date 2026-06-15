@@ -219,6 +219,12 @@ _SPIKE_SL_MAX_HOLD_PER_SYM: dict[str, float] = {
     "BOOM900":   float(os.getenv("DERIV_MAX_HOLD_BOOM900",   "600") or 600),
     "BOOM1000":  float(os.getenv("DERIV_MAX_HOLD_BOOM1000",  "700") or 700),
 }
+# If peak_profit has been exactly 0 for this many seconds → close early and
+# allow DRY_EXIT_RELAX to re-enter when conditions develop again.
+# Set to 0 to disable. Only fires when price has NOT moved at all (zero peak).
+_ZERO_PEAK_EARLY_EXIT_SEC = float(
+    os.getenv("DERIV_ZERO_PEAK_EARLY_EXIT_SEC", "0") or 0
+)
 _SPIKE_SL_MAX_HOLD_DEFAULT = float(
     os.getenv("DERIV_SPIKE_SL_MAX_HOLD_DEFAULT", "900") or 900
 )
@@ -953,6 +959,33 @@ class DerivTradeExecutor:
             and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
             and current_profit < 0
         ):
+            # Zero-peak early exit: if the price has NEVER moved in our favor
+            # (peak==0) for N seconds, the spike window for this entry has
+            # passed. Exit now and let DRY_EXIT_RELAX re-enter when conditions
+            # are valid again — no sense bleeding spread for 10 more minutes.
+            if (
+                _ZERO_PEAK_EARLY_EXIT_SEC > 0
+                and float(oc.peak_profit) == 0.0
+                and _held_sec >= _ZERO_PEAK_EARLY_EXIT_SEC
+                and cid not in self._closing
+            ):
+                self._closing.add(cid)
+                oc.pending_close_reason = "max_hold_timeout"
+                _LOGGER.info(
+                    "[ZERO_PEAK_EARLY_EXIT] %s cid=%s sym=%s held=%.0fs "
+                    "zero_peak=True → exiting early (threshold=%.0fs)",
+                    source, cid, oc.symbol, _held_sec, _ZERO_PEAK_EARLY_EXIT_SEC,
+                )
+                try:
+                    await self._client.sell(cid)
+                    return True
+                except DerivClientError as exc:
+                    _LOGGER.warning(
+                        "[ZERO_PEAK_EARLY_EXIT] sell failed cid=%s: %s", cid, exc
+                    )
+                    self._closing.discard(cid)
+                    oc.pending_close_reason = None
+
             _sym_max_hold = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
                 oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
             )
