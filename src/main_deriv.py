@@ -3095,6 +3095,16 @@ class DerivDaemon:
                 # When cluster_n>=2, require elapsed >= P50 (1.0×median) instead of 0.70.
                 _mat_cl_n = int(self._risk.get_spike_count_recent(tick.symbol, 300) or 0)
                 _mat_frac_base = float(os.getenv("DERIV_MATURITY_GATE_FRAC", "0.70"))
+                _mat_frac_map_raw = os.getenv("DERIV_MATURITY_GATE_FRAC_MAP", "")
+                if _mat_frac_map_raw:
+                    for _item in _mat_frac_map_raw.split(','):
+                        _sym_k, _, _sym_v = _item.strip().partition(':')
+                        if _sym_k.strip().upper() == tick.symbol.upper() and _sym_v:
+                            try:
+                                _mat_frac_base = float(_sym_v.strip())
+                            except ValueError:
+                                pass
+                            break
                 _mat_frac_cluster = float(os.getenv("DERIV_MATURITY_GATE_CLUSTER_FRAC", "1.0"))
                 _mat_frac = _mat_frac_cluster if _mat_cl_n >= 2 else _mat_frac_base
                 _mat_threshold_s = _mat_median_s * _mat_frac
