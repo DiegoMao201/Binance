@@ -219,12 +219,6 @@ _SPIKE_SL_MAX_HOLD_PER_SYM: dict[str, float] = {
     "BOOM900":   float(os.getenv("DERIV_MAX_HOLD_BOOM900",   "600") or 600),
     "BOOM1000":  float(os.getenv("DERIV_MAX_HOLD_BOOM1000",  "700") or 700),
 }
-# If peak_profit has been exactly 0 for this many seconds → close early and
-# allow DRY_EXIT_RELAX to re-enter when conditions develop again.
-# Set to 0 to disable. Only fires when price has NOT moved at all (zero peak).
-_ZERO_PEAK_EARLY_EXIT_SEC = float(
-    os.getenv("DERIV_ZERO_PEAK_EARLY_EXIT_SEC", "0") or 0
-)
 _SPIKE_SL_MAX_HOLD_DEFAULT = float(
     os.getenv("DERIV_SPIKE_SL_MAX_HOLD_DEFAULT", "900") or 900
 )
@@ -959,33 +953,59 @@ class DerivTradeExecutor:
             and float(oc.peak_profit) < _SCARCITY_EXIT_PEAK_GUARD
             and current_profit < 0
         ):
-            # Zero-peak early exit: if the price has NEVER moved in our favor
-            # (peak==0) for N seconds, the spike window for this entry has
-            # passed. Exit now and let DRY_EXIT_RELAX re-enter when conditions
-            # are valid again — no sense bleeding spread for 10 more minutes.
-            if (
-                _ZERO_PEAK_EARLY_EXIT_SEC > 0
-                and float(oc.peak_profit) == 0.0
-                and _held_sec >= _ZERO_PEAK_EARLY_EXIT_SEC
-                and cid not in self._closing
-            ):
-                self._closing.add(cid)
-                oc.pending_close_reason = "max_hold_timeout"
-                _LOGGER.info(
-                    "[ZERO_PEAK_EARLY_EXIT] %s cid=%s sym=%s held=%.0fs "
-                    "zero_peak=True → exiting early (threshold=%.0fs)",
-                    source, cid, oc.symbol, _held_sec, _ZERO_PEAK_EARLY_EXIT_SEC,
+            # ── FILOSOFÍA A: Structural exit evaluation ──────────────────────
+            # Solo las 4 condiciones estructurales pueden cerrar mid-trade.
+            # Score/RNG/tiempo son drift normal del PRNG — no cierran.
+            try:
+                from src.safety.structural_exit import evaluate_structural_exit
+                _struct_decision = evaluate_structural_exit(
+                    contract=oc,
+                    current_state=self._get_structural_state(oc.symbol),
+                    spike_events_recent=self._get_recent_spike_events(seconds=120),
+                    dynamic_config=self._get_dynamic_config_snapshot(),
+                    market_phase=self._get_market_phase_snapshot(),
                 )
-                try:
-                    await self._client.sell(cid)
-                    return True
-                except DerivClientError as exc:
-                    _LOGGER.warning(
-                        "[ZERO_PEAK_EARLY_EXIT] sell failed cid=%s: %s", cid, exc
+                if _struct_decision.should_close and cid not in self._closing:
+                    self._closing.add(cid)
+                    oc.pending_close_reason = f"structural_{_struct_decision.reason}"
+                    _LOGGER.info(
+                        "[STRUCTURAL_EXIT] %s cid=%s reason=%s meta=%s → closing",
+                        oc.symbol, cid, _struct_decision.reason, _struct_decision.metadata,
                     )
-                    self._closing.discard(cid)
-                    oc.pending_close_reason = None
+                    try:
+                        await self._client.sell(cid)
+                        return True
+                    except DerivClientError as exc:
+                        _LOGGER.warning("[STRUCTURAL_EXIT] sell failed cid=%s: %s", cid, exc)
+                        self._closing.discard(cid)
+                        oc.pending_close_reason = None
+            except Exception as _struct_exc:
+                _LOGGER.debug("[STRUCTURAL_EXIT] eval error (safe ignore): %s", _struct_exc)
 
+            # ── LLM Hold Decision (rate-limited, solo en triggers concretos) ─
+            try:
+                from src.analysis.llm_hold_decision import should_invoke_hold_llm, evaluate_hold_with_llm
+                _hold_state = self._get_structural_state(oc.symbol)
+                if should_invoke_hold_llm(oc, _held_sec, _hold_state):
+                    _hold_dec = await evaluate_hold_with_llm(oc, _hold_state)
+                    if _hold_dec.action == "CLOSE" and cid not in self._closing:
+                        self._closing.add(cid)
+                        oc.pending_close_reason = "llm_hold_close"
+                        _LOGGER.info(
+                            "[LLM_HOLD] %s cid=%s CLOSE conf=%.2f reason='%s'",
+                            oc.symbol, cid, _hold_dec.confidence, _hold_dec.reason,
+                        )
+                        try:
+                            await self._client.sell(cid)
+                            return True
+                        except DerivClientError as exc:
+                            _LOGGER.warning("[LLM_HOLD] sell failed cid=%s: %s", cid, exc)
+                            self._closing.discard(cid)
+                            oc.pending_close_reason = None
+            except Exception as _llm_exc:
+                _LOGGER.debug("[LLM_HOLD] eval error (safe ignore, HOLD): %s", _llm_exc)
+
+            # ── Max hold como red de seguridad final ─────────────────────────
             _sym_max_hold = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
                 oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
             )
@@ -2562,6 +2582,71 @@ class DerivTradeExecutor:
             "consecutive": self._dry_exit_consecutive.get(sym_key, 0) if is_dry else 0,
             "closed_at_ts": float(last.get("closed_at_ts") or 0),
         }
+
+    def get_last_close_ts(self, symbol: str) -> float | None:
+        """Return the closed_at_ts of the last trade for *symbol*, or None."""
+        last = self._last_closed_sym.get(symbol.upper())
+        if last is None:
+            return None
+        return float(last.get("closed_at_ts") or 0) or None
+
+    def _get_structural_state(self, symbol: str) -> dict[str, Any]:
+        """Build a state snapshot for structural_exit and llm_hold_decision."""
+        state: dict[str, Any] = {}
+        # Pull what we can from dynamic_config_provider
+        if self._dynamic_config_provider is not None:
+            try:
+                cfg = self._dynamic_config_provider(symbol) or {}
+                state["market_phase"] = cfg.get("market_phase", "")
+                state["fvg_still_valid"] = cfg.get("fvg_still_valid", "unknown")
+            except Exception:
+                pass
+        return state
+
+    def _get_recent_spike_events(self, seconds: float = 120) -> list[dict[str, Any]]:
+        """Return spike events from the last *seconds* seconds from the spike log."""
+        import time as _time
+        import json as _json
+        cutoff = _time.time() - seconds
+        try:
+            state_dir = __import__("pathlib").Path(
+                __import__("os").environ.get("BOT_STATE_DIR",
+                    __import__("os").environ.get("LOGS_DIR",
+                        str(self._settings.closed_contracts_file.parent)))
+            )
+            spike_file = state_dir / "deriv_spike_events.json"
+            if not spike_file.exists():
+                return []
+            with spike_file.open() as fh:
+                raw = _json.load(fh)
+            evts = raw if isinstance(raw, list) else raw.get("events", raw.get("spikes", []))
+            return [e for e in evts if float(e.get("ts", 0) or 0) >= cutoff]
+        except Exception:
+            return []
+
+    def _get_dynamic_config_snapshot(self) -> dict[str, Any]:
+        """Return {symbol: dynamic_config_dict} for all known symbols."""
+        from src.asset_intel.profiles import ASSET_INTEL_PROFILES
+        snapshot: dict[str, Any] = {}
+        if self._dynamic_config_provider is None:
+            return snapshot
+        for sym in ASSET_INTEL_PROFILES:
+            try:
+                cfg = self._dynamic_config_provider(sym) or {}
+                snapshot[sym] = cfg
+            except Exception:
+                pass
+        return snapshot
+
+    def _get_market_phase_snapshot(self) -> dict[str, str]:
+        """Return {symbol: market_phase} from dynamic config."""
+        phases: dict[str, str] = {}
+        snapshot = self._get_dynamic_config_snapshot()
+        for sym, cfg in snapshot.items():
+            phase = cfg.get("market_phase", "")
+            if phase:
+                phases[sym] = phase
+        return phases
 
     def get_per_symbol_stats(self) -> dict[str, Any]:
         """Return a snapshot of per-symbol performance and session totals."""

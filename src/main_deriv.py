@@ -145,6 +145,15 @@ _DRY_EXIT_RELAX_MAX_CONSECUTIVE: int = max(
 )
 _DRY_EXIT_RELAX_SKIP_MATURITY: bool = _env_flag("DERIV_DRY_EXIT_RELAX_SKIP_MATURITY", "true")
 
+# ─── INTER_TRADE_RACE_GUARD — Filosofía A re-entrada continua ────────────────
+# Cuando está activo (> 0), reemplaza el tick-cooldown por un guardrail
+# puramente técnico de N segundos: solo previene race conditions del WebSocket.
+# El pipeline (score/RNG/imminence gates) decide si hay setup — no el tiempo.
+# Default 0 = desactivado (comportamiento anterior via _CooldownGate).
+_INTER_TRADE_RACE_GUARD_SEC: float = float(
+    os.getenv("DERIV_INTER_TRADE_RACE_GUARD_SEC", "0") or 0
+)
+
 # ─── Hard symbol disable list ─────────────────────────────────────────────
 # Runtime-safe kill switch. Defaults align with current operator request.
 _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
@@ -2357,22 +2366,45 @@ class DerivDaemon:
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)
         # ═══════════════════════════════════════════════════════════════════
         if not self._cooldown.can_fire(tick.symbol):
-            _dry_relax_ok, _dry_consec = self._is_dry_exit_relax(tick.symbol)
-            if _dry_relax_ok:
-                _LOGGER.info(
-                    "[DRY_EXIT_RELAX] %s bypassing trade_cooldown | consecutive=%d/%d",
-                    tick.symbol, _dry_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
-                )
-                # Continue pipeline — do NOT return
+            # FILOSOFÍA A: race guard mode — el pipeline (score/RNG/gates) decide
+            # si hay setup, no el tiempo. Solo bloqueamos N segundos post-cierre
+            # para evitar race conditions del WebSocket.
+            if _INTER_TRADE_RACE_GUARD_SEC > 0:
+                _last_close_ts = self._executor.get_last_close_ts(tick.symbol)
+                _elapsed_since_close = time.time() - (_last_close_ts or 0.0)
+                if _last_close_ts and _elapsed_since_close >= _INTER_TRADE_RACE_GUARD_SEC:
+                    _LOGGER.info(
+                        "[RACE_GUARD] %s bypassing trade_cooldown | since_close=%.0fs >= guard=%.0fs",
+                        tick.symbol, _elapsed_since_close, _INTER_TRADE_RACE_GUARD_SEC,
+                    )
+                    # Continue — pipeline decide
+                else:
+                    _remain = max(0.0, _INTER_TRADE_RACE_GUARD_SEC - _elapsed_since_close)
+                    self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
+                    self._sym_last_inactive_reason[tick.symbol.upper()] = "trade_cooldown"
+                    self._sym_inactive_streak[tick.symbol.upper()] = (
+                        self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
+                    )
+                    self._spike_enrich(tick.symbol, bot_entered=False, block_reason=f"race_guard_{_remain:.0f}s")
+                    return
             else:
-                # mark inactive transition source for reactivation gate
-                self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
-                self._sym_last_inactive_reason[tick.symbol.upper()] = "trade_cooldown"
-                self._sym_inactive_streak[tick.symbol.upper()] = (
-                    self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
-                )
-                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="trade_cooldown")
-                return
+                # Modo anterior: DRY_EXIT_RELAX bypass
+                _dry_relax_ok, _dry_consec = self._is_dry_exit_relax(tick.symbol)
+                if _dry_relax_ok:
+                    _LOGGER.info(
+                        "[DRY_EXIT_RELAX] %s bypassing trade_cooldown | consecutive=%d/%d",
+                        tick.symbol, _dry_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
+                    )
+                    # Continue pipeline — do NOT return
+                else:
+                    # mark inactive transition source for reactivation gate
+                    self._sym_last_inactive_ts[tick.symbol.upper()] = time.time()
+                    self._sym_last_inactive_reason[tick.symbol.upper()] = "trade_cooldown"
+                    self._sym_inactive_streak[tick.symbol.upper()] = (
+                        self._sym_inactive_streak.get(tick.symbol.upper(), 0) + 1
+                    )
+                    self._spike_enrich(tick.symbol, bot_entered=False, block_reason="trade_cooldown")
+                    return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 0b — GATE: disabled / suspended symbols
@@ -3095,10 +3127,25 @@ class DerivDaemon:
                                 "remain_sec": max(0, int(_mat_remain_s)),
                             },
                         )
-                    # DRY_EXIT_RELAX: if last close was a zero-peak timeout and the
-                    # scarcity pressure has not reset, bypass the structural floor so
-                    # the bot can re-position without waiting the full maturity window.
-                    if _DRY_EXIT_RELAX_SKIP_MATURITY:
+                    # FILOSOFÍA A: bypass si cerramos este símbolo en los últimos
+                    # 300s. El reloj del PRNG no se reseteó por nuestro cierre —
+                    # la presión de scarcity sigue acumulada.
+                    _mat_last_close_ts = self._executor.get_last_close_ts(tick.symbol)
+                    _mat_elapsed_since_close = (
+                        time.time() - _mat_last_close_ts if _mat_last_close_ts else float("inf")
+                    )
+                    _mat_recent_close_window = float(
+                        os.getenv("DERIV_MATURITY_BYPASS_RECENT_CLOSE_SEC", "300") or 300
+                    )
+                    if _mat_last_close_ts and _mat_elapsed_since_close < _mat_recent_close_window:
+                        _LOGGER.info(
+                            "[MATURITY_GATE_BYPASS] %s cerramos hace %.0fs < %.0fs "
+                            "— reloj PRNG no reseteado, bypass maturity",
+                            tick.symbol, _mat_elapsed_since_close, _mat_recent_close_window,
+                        )
+                        # Do NOT return — continue to score/RNG evaluation
+                    elif _DRY_EXIT_RELAX_SKIP_MATURITY:
+                        # Fallback: DRY_EXIT_RELAX para dry exits específicamente
                         _dry_mat_ok, _dry_mat_consec = self._is_dry_exit_relax(tick.symbol)
                         if _dry_mat_ok:
                             _LOGGER.info(
@@ -3107,7 +3154,7 @@ class DerivDaemon:
                                 tick.symbol, _mat_elapsed_s, _mat_threshold_s,
                                 _dry_mat_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
                             )
-                            # Do NOT return — continue to score/RNG evaluation
+                            # Do NOT return
                         else:
                             self._spike_enrich(
                                 tick.symbol, bot_entered=False, block_reason="early_entry_gate"

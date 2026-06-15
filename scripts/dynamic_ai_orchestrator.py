@@ -942,6 +942,87 @@ def _apply_smoothing_all(candidate_cfg: dict[str, SymbolCfg]) -> tuple[dict[str,
     return smoothed, blocked_regime_flips
 
 
+_ANTI_SPAM_ENABLED: bool = (
+    os.getenv("DERIV_ANTI_SPAM_ADAPTIVE_ENABLED", "true").lower().strip() in ("1", "true", "yes", "on")
+)
+_ANTI_SPAM_LOOKBACK_SEC: float = float(os.getenv("DERIV_ANTI_SPAM_LOOKBACK_SEC", "3600") or 3600)
+_ANTI_SPAM_LOSS_STREAK_N: int = max(2, int(os.getenv("DERIV_ANTI_SPAM_LOSS_STREAK_N", "3") or 3))
+_ANTI_SPAM_RAISE_DELTA: float = float(os.getenv("DERIV_ANTI_SPAM_RAISE_DELTA", "0.5") or 0.5)
+_ANTI_SPAM_LOWER_DELTA: float = float(os.getenv("DERIV_ANTI_SPAM_LOWER_DELTA", "0.3") or 0.3)
+
+
+def _apply_anti_spam_adaptive(
+    cfg: dict[str, "SymbolCfg"],
+    logs_dir: "Path",
+) -> dict[str, "SymbolCfg"]:
+    """
+    Anti-spam adaptativo — Filosofía A (2026-06-14).
+
+    Detecta rachas perdedoras recientes y sube score_min temporalmente.
+    Baja gradualmente cuando hay un ganador. Reemplaza MAX_CONSECUTIVE rígido.
+    Corre después de todos los layers LLM/policy, antes del smoothing.
+    """
+    if not _ANTI_SPAM_ENABLED:
+        return cfg
+
+    import time as _time
+    now_ts = _time.time()
+    cutoff = now_ts - _ANTI_SPAM_LOOKBACK_SEC
+
+    closed_path = logs_dir / "deriv_closed_contracts.json"
+    if not closed_path.exists():
+        return cfg
+
+    try:
+        raw = json.loads(closed_path.read_text(encoding="utf-8"))
+        all_trades: list[dict] = raw if isinstance(raw, list) else []
+    except Exception:
+        return cfg
+
+    updated = dict(cfg)
+    for sym in list(cfg.keys()):
+        recent = sorted(
+            [t for t in all_trades
+             if t.get("symbol") == sym and float(t.get("closed_at_ts") or 0) >= cutoff],
+            key=lambda t: float(t.get("closed_at_ts") or 0),
+        )
+        if not recent:
+            continue
+
+        last_n = recent[-_ANTI_SPAM_LOSS_STREAK_N:]
+        all_losses = len(last_n) == _ANTI_SPAM_LOSS_STREAK_N and all(
+            float(t.get("realized_pnl_usdt") or 0) < 0 for t in last_n
+        )
+        last_is_win = float(recent[-1].get("realized_pnl_usdt") or 0) > 0
+
+        sym_cfg = cfg[sym]
+        current_min = float(sym_cfg.score_min_override)
+        ceiling = _symbol_score_ceiling(sym)
+        floor = _symbol_score_floor(sym)
+
+        if all_losses:
+            new_min = min(current_min + _ANTI_SPAM_RAISE_DELTA, ceiling)
+            if new_min > current_min + 1e-9:
+                LOG.info(
+                    "[ANTI_SPAM_ADAPTIVE] %s racha_%d_pérdidas → score_min %.2f → %.2f",
+                    sym, _ANTI_SPAM_LOSS_STREAK_N, current_min, new_min,
+                )
+                updated[sym] = _clamp_cfg(sym, SymbolCfg(
+                    **{**sym_cfg.__dict__, "score_min_override": new_min}  # type: ignore[arg-type]
+                ))
+        elif last_is_win and current_min > floor + 1e-9:
+            new_min = max(current_min - _ANTI_SPAM_LOWER_DELTA, floor)
+            LOG.info(
+                "[ANTI_SPAM_ADAPTIVE] %s último_trade_ganador → score_min %.2f → %.2f",
+                sym, current_min, new_min,
+            )
+            updated[sym] = _clamp_cfg(sym, SymbolCfg(
+                **{**sym_cfg.__dict__, "score_min_override": new_min}  # type: ignore[arg-type]
+            ))
+
+    return updated
+
+
 def _load_json(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -4120,6 +4201,7 @@ async def run_loop() -> None:
                 now_ts=time.time(),
             )
 
+            new_cfg = _apply_anti_spam_adaptive(new_cfg, logs_dir)
             smoothed_cfg, blocked_regime_flips = _apply_smoothing_all(new_cfg)
             updates = await _apply_cfg(
                 conn,
