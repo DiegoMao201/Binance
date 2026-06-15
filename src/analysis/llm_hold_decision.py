@@ -104,8 +104,13 @@ def should_invoke_hold_llm(
     p75 = pctls.get("p75", 600)
     peak = float(getattr(contract, "peak_profit", 0) or 0)
 
-    # Trigger 1: llevamos > 80% del p75 sin haber visto ningún movimiento
-    trigger_long_hold_no_peak = (held_sec > p75 * 0.80 and peak == 0.0)
+    # Trigger 1: llevamos > 65% del max_hold del símbolo sin spike.
+    # El umbral usa min(p75, sym_max_hold)*0.65 para que el LLM siempre
+    # dispare ANTES del cierre por max_hold (el p75*0.80 anterior superaba
+    # el max_hold en BOOM500/CRASH500/CRASH900, dejando el LLM sin voz).
+    _sym_max_hold = float(current_state.get("sym_max_hold", p75) or p75)
+    _llm_trigger_threshold = min(p75, _sym_max_hold) * 0.65
+    trigger_long_hold_no_peak = (held_sec > _llm_trigger_threshold and peak == 0.0)
 
     # Trigger 2: market_phase degrada a CAUTION
     trigger_phase_caution = current_state.get("market_phase") == "CAUTION"

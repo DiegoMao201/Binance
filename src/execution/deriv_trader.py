@@ -990,6 +990,12 @@ class DerivTradeExecutor:
             try:
                 from src.analysis.llm_hold_decision import should_invoke_hold_llm, evaluate_hold_with_llm
                 _hold_state = self._get_structural_state(oc.symbol)
+                # Inyectar el max_hold del símbolo para que should_invoke_hold_llm
+                # use el umbral correcto (el trigger p75*0.80 supera el max_hold
+                # para BOOM500/CRASH500/CRASH900, dejando el LLM sin disparar nunca).
+                _hold_state["sym_max_hold"] = _SPIKE_SL_MAX_HOLD_PER_SYM.get(
+                    oc.symbol, _SPIKE_SL_MAX_HOLD_DEFAULT
+                )
                 if should_invoke_hold_llm(oc, _held_sec, _hold_state):
                     _hold_dec = await evaluate_hold_with_llm(oc, _hold_state)
                     if _hold_dec.action == "CLOSE" and cid not in self._closing:
