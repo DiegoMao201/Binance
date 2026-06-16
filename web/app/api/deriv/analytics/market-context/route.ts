@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { NextRequest, NextResponse } from 'next/server';
+import { queryDerivAnalytics } from '../../../../../lib/deriv-db';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,6 +12,48 @@ const MC_FILE = path.join(DERIV_LOGS, 'deriv_market_context.json');
 // In-memory cache to avoid parsing 3.6MB on every request
 let _cache: { ts: number; data: any[] } | null = null;
 const CACHE_TTL = 10_000;
+
+// V2 fields cache (progressive imminence + ceiling from score_breakdown DB)
+const _v2Cache = new Map<string, { ts: number; data: Record<string, any> }>();
+const V2_CACHE_TTL = 30_000;
+
+async function getV2Fields(symbol: string): Promise<Record<string, any>> {
+  const now = Date.now();
+  const cached = _v2Cache.get(symbol);
+  if (cached && now - cached.ts < V2_CACHE_TTL) return cached.data;
+  try {
+    const result = await queryDerivAnalytics(`
+      SELECT score_breakdown
+      FROM deriv_tick_snapshots
+      WHERE symbol = $1
+        AND score_breakdown IS NOT NULL
+        AND score_breakdown ? 'progressive_imminence_bucket'
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [symbol]);
+    if (result.rows.length === 0) {
+      _v2Cache.set(symbol, { ts: now, data: {} });
+      return {};
+    }
+    const bd = result.rows[0].score_breakdown || {};
+    const data: Record<string, any> = {
+      progressive_imminence_bucket:      bd.progressive_imminence_bucket ?? null,
+      progressive_imminence_ratio:       bd.progressive_imminence_ratio ?? null,
+      progressive_imminence_score_bonus: bd.progressive_imminence_score_bonus ?? null,
+      progressive_imminence_rng_bonus:   bd.progressive_imminence_rng_bonus ?? null,
+      ceiling_value_s:                   bd.ceiling_value_s ?? null,
+      ceiling_source:                    bd.ceiling_source ?? null,
+      ceiling_p99_dynamic_s:             bd.ceiling_p99_dynamic_s ?? null,
+      hurst_time_compound_bonus:         bd.hurst_time_compound_bonus ?? null,
+      hurst_time_compound_reason:        bd.hurst_time_compound_reason ?? null,
+    };
+    _v2Cache.set(symbol, { ts: now, data });
+    return data;
+  } catch {
+    _v2Cache.set(symbol, { ts: now, data: {} });
+    return {};
+  }
+}
 
 async function loadAll(): Promise<any[]> {
   const now = Date.now();
@@ -139,6 +182,7 @@ export async function GET(request: NextRequest) {
     const latest = entries[entries.length - 1];
     const recent = entries.slice(-2000);
     const spike_stats = computeStats(recent);
+    const v2Fields = await getV2Fields(symbol);
 
     // Hurst history — 12 evenly-spaced samples from last 20 min
     const nowSec = Date.now() / 1000;
@@ -218,6 +262,16 @@ export async function GET(request: NextRequest) {
         rng_probability: latest.rng_probability ?? null,
         rng_missing: latest.rng_missing ?? [],
         rng_threshold: latest.rng_threshold ?? 65,
+        // ── V2 Progressive Imminence + Ceiling (PASO 2.3e-D, from score_breakdown DB)
+        progressive_imminence_bucket:      v2Fields.progressive_imminence_bucket ?? null,
+        progressive_imminence_ratio:       v2Fields.progressive_imminence_ratio ?? null,
+        progressive_imminence_score_bonus: v2Fields.progressive_imminence_score_bonus ?? null,
+        progressive_imminence_rng_bonus:   v2Fields.progressive_imminence_rng_bonus ?? null,
+        ceiling_value_s:                   v2Fields.ceiling_value_s ?? null,
+        ceiling_source:                    v2Fields.ceiling_source ?? null,
+        ceiling_p99_dynamic_s:             v2Fields.ceiling_p99_dynamic_s ?? null,
+        hurst_time_compound_bonus:         v2Fields.hurst_time_compound_bonus ?? null,
+        hurst_time_compound_reason:        v2Fields.hurst_time_compound_reason ?? null,
       },
       spike_stats,
       hurst_history,

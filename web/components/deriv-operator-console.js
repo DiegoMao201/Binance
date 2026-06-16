@@ -148,6 +148,9 @@ function SymbolCard({ s }) {
   const scoreAgeSec0  = s.live?.ts ? Math.max(0, Date.now() / 1000 - s.live.ts) : null;
   const scoreIsStale0 = scoreAgeSec0 != null && scoreAgeSec0 > 90;
   const scoreGap0     = s.live?.scoreGap ?? null;   // gap available early for semaphore
+  // liveEarly extracted early so compact message can use it (FIX 4)
+  const liveEarlyActive  = s.live?.earlyEntryActive ?? false;
+  const liveEarlyRemain  = s.live?.earlyEntryRemainSec ?? null;
 
   /* ─ semáforo ─ */
   // isInactive only fires when score is stale — if score is fresh, the symbol IS processing normally.
@@ -180,15 +183,25 @@ function SymbolCard({ s }) {
   } else if (isManualOnly && scoreGap0 != null && scoreGap0 <= 0) {
     msgEmoji = "🎯"; msgLine = `Score OK · entra manualmente${minsSince != null ? ` · ${minsSince} min sin spike` : ""}`;
   } else if (clusterDone) {
+    // FIX CRÍTICO 1: usa techo V2 en lugar de medMins (p50 sesgado)
+    const _ceilMins = _v2Ceiling ? Math.round(_v2Ceiling / 60) : null;
     msgEmoji = "🚨";
     msgLine = secs > 300
       ? `Post-cluster · ${minsSince}m sin spike · esperando normalización`
-      : `Cluster agotado — espera${medMins ? ` ~${medMins} min` : " un rato"} antes de entrar`;
+      : `Cluster agotado — espera${_ceilMins ? ` ~${_ceilMins}m (techo)` : medMins ? ` ~${medMins}m` : " un rato"} antes de entrar`;
   } else if (sem === "green") {
     msgEmoji = "✅"; msgLine = `Zona cargada${minsSince != null ? ` · ${minsSince} min sin caída` : ""}`;
+  } else if (liveEarlyActive) {
+    // FIX CRÍTICO 4: warmup no debe mostrarse como "Acumulando"
+    msgEmoji = "⏱";
+    msgLine = `WARMUP${liveEarlyRemain != null ? ` · ${Math.round(liveEarlyRemain)}s` : " · acumulando señal inicial"}`;
   } else {
-    const pct = p75Sec && secs ? Math.round((secs / p75Sec) * 100) : null;
-    msgEmoji = "⏳"; msgLine = `Acumulando${pct != null ? ` · ${pct}% del tiempo típico` : ""}`;
+    // FIX CRÍTICO 2: ratio V2 en lugar de p75 sesgado
+    const pct = _v2Ratio != null
+      ? Math.round(_v2Ratio * 100)
+      : (p75Sec && secs ? Math.round((secs / p75Sec) * 100) : null);
+    const bktLabel = _v2Bucket && _v2Bucket !== "fresh" ? ` [${_v2Bucket}]` : "";
+    msgEmoji = "⏳"; msgLine = `Acumulando${pct != null ? ` · ${pct}% del techo` : ""}${bktLabel}`;
   }
 
   /* ─ score strip ─ */
@@ -198,8 +211,7 @@ function SymbolCard({ s }) {
   const gap   = live?.scoreGap;
   const liveGateName = live?.gateName ?? null;
   const liveFvgBos   = live?.fvgBosValidated ?? null;
-  const liveEarlyActive  = live?.earlyEntryActive ?? false;
-  const liveEarlyRemain  = live?.earlyEntryRemainSec ?? null;
+  // liveEarlyActive / liveEarlyRemain declared early (above) for compact message
   const liveKind = live?.kind;
   const isVetado = liveKind === "BLOQUEADO" && gap != null && gap <= 0;
   const pctToGate    = gate && score != null ? Math.max(0, Math.min(100, (score / gate) * 100)) : null;
@@ -215,8 +227,10 @@ function SymbolCard({ s }) {
   const hurstPos      = hurst != null ? Math.max(2, Math.min(98, ((hurst - 0.30) / 0.40) * 100)) : 50;
   const hurstBarColor = (h) => h < 0.45 ? T.green : h < 0.55 ? T.amber : T.red;
 
-  /* ─ accumulation bar ─ */
-  const accumPct  = Math.min(100, Math.round((secs / (p75Sec || medSec || 1)) * 100));
+  /* ─ accumulation bar — FIX CRÍTICO 3: usa techo V2 como denominador ─ */
+  const accumPct  = _v2Ceiling
+    ? Math.min(100, Math.round((secs / _v2Ceiling) * 100))
+    : Math.min(100, Math.round((secs / (p75Sec || medSec || 1)) * 100));
   const barColor  = sem === "green" ? T.green : sem === "red" ? T.red : sem === "manual" ? T.violet : T.amber;
   const barSuffix = accumPct >= 100 ? "· zona óptima" : accumPct >= 75 ? "· casi lista" : accumPct >= 40 ? "· zona de espera" : "· muy pronto";
 
@@ -247,6 +261,15 @@ function SymbolCard({ s }) {
     : null;
   const _rngProbC   = _sn?.rng_probability ?? null;
   const _rngThreshC = _sn?.rng_threshold ?? 65;
+
+  // ── V2 Progressive Imminence + Ceiling (PASO 2.3e-D) ──────────────────
+  const _v2Bucket  = _sn?.progressive_imminence_bucket ?? null;   // fresh/warming/medium/high/very_high/overdue_extreme
+  const _v2Ratio   = _sn?.progressive_imminence_ratio ?? null;    // 0.0–1.0+ (elapsed/ceiling)
+  const _v2Ceiling = _sn?.ceiling_value_s ?? null;                // seconds
+  const _v2CeilSrc = _sn?.ceiling_source ?? null;                 // hardcoded_higher/dynamic_p99_higher/etc.
+  const _v2HTBonus = _sn?.hurst_time_compound_bonus ?? null;      // e.g. +1.0 / -1.0
+  const _v2HTReasn = _sn?.hurst_time_compound_reason ?? null;     // e.g. 'agotado_cerca_techo'
+
   const _masterRed    = _structConflC
     || _scarcityC === "SECO"
     || (_scarcityC === "VENCIDO" && (_scoreRawC == null || _scoreRawC < 7.0))
@@ -526,8 +549,13 @@ function SymbolCard({ s }) {
         <div style={{ height: 6, borderRadius: 4, background: T.bg, overflow: "hidden" }}>
           <div style={{ height: "100%", borderRadius: 4, background: barColor, width: `${accumPct}%`, transition: "width 600ms ease" }} />
         </div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: -4 }}>
-          {accumPct}% del tiempo hasta zona óptima {barSuffix}
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: -4, display: "flex", justifyContent: "space-between" }}>
+          <span>{accumPct}% del ciclo {barSuffix}</span>
+          {_v2Ceiling != null && (
+            <span style={{ color: T.mute, opacity: 0.7 }}>
+              techo {Math.round(_v2Ceiling / 60)}m {_v2CeilSrc === "dynamic_p99_higher" ? "·p99" : _v2CeilSrc === "hardcoded_higher" ? "·fijo" : ""}
+            </span>
+          )}
         </div>
 
         {/* cadencia */}
@@ -562,6 +590,40 @@ function SymbolCard({ s }) {
                 </span>
               );
             })()}
+
+            {/* ── FIX 6: TECHO V2 / BUCKET / RATIO ─────────────────────── */}
+            {_v2Ceiling != null && (() => {
+              const bucketColor = {
+                fresh: T.mute, warming: T.cyan, medium: T.amber,
+                high: T.orange, very_high: T.red, overdue_extreme: T.red,
+              }[_v2Bucket] || T.mute;
+              const ratioDisplay = _v2Ratio != null ? `${Math.round(_v2Ratio * 100)}%` : "–";
+              return (
+                <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, letterSpacing: "0.06em" }}>V2</span>
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>
+                    techo <span style={{ color: T.textD }}>{Math.round(_v2Ceiling / 60)}m</span>
+                    <span style={{ color: T.mute, fontSize: 7 }}> {_v2CeilSrc === "dynamic_p99_higher" ? "p99" : _v2CeilSrc === "hardcoded_fallback" ? "~fijo" : "fijo"}</span>
+                  </span>
+                  {_v2Bucket && (
+                    <span style={{
+                      fontFamily: FONT_MONO, fontSize: 7, fontWeight: 700, color: bucketColor,
+                      background: bucketColor + "18", border: `1px solid ${bucketColor}44`,
+                      borderRadius: 3, padding: "1px 4px",
+                    }}>{_v2Bucket}</span>
+                  )}
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: bucketColor }}>{ratioDisplay}</span>
+                  {/* FIX 8: Compound Hurst+Time */}
+                  {_v2HTBonus != null && _v2HTBonus !== 0 && (
+                    <span style={{ fontFamily: FONT_MONO, fontSize: 7, color: _v2HTBonus > 0 ? T.green : T.orange }}>
+                      H+T {_v2HTBonus > 0 ? "+" : ""}{_v2HTBonus.toFixed(1)}
+                      {_v2HTReasn ? ` (${_v2HTReasn.replace(/_/g, " ")})` : ""}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* ── ESTRUCTURA 15M (Vision LLM — 1 línea) ─────────────── */}
             {s.vision && (() => {
               const v = s.vision;
@@ -615,7 +677,11 @@ function SymbolCard({ s }) {
                 </span>
                 <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
                   Z={_zScore != null ? (_zScore > 0 ? "+" : "") + _zScore.toFixed(2) : "?"}
-                  {_p90Ticks != null && ` · p90=${_p90Ticks}t`}
+                  {/* FIX 5: techo V2 + bucket en vez de p90 en ticks */}
+                  {_v2Ceiling != null
+                    ? ` · techo=${Math.round(_v2Ceiling / 60)}m`
+                    : (_p90Ticks != null ? ` · p90=${_p90Ticks}t` : "")}
+                  {_v2Bucket && ` · [${_v2Bucket}]`}
                 </span>
               </div>
             )}
