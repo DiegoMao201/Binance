@@ -121,7 +121,7 @@ function computePresion(entry: any, spikeStats: SpikeStats | null): PresionResul
 
 export async function GET(request: NextRequest) {
   const symbol = request.nextUrl.searchParams.get('symbol');
-  const validSymbols = ['BOOM500', 'BOOM600', 'CRASH500', 'CRASH600', 'CRASH900', 'CRASH1000'];
+  const validSymbols = ['BOOM500', 'BOOM600', 'BOOM900', 'BOOM1000', 'CRASH500', 'CRASH600', 'CRASH900', 'CRASH1000'];
   if (!symbol || !validSymbols.includes(symbol)) {
     return NextResponse.json({ error: 'Invalid symbol' }, { status: 400 });
   }

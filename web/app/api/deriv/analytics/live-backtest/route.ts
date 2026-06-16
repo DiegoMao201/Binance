@@ -10,10 +10,10 @@ export async function GET(request: NextRequest) {
     const lookback = parseInt(searchParams.get('lookback') || '24');
     
     // Validate symbol
-    const validSymbols = ['CRASH500', 'CRASH600', 'CRASH900'];
+    const validSymbols = ['CRASH500', 'CRASH600', 'CRASH900', 'CRASH1000', 'BOOM500', 'BOOM600', 'BOOM900', 'BOOM1000'];
     if (!symbol || !validSymbols.includes(symbol)) {
       return NextResponse.json(
-        { error: 'Invalid symbol. Must be one of: CRASH500, CRASH600, CRASH900' },
+        { error: 'Invalid symbol. Must be one of: ' + validSymbols.join(', ') },
         { status: 400 }
       );
     }

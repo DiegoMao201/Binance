@@ -997,7 +997,7 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH500", "CRASH600", "CRASH900", "CRASH1000", "BOOM500", "BOOM600", "BOOM900"];
+  const SYMBOL_ORDER = ["CRASH500", "CRASH600", "CRASH900", "CRASH1000", "BOOM500", "BOOM600", "BOOM900", "BOOM1000"];
   const symbols = (data?.symbols || []).slice().sort((a, b) => {
     const ai = SYMBOL_ORDER.indexOf(a.symbol);
     const bi = SYMBOL_ORDER.indexOf(b.symbol);
