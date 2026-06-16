@@ -86,6 +86,127 @@ def _ema200(prices: list[float]) -> float | None:
         ema = p * alpha + ema * (1.0 - alpha)
     return ema
 
+# ── PASO 2.3e-D (2026-06-15, Diego) — Recalibración techos + curva V2 ────────
+# Techos refinados validados con 8809 spikes / 24.4 días (Opción D híbrida:
+# max(p99_dynamic_7d, hardcoded_visual_validated)).
+# Diego observación visual (2 semanas) = p99.8-p99.9 distribución limpia.
+DERIV_CEILING_HARDCODED_S: dict[str, float] = {
+    'CRASH500': 3900.0,   # 65 min
+    'BOOM500':  3480.0,   # 58 min
+    'CRASH600': 4200.0,   # 70 min
+    'BOOM600':  4200.0,   # 70 min
+    'CRASH900': 5100.0,   # 85 min
+    'BOOM900':  5520.0,   # 92 min
+    'BOOM1000': 4740.0,   # 79 min
+    'CRASH1000':5280.0,   # 88 min
+}
+
+
+def _compute_dynamic_ceiling_gap(
+    symbol: str,
+    spike_buffer: list,
+    window_hours: float = 168.0,
+    hardcoded_ceiling_map: dict | None = None,
+) -> dict:
+    """p99 rolling 7d ceiling con fallback al techo visual hardcoded (Opción D híbrida).
+
+    Resuelve sesgo del p90: cola pesada de Poisson está en p99-p99.9, no en p90.
+    Hybrid final = max(p99_dynamic, hardcoded_visual) — el más conservador.
+
+    Returns dict con:
+      ceiling_s, source, p99_dynamic_s, hardcoded_s
+    """
+    now = time.time()
+    t0 = now - (window_hours * 3600.0)
+    recent_ts = sorted(float(ts) for ts in spike_buffer if float(ts) >= t0)
+
+    hardcoded_s: float | None = (hardcoded_ceiling_map or DERIV_CEILING_HARDCODED_S).get(
+        str(symbol).upper()
+    )
+
+    if len(recent_ts) < 20:
+        return {
+            'ceiling_s': hardcoded_s if hardcoded_s else 1800.0,
+            'source': 'hardcoded_fallback',
+            'p99_dynamic_s': None,
+            'hardcoded_s': hardcoded_s,
+        }
+
+    gaps = [
+        recent_ts[i + 1] - recent_ts[i]
+        for i in range(len(recent_ts) - 1)
+        if recent_ts[i + 1] - recent_ts[i] <= 14400.0  # excluir downtime >4h
+    ]
+
+    if len(gaps) < 20:
+        return {
+            'ceiling_s': hardcoded_s if hardcoded_s else 1800.0,
+            'source': 'hardcoded_fallback_insufficient_clean',
+            'p99_dynamic_s': None,
+            'hardcoded_s': hardcoded_s,
+        }
+
+    gaps_sorted = sorted(gaps)
+    idx_p99 = int(len(gaps_sorted) * 0.99)
+    p99_dynamic = gaps_sorted[min(idx_p99, len(gaps_sorted) - 1)]
+
+    if hardcoded_s:
+        if p99_dynamic > hardcoded_s:
+            return {
+                'ceiling_s': p99_dynamic,
+                'source': 'dynamic_p99_higher',
+                'p99_dynamic_s': p99_dynamic,
+                'hardcoded_s': hardcoded_s,
+            }
+        return {
+            'ceiling_s': hardcoded_s,
+            'source': 'hardcoded_higher',
+            'p99_dynamic_s': p99_dynamic,
+            'hardcoded_s': hardcoded_s,
+        }
+
+    return {
+        'ceiling_s': p99_dynamic,
+        'source': 'dynamic_p99_only',
+        'p99_dynamic_s': p99_dynamic,
+        'hardcoded_s': None,
+    }
+
+
+def _compute_progressive_imminence_bonus_v2(
+    symbol: str,
+    elapsed_s: float,
+    ceiling_s: float,
+) -> dict:
+    """Curva de 6 buckets sobre techo REAL (no p90 sesgado). V2 PASO 2.3e-D.
+
+    Buckets (ratio = elapsed_s / ceiling_s):
+      fresh        0-20%   → +0.0 score / +0 RNG
+      warming     20-40%   → +0.5 score / +5 RNG
+      medium      40-60%   → +1.0 score / +10 RNG
+      high        60-80%   → +1.5 score / +15 RNG
+      very_high   80-100%  → +2.5 score / +25 RNG
+      overdue_extreme >100% → +3.5 score / +35 RNG
+    """
+    if ceiling_s <= 0.0:
+        return {'ratio': 0.0, 'score_bonus': 0.0, 'rng_bonus': 0.0, 'bucket': 'invalid'}
+
+    ratio = elapsed_s / ceiling_s
+
+    if ratio < 0.20:
+        return {'ratio': ratio, 'score_bonus': 0.0,  'rng_bonus': 0.0,  'bucket': 'fresh'}
+    elif ratio < 0.40:
+        return {'ratio': ratio, 'score_bonus': 0.5,  'rng_bonus': 5.0,  'bucket': 'warming'}
+    elif ratio < 0.60:
+        return {'ratio': ratio, 'score_bonus': 1.0,  'rng_bonus': 10.0, 'bucket': 'medium'}
+    elif ratio < 0.80:
+        return {'ratio': ratio, 'score_bonus': 1.5,  'rng_bonus': 15.0, 'bucket': 'high'}
+    elif ratio < 1.00:
+        return {'ratio': ratio, 'score_bonus': 2.5,  'rng_bonus': 25.0, 'bucket': 'very_high'}
+    else:
+        return {'ratio': ratio, 'score_bonus': 3.5,  'rng_bonus': 35.0, 'bucket': 'overdue_extreme'}
+
+
 # ─── Hurst Calibration from PostgreSQL ────────────────────────────────────────
 # Reads v_deriv_hurst_buckets every hour (async, decoupled from WS hot path).
 # Updates a shared dict that DerivRiskManager reads on every evaluate() call.

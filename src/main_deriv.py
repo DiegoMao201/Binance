@@ -43,6 +43,9 @@ from src.execution.order_router import OrderRouter, OrderRouterError
 from src.safety.deriv_risk import (
     DerivRiskManager, HurstCalibrator, MacroHDCalibrator,
     EXTREME_TENSION_LIMITS_SEC,
+    DERIV_CEILING_HARDCODED_S,
+    _compute_dynamic_ceiling_gap,
+    _compute_progressive_imminence_bonus_v2,
 )
 from src.safety.ghost_logger import GhostLogger
 from src.execution.position_manager import SYMBOL_RATCHET_PARAMS as _DPM_PARAMS
@@ -205,11 +208,10 @@ _PROGRESSIVE_P90_FALLBACK_S: dict[str, float] = {
 }
 
 
-def _compute_dynamic_p90_gap(spike_ts_list: list, symbol: str, window_hours: float = 12.0) -> float:
-    """p90 de gaps inter-spike rolling en la ventana dada.
-
-    Retorna segundos. Fallback a hardcoded si <5 spikes en ventana.
-    """
+# DEPRECATED 2.3e-D: reemplazada por _compute_dynamic_ceiling_gap (src/safety/deriv_risk.py)
+# p90 sesgado hacia tendencia central; la cola pesada de Poisson está en p99-p99.9.
+# NO ELIMINAR hasta confirmar 72h sin regresiones.
+def _compute_dynamic_p90_gap(spike_ts_list: list, symbol: str, window_hours: float = 12.0) -> float:  # noqa: ARG001
     import time as _time
     t0 = _time.time() - window_hours * 3600.0
     recent = sorted(float(ts) for ts in spike_ts_list if ts and float(ts) >= t0)
@@ -223,15 +225,10 @@ def _compute_dynamic_p90_gap(spike_ts_list: list, symbol: str, window_hours: flo
     return gaps_sorted[min(idx, len(gaps_sorted) - 1)]
 
 
+# DEPRECATED 2.3e-D: reemplazada por _compute_progressive_imminence_bonus_v2 (src/safety/deriv_risk.py)
+# 4 buckets sobre p90 → 6 buckets sobre techo real visual+data.
+# NO ELIMINAR hasta confirmar 72h sin regresiones.
 def _compute_progressive_imminence_bonus(elapsed_s: float, p90_dynamic_s: float) -> dict:
-    """Curva continua de bonos por % del techo dinámico (p90 rolling 12h).
-
-    Buckets:
-      fresh       < 30%  → +0.0 score / +0 RNG
-      building  30-60%   → +0.5 score / +5 RNG
-      ripe      60-90%   → +1.5 score / +15 RNG
-      overdue_high >= 90% → +3.0 score / +30 RNG
-    """
     if p90_dynamic_s <= 0.0:
         return {"ratio": 0.0, "score_bonus": 0.0, "rng_bonus": 0.0, "bucket": "invalid"}
     ratio = elapsed_s / p90_dynamic_s
@@ -4323,9 +4320,9 @@ class DerivDaemon:
                     tick.symbol, _seco_resolved, _dry_gate_score,
                 )
 
-        # ── PASO 2.3e-B (2026-06-15): Progressive imminence bonus + Compound Hurst-Time ──
-        # Reemplaza bonos binarios BUILDING/OVERDUE (comentados arriba).
-        # Usa elapsed_s en segundos (wall-clock, de _scar) + p90 dinámico rolling 12h.
+        # ── PASO 2.3e-D (2026-06-15): Progressive imminence V2 + Compound Hurst-Time ──
+        # V2: ceiling real (p99 7d + hardcoded visual) en lugar de p90 sesgado 12h.
+        # 6 buckets (fresh/warming/medium/high/very_high/overdue_extreme) vs 4 de V1.
         # _scar ya fue computado arriba en el bloque scarcity (línea ~4275).
         if _is_bc_bias:
             _prog_elapsed_s = float((_scar or {}).get("elapsed_s") or 0.0)
@@ -4333,8 +4330,22 @@ class DerivDaemon:
                 self._risk._spike_scar_ts.get(tick.symbol.upper(), [])
                 or self._risk._spike_scar_ts.get(tick.symbol, [])
             )
-            _prog_p90 = _compute_dynamic_p90_gap(_prog_spike_ts, tick.symbol, window_hours=12.0)
-            _prog_bonus_info = _compute_progressive_imminence_bonus(_prog_elapsed_s, _prog_p90)
+
+            # V2: ceiling dinámico p99 rolling 7d con fallback hardcoded visual+data
+            _prog_ceiling_info = _compute_dynamic_ceiling_gap(
+                symbol=tick.symbol,
+                spike_buffer=_prog_spike_ts,
+                window_hours=168.0,
+                hardcoded_ceiling_map=DERIV_CEILING_HARDCODED_S,
+            )
+            _prog_ceiling_s = _prog_ceiling_info["ceiling_s"]
+
+            # V2: 6 buckets sobre techo real
+            _prog_bonus_info = _compute_progressive_imminence_bonus_v2(
+                symbol=tick.symbol,
+                elapsed_s=_prog_elapsed_s,
+                ceiling_s=_prog_ceiling_s,
+            )
             _prog_ratio = _prog_bonus_info["ratio"]
 
             # Aplicar bono progresivo al score
@@ -4342,19 +4353,24 @@ class DerivDaemon:
             if _prog_score_bonus > 0.0:
                 snap.score = round(min(10.0, snap.score + _prog_score_bonus), 3)
 
-            # Compound Hurst + Time signal
+            # Compound Hurst + Time signal (sin cambios vs V1)
             _prog_hurst = float(_eval_hurst if _eval_hurst is not None else 0.5)
             _prog_compound = _compute_hurst_time_compound_bonus(_prog_hurst, _prog_ratio)
             _prog_compound_bonus = float(_prog_compound["bonus"])
             if _prog_compound_bonus != 0.0:
                 snap.score = round(min(10.0, max(0.0, snap.score + _prog_compound_bonus)), 3)
 
-            # Registrar en score_breakdown para auditoría
+            # Registrar en score_breakdown para auditoría (V2: nuevas claves ceiling_*)
             snap.score_breakdown["progressive_imminence_ratio"]       = round(_prog_ratio, 3)
             snap.score_breakdown["progressive_imminence_score_bonus"] = _prog_score_bonus
             snap.score_breakdown["progressive_imminence_rng_bonus"]   = float(_prog_bonus_info["rng_bonus"])
             snap.score_breakdown["progressive_imminence_bucket"]      = _prog_bonus_info["bucket"]
-            snap.score_breakdown["p90_dynamic_12h_s"]                 = round(_prog_p90, 1)
+            snap.score_breakdown["ceiling_value_s"]                   = round(_prog_ceiling_s, 1)
+            snap.score_breakdown["ceiling_source"]                    = _prog_ceiling_info["source"]
+            snap.score_breakdown["ceiling_p99_dynamic_s"]             = (
+                round(_prog_ceiling_info["p99_dynamic_s"], 1)
+                if _prog_ceiling_info["p99_dynamic_s"] is not None else None
+            )
             snap.score_breakdown["hurst_time_compound_bonus"]         = _prog_compound_bonus
             snap.score_breakdown["hurst_time_compound_reason"]        = _prog_compound["reason"]
 
@@ -4362,10 +4378,11 @@ class DerivDaemon:
             if _prog_bonus_info["bucket"] != "fresh" or _prog_compound_bonus != 0.0:
                 _LOGGER.info(
                     "[PROGRESSIVE] %s ratio=%.2f bucket=%s score_bonus=%+.1f "
-                    "compound=%+.1f (%s) p90_dyn=%.0fs elapsed=%.0fs → score=%.2f",
+                    "compound=%+.1f (%s) ceiling=%.0fs(%s) elapsed=%.0fs → score=%.2f",
                     tick.symbol, _prog_ratio, _prog_bonus_info["bucket"],
                     _prog_score_bonus, _prog_compound_bonus, _prog_compound["reason"],
-                    _prog_p90, _prog_elapsed_s, snap.score,
+                    _prog_ceiling_s, _prog_ceiling_info["source"],
+                    _prog_elapsed_s, snap.score,
                 )
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
