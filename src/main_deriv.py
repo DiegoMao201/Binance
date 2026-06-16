@@ -61,6 +61,7 @@ from src.strategies.deriv_signals import (
 )
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
+from src.utils.decision_logger import log_decision, update_decision_outcome
 
 
 _LOGGER = logging.getLogger("deriv.daemon")
@@ -594,6 +595,8 @@ class DerivDaemon:
         # Per-symbol tick counter for periodic diagnostic logs
         self._diag_tick_count: dict[str, int] = {}
         # ── Signal cooldown (global anti-spam debounce for ALL HARD_MATH_OVERRIDE types) ──
+        # PASO 2.3h-prep Fase F: maps symbol → decision_id for outcome linking
+        self._decision_ids: dict[str, str] = {}
         # Tracks last fired override per symbol. Checked FIRST in _pipeline() so
         # neither math nor AI evaluation runs on cooling-down symbols.
         self._signal_cooldown: dict[str, int | None] = {}  # symbol → tick count at last signal eval
@@ -3126,12 +3129,19 @@ class DerivDaemon:
                         )
                         return
 
+        # PASO 2.3h-prep Fase E: maturity data for LLM (initialized here, populated below)
+        _mat_elapsed_s_out: float | None = None
+        _mat_threshold_s_out: float | None = None
+        _mat_ratio_out: float | None = None
+        _mat_status_out: str | None = None
+
         # ═══════════════════════════════════════════════════════════════════
         # MATURITY_GATE — structural floor: first FRAC of the typical cycle
         # Blocks entry while elapsed wall-clock time < median_gap × FRAC.
         # Uses get_scarcity_state() (same source as the operator card "típico").
         # Env vars: DERIV_MATURITY_GATE_ENABLED (default true)
         #           DERIV_MATURITY_GATE_FRAC    (default 0.70)
+        # PASO 2.3h-prep Fase E: hard block → safety net only for ratio < 0.10.
         # ═══════════════════════════════════════════════════════════════════
         if (
             is_spike_market(tick.symbol)
@@ -3160,6 +3170,16 @@ class DerivDaemon:
                 _mat_frac_cluster = float(os.getenv("DERIV_MATURITY_GATE_CLUSTER_FRAC", "1.0"))
                 _mat_frac = _mat_frac_cluster if _mat_cl_n >= 2 else _mat_frac_base
                 _mat_threshold_s = _mat_median_s * _mat_frac
+                # Fase E: always compute ratio+status for LLM informative use
+                _mat_ratio_out = float(_mat_elapsed_s) / float(_mat_threshold_s)
+                _mat_elapsed_s_out = float(_mat_elapsed_s)
+                _mat_threshold_s_out = float(_mat_threshold_s)
+                _mat_status_out = (
+                    "extremely_early" if _mat_ratio_out < 0.30 else
+                    "early" if _mat_ratio_out < 0.60 else
+                    "ready" if _mat_ratio_out < 1.0 else
+                    "mature"
+                )
                 if _mat_elapsed_s < _mat_threshold_s:
                     _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
                     _mat_key = f"{tick.symbol}:early_entry_gate"
@@ -3170,9 +3190,11 @@ class DerivDaemon:
                     if (_mat_now - _mat_last_emit) >= 30.0:
                         self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
                         _LOGGER.info(
-                            "[MATURITY_GATE] EARLY_ENTRY_GATE %s | elapsed=%.0fs < "
+                            "[MATURITY_GATE] %s | ratio=%.2f status=%s | elapsed=%.0fs < "
                             "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs | cluster_n=%d",
                             tick.symbol,
+                            _mat_ratio_out,
+                            _mat_status_out,
                             _mat_elapsed_s,
                             _mat_threshold_s,
                             _mat_frac * 100,
@@ -3180,6 +3202,8 @@ class DerivDaemon:
                             _mat_remain_s,
                             _mat_cl_n,
                         )
+                    if _mat_ratio_out < 0.10:
+                        # EXTREME safety net: block only when <10% of cycle elapsed.
                         self._record_decision(
                             symbol=tick.symbol, allowed=False, side=None, score=0.0,
                             reason=(
@@ -3189,46 +3213,54 @@ class DerivDaemon:
                             extra={
                                 "gate_name": "EARLY_ENTRY_GATE",
                                 "remain_sec": max(0, int(_mat_remain_s)),
+                                "ratio": _mat_ratio_out,
                             },
                         )
-                    # FILOSOFÍA A: bypass si cerramos este símbolo en los últimos
-                    # 300s. El reloj del PRNG no se reseteó por nuestro cierre —
-                    # la presión de scarcity sigue acumulada.
-                    _mat_last_close_ts = self._executor.get_last_close_ts(tick.symbol)
-                    _mat_elapsed_since_close = (
-                        time.time() - _mat_last_close_ts if _mat_last_close_ts else float("inf")
-                    )
-                    _mat_recent_close_window = float(
-                        os.getenv("DERIV_MATURITY_BYPASS_RECENT_CLOSE_SEC", "300") or 300
-                    )
-                    if _mat_last_close_ts and _mat_elapsed_since_close < _mat_recent_close_window:
-                        _LOGGER.info(
-                            "[MATURITY_GATE_BYPASS] %s cerramos hace %.0fs < %.0fs "
-                            "— reloj PRNG no reseteado, bypass maturity",
-                            tick.symbol, _mat_elapsed_since_close, _mat_recent_close_window,
+                        # FILOSOFÍA A: bypass si cerramos este símbolo en los últimos
+                        # 300s. El reloj del PRNG no se reseteó por nuestro cierre —
+                        # la presión de scarcity sigue acumulada.
+                        _mat_last_close_ts = self._executor.get_last_close_ts(tick.symbol)
+                        _mat_elapsed_since_close = (
+                            time.time() - _mat_last_close_ts if _mat_last_close_ts else float("inf")
                         )
-                        # Do NOT return — continue to score/RNG evaluation
-                    elif _DRY_EXIT_RELAX_SKIP_MATURITY:
-                        # Fallback: DRY_EXIT_RELAX para dry exits específicamente
-                        _dry_mat_ok, _dry_mat_consec = self._is_dry_exit_relax(tick.symbol)
-                        if _dry_mat_ok:
+                        _mat_recent_close_window = float(
+                            os.getenv("DERIV_MATURITY_BYPASS_RECENT_CLOSE_SEC", "300") or 300
+                        )
+                        if _mat_last_close_ts and _mat_elapsed_since_close < _mat_recent_close_window:
                             _LOGGER.info(
-                                "[DRY_EXIT_RELAX] %s bypassing MATURITY_GATE | "
-                                "elapsed=%.0fs < threshold=%.0fs | consecutive=%d/%d",
-                                tick.symbol, _mat_elapsed_s, _mat_threshold_s,
-                                _dry_mat_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
+                                "[MATURITY_GATE_BYPASS] %s cerramos hace %.0fs < %.0fs "
+                                "— reloj PRNG no reseteado, bypass maturity",
+                                tick.symbol, _mat_elapsed_since_close, _mat_recent_close_window,
                             )
-                            # Do NOT return
+                            # Do NOT return — continue to score/RNG evaluation
+                        elif _DRY_EXIT_RELAX_SKIP_MATURITY:
+                            # Fallback: DRY_EXIT_RELAX para dry exits específicamente
+                            _dry_mat_ok, _dry_mat_consec = self._is_dry_exit_relax(tick.symbol)
+                            if _dry_mat_ok:
+                                _LOGGER.info(
+                                    "[DRY_EXIT_RELAX] %s bypassing MATURITY_GATE | "
+                                    "elapsed=%.0fs < threshold=%.0fs | consecutive=%d/%d",
+                                    tick.symbol, _mat_elapsed_s, _mat_threshold_s,
+                                    _dry_mat_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
+                                )
+                                # Do NOT return
+                            else:
+                                self._spike_enrich(
+                                    tick.symbol, bot_entered=False, block_reason="early_entry_gate"
+                                )
+                                return
                         else:
                             self._spike_enrich(
                                 tick.symbol, bot_entered=False, block_reason="early_entry_gate"
                             )
                             return
                     else:
-                        self._spike_enrich(
-                            tick.symbol, bot_entered=False, block_reason="early_entry_gate"
+                        # Informative only (ratio >= 0.10): log and continue to LLM.
+                        _LOGGER.info(
+                            "[MATURITY_GATE] INFORMATIVE %s ratio=%.2f status=%s "
+                            "— pipeline continues to LLM",
+                            tick.symbol, _mat_ratio_out, _mat_status_out,
                         )
-                        return
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
@@ -3314,6 +3346,13 @@ class DerivDaemon:
             autocorr_lag1=pre_autocorr,
             dynamic_cfg=_dyn_cfg,
         )
+        # PASO 2.3h-prep Fase E: inject maturity data into score_breakdown for LLM
+        if _mat_ratio_out is not None:
+            snap.score_breakdown["maturity_elapsed_s"] = _mat_elapsed_s_out
+            snap.score_breakdown["maturity_threshold_s"] = _mat_threshold_s_out
+            snap.score_breakdown["maturity_ratio"] = round(_mat_ratio_out, 3)
+            snap.score_breakdown["maturity_status"] = _mat_status_out
+
         # Cache state for market context telemetry (written on next 60-tick cycle).
         _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
         _cache_sym = tick.symbol.upper()
@@ -5693,6 +5732,29 @@ class DerivDaemon:
                 self._spike_enrich(tick.symbol, bot_entered=False,
                                    block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
+        # PASO 2.3h-prep Fase F: log enriched decision before routing order
+        _dec_id = log_decision(
+            symbol=tick.symbol,
+            decision="enter",
+            score_breakdown=dict(snap.score_breakdown),
+            maturity_info={
+                "elapsed_s": _mat_elapsed_s_out,
+                "threshold_s": _mat_threshold_s_out,
+                "ratio": _mat_ratio_out,
+                "status": _mat_status_out,
+            } if _mat_ratio_out is not None else None,
+            llm_info={
+                "approved": analysis.ai_approved if analysis else None,
+                "confidence": analysis.ai_confidence if analysis else None,
+                "model": analysis.ai_model if analysis else None,
+                "reason": analysis.ai_reason if analysis else None,
+                "skipped": analysis.ai_skipped if analysis else True,
+            },
+            entry_action="entering",
+        )
+        if _dec_id:
+            self._decision_ids[tick.symbol] = _dec_id
+
         self._counters["orders_sent"] += 1
         try:
             result = await self._router.route_order(payload)
@@ -5968,6 +6030,17 @@ class DerivDaemon:
                             _duration, _pnl, rec.get("side"),
                         )
                     self._risk.register_close(_pnl, symbol=str(rec.get("symbol") or ""))
+                    # PASO 2.3h-prep Fase F: link outcome to enriched decision log
+                    _rec_sym = str(rec.get("symbol") or "")
+                    _rec_did = self._decision_ids.pop(_rec_sym, None)
+                    if _rec_did:
+                        update_decision_outcome(
+                            decision_id=_rec_did,
+                            realized_pnl=_pnl,
+                            peak_profit=float(rec.get("peak_profit") or 0.0),
+                            duration_s=_duration,
+                            exit_reason=str(rec.get("exit_reason") or "unknown"),
+                        )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("[deriv-daemon] reaper iteration failed")
             try:

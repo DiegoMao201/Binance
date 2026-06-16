@@ -57,6 +57,8 @@ import pandas as pd
 
 from src.data.deriv_client import DerivClient, DerivClientError
 from src.utils.deriv_config import DerivSettings
+from src.analysis.pattern_memory_query import query_pattern_memory
+from src.analysis.geometric_levels import get_active_structure
 
 
 _LOGGER = logging.getLogger("deriv.analyst")
@@ -700,6 +702,9 @@ def _build_ai_prompt(
     ai_threshold: float = 7.5,
     ai_min_confidence: float | None = None,
     symbol_guard_threshold: float | None = None,
+    pattern_memory: dict | None = None,
+    geometric_structure: dict | None = None,
+    maturity_info: dict | None = None,
 ) -> str:
     # Spike markets (BOOM/CRASH) don't require trending Hurst — spikes are stochastic.
     # Use the hurst_min_spike value (0.43) for those; trend requirement only for R_*.
@@ -898,13 +903,87 @@ def _build_ai_prompt(
             '- compound=="trending_spike_lejano": -1 confidence level (spike unlikely soon).\n'
         )
 
+    # ── PASO 2.3h-prep Fase C: Pattern Memory section ────────────────────────
+    _pm_ctx = ""
+    if pattern_memory and pattern_memory.get("enough_data"):
+        _pm_wr = float(pattern_memory.get("wr", 0))
+        _pm_pnl = float(pattern_memory.get("avg_pnl", 0))
+        _pm_n = pattern_memory.get("n_trades", 0)
+        _pm_key = pattern_memory.get("pattern_key", "?")
+        if _pm_wr >= 60 and _pm_pnl > 0:
+            _pm_signal = "PATRÓN GANADOR HISTÓRICO — favorece entrada"
+        elif _pm_wr < 45 or _pm_pnl < -0.05:
+            _pm_signal = "PATRÓN PERDEDOR HISTÓRICO — desfavorece entrada"
+        else:
+            _pm_signal = "marginal — requiere confluencia adicional"
+        _pm_ctx = (
+            f"\n\nPATTERN MEMORY (histórico real de este patrón exacto):\n"
+            f"- Patrón: {_pm_key}\n"
+            f"- N trades históricos: {_pm_n}\n"
+            f"- WR histórico: {_pm_wr:.0f}%%\n"
+            f"- Avg PnL: ${_pm_pnl:+.3f}\n"
+            f"- Señal: {_pm_signal}\n"
+            "USA ESTO COMO FACTOR PRINCIPAL. Es data REAL de cómo ha funcionado este patrón.\n"
+        )
+    elif pattern_memory:
+        _pm_ctx = (
+            f"\n\nPATTERN MEMORY: insuficiente data "
+            f"({pattern_memory.get('reason', 'unknown')}) — no usar como factor.\n"
+        )
+
+    # ── PASO 2.3h-prep Fase D: Geometric structure section ───────────────────
+    _geom_ctx = ""
+    if geometric_structure:
+        _h_levels = geometric_structure.get("horizontal_levels") or []
+        _d_lines = geometric_structure.get("diagonal_trendlines") or []
+        if _h_levels or _d_lines:
+            _h_txt = "\n".join(
+                f"  - {h['type']} en {h['price']:.4f} "
+                f"({h['distance_pct']:+.2f}%% del precio actual) — {h['n_touches']} toques"
+                for h in _h_levels
+            ) or "  (ninguno)"
+            _d_txt = "\n".join(
+                f"  - {d['type']} proyectada en {d['projected_price_now']:.4f} "
+                f"({d['distance_pct']:+.2f}%% del precio actual) — {d['n_touches']} toques objetivos"
+                for d in _d_lines
+            ) or "  (ninguna)"
+            _geom_ctx = (
+                "\n\nESTRUCTURA GEOMÉTRICA (auto-detectada):\n"
+                f"Niveles horizontales:\n{_h_txt}\n"
+                f"Trendlines diagonales:\n{_d_txt}\n"
+                "INTERPRETACIÓN:\n"
+                "- <0.3%% de un nivel con 3+ toques = ZONA CRÍTICA (posible rebote o ruptura con spike)\n"
+                "- Más toques = nivel más significativo\n"
+                "- Usa como confirmación estructural del timing de entrada.\n"
+            )
+
+    # ── PASO 2.3h-prep Fase E: Maturity informative section ──────────────────
+    _mat_ctx = ""
+    if maturity_info and maturity_info.get("elapsed_s") is not None:
+        _me = float(maturity_info.get("elapsed_s") or 0)
+        _mt = float(maturity_info.get("threshold_s") or 1)
+        _mr = float(maturity_info.get("ratio") or (_me / _mt if _mt else 0))
+        _ms = str(maturity_info.get("status") or "unknown")
+        _mat_ctx = (
+            "\n\nMATURITY STATUS (informativo — NO bloqueante salvo ratio<0.10):\n"
+            f"- Tiempo desde último spike: {_me:.0f}s\n"
+            f"- Threshold de maduración: {_mt:.0f}s\n"
+            f"- Ratio actual: {_mr:.2f} ({_ms})\n"
+            "  extremely_early(<0.30): muy prematuro, requiere confluencia EXCEPCIONAL\n"
+            "  early(0.30-0.60): prematuro, requiere confluencia ALTA\n"
+            "  ready(0.60-1.0): zona madura, criterios habituales\n"
+            "  mature(>1.0): maduro\n"
+            "RECUERDA: spike PRNG no tiene memoria. Si hay confluencia FUERTE (Pattern Memory "
+            "+ V2 + estructura + score alto), puedes aprobar incluso en early.\n"
+        )
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
 PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
-Score breakdown: {json.dumps(breakdown)}{_op_ctx}{_struct_ctx}{_rng_section}{_v2_ctx}
+Score breakdown: {json.dumps(breakdown)}{_op_ctx}{_struct_ctx}{_rng_section}{_v2_ctx}{_pm_ctx}{_geom_ctx}{_mat_ctx}
 
 SYMBOL_GUARDRAIL:
 - symbol_bleed_bonus: {_bleed_bonus:.2f}
@@ -952,6 +1031,12 @@ class DerivAnalyst:
         self._ai_log_path: Path = settings.logs_dir / "deriv_ai_decisions.json"
         self._closed_log_path: Path = settings.logs_dir / "deriv_closed_contracts.json"
         self._spike_log_path: Path = settings.logs_dir / "deriv_spike_events.json"
+        # PASO 2.3h-prep: DB URL para Pattern Memory + prompt audit
+        self._db_url: str = os.getenv("DATABASE_URL", "").strip()
+        self._prompt_audit_enabled: bool = os.getenv(
+            "DERIV_PROMPT_AUDIT_ENABLED", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._prompt_audit_path: Path = settings.logs_dir / "llm_prompts_audit.jsonl"
         self._ai_quality_cache_ts: float = 0.0
         self._ai_quality_cache: dict[str, dict[str, Any]] = {}
 
@@ -1529,6 +1614,50 @@ class DerivAnalyst:
             "[AI_GATE] %s using threshold=%.2f (is_boom_crash=%s)",
             symbol, _ai_threshold, _is_boom_crash,
         )
+        # PASO 2.3h-prep Fase C: Pattern Memory v2 query
+        _pm_result: dict | None = None
+        if self._db_url and side:
+            try:
+                _pm_result = await asyncio.wait_for(
+                    query_pattern_memory(
+                        symbol=symbol,
+                        side=side,
+                        fvg_tier_raw=str(score_breakdown.get("fvg_tier") or ""),
+                        imminence_state_raw=str(
+                            score_breakdown.get("spike_imminence_state")
+                            or score_breakdown.get("imminence_state") or ""
+                        ),
+                        hurst=hurst,
+                        score=score,
+                        db_url=self._db_url,
+                    ),
+                    timeout=3.0,
+                )
+            except Exception:
+                _pm_result = None
+
+        # PASO 2.3h-prep Fase D: Geometric structure from tick history
+        _geo_result: dict | None = None
+        if prices_list and len(prices_list) >= 100:
+            try:
+                _geo_result = get_active_structure(symbol, prices_list)
+            except Exception:
+                _geo_result = None
+
+        # PASO 2.3h-prep Fase E: Maturity info from score_breakdown
+        _maturity_info: dict | None = None
+        _mat_elapsed = score_breakdown.get("maturity_elapsed_s")
+        _mat_threshold = score_breakdown.get("maturity_threshold_s")
+        _mat_ratio = score_breakdown.get("maturity_ratio")
+        _mat_status = score_breakdown.get("maturity_status")
+        if _mat_elapsed is not None and _mat_threshold is not None:
+            _maturity_info = {
+                "elapsed_s": _mat_elapsed,
+                "threshold_s": _mat_threshold,
+                "ratio": _mat_ratio,
+                "status": _mat_status,
+            }
+
         prompt = _build_ai_prompt(
             symbol=symbol,
             side=side,
@@ -1544,7 +1673,37 @@ class DerivAnalyst:
             ai_threshold=_ai_threshold,
             ai_min_confidence=_symbol_min_conf,
             symbol_guard_threshold=float(score_breakdown.get("symbol_bleed_threshold") or -2.0),
+            pattern_memory=_pm_result,
+            geometric_structure=_geo_result,
+            maturity_info=_maturity_info,
         )
+
+        # PASO 2.3h-prep Fase B: Prompt audit logging
+        if self._prompt_audit_enabled:
+            try:
+                import json as _json_mod
+                _audit_entry = {
+                    "ts": time.time(),
+                    "symbol": symbol,
+                    "prompt": prompt,
+                    "context_fields": {
+                        "score": score,
+                        "bucket": score_breakdown.get("progressive_imminence_bucket"),
+                        "ceiling_s": score_breakdown.get("ceiling_value_s"),
+                        "ratio": score_breakdown.get("progressive_imminence_ratio"),
+                        "compound_reason": score_breakdown.get("hurst_time_compound_reason"),
+                        "hurst": hurst,
+                        "rng": score_breakdown.get("rng_probability"),
+                        "fvg_tier": score_breakdown.get("fvg_tier"),
+                        "pattern_memory": _pm_result,
+                        "has_geometry": bool(_geo_result and _geo_result.get("horizontal_levels")),
+                        "maturity_status": _mat_status,
+                    },
+                }
+                with open(self._prompt_audit_path, "a") as _f:
+                    _f.write(_json_mod.dumps(_audit_entry, default=str) + "\n")
+            except Exception:
+                pass
 
         try:
             _LOGGER.info(
@@ -1594,6 +1753,22 @@ class DerivAnalyst:
                     analysis.ai_confidence = 0.0
                     analysis.ai_reason = "all_models_failed_fail_closed"
                 return analysis
+            # Circuit breaker open (API credential failures) — fail-open if configured.
+            # PASO 2.3h-prep: circuit_breaker_open was previously missing from fail-open
+            # checks, causing permanent veto for the 30-min breaker window even with
+            # DERIV_AI_FAIL_OPEN=true. Now properly covered.
+            if ai_result.get("reason") == "circuit_breaker_open":
+                if _AI_FAIL_OPEN:
+                    _LOGGER.warning(
+                        "[deriv-analyst] AI circuit breaker open for %s — gate bypassed "
+                        "(DERIV_AI_FAIL_OPEN=true)",
+                        symbol,
+                    )
+                    analysis.ai_skipped = True
+                    analysis.ai_approved = True
+                    analysis.ai_reason = "circuit_breaker_bypass"
+                    return analysis
+                # else: fall through — approved=False, conf=0.0 → VETO (default behavior)
             _ai_conf = float(ai_result.get("confidence", 0.0) or 0.0)
             _model_approved = bool(ai_result.get("approved", False))
             analysis.ai_approved = (
