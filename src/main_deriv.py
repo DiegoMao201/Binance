@@ -208,40 +208,6 @@ _PROGRESSIVE_P90_FALLBACK_S: dict[str, float] = {
 }
 
 
-# DEPRECATED 2.3e-D: reemplazada por _compute_dynamic_ceiling_gap (src/safety/deriv_risk.py)
-# p90 sesgado hacia tendencia central; la cola pesada de Poisson está en p99-p99.9.
-# NO ELIMINAR hasta confirmar 72h sin regresiones.
-def _compute_dynamic_p90_gap(spike_ts_list: list, symbol: str, window_hours: float = 12.0) -> float:  # noqa: ARG001
-    import time as _time
-    t0 = _time.time() - window_hours * 3600.0
-    recent = sorted(float(ts) for ts in spike_ts_list if ts and float(ts) >= t0)
-    if len(recent) < 5:
-        return _PROGRESSIVE_P90_FALLBACK_S.get(str(symbol).upper(), 1200.0)
-    gaps = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
-    if len(gaps) < 4:
-        return _PROGRESSIVE_P90_FALLBACK_S.get(str(symbol).upper(), 1200.0)
-    gaps_sorted = sorted(gaps)
-    idx = int(len(gaps_sorted) * 0.90)
-    return gaps_sorted[min(idx, len(gaps_sorted) - 1)]
-
-
-# DEPRECATED 2.3e-D: reemplazada por _compute_progressive_imminence_bonus_v2 (src/safety/deriv_risk.py)
-# 4 buckets sobre p90 → 6 buckets sobre techo real visual+data.
-# NO ELIMINAR hasta confirmar 72h sin regresiones.
-def _compute_progressive_imminence_bonus(elapsed_s: float, p90_dynamic_s: float) -> dict:
-    if p90_dynamic_s <= 0.0:
-        return {"ratio": 0.0, "score_bonus": 0.0, "rng_bonus": 0.0, "bucket": "invalid"}
-    ratio = elapsed_s / p90_dynamic_s
-    if ratio < 0.30:
-        return {"ratio": ratio, "score_bonus": 0.0, "rng_bonus": 0.0, "bucket": "fresh"}
-    elif ratio < 0.60:
-        return {"ratio": ratio, "score_bonus": 0.5, "rng_bonus": 5.0, "bucket": "building"}
-    elif ratio < 0.90:
-        return {"ratio": ratio, "score_bonus": 1.5, "rng_bonus": 15.0, "bucket": "ripe"}
-    else:
-        return {"ratio": ratio, "score_bonus": 3.0, "rng_bonus": 30.0, "bucket": "overdue_high"}
-
-
 def _compute_hurst_time_compound_bonus(hurst: float, ratio: float) -> dict:
     """Compound signal Hurst + tiempo desde último spike.
 
@@ -4216,13 +4182,8 @@ class DerivDaemon:
                         f"spike_imminence_RIPE: gap={_imm.get('ticks_since_last')}t "
                         f"score={_imm_score:.2f} → no bonus (RIPE gate passed, score≥{_ripe_min:.1f})"
                     )
-                # DEPRECATED 2026-06-15 PASO 2.3e-B (Diego — filosofía "bot astuto"):
-                # Los bonos binarios BUILDING (+imm_max×imm_score) y OVERDUE (+40%)
-                # se reemplazan por bonos progresivos basados en % del p90 dinámico 12h.
-                # Razón: filosofía "bot astuto, no rígido" — la curva continua de ratio
-                # captura la progresión real de probabilidad sin estados binarios.
-                # Nueva lógica: _compute_progressive_imminence_bonus() aplicada abajo
-                # tras el bloque de scarcity (donde _scar.elapsed_s está disponible).
+                # Bonos progresivos V2 (_compute_progressive_imminence_bonus_v2) aplicados
+                # tras el bloque de scarcity. Buckets binarios reemplazados en PASO 2.3e-D.
                 #
                 # elif _imm_state == "BUILDING" and 0.25 <= _imm_score <= 0.65:
                 #     _imm_boost = round(_imm_max * _imm_score, 2)

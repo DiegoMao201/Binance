@@ -54,12 +54,17 @@ _RESPITE_MIN_CONFIDENCE: float = float(
 )
 
 # Percentiles empíricos de ganadores por símbolo (data 2026-06-14)
+# BOOM900/BOOM1000/CRASH1000: estimación inicial conservadora (PASO 2.3e-G 2026-06-16).
+# Recalibrar con data real tras 7-14 días de observación por símbolo.
 _WINNER_PERCENTILES: dict[str, dict[str, int]] = {
     "BOOM500":  {"p25": 81,  "p50": 381,  "p75": 610},
     "BOOM600":  {"p25": 217, "p50": 256,  "p75": 562},
     "CRASH500": {"p25": 264, "p50": 275,  "p75": 792},
     "CRASH600": {"p25": 300, "p50": 400,  "p75": 600},
     "CRASH900": {"p25": 675, "p50": 708,  "p75": 1310},
+    "BOOM900":  {"p25": 200, "p50": 400,  "p75": 600},
+    "BOOM1000": {"p25": 200, "p50": 400,  "p75": 700},
+    "CRASH1000":{"p25": 200, "p50": 450,  "p75": 700},
 }
 
 # Razones estructurales válidas para CLOSE (anti-alucinación: cualquier otro código → HOLD)

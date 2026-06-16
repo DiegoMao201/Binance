@@ -857,13 +857,45 @@ def _build_ai_prompt(
             "Absence of FVG ≠ bad entry. Extreme temporal tension = high spike probability.\n"
         )
 
+    # ── V2 Scarcity cycle context (PASO 2.3e-G 2026-06-16) ──────────────────────
+    # Previously the LLM had no visibility into the V2 ceiling/bucket/compound system.
+    # Now we inject the cycle position so the LLM can weight entries by scarcity maturity.
+    _sb          = breakdown or {}
+    _v2_ceiling  = _sb.get("ceiling_value_s")
+    _v2_src      = str(_sb.get("ceiling_source") or "unknown")
+    _v2_ratio    = _sb.get("progressive_imminence_ratio")
+    _v2_bucket   = str(_sb.get("progressive_imminence_bucket") or "")
+    _v2_compound = str(_sb.get("hurst_time_compound_reason") or "neutral")
+    _v2_elapsed  = _sb.get("scarcity_elapsed_s")
+    _v2_ctx = ""
+    if _v2_bucket and _v2_ceiling is not None and _v2_ratio is not None:
+        _v2_ctx = (
+            f"\nSCARCITY_CYCLE (V2 system):\n"
+            f"- Ceiling (expected max spike interval): {_v2_ceiling:.0f}s (source={_v2_src})\n"
+            f"- Elapsed since last spike: {_v2_elapsed:.0f}s\n"
+            f"- Ratio elapsed/ceiling: {_v2_ratio:.2f}\n"
+            f"- Bucket: {_v2_bucket}\n"
+            "  Bucket guide: fresh(0-20%%)=spike very recent; warming(20-40%%)=early;"
+            " medium(40-60%%)=reasonable; high(60-80%%)=good; very_high(80-100%%)=imminent;"
+            " overdue_extreme(>100%%)=spike statistically overdue\n"
+            f"- Compound Hurst+Time signal: {_v2_compound}\n"
+            "  Signals: agotado_cerca_techo=STRONG spike imminent;"
+            " trending_spike_lejano=spike unlikely soon;"
+            " trending_cerca_techo=ambiguous; sin_fuerza_muy_pronto=premature; neutral=no signal\n"
+            "\nV2 OPERATIONAL RULES:\n"
+            '- DO NOT approve if bucket == "fresh" (spike just fired, retrace expected).\n'
+            '- PREFER to approve if bucket in {high, very_high, overdue_extreme}.\n'
+            '- Add confidence if compound == "agotado_cerca_techo".\n'
+            '- Reduce confidence if compound == "trending_spike_lejano".\n'
+        )
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
 PROPOSED DIRECTION: {side} (MULTUP=long, MULTDOWN=short)
 
 MATHEMATICAL SCORING (out of 10): {score:.2f}
-Score breakdown: {json.dumps(breakdown)}{_op_ctx}{_struct_ctx}{_rng_section}
+Score breakdown: {json.dumps(breakdown)}{_op_ctx}{_struct_ctx}{_rng_section}{_v2_ctx}
 
 SYMBOL_GUARDRAIL:
 - symbol_bleed_bonus: {_bleed_bonus:.2f}
