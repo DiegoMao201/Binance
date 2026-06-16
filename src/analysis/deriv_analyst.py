@@ -1021,12 +1021,13 @@ from statistical tilt: kinetic compression, structural BOS, cycle maturity, scar
 The goal is asymmetric probability, not certainty.
 
 Respond ONLY with a JSON object:
-{{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}}
+{{"approved": true/false, "confidence": 0.0-1.0, "reason": "2-3 sentences citing: (1) V2/scarcity bucket and imminence, (2) Pattern Memory result if data available, (3) Maturity ratio, (4) Geometry if structural levels detected"}}
 
 {_approve_cond}
 {_bleed_rule}
 {_spike_timing_rule}
-Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict."""
+Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict.
+IMPORTANT: Your reason MUST mention the V2 scarcity bucket and Pattern Memory (even if insufficient data). Cite specific numbers when available."""
 
 
 # ── Main analyst class ───────────────────────────────────────────────────────
