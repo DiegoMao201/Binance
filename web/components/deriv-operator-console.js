@@ -142,6 +142,15 @@ function SymbolCard({ s }) {
   const cluster = analytics?.snapshot?.spike_cluster_active ?? false;
   const hasOpen = !!s.openContract;
   const hurst  = analytics?.snapshot?.hurst ?? null;
+
+  // ── _sn + V2 fields DECLARED EARLY — used by semaphore, compact msg & accum bar ──
+  const _snEarly   = analytics?.snapshot ?? null;
+  const _v2Bucket  = _snEarly?.progressive_imminence_bucket ?? null;
+  const _v2Ratio   = _snEarly?.progressive_imminence_ratio ?? null;
+  const _v2Ceiling = _snEarly?.ceiling_value_s ?? null;
+  const _v2CeilSrc = _snEarly?.ceiling_source ?? null;
+  const _v2HTBonus = _snEarly?.hurst_time_compound_bonus ?? null;
+  const _v2HTReasn = _snEarly?.hurst_time_compound_reason ?? null;
   const hurstH = analytics?.hurst_history ?? [];
 
   /* ─ score freshness + gap (needed before isInactive / sem) ─ */
@@ -261,14 +270,6 @@ function SymbolCard({ s }) {
     : null;
   const _rngProbC   = _sn?.rng_probability ?? null;
   const _rngThreshC = _sn?.rng_threshold ?? 65;
-
-  // ── V2 Progressive Imminence + Ceiling (PASO 2.3e-D) ──────────────────
-  const _v2Bucket  = _sn?.progressive_imminence_bucket ?? null;   // fresh/warming/medium/high/very_high/overdue_extreme
-  const _v2Ratio   = _sn?.progressive_imminence_ratio ?? null;    // 0.0–1.0+ (elapsed/ceiling)
-  const _v2Ceiling = _sn?.ceiling_value_s ?? null;                // seconds
-  const _v2CeilSrc = _sn?.ceiling_source ?? null;                 // hardcoded_higher/dynamic_p99_higher/etc.
-  const _v2HTBonus = _sn?.hurst_time_compound_bonus ?? null;      // e.g. +1.0 / -1.0
-  const _v2HTReasn = _sn?.hurst_time_compound_reason ?? null;     // e.g. 'agotado_cerca_techo'
 
   const _masterRed    = _structConflC
     || _scarcityC === "SECO"
