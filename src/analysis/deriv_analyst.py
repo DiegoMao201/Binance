@@ -882,11 +882,20 @@ def _build_ai_prompt(
             "  Signals: agotado_cerca_techo=STRONG spike imminent;"
             " trending_spike_lejano=spike unlikely soon;"
             " trending_cerca_techo=ambiguous; sin_fuerza_muy_pronto=premature; neutral=no signal\n"
-            "\nV2 OPERATIONAL RULES:\n"
-            '- DO NOT approve if bucket == "fresh" (spike just fired, retrace expected).\n'
-            '- PREFER to approve if bucket in {high, very_high, overdue_extreme}.\n'
-            '- Add confidence if compound == "agotado_cerca_techo".\n'
-            '- Reduce confidence if compound == "trending_spike_lejano".\n'
+            "\nV2 OPERATIONAL RULES (bucket = confidence factor, not binary filter):\n"
+            '- bucket="fresh" (0-20%%): DO NOT APPROVE unless score>=8.0 AND compound=="agotado_cerca_techo".'
+            ' (spike very recent, retrace expected)\n'
+            '- bucket="warming" (20-40%%): APPROVE CAUTIOUSLY — require score>=7.0 OR confidence>=0.85.'
+            ' (still early in cycle)\n'
+            '- bucket="medium" (40-60%%): APPROVE NORMALLY — apply usual threshold.\n'
+            '- bucket="high" (60-80%%): APPROVE WITH BONUS — reduce effective score threshold by 0.5.'
+            ' (high probability zone)\n'
+            '- bucket="very_high" (80-100%%): APPROVE WITH LARGE BONUS — reduce effective score threshold by 1.0.'
+            ' (spike imminent)\n'
+            '- bucket="overdue_extreme" (>100%%): EVALUATE CAREFULLY — approve but consider anomalous cluster risk.\n'
+            '\nCOMPOUND MODIFIER:\n'
+            '- compound=="agotado_cerca_techo": +1 confidence level (strong spike imminent signal).\n'
+            '- compound=="trending_spike_lejano": -1 confidence level (spike unlikely soon).\n'
         )
 
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
