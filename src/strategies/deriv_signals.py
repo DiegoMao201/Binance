@@ -376,8 +376,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_min_post_sec": 280,      # cycle=500s, min_post=280s → hold=450s covers spikes up to 730s
     },
     "BOOM1000": {
-        # 2026-05-29 user directive: BOOM1000 OFF.
-        "disabled": True,
+        # 2026-06-16 user directive: BOOM1000 REACTIVADO — activado al pipeline completo.
         "type": "spike_boom",
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
@@ -544,8 +543,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     },
     # ── NEW: BOOM/CRASH 900 — active ───────────────────────────────────────────────
     "BOOM900": {
-        # 2026-05-29 user directive: BOOM900 puro ruido — DESACTIVADO.
-        "disabled": True,
+        # 2026-06-16 user directive: BOOM900 REACTIVADO — activado al pipeline completo.
         "type": "spike_boom",
         "strategy_mode": "spike",
         "forced_side": "MULTUP",
