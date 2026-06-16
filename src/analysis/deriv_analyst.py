@@ -344,6 +344,14 @@ def _hurst_rs(prices: np.ndarray, min_n: int = 30) -> float:
     if log_returns.size < 64 or np.std(log_returns) == 0:
         return 0.50
 
+    # FIX PASO 2.3e-C: spike tick creates extreme log-return → inflates variance
+    # at short lags → Hurst rises artificially (+0.107 contamination measured 2.3d-B).
+    _lr_std = float(np.std(log_returns))
+    if _lr_std > 0:
+        _mask = np.abs(log_returns) <= 3.0 * _lr_std
+        if int(np.sum(_mask)) >= min_n:
+            log_returns = log_returns[_mask]
+
     # Cumulative log-returns: cum[i] = sum(log_returns[0..i-1])
     cum = np.concatenate(([0.0], np.cumsum(log_returns)))
 
