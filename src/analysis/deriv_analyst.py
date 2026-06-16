@@ -956,6 +956,21 @@ def _build_ai_prompt(
                 "- Más toques = nivel más significativo\n"
                 "- Usa como confirmación estructural del timing de entrada.\n"
             )
+        else:
+            # G.2 fix: always include section so LLM knows analysis ran
+            _n_h = geometric_structure.get("n_total_horizontals", 0)
+            _n_d = geometric_structure.get("n_total_diagonals", 0)
+            _geom_ctx = (
+                "\n\nESTRUCTURA GEOMÉTRICA (auto-detectada):\n"
+                f"No se detectaron niveles con N≥3 toques en la ventana actual "
+                f"(horizontales encontrados: {_n_h}, diagonales: {_n_d}).\n"
+                "INTERPRETACIÓN: Precio sin zonas S/R estructurales claras — precio en zona libre.\n"
+            )
+    elif n_ticks is not None and n_ticks < 100:
+        _geom_ctx = (
+            "\n\nESTRUCTURA GEOMÉTRICA: Insuficientes ticks para análisis "
+            f"({n_ticks}<100) — no disponible.\n"
+        )
 
     # ── PASO 2.3h-prep Fase E: Maturity informative section ──────────────────
     _mat_ctx = ""
@@ -1696,7 +1711,10 @@ class DerivAnalyst:
                         "rng": score_breakdown.get("rng_probability"),
                         "fvg_tier": score_breakdown.get("fvg_tier"),
                         "pattern_memory": _pm_result,
-                        "has_geometry": bool(_geo_result and _geo_result.get("horizontal_levels")),
+                        "n_ticks": len(prices_list),
+                        "has_geometry": bool(_geo_result and (_geo_result.get("horizontal_levels") or _geo_result.get("diagonal_trendlines"))),
+                        "n_geo_horizontals": len((_geo_result or {}).get("horizontal_levels") or []),
+                        "n_geo_diagonals": len((_geo_result or {}).get("diagonal_trendlines") or []),
                         "maturity_status": _mat_status,
                     },
                 }
