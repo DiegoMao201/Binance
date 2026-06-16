@@ -49,7 +49,7 @@ def _imminence_to_bucket(state: str | None) -> str:
 
 def _fvg_to_tier(fvg_tier_raw: str | None) -> str:
     t = (fvg_tier_raw or "").lower()
-    if "mitigated" in t:
+    if "mitigated" in t or "confluence" in t:
         return "mitigated"
     if any(x in t for x in ("detected", "active", "bull", "bear")):
         return "detected"

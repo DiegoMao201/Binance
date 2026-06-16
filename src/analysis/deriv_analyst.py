@@ -288,6 +288,8 @@ class DerivAnalysis:
     ai_reason: str = "ai_gate_disabled"
     ai_model: str = ""
     ai_skipped: bool = False        # True if AI gate disabled or timed out
+    pattern_memory_context: dict | None = None
+    geometric_structure_context: dict | None = None
 
 
 def _safe_ts(v: Any) -> float | None:
@@ -1839,6 +1841,9 @@ class DerivAnalyst:
                 analysis.ai_confidence = 0.0
                 analysis.ai_reason   = f"ai_error_fail_closed: {exc}"
 
+        # H.2: propagate PM + geometry context to caller (for decision_logger)
+        analysis.pattern_memory_context = _pm_result
+        analysis.geometric_structure_context = _geo_result
         return analysis
 
     def get_history_summary(self) -> dict[str, Any]:

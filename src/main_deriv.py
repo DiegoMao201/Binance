@@ -5743,6 +5743,8 @@ class DerivDaemon:
                 "ratio": _mat_ratio_out,
                 "status": _mat_status_out,
             } if _mat_ratio_out is not None else None,
+            pattern_memory=analysis.pattern_memory_context if analysis else None,
+            geometric_structure=analysis.geometric_structure_context if analysis else None,
             llm_info={
                 "approved": analysis.ai_approved if analysis else None,
                 "confidence": analysis.ai_confidence if analysis else None,
