@@ -528,7 +528,7 @@ PATTERN_MEMORY_ENABLED = os.getenv("DYNAMIC_AI_PATTERN_MEMORY_ENABLED", "true").
 }
 PATTERN_MEMORY_LOOKBACK = max(
     80,
-    int(os.getenv("DYNAMIC_AI_PATTERN_MEMORY_LOOKBACK", "500") or 500),
+    int(os.getenv("DYNAMIC_AI_PATTERN_MEMORY_LOOKBACK", "1500") or 1500),
 )
 
 # --- Market Phase intelligence (per symbol × UTC hour) ---------------------
@@ -3858,7 +3858,13 @@ async def _update_pattern_memory(conn: Any, logs_dir: Path) -> None:
     if not PATTERN_MEMORY_ENABLED:
         return
 
-    closed = _load_json(logs_dir / "deriv_closed_contracts.json")
+    # Prefer merged historical file when available (set by merge_contracts_for_pm.py)
+    _history_path = logs_dir / "deriv_contracts_history_pm.json"
+    _current_path = logs_dir / "deriv_closed_contracts.json"
+    if _history_path.exists():
+        closed = _load_json(_history_path)
+    else:
+        closed = _load_json(_current_path)
     if not closed:
         return
 
