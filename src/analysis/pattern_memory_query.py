@@ -48,10 +48,11 @@ def _imminence_to_bucket(state: str | None) -> str:
 
 
 def _fvg_to_tier(fvg_tier_raw: str | None) -> str:
-    t = (fvg_tier_raw or "").lower()
-    if "mitigated" in t or "confluence" in t:
+    # Must match _fvg_tier_cat() in dynamic_ai_orchestrator.py (authoritative PM writer)
+    t = (fvg_tier_raw or "").lower().strip()
+    if "mitigat" in t:
         return "mitigated"
-    if any(x in t for x in ("detected", "active", "bull", "bear")):
+    if t and t not in ("none", "unknown", ""):
         return "detected"
     return "none"
 
