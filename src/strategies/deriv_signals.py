@@ -407,9 +407,10 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # CRASH600 spike peak +$0.21 didn't trigger $0.40 TP. Small spikes are still real spikes.
         "spike_capture_tp_usdt": 0.15,
         "spike_profit_delta_usdt": 0.10,
-        # Phase 31: observation window — wait 90s after signal; if spike occurs during wait → cancel
-        # (spike already happened = entry is late). If no spike → proceed (spike still pending).
-        "observation_window_sec": 90,
+        # 2026-06-16: TRIPLE_LOCK predicts spike is imminent; OBS_WINDOW was killing
+        # the best entries (spike fires in 1s = perfect timing → was being cancelled).
+        # 0 = no obs window; AI conf≥0.85 + TRIPLE_LOCK is sufficient quality gate.
+        "observation_window_sec": 0,
         # Prueba04: reduced from 400→280 to capture the 280-400s range (4/6 BOOM1000 blocks in Prueba03)
         # cycle=1000s, min_post=280s → entries at t≥280s, hold=390s covers spikes up to 670s
         "spike_min_post_sec": 280,
