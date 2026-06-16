@@ -191,6 +191,85 @@ _DYNAMIC_GATE_SLOW_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_SLOW_CEI
 _DYNAMIC_GATE_FAST_FLOOR: float = float(os.getenv("DERIV_DYNAMIC_GATE_FAST_FLOOR", "6.5"))
 
 
+# ── PASO 2.3e-B (2026-06-15, Diego) — Progressive imminence + Compound Hurst-Time ──
+# Filosofía "bot astuto": evaluación continua vs. estados binarios.
+# p90 dinámico rolling 12h reemplaza percentiles hardcoded de 2026-06-06.
+
+# Fallback p90 en segundos por símbolo (calibrado 2.3d-B sobre datos 12h reales)
+_PROGRESSIVE_P90_FALLBACK_S: dict[str, float] = {
+    "CRASH500": 1098.0,  # 18.3 min
+    "CRASH600": 1110.0,  # 18.5 min
+    "CRASH900": 1776.0,  # 29.6 min
+    "BOOM500":  1422.0,  # 23.7 min
+    "BOOM600":  1368.0,  # 22.8 min
+}
+
+
+def _compute_dynamic_p90_gap(spike_ts_list: list, symbol: str, window_hours: float = 12.0) -> float:
+    """p90 de gaps inter-spike rolling en la ventana dada.
+
+    Retorna segundos. Fallback a hardcoded si <5 spikes en ventana.
+    """
+    import time as _time
+    t0 = _time.time() - window_hours * 3600.0
+    recent = sorted(float(ts) for ts in spike_ts_list if ts and float(ts) >= t0)
+    if len(recent) < 5:
+        return _PROGRESSIVE_P90_FALLBACK_S.get(str(symbol).upper(), 1200.0)
+    gaps = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+    if len(gaps) < 4:
+        return _PROGRESSIVE_P90_FALLBACK_S.get(str(symbol).upper(), 1200.0)
+    gaps_sorted = sorted(gaps)
+    idx = int(len(gaps_sorted) * 0.90)
+    return gaps_sorted[min(idx, len(gaps_sorted) - 1)]
+
+
+def _compute_progressive_imminence_bonus(elapsed_s: float, p90_dynamic_s: float) -> dict:
+    """Curva continua de bonos por % del techo dinámico (p90 rolling 12h).
+
+    Buckets:
+      fresh       < 30%  → +0.0 score / +0 RNG
+      building  30-60%   → +0.5 score / +5 RNG
+      ripe      60-90%   → +1.5 score / +15 RNG
+      overdue_high >= 90% → +3.0 score / +30 RNG
+    """
+    if p90_dynamic_s <= 0.0:
+        return {"ratio": 0.0, "score_bonus": 0.0, "rng_bonus": 0.0, "bucket": "invalid"}
+    ratio = elapsed_s / p90_dynamic_s
+    if ratio < 0.30:
+        return {"ratio": ratio, "score_bonus": 0.0, "rng_bonus": 0.0, "bucket": "fresh"}
+    elif ratio < 0.60:
+        return {"ratio": ratio, "score_bonus": 0.5, "rng_bonus": 5.0, "bucket": "building"}
+    elif ratio < 0.90:
+        return {"ratio": ratio, "score_bonus": 1.5, "rng_bonus": 15.0, "bucket": "ripe"}
+    else:
+        return {"ratio": ratio, "score_bonus": 3.0, "rng_bonus": 30.0, "bucket": "overdue_high"}
+
+
+def _compute_hurst_time_compound_bonus(hurst: float, ratio: float) -> dict:
+    """Compound signal Hurst + tiempo desde último spike.
+
+    Hurst < 0.45 = sin fuerza (mean-reverting)
+    Hurst > 0.55 = tendencia activa
+
+    Combinaciones:
+      Hurst<0.45 + ratio>0.60 → +1.0  (agotado + cerca del techo)
+      Hurst>0.55 + ratio<0.30 → -1.0  (trending + spike lejano)
+      Hurst>0.55 + ratio>0.80 → +0.0  (trending cerca techo — neutral)
+      Hurst<0.45 + ratio<0.30 → -0.3  (sin fuerza pero muy pronto)
+    """
+    bonus = 0.0
+    reason = "neutral"
+    if hurst < 0.45 and ratio > 0.60:
+        bonus, reason = 1.0, "agotado_cerca_techo"
+    elif hurst > 0.55 and ratio < 0.30:
+        bonus, reason = -1.0, "trending_spike_lejano"
+    elif hurst > 0.55 and ratio > 0.80:
+        bonus, reason = 0.0, "trending_cerca_techo"
+    elif hurst < 0.45 and ratio < 0.30:
+        bonus, reason = -0.3, "sin_fuerza_muy_pronto"
+    return {"bonus": bonus, "reason": reason}
+
+
 def _compute_atr_hold_extension(
     symbol: str,
     atr_abs: float,
@@ -4130,30 +4209,36 @@ class DerivDaemon:
                         f"spike_imminence_RIPE: gap={_imm.get('ticks_since_last')}t "
                         f"score={_imm_score:.2f} → no bonus (RIPE gate passed, score≥{_ripe_min:.1f})"
                     )
-                elif _imm_state == "BUILDING" and 0.25 <= _imm_score <= 0.65:
-                    # Sweet spot: bonus completo escalado por score de inminencia
-                    _imm_boost = round(_imm_max * _imm_score, 2)
-                    snap.score = round(min(10.0, snap.score + _imm_boost), 3)
-                    snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
-                    snap.reasons.append(
-                        f"spike_imminence_BUILDING: gap={_imm.get('ticks_since_last')}t "
-                        f"score={_imm_score:.2f} → +{_imm_boost:.2f} (61%WR sweet spot)"
-                    )
-                    _LOGGER.info(
-                        "[PIPELINE] SPIKE_IMMINENCE_BUILDING %s gap=%st imm=%.2f → +%.2f score→%.2f",
-                        tick.symbol, _imm.get("ticks_since_last"),
-                        _imm_score, _imm_boost, snap.score,
-                    )
-                elif _imm_state == "OVERDUE":
-                    # Pasó el p75 — spike overdue, bonus reducido 40%
-                    _imm_boost = round(_imm_max * _imm_score * 0.40, 2)
-                    if _imm_boost > 0.0:
-                        snap.score = round(min(10.0, snap.score + _imm_boost), 3)
-                        snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
-                        snap.reasons.append(
-                            f"spike_imminence_OVERDUE: gap={_imm.get('ticks_since_last')}t "
-                            f"score={_imm_score:.2f} → +{_imm_boost:.2f} (overdue 40%)"
-                        )
+                # DEPRECATED 2026-06-15 PASO 2.3e-B (Diego — filosofía "bot astuto"):
+                # Los bonos binarios BUILDING (+imm_max×imm_score) y OVERDUE (+40%)
+                # se reemplazan por bonos progresivos basados en % del p90 dinámico 12h.
+                # Razón: filosofía "bot astuto, no rígido" — la curva continua de ratio
+                # captura la progresión real de probabilidad sin estados binarios.
+                # Nueva lógica: _compute_progressive_imminence_bonus() aplicada abajo
+                # tras el bloque de scarcity (donde _scar.elapsed_s está disponible).
+                #
+                # elif _imm_state == "BUILDING" and 0.25 <= _imm_score <= 0.65:
+                #     _imm_boost = round(_imm_max * _imm_score, 2)
+                #     snap.score = round(min(10.0, snap.score + _imm_boost), 3)
+                #     snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
+                #     snap.reasons.append(
+                #         f"spike_imminence_BUILDING: gap={_imm.get('ticks_since_last')}t "
+                #         f"score={_imm_score:.2f} → +{_imm_boost:.2f} (61%WR sweet spot)"
+                #     )
+                #     _LOGGER.info(
+                #         "[PIPELINE] SPIKE_IMMINENCE_BUILDING %s gap=%st imm=%.2f → +%.2f score→%.2f",
+                #         tick.symbol, _imm.get("ticks_since_last"),
+                #         _imm_score, _imm_boost, snap.score,
+                #     )
+                # elif _imm_state == "OVERDUE":
+                #     _imm_boost = round(_imm_max * _imm_score * 0.40, 2)
+                #     if _imm_boost > 0.0:
+                #         snap.score = round(min(10.0, snap.score + _imm_boost), 3)
+                #         snap.score_breakdown["spike_imminence_bonus"] = _imm_boost
+                #         snap.reasons.append(
+                #             f"spike_imminence_OVERDUE: gap={_imm.get('ticks_since_last')}t "
+                #             f"score={_imm_score:.2f} → +{_imm_boost:.2f} (overdue 40%)"
+                #         )
 
         # ── 2026-06-06 HURST × IMMINENCIA — bonus mean-reversion para CRASH ─
         # Insight cuantitativo: cuando Hurst < 0.42 el mercado es mean-reverting
@@ -4236,6 +4321,51 @@ class DerivDaemon:
                 _LOGGER.debug(
                     "[LEY2] %s %s → dry_override_gate=%.2f (regime gate bypass armed)",
                     tick.symbol, _seco_resolved, _dry_gate_score,
+                )
+
+        # ── PASO 2.3e-B (2026-06-15): Progressive imminence bonus + Compound Hurst-Time ──
+        # Reemplaza bonos binarios BUILDING/OVERDUE (comentados arriba).
+        # Usa elapsed_s en segundos (wall-clock, de _scar) + p90 dinámico rolling 12h.
+        # _scar ya fue computado arriba en el bloque scarcity (línea ~4275).
+        if _is_bc_bias:
+            _prog_elapsed_s = float((_scar or {}).get("elapsed_s") or 0.0)
+            _prog_spike_ts = list(
+                self._risk._spike_scar_ts.get(tick.symbol.upper(), [])
+                or self._risk._spike_scar_ts.get(tick.symbol, [])
+            )
+            _prog_p90 = _compute_dynamic_p90_gap(_prog_spike_ts, tick.symbol, window_hours=12.0)
+            _prog_bonus_info = _compute_progressive_imminence_bonus(_prog_elapsed_s, _prog_p90)
+            _prog_ratio = _prog_bonus_info["ratio"]
+
+            # Aplicar bono progresivo al score
+            _prog_score_bonus = float(_prog_bonus_info["score_bonus"])
+            if _prog_score_bonus > 0.0:
+                snap.score = round(min(10.0, snap.score + _prog_score_bonus), 3)
+
+            # Compound Hurst + Time signal
+            _prog_hurst = float(_eval_hurst if _eval_hurst is not None else 0.5)
+            _prog_compound = _compute_hurst_time_compound_bonus(_prog_hurst, _prog_ratio)
+            _prog_compound_bonus = float(_prog_compound["bonus"])
+            if _prog_compound_bonus != 0.0:
+                snap.score = round(min(10.0, max(0.0, snap.score + _prog_compound_bonus)), 3)
+
+            # Registrar en score_breakdown para auditoría
+            snap.score_breakdown["progressive_imminence_ratio"]       = round(_prog_ratio, 3)
+            snap.score_breakdown["progressive_imminence_score_bonus"] = _prog_score_bonus
+            snap.score_breakdown["progressive_imminence_rng_bonus"]   = float(_prog_bonus_info["rng_bonus"])
+            snap.score_breakdown["progressive_imminence_bucket"]      = _prog_bonus_info["bucket"]
+            snap.score_breakdown["p90_dynamic_12h_s"]                 = round(_prog_p90, 1)
+            snap.score_breakdown["hurst_time_compound_bonus"]         = _prog_compound_bonus
+            snap.score_breakdown["hurst_time_compound_reason"]        = _prog_compound["reason"]
+
+            # Logging [PROGRESSIVE] para auditoría posterior
+            if _prog_bonus_info["bucket"] != "fresh" or _prog_compound_bonus != 0.0:
+                _LOGGER.info(
+                    "[PROGRESSIVE] %s ratio=%.2f bucket=%s score_bonus=%+.1f "
+                    "compound=%+.1f (%s) p90_dyn=%.0fs elapsed=%.0fs → score=%.2f",
+                    tick.symbol, _prog_ratio, _prog_bonus_info["bucket"],
+                    _prog_score_bonus, _prog_compound_bonus, _prog_compound["reason"],
+                    _prog_p90, _prog_elapsed_s, snap.score,
                 )
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
