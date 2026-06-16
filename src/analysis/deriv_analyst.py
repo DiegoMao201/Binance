@@ -1368,157 +1368,26 @@ class DerivAnalyst:
             recent_win_rate = (recent_wins / recent_trades_n * 100.0) if recent_trades_n else 0.0
             recent_avg_pnl = (sum(recent_pnl_values) / recent_trades_n) if recent_trades_n else 0.0
 
-            adaptive_conf = float(_AI_MIN_CONFIDENCE)
-            reasons: list[str] = []
-
-            if decisions_n >= 12 and approval_rate >= 90.0:
-                adaptive_conf += 0.08
-                reasons.append(f"approval_rate={approval_rate:.1f}%")
-            elif decisions_n >= 12 and approval_rate >= 82.0:
-                adaptive_conf += 0.05
-                reasons.append(f"approval_rate={approval_rate:.1f}%")
-
-            if trades_n >= 8:
-                if win_rate < 35.0:
-                    adaptive_conf += 0.08
-                    reasons.append(f"win_rate={win_rate:.1f}%")
-                if win_rate < 25.0:
-                    adaptive_conf += 0.05
-                if avg_pnl < 0.0:
-                    adaptive_conf += 0.05
-                    reasons.append(f"avg_pnl={avg_pnl:.4f}")
-                if weak_exit_rate >= 55.0:
-                    adaptive_conf += 0.03
-                    reasons.append(f"weak_exits={weak_exit_rate:.1f}%")
-
-            if trades_n >= 8 and win_rate >= 55.0 and avg_pnl > 0.0 and approval_rate <= 70.0:
-                adaptive_conf -= 0.03
-
-            adaptive_conf = max(_AI_MIN_CONFIDENCE, min(adaptive_conf, _AI_ADAPTIVE_MAX_CONFIDENCE))
-
-            quality_veto = False
-            veto_reasons: list[str] = []
-            if _AI_QUALITY_VETO_ENABLED:
-                if (
-                    decisions_n >= _AI_QUALITY_VETO_MIN_DECISIONS
-                    and approval_rate >= _AI_QUALITY_VETO_APPROVAL_RATE
-                    and trades_n >= _AI_QUALITY_VETO_MIN_TRADES
-                    and (win_rate <= _AI_QUALITY_VETO_WIN_RATE or avg_pnl <= _AI_QUALITY_VETO_AVG_PNL)
-                ):
-                    quality_veto = True
-                    veto_reasons.append(
-                        f"macro_veto:approval={approval_rate:.1f}% wr={win_rate:.1f}% avg={avg_pnl:.4f}"
-                    )
-                if (
-                    tail_n >= 4
-                    and tail_win_rate <= _AI_QUALITY_VETO_TAIL_WIN_RATE
-                    and tail_avg_pnl <= _AI_QUALITY_VETO_TAIL_AVG_PNL
-                ):
-                    quality_veto = True
-                    veto_reasons.append(
-                        f"tail_veto:n={tail_n} wr={tail_win_rate:.1f}% avg={tail_avg_pnl:.4f}"
-                    )
-
-                if quality_veto and _AI_QUALITY_RECOVERY_ENABLED:
-                    market_activity_ok = (
-                        spikes_recent_n >= _AI_QUALITY_RECOVERY_MIN_SPIKES
-                        and spikes_recent_entry_rate >= _AI_QUALITY_RECOVERY_MIN_ENTRY_RATE
-                    )
-                    ai_flow_ok = (
-                        decisions_recent_n >= _AI_QUALITY_RECOVERY_MIN_DECISIONS
-                        and approval_rate_recent >= _AI_QUALITY_RECOVERY_MIN_AI_APPROVAL
-                    )
-                    recent_trade_quality_ok = (
-                        recent_trades_n == 0
-                        or (
-                            recent_trades_n >= _AI_QUALITY_RECOVERY_MIN_RECENT_TRADES
-                            and (
-                                recent_win_rate >= _AI_QUALITY_RECOVERY_RECENT_WIN_RATE
-                                or recent_avg_pnl >= _AI_QUALITY_RECOVERY_RECENT_AVG_PNL
-                            )
-                        )
-                    )
-
-                    if market_activity_ok and ai_flow_ok and recent_trade_quality_ok:
-                        quality_veto = False
-                        veto_reasons.append(
-                            "recovery_override:"
-                            f"spikes={spikes_recent_n} entry={spikes_recent_entry_rate:.1f}% "
-                            f"ai={approval_rate_recent:.1f}% recent_n={recent_trades_n} "
-                            f"recent_wr={recent_win_rate:.1f}% recent_avg={recent_avg_pnl:.4f}"
-                        )
-
-                # Market-phase override: when the IA sidecar marks this symbol
-                # as ACCEL (short-window spike rate well above its own hourly
-                # baseline) we let it trade through a temporary bleed.
-                _phase_payload = _market_phase_for(sym) or {}
-                _phase_label = str(_phase_payload.get("phase") or "").upper()
-                _slope_signal = str(_phase_payload.get("slope_signal") or "").upper()
-                if quality_veto and _AI_ACCEL_BYPASS_TAIL_VETO and (
-                    _phase_label == "ACCEL" or _slope_signal == "ACCEL_FAST"
-                ):
-                    quality_veto = False
-                    veto_reasons.append(
-                        f"market_phase_override:phase={_phase_label or 'n/a'} "
-                        f"slope={_slope_signal or 'n/a'}"
-                    )
-                if _AI_ACCEL_CONF_RELAX > 0.0 and (
-                    _phase_label == "ACCEL" or _slope_signal == "ACCEL_FAST"
-                ):
-                    adaptive_conf = max(
-                        _AI_MIN_CONFIDENCE, adaptive_conf - _AI_ACCEL_CONF_RELAX
-                    )
-                    reasons.append(
-                        f"accel_relax=-{_AI_ACCEL_CONF_RELAX:.2f}"
-                    )
-
             out[sym] = {
-                "ai_min_confidence": adaptive_conf,
-                "quality_note": "adaptive:" + (", ".join(reasons) if reasons else "baseline"),
+                "ai_min_confidence": _AI_MIN_CONFIDENCE,
+                "quality_note": "adaptive:disabled",
                 "approval_rate": approval_rate,
                 "win_rate": win_rate,
                 "avg_pnl": avg_pnl,
                 "trades_n": trades_n,
                 "decisions_n": decisions_n,
-                "tail_n": tail_n,
-                "tail_win_rate": tail_win_rate,
-                "tail_avg_pnl": tail_avg_pnl,
-                "spikes_recent_n": spikes_recent_n,
-                "spikes_recent_entry_rate": spikes_recent_entry_rate,
-                "decisions_recent_n": decisions_recent_n,
-                "approval_rate_recent": approval_rate_recent,
-                "recent_trades_n": recent_trades_n,
-                "recent_win_rate": recent_win_rate,
-                "recent_avg_pnl": recent_avg_pnl,
-                "quality_veto": quality_veto,
-                "quality_veto_note": "; ".join(veto_reasons),
+                "quality_veto": False,
+                "quality_veto_note": "",
             }
 
         self._ai_quality_cache = out
         self._ai_quality_cache_ts = now
 
     def _dynamic_ai_min_confidence(self, symbol: str) -> tuple[float, str]:
-        if not _AI_ADAPTIVE_CONFIDENCE_ENABLED:
-            return _AI_MIN_CONFIDENCE, "adaptive:disabled"
-        self._refresh_ai_quality_cache()
-        row = self._ai_quality_cache.get(str(symbol or "").upper())
-        if not row:
-            return _AI_MIN_CONFIDENCE, "adaptive:baseline"
-        return float(row.get("ai_min_confidence", _AI_MIN_CONFIDENCE)), str(
-            row.get("quality_note", "adaptive:baseline")
-        )
+        return _AI_MIN_CONFIDENCE, "adaptive:disabled"
 
     def _quality_veto_for_symbol(self, symbol: str) -> tuple[bool, str]:
-        if not _AI_QUALITY_VETO_ENABLED:
-            return False, "quality_veto:disabled"
-        self._refresh_ai_quality_cache()
-        row = self._ai_quality_cache.get(str(symbol or "").upper())
-        if not row:
-            return False, "quality_veto:none"
-        if bool(row.get("quality_veto")):
-            note = str(row.get("quality_veto_note") or "quality_veto")
-            return True, note
-        return False, "quality_veto:none"
+        return False, "quality_veto:disabled"
 
     # ─────────────────────────────────────────────────────────────────────────
     # Core analysis method

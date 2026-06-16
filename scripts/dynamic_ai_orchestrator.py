@@ -2733,10 +2733,8 @@ def _apply_symbol_risk_floor_policy(
     """
     ts_now = float(now_ts if isinstance(now_ts, (int, float)) else time.time())
     report: dict[str, dict[str, Any]] = {}
-    existing_lockouts = _load_symbol_risk_lockouts(lockout_path)
-    updated_lockouts: dict[str, dict[str, Any]] = {}
 
-    # Aggregate closed PnL per symbol within DD window.
+    # Aggregate closed PnL per symbol within DD window (for report only).
     closed_rows = _load_json(logs_dir / "deriv_closed_contracts.json")
     cutoff_ts = ts_now - float(SYMBOL_RISK_DD_WINDOW_SEC)
     pnl_per_sym: dict[str, float] = {}
@@ -2786,56 +2784,13 @@ def _apply_symbol_risk_floor_policy(
         sym_report: dict[str, Any] = {
             "pnl_6h": round(pnl_per_sym.get(sym, 0.0), 4),
             "trades_6h": trades_per_sym.get(sym, 0),
-            "lockout_active": False,
-            "lockout_until_ts": None,
             "hurst_clamp_applied": False,
         }
 
-        # 1) DD lockout (engage or honor existing).
-        prior = existing_lockouts.get(sym) or {}
-        prior_until = _safe_ts(prior.get("until_ts")) if prior else None
-        engage_new_lockout = False
-        if (
-            trades_per_sym.get(sym, 0) >= SYMBOL_RISK_MIN_TRADES
-            and pnl_per_sym.get(sym, 0.0) <= SYMBOL_RISK_DD_FLOOR_USDT
-        ):
-            engage_new_lockout = True
-
-        next_until: float | None = None
-        if engage_new_lockout:
-            # Refresh window so the lockout is exactly SYMBOL_RISK_LOCKOUT_SEC
-            # from now (clamp at most one renew per cycle).
-            next_until = ts_now + float(SYMBOL_RISK_LOCKOUT_SEC)
-        elif prior_until is not None and prior_until > ts_now:
-            next_until = prior_until
-
         is_active_override = base.is_active
-        # DEPRECATED 2026-06-15 (Diego decisión PASO 2.3c-C): DD lockout ya NO
-        # desactiva símbolos. Filosofía PRNG: spikes Poisson independientes;
-        # DD pasado ≠ DD futuro. Reemplazado: score_min sube, símbolo activo.
-        dd_lockout_score_penalty = 0.0
-        if next_until is not None and next_until > ts_now:
-            # was: is_active_override = False
-            dd_lockout_score_penalty = 1.0
-            sym_report["lockout_active"] = True
-            sym_report["lockout_until_ts"] = round(float(next_until), 1)
-            updated_lockouts[sym] = {
-                "until_ts": float(next_until),
-                "until_iso": datetime.fromtimestamp(next_until, tz=timezone.utc).isoformat(),
-                "engaged_at_ts": float(prior.get("engaged_at_ts") or ts_now) if prior_until is not None and not engage_new_lockout else ts_now,
-                "engaged_at_iso": datetime.fromtimestamp(
-                    float(prior.get("engaged_at_ts") or ts_now)
-                    if prior_until is not None and not engage_new_lockout
-                    else ts_now,
-                    tz=timezone.utc,
-                ).isoformat(),
-                "trigger_pnl_6h": round(pnl_per_sym.get(sym, 0.0), 4),
-                "trigger_trades_6h": int(trades_per_sym.get(sym, 0)),
-                "renewed_this_cycle": bool(engage_new_lockout),
-            }
 
         # 2) CRASH900 Hurst clamp on score_min_override.
-        next_score = float(base.score_min_override) + dd_lockout_score_penalty
+        next_score = float(base.score_min_override)
         if sym == "CRASH900" and len(crash900_hursts) >= CRASH900_HURST_MIN_SAMPLES:
             recent = crash900_hursts[-CRASH900_HURST_MIN_SAMPLES:]
             if all(h < CRASH900_HURST_CLAMP_THRESHOLD for h in recent):
@@ -2859,7 +2814,7 @@ def _apply_symbol_risk_floor_policy(
         out[sym] = new_cfg
         report[sym] = sym_report
 
-    _save_symbol_risk_lockouts(lockout_path, updated_lockouts)
+    _save_symbol_risk_lockouts(lockout_path, {})
     return out, report
 
 
