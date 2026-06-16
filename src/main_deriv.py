@@ -1790,6 +1790,16 @@ class DerivDaemon:
                 # Master Key bypass indicator
                 "master_key_bypass":        _fvg_cache.get("master_key_bypass"),
                 "master_key_rng":           _fvg_cache.get("master_key_rng"),
+                # V2 Progressive Imminence + Ceiling — PASO 2.3e-E.2
+                "progressive_imminence_bucket":      _fvg_cache.get("progressive_imminence_bucket"),
+                "progressive_imminence_ratio":       _fvg_cache.get("progressive_imminence_ratio"),
+                "progressive_imminence_score_bonus": _fvg_cache.get("progressive_imminence_score_bonus"),
+                "progressive_imminence_rng_bonus":   _fvg_cache.get("progressive_imminence_rng_bonus"),
+                "ceiling_value_s":                   _fvg_cache.get("ceiling_value_s"),
+                "ceiling_source":                    _fvg_cache.get("ceiling_source"),
+                "ceiling_p99_dynamic_s":             _fvg_cache.get("ceiling_p99_dynamic_s"),
+                "hurst_time_compound_bonus":         _fvg_cache.get("hurst_time_compound_bonus"),
+                "hurst_time_compound_reason":        _fvg_cache.get("hurst_time_compound_reason"),
             }
             _ctx_file = self._ctx_state_dir / "deriv_market_context.json"
             try:
@@ -4424,6 +4434,16 @@ class DerivDaemon:
                 # Master Key bypass (set at individual gate bypasses, always before this point)
                 "master_key_bypass":       _sb_tel.get("master_key_bypass"),
                 "master_key_rng":          _sb_tel.get("master_key_rng"),
+                # V2 Progressive Imminence + Ceiling — PASO 2.3e-E.2
+                "progressive_imminence_bucket":      _sb_tel.get("progressive_imminence_bucket"),
+                "progressive_imminence_ratio":       _sb_tel.get("progressive_imminence_ratio"),
+                "progressive_imminence_score_bonus": _sb_tel.get("progressive_imminence_score_bonus"),
+                "progressive_imminence_rng_bonus":   _sb_tel.get("progressive_imminence_rng_bonus"),
+                "ceiling_value_s":                   _sb_tel.get("ceiling_value_s"),
+                "ceiling_source":                    _sb_tel.get("ceiling_source"),
+                "ceiling_p99_dynamic_s":             _sb_tel.get("ceiling_p99_dynamic_s"),
+                "hurst_time_compound_bonus":         _sb_tel.get("hurst_time_compound_bonus"),
+                "hurst_time_compound_reason":        _sb_tel.get("hurst_time_compound_reason"),
             }
             self._last_fvg_state[_cache_sym].update(
                 {k: v for k, v in _tel_fields.items() if v is not None}

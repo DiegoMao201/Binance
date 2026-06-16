@@ -551,7 +551,7 @@ function SymbolCard({ s }) {
           <div style={{ height: "100%", borderRadius: 4, background: barColor, width: `${accumPct}%`, transition: "width 600ms ease" }} />
         </div>
         <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: -4, display: "flex", justifyContent: "space-between" }}>
-          <span>{accumPct}% del ciclo {barSuffix}</span>
+          <span>{accumPct}% del techo {barSuffix}</span>
           {_v2Ceiling != null && (
             <span style={{ color: T.mute, opacity: 0.7 }}>
               techo {Math.round(_v2Ceiling / 60)}m {_v2CeilSrc === "dynamic_p99_higher" ? "·p99" : _v2CeilSrc === "hardcoded_higher" ? "·fijo" : ""}
