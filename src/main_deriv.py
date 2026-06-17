@@ -3183,7 +3183,7 @@ class DerivDaemon:
                 )
                 if _mat_elapsed_s < _mat_threshold_s:
                     _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
-                    _mat_key = f"{tick.symbol}:early_entry_gate"
+                    _mat_key = f"{tick.symbol}:maturity_info"
                     _mat_last_emit = float(
                         self._dynamic_inactive_last_emit_ts.get(_mat_key) or 0.0
                     )
@@ -3191,8 +3191,9 @@ class DerivDaemon:
                     if (_mat_now - _mat_last_emit) >= 30.0:
                         self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
                         _LOGGER.info(
-                            "[MATURITY_GATE] %s | ratio=%.2f status=%s | elapsed=%.0fs < "
-                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs | cluster_n=%d",
+                            "[MATURITY_GATE] INFORMATIVE %s | ratio=%.2f status=%s | elapsed=%.0fs < "
+                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs | cluster_n=%d"
+                            " — pipeline continues to LLM",
                             tick.symbol,
                             _mat_ratio_out,
                             _mat_status_out,
@@ -3202,65 +3203,6 @@ class DerivDaemon:
                             _mat_median_s,
                             _mat_remain_s,
                             _mat_cl_n,
-                        )
-                    if _mat_ratio_out < 0.10:
-                        # EXTREME safety net: block only when <10% of cycle elapsed.
-                        self._record_decision(
-                            symbol=tick.symbol, allowed=False, side=None, score=0.0,
-                            reason=(
-                                f"EARLY_ENTRY_GATE: warmup_remain={_mat_remain_s:.0f}s "
-                                f"(elapsed={_mat_elapsed_s:.0f}s < threshold={_mat_threshold_s:.0f}s)"
-                            ),
-                            extra={
-                                "gate_name": "EARLY_ENTRY_GATE",
-                                "remain_sec": max(0, int(_mat_remain_s)),
-                                "ratio": _mat_ratio_out,
-                            },
-                        )
-                        # FILOSOFÍA A: bypass si cerramos este símbolo en los últimos
-                        # 300s. El reloj del PRNG no se reseteó por nuestro cierre —
-                        # la presión de scarcity sigue acumulada.
-                        _mat_last_close_ts = self._executor.get_last_close_ts(tick.symbol)
-                        _mat_elapsed_since_close = (
-                            time.time() - _mat_last_close_ts if _mat_last_close_ts else float("inf")
-                        )
-                        _mat_recent_close_window = float(
-                            os.getenv("DERIV_MATURITY_BYPASS_RECENT_CLOSE_SEC", "300") or 300
-                        )
-                        if _mat_last_close_ts and _mat_elapsed_since_close < _mat_recent_close_window:
-                            _LOGGER.info(
-                                "[MATURITY_GATE_BYPASS] %s cerramos hace %.0fs < %.0fs "
-                                "— reloj PRNG no reseteado, bypass maturity",
-                                tick.symbol, _mat_elapsed_since_close, _mat_recent_close_window,
-                            )
-                            # Do NOT return — continue to score/RNG evaluation
-                        elif _DRY_EXIT_RELAX_SKIP_MATURITY:
-                            # Fallback: DRY_EXIT_RELAX para dry exits específicamente
-                            _dry_mat_ok, _dry_mat_consec = self._is_dry_exit_relax(tick.symbol)
-                            if _dry_mat_ok:
-                                _LOGGER.info(
-                                    "[DRY_EXIT_RELAX] %s bypassing MATURITY_GATE | "
-                                    "elapsed=%.0fs < threshold=%.0fs | consecutive=%d/%d",
-                                    tick.symbol, _mat_elapsed_s, _mat_threshold_s,
-                                    _dry_mat_consec, _DRY_EXIT_RELAX_MAX_CONSECUTIVE,
-                                )
-                                # Do NOT return
-                            else:
-                                self._spike_enrich(
-                                    tick.symbol, bot_entered=False, block_reason="early_entry_gate"
-                                )
-                                return
-                        else:
-                            self._spike_enrich(
-                                tick.symbol, bot_entered=False, block_reason="early_entry_gate"
-                            )
-                            return
-                    else:
-                        # Informative only (ratio >= 0.10): log and continue to LLM.
-                        _LOGGER.info(
-                            "[MATURITY_GATE] INFORMATIVE %s ratio=%.2f status=%s "
-                            "— pipeline continues to LLM",
-                            tick.symbol, _mat_ratio_out, _mat_status_out,
                         )
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
