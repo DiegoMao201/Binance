@@ -3169,7 +3169,6 @@ class DerivDaemon:
                 _mat_frac_cluster = float(os.getenv("DERIV_MATURITY_GATE_CLUSTER_FRAC", "1.0"))
                 _mat_frac = _mat_frac_cluster if _mat_cl_n >= 2 else _mat_frac_base
                 _mat_threshold_s = _mat_median_s * _mat_frac
-                # Fase E: always compute ratio+status for LLM informative use
                 _mat_ratio_out = float(_mat_elapsed_s) / float(_mat_threshold_s)
                 _mat_elapsed_s_out = float(_mat_elapsed_s)
                 _mat_threshold_s_out = float(_mat_threshold_s)
@@ -3179,29 +3178,49 @@ class DerivDaemon:
                     "ready" if _mat_ratio_out < 1.0 else
                     "mature"
                 )
+                # PASO 2.6 O.3: hybrid — safety net extremo <15%, resto informativo al LLM
+                _mat_hardblock_min = float(
+                    os.getenv("DERIV_MATURITY_HARDBLOCK_MIN_RATIO", "0.15")
+                )
                 if _mat_elapsed_s < _mat_threshold_s:
                     _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
-                    _mat_key = f"{tick.symbol}:maturity_info"
+                    _mat_key = f"{tick.symbol}:maturity_gate"
                     _mat_last_emit = float(
                         self._dynamic_inactive_last_emit_ts.get(_mat_key) or 0.0
                     )
                     _mat_now = time.time()
-                    if (_mat_now - _mat_last_emit) >= 30.0:
-                        self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
-                        _LOGGER.info(
-                            "[MATURITY_GATE] INFORMATIVE %s | ratio=%.2f status=%s | elapsed=%.0fs < "
-                            "threshold=%.0fs (%.0f%% × median=%.0fs) | remain=%.0fs | cluster_n=%d"
-                            " — pipeline continues to LLM",
-                            tick.symbol,
-                            _mat_ratio_out,
-                            _mat_status_out,
-                            _mat_elapsed_s,
-                            _mat_threshold_s,
-                            _mat_frac * 100,
-                            _mat_median_s,
-                            _mat_remain_s,
-                            _mat_cl_n,
+                    if _mat_ratio_out < _mat_hardblock_min:
+                        # HARD BLOCK — primeros ~15% del ciclo: zona de ruido puro
+                        if (_mat_now - _mat_last_emit) >= 30.0:
+                            self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
+                            _LOGGER.info(
+                                "[MATURITY_HARDBLOCK] BLOCKED %s | ratio=%.3f < min=%.2f | "
+                                "elapsed=%.0fs threshold=%.0fs (%.0f%% × median=%.0fs) | "
+                                "remain=%.0fs | cluster_n=%d",
+                                tick.symbol, _mat_ratio_out, _mat_hardblock_min,
+                                _mat_elapsed_s, _mat_threshold_s, _mat_frac * 100,
+                                _mat_median_s, _mat_remain_s, _mat_cl_n,
+                            )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason=(
+                                f"maturity_hardblock:ratio={_mat_ratio_out:.3f}"
+                                f"<{_mat_hardblock_min}"
+                            ),
                         )
+                        return
+                    else:
+                        # Informative — LLM decide con contexto completo (memoria #11)
+                        if (_mat_now - _mat_last_emit) >= 30.0:
+                            self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
+                            _LOGGER.info(
+                                "[MATURITY_GATE] INFORMATIVE %s | ratio=%.2f status=%s | "
+                                "elapsed=%.0fs < threshold=%.0fs (%.0f%% × median=%.0fs) | "
+                                "remain=%.0fs | cluster_n=%d — pipeline continues to LLM",
+                                tick.symbol, _mat_ratio_out, _mat_status_out,
+                                _mat_elapsed_s, _mat_threshold_s, _mat_frac * 100,
+                                _mat_median_s, _mat_remain_s, _mat_cl_n,
+                            )
 
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.

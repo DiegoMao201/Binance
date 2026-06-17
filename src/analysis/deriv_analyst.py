@@ -59,6 +59,7 @@ from src.data.deriv_client import DerivClient, DerivClientError
 from src.utils.deriv_config import DerivSettings
 from src.analysis.pattern_memory_query import query_pattern_memory
 from src.analysis.geometric_levels import get_active_structure
+from src.utils.llm_throttle import LLM_THROTTLE
 
 
 _LOGGER = logging.getLogger("deriv.analyst")
@@ -1010,7 +1011,7 @@ def _build_ai_prompt(
             f"({n_ticks}<100) — no disponible.\n"
         )
 
-    # ── PASO 2.3h-prep Fase E: Maturity informative section ──────────────────
+    # ── PASO 2.6 O.4: Maturity informative section + reglas aguantar ─────────
     _mat_ctx = ""
     if maturity_info and maturity_info.get("elapsed_s") is not None:
         _me = float(maturity_info.get("elapsed_s") or 0)
@@ -1018,16 +1019,45 @@ def _build_ai_prompt(
         _mr = float(maturity_info.get("ratio") or (_me / _mt if _mt else 0))
         _ms = str(maturity_info.get("status") or "unknown")
         _mat_ctx = (
-            "\n\nMATURITY STATUS (informativo — NO bloqueante salvo ratio<0.10):\n"
+            "\n\nMATURITY STATUS (informativo — hard-block solo ratio<0.15, resto decides tú):\n"
             f"- Tiempo desde último spike: {_me:.0f}s\n"
             f"- Threshold de maduración: {_mt:.0f}s\n"
             f"- Ratio actual: {_mr:.2f} ({_ms})\n"
-            "  extremely_early(<0.30): muy prematuro, requiere confluencia EXCEPCIONAL\n"
-            "  early(0.30-0.60): prematuro, requiere confluencia ALTA\n"
-            "  ready(0.60-1.0): zona madura, criterios habituales\n"
-            "  mature(>1.0): maduro\n"
-            "RECUERDA: spike PRNG no tiene memoria. Si hay confluencia FUERTE (Pattern Memory "
-            "+ V2 + estructura + score alto), puedes aprobar incluso en early.\n"
+            "  extremely_early(<0.30): muy prematuro — datos muestran WR bajo, timeout probable\n"
+            "  early(0.30-0.60): prematuro — puede funcionar con confluencia ALTA\n"
+            "  ready(0.60-1.0): zona madura — criterios habituales\n"
+            "  mature(>1.0): maduro — spike inminente o ya pasó\n"
+            "\n"
+            "### REGLA CRÍTICA — AGUANTAR PARA ENTRAR BIEN\n"
+            "Datos reales: timeouts tienen maturity_ratio promedio=0.253, ganadores=0.442.\n"
+            "Conclusión: entrar temprano = timeout. AGUANTAR = mejor PnL.\n"
+            "\n"
+            f"Tu decisión AHORA (ratio={_mr:.2f}):\n"
+        )
+        if _mr < 0.25:
+            _mat_ctx += (
+                "- ratio<0.25: ZONA PELIGROSA. NO uses ENTER_NOW salvo TRIPLE_LOCK+Z>=4.0.\n"
+                "- PREFIERE PREPARE_AND_WAIT wait_seconds=90-120.\n"
+                "- Si confluencia débil: SKIP. Confidence máxima: 0.75.\n"
+            )
+        elif _mr < 0.50:
+            _mat_ctx += (
+                "- ratio 0.25-0.50: ZONA TEMPRANA. ENTER_NOW solo si score>=7.5+RNG>=80+estructura.\n"
+                "- En otro caso: PREPARE_AND_WAIT wait_seconds=60-90.\n"
+                "- Confidence máxima sin TRIPLE_LOCK: 0.85.\n"
+            )
+        elif _mr < 0.85:
+            _mat_ctx += (
+                "- ratio 0.50-0.85: ZONA MADURA. Criterios normales. ENTER_NOW con confluencia razonable.\n"
+            )
+        else:
+            _mat_ctx += (
+                "- ratio>=0.85: OVERDUE. Spike inminente. ENTER_NOW si gates pasan.\n"
+                "- Confidence puede subir a 0.90+ con buena confluencia.\n"
+            )
+        _mat_ctx += (
+            "FILOSOFÍA: Un trade que esperó 120s y ganó vale más que 3 prematuros perdidos.\n"
+            "En tu razón SIEMPRE menciona el maturity_ratio y por qué eliges esa acción.\n"
         )
 
     # K.4 — symbol velocity context for strategic timing decisions
@@ -1693,6 +1723,24 @@ class DerivAnalyst:
             except Exception:
                 pass
 
+        # PASO 2.6 O.1 — Throttle: 1 llamada LLM real por símbolo por minuto
+        # Evita múltiples llamadas al LLM cuando el estado cambia rápidamente.
+        # Con 8 símbolos = 8/min máx. Cabe en DeepSeek free (20/min, 1000/día).
+        _throttle_check = LLM_THROTTLE.can_call(symbol)
+        if not _throttle_check["allowed"]:
+            LLM_THROTTLE.record_skip(symbol)
+            _LOGGER.info(
+                "[LLM_THROTTLE] %s skipped | %s | remain=%ds",
+                symbol, _throttle_check["reason"], _throttle_check["remaining_sec"],
+            )
+            analysis.ai_skipped = False
+            analysis.ai_approved = False
+            analysis.ai_confidence = 0.0
+            analysis.ai_reason = (
+                f"throttled:{_throttle_check['remaining_sec']}s_remaining"
+            )
+            return analysis
+
         try:
             _LOGGER.info(
                 "[AI_CACHE] CACHE_REFRESH %s | reason=CACHE_MISS/INVALIDATED | "
@@ -1786,6 +1834,7 @@ class DerivAnalyst:
                 analysis.ai_reason = f"{analysis.ai_reason} | {_quality_veto_note}"
             analysis.ai_reason = f"{analysis.ai_reason} | {_quality_note}"
             analysis.ai_model      = str(ai_result.get("model", ""))
+            LLM_THROTTLE.record_call(symbol)
             await self._ai_cache_set(
                 symbol, ai_result,
                 {"hurst": hurst, "autocorr": autocorr, "score": score, "vol_regime": vr},
