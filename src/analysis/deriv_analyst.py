@@ -288,6 +288,11 @@ class DerivAnalysis:
     ai_reason: str = "ai_gate_disabled"
     ai_model: str = ""
     ai_skipped: bool = False        # True if AI gate disabled or timed out
+    # K.3 — strategic action fields (new contract)
+    ai_action: str = "SKIP"          # ENTER_NOW | PREPARE_AND_WAIT | POSTPONE | SKIP
+    ai_size_multiplier: float = 1.0  # 0.5-1.5
+    ai_wait_seconds: int = 0         # for PREPARE_AND_WAIT
+    ai_expected_spike_window_sec: int = 0
     pattern_memory_context: dict | None = None
     geometric_structure_context: dict | None = None
 
@@ -545,15 +550,40 @@ async def _call_openrouter(prompt: str) -> dict[str, Any]:
 
 
 def _normalize_ai(d: dict) -> dict:
-    d.setdefault("approved", False)
+    # K.3: new action-based contract — backward compat with old {approved, confidence}
+    if "action" in d:
+        action = str(d.get("action", "SKIP")).upper().strip()
+        if action not in ("ENTER_NOW", "PREPARE_AND_WAIT", "POSTPONE", "SKIP"):
+            action = "SKIP"
+        d["action"] = action
+        d["approved"] = action in ("ENTER_NOW", "PREPARE_AND_WAIT")
+    else:
+        # Old format: map to new
+        old_approved = bool(d.get("approved", False))
+        d["action"] = "ENTER_NOW" if old_approved else "SKIP"
+        d["approved"] = old_approved
     d.setdefault("confidence", 0.0)
     d.setdefault("reason", "")
     d.setdefault("model", "")
+    d.setdefault("size_multiplier", 1.0)
+    d.setdefault("wait_seconds", 0)
+    d.setdefault("expected_spike_window_sec", 0)
     try:
         d["confidence"] = float(d["confidence"])
     except (TypeError, ValueError):
         d["confidence"] = 0.0
-    d["approved"] = bool(d.get("approved", False))
+    try:
+        d["size_multiplier"] = max(0.5, min(1.5, float(d["size_multiplier"])))
+    except (TypeError, ValueError):
+        d["size_multiplier"] = 1.0
+    try:
+        d["wait_seconds"] = min(120, max(0, int(d["wait_seconds"])))
+    except (TypeError, ValueError):
+        d["wait_seconds"] = 0
+    try:
+        d["expected_spike_window_sec"] = max(0, int(d["expected_spike_window_sec"]))
+    except (TypeError, ValueError):
+        d["expected_spike_window_sec"] = 0
     return d
 
 
@@ -994,6 +1024,19 @@ def _build_ai_prompt(
             "+ V2 + estructura + score alto), puedes aprobar incluso en early.\n"
         )
 
+    # K.4 — symbol velocity context for strategic timing decisions
+    _sym_upper = str(symbol or "").upper()
+    if _sym_upper in ("BOOM500", "CRASH500"):
+        _symbol_speed_ctx = "RÁPIDO (BOOM500/CRASH500): spike típico 1-3 min. ENTER_NOW cuando V2 high + score>=6.5. PREPARE_AND_WAIT máx 30-60s."
+    elif _sym_upper in ("BOOM600", "CRASH600"):
+        _symbol_speed_ctx = "MEDIO (BOOM600/CRASH600): spike típico 2-4 min. ENTER_NOW con buena confluencia. PREPARE_AND_WAIT 30-90s."
+    elif _sym_upper in ("BOOM900", "CRASH900"):
+        _symbol_speed_ctx = "LENTO (BOOM900/CRASH900): spike típico 4-7 min. Requiere confluencia fuerte. PREPARE_AND_WAIT 60-120s preferido sobre ENTER_NOW prematuro."
+    elif _sym_upper in ("BOOM1000", "CRASH1000"):
+        _symbol_speed_ctx = "MUY LENTO (BOOM1000/CRASH1000): spike típico 6-12 min. Un solo indicador no basta. PREPARE_AND_WAIT 90-120s cuando maturity early/ready. ENTER_NOW solo con TRIPLE_LOCK o V2 very_high + ratio>=0.7."
+    else:
+        _symbol_speed_ctx = "Símbolo desconocido — usar criterios estándar."
+
     return f"""You are a quantitative trading assistant evaluating a trade signal on a Deriv synthetic volatility index.
 
 SYMBOL: {symbol}
@@ -1020,14 +1063,61 @@ Deriv spike indices are Poisson-distributed RNG — no entry is ever "perfect." 
 from statistical tilt: kinetic compression, structural BOS, cycle maturity, scarcity.
 The goal is asymmetric probability, not certainty.
 
-Respond ONLY with a JSON object:
-{{"approved": true/false, "confidence": 0.0-1.0, "reason": "2-3 sentences citing: (1) V2/scarcity bucket and imminence, (2) Pattern Memory result if data available, (3) Maturity ratio, (4) Geometry if structural levels detected"}}
+### TU ROL — DECISOR ESTRATÉGICO DE TIMING (K.3/K.4)
 
-{_approve_cond}
+NO eres un filtro SÍ/NO. Eres un decisor estratégico. El sistema gana 80% cuando el spike llega durante la posición. Tu trabajo: maximizar la probabilidad de que el spike llegue MIENTRAS estamos dentro.
+
+### LAS 4 ACCIONES
+
+**ENTER_NOW** — confluencia óptima ahora:
+  - score>={ai_threshold:.1f} + V2 bucket high/very_high + maturity ready/mature
+  - O TRIPLE_LOCK activo (spike inminente)
+  - O RNG>={_rng_threshold} + estructura confirmada + imminence RIPE/OVERDUE
+
+**PREPARE_AND_WAIT** (wait_seconds 30-120) — confluencia construyéndose:
+  - score decente ({ai_threshold:.1f}-7.0) que puede mejorar
+  - Maturity early/ready (ratio 0.30-0.65) — el ciclo madura en segundos
+  - El bot NO llamará al LLM otra vez; reevaluará gates cada tick
+  - Indica wait_seconds según velocidad del símbolo (ver abajo)
+
+**POSTPONE** — condiciones adversas para los próximos 60s:
+  - Cluster de spikes recién terminado (imminence FRESH tras burst)
+  - Post-spike reciente <30s + score bajo (<{ai_threshold:.1f})
+  - El bot no te llamará por 60 segundos
+
+**SKIP** — condiciones contradictorias:
+  - Conflicto direccional fuerte (structural_fvg_CONFLICT con confidence alta)
+  - Imminence FRESH + score bajo + no hay estructura
+
+### VELOCIDAD DEL SÍMBOLO (crítico para wait_seconds)
+{_symbol_speed_ctx}
+
+### HISTÓRICO = CONTEXTO, NO VETO
+Si WR_reciente<40%: requiere confluencia más fuerte para ENTER_NOW. Prefiere PREPARE_AND_WAIT 60-120s.
+Si WR_reciente>55%: ENTER_NOW con score mínimo válido.
+Si Pattern Memory WR≥60% n≥10: suma convicción → ENTER_NOW con size_multiplier hasta 1.3.
+NUNCA uses historial como rechazo absoluto. Cuando la hora buena llega, el bot debe entrar.
+
+### SIZE_MULTIPLIER GUIDE
+1.5: confluencia perfecta + PM ganador + TRIPLE_LOCK
+1.2: confluencia buena + streak ganador O PM ganador
+1.0: confluencia mínima válida
+0.8: señal marginal, historial adverso
+0.5: condiciones débiles pero quieres exposición mínima
+
+### BLEED / GUARDRAIL
 {_bleed_rule}
 {_spike_timing_rule}
-Do NOT approve if confidence <{_min_conf:.2f} or if mathematical signals conflict.
-IMPORTANT: Your reason MUST mention the V2 scarcity bucket and Pattern Memory (even if insufficient data). Cite specific numbers when available."""
+
+### RESPONDE SOLO JSON (sin markdown):
+{{"action": "ENTER_NOW" | "PREPARE_AND_WAIT" | "POSTPONE" | "SKIP",
+  "confidence": 0.0-1.0,
+  "size_multiplier": 0.5-1.5,
+  "wait_seconds": 0-120,
+  "expected_spike_window_sec": integer,
+  "reason": "2-3 frases citando: V2/scarcity bucket, Pattern Memory (n y WR si disponible), Maturity ratio, decisión estratégica justificada"}}
+
+Confidence mínima para ENTER_NOW: {_min_conf:.2f}. Para PREPARE_AND_WAIT: 0.60 mínimo."""
 
 
 # ── Main analyst class ───────────────────────────────────────────────────────
@@ -1660,7 +1750,13 @@ class DerivAnalyst:
                     return analysis
                 # else: fall through — approved=False, conf=0.0 → VETO (default behavior)
             _ai_conf = float(ai_result.get("confidence", 0.0) or 0.0)
-            _model_approved = bool(ai_result.get("approved", False))
+            # K.3 — new action contract; backward compat via _normalize_ai()
+            _ai_action = str(ai_result.get("action", "ENTER_NOW" if ai_result.get("approved") else "SKIP"))
+            _model_approved = _ai_action in ("ENTER_NOW", "PREPARE_AND_WAIT")
+            analysis.ai_action = _ai_action
+            analysis.ai_size_multiplier = float(ai_result.get("size_multiplier", 1.0) or 1.0)
+            analysis.ai_wait_seconds = int(ai_result.get("wait_seconds", 0) or 0)
+            analysis.ai_expected_spike_window_sec = int(ai_result.get("expected_spike_window_sec", 0) or 0)
             analysis.ai_approved = (
                 _model_approved
                 and _ai_conf >= _symbol_min_conf
