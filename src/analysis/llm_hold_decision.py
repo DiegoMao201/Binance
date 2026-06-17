@@ -32,9 +32,7 @@ _HOLD_LLM_MODELS: list[str] = [
     if m.strip()
 ]
 
-_HOLD_LLM_ENABLED: bool = (
-    os.getenv("DERIV_HOLD_LLM_ENABLED", "false").lower().strip() in ("1", "true", "yes", "on")
-)
+_HOLD_LLM_ENABLED: bool = False  # K.1: disabled — 24/24 trades 100% losses ($-17.33/24h evidence)
 _HOLD_LLM_MIN_INTERVAL_SEC: float = float(
     os.getenv("DERIV_HOLD_LLM_MIN_INTERVAL_SEC", "60") or 60
 )
