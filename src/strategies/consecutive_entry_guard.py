@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Dict
+from typing import Dict, Optional
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,17 +65,83 @@ class ConsecutiveEntryGuard:
             })
             self._maybe_activate_cooldown(symbol, last_spike_ts=last_spike_ts)
 
-    def is_blocked(self, symbol: str) -> dict:
+    def is_blocked(self, symbol: str, current_sb: Optional[Dict] = None) -> dict:
         """
         Verificar si el símbolo está en cooldown por corrida de pérdidas.
 
+        L.6.3: if current_sb provided, checks max pressure condition.
+        If max pressure AND not contaminated → override cooldown (returns blocked=False).
+
         Returns dict:
-          blocked        : bool
-          reason         : str
-          remaining_sec  : int
+          blocked             : bool
+          reason              : str
+          remaining_sec       : int
+          allow_chase_bypass  : bool — True when blocked; signals main to try L.6.2 bypass
+          max_pressure_override: bool — True when cooldown was overridden by max pressure
         """
         with self._lock:
-            return self._check_blocked(symbol)
+            result = self._check_blocked(symbol)
+            if not result["blocked"]:
+                return result
+
+            # L.6.3 — max pressure override check
+            if current_sb:
+                scarcity_ratio = float(current_sb.get("scarcity_ratio") or 0.0)
+                maturity_ratio = float(
+                    current_sb.get("progressive_imminence_ratio")
+                    or current_sb.get("maturity_ratio")
+                    or 0.0
+                )
+                rng_prob       = float(current_sb.get("rng_probability") or 0.0)
+                score          = float(current_sb.get("score_raw") or 0.0)
+                triple_lock    = bool(current_sb.get("triple_lock_fired", False))
+
+                max_pressure = (
+                    triple_lock
+                    or (
+                        scarcity_ratio >= 3.0
+                        and maturity_ratio >= 0.85
+                        and rng_prob >= 80
+                        and score >= 7.0
+                    )
+                )
+                if max_pressure:
+                    # Lazy import to avoid circular dependency at module load
+                    from src.safety.post_spike_contamination import detect_contamination  # noqa: PLC0415
+                    contam = detect_contamination(symbol, current_sb)
+                    if not contam["contaminated"]:
+                        remaining = result["remaining_sec"]
+                        reason = (
+                            f"max_pressure_override:"
+                            f"triple_lock={triple_lock}"
+                            f"|z={scarcity_ratio:.2f}"
+                            f"|ratio={maturity_ratio:.2f}"
+                            f"|rng={rng_prob:.0f}"
+                            f"|score={score:.2f}"
+                        )
+                        _LOGGER.info(
+                            "[CONSECUTIVE_GUARD] %s MAX_PRESSURE_OVERRIDE "
+                            "(was %ds remaining) | %s",
+                            symbol, remaining, reason,
+                        )
+                        del self._cooldown_until[symbol]
+                        self._cooldown_reason.pop(symbol, None)
+                        self._cooldown_spike_ts.pop(symbol, None)
+                        return {
+                            "blocked": False,
+                            "reason": reason,
+                            "remaining_sec": 0,
+                            "allow_chase_bypass": False,
+                            "max_pressure_override": True,
+                        }
+                    _LOGGER.debug(
+                        "[CONSECUTIVE_GUARD] %s max_pressure detected but CONTAMINATED "
+                        "(%s) — keeping cooldown",
+                        symbol, contam["confidence"],
+                    )
+
+            result["allow_chase_bypass"] = True
+            return result
 
     def on_spike_detected(self, symbol: str, spike_ts: float = 0.0) -> None:
         """
@@ -150,14 +216,15 @@ class ConsecutiveEntryGuard:
     def _check_blocked(self, symbol: str) -> dict:
         until = self._cooldown_until.get(symbol)
         if until is None:
-            return {"blocked": False, "reason": "", "remaining_sec": 0}
+            return {"blocked": False, "reason": "", "remaining_sec": 0, "allow_chase_bypass": False}
 
         now = time.time()
         if now >= until:
             del self._cooldown_until[symbol]
             self._cooldown_reason.pop(symbol, None)
-            return {"blocked": False, "reason": "cooldown_expired", "remaining_sec": 0}
+            return {"blocked": False, "reason": "cooldown_expired", "remaining_sec": 0, "allow_chase_bypass": False}
 
+        # allow_chase_bypass is added by is_blocked() after L.6.3 check — return here without it
         return {
             "blocked": True,
             "reason": self._cooldown_reason.get(symbol, "unknown"),

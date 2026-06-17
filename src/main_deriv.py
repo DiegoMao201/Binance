@@ -61,6 +61,7 @@ from src.strategies.deriv_signals import (
 )
 from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
+from src.safety.post_spike_contamination import detect_contamination as _detect_spike_contamination
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
@@ -1154,7 +1155,7 @@ class DerivDaemon:
             else 0.0
         )
 
-        _min_margin = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_SCORE_MARGIN", "0.60") or 0.60)
+        _min_margin = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_SCORE_MARGIN", "0.50") or 0.50)
         _min_momentum = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_MOMENTUM_MIN", "1.10") or 1.10)
         _min_velocity = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_VELOCITY_MIN", "0.45") or 0.45)
         _min_atr = float(os.getenv("DERIV_POST_SPIKE_STRENGTH_ATR_MIN", "1.00") or 1.00)
@@ -3072,20 +3073,60 @@ class DerivDaemon:
         # RNG (cooldown×0.3, POST_CLUSTER_EXHAUSTION) already suppress entries
         # after spikes without a blunt tick-count gate.
 
-        # ── L.1 CONSECUTIVE_ENTRY_GUARD ──────────────────────────────────────
+        # ── L.1+L.2+L.6.2+L.6.3 CONSECUTIVE_ENTRY_GUARD ────────────────────
         # Block if symbol is in corrida-cooldown (2+ losing trades in 600s window).
-        # Cooldown auto-cancels when a real spike arrives (on_spike_detected).
-        # L.2: notify guard of spike so it can release cooldown for the real spike.
+        # L.2: on_spike_detected cancels cooldown when a NEW spike arrives.
+        # L.6.2: if still blocked but score>=6.0 AND signal not contaminated → chase bypass.
+        # L.6.3: if max pressure (Z>=3 + ratio>=0.85 + RNG>=80 + score>=7) AND not
+        #         contaminated → override is handled inside is_blocked() itself.
+        # Uses _last_fvg_state (previous cycle data: scarcity_ratio, imminence_ratio,
+        # rng_probability, score_raw) — accurate enough for corrida/contamination check.
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
-        _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol)
-        if _ceg["blocked"]:
-            self._spike_enrich(
-                tick.symbol, bot_entered=False,
-                block_reason=f"consecutive_guard:{_ceg['reason']}:{_ceg['remaining_sec']}s",
+        _ceg_sb = self._last_fvg_state.get(tick.symbol.upper(), {})
+        _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol, current_sb=_ceg_sb)
+        if _ceg.get("max_pressure_override"):
+            _LOGGER.info(
+                "[CONSECUTIVE_GUARD] %s MAX_PRESSURE_OVERRIDE | %s",
+                tick.symbol, _ceg.get("reason", ""),
             )
-            return
+        elif _ceg["blocked"]:
+            if _ceg.get("allow_chase_bypass"):
+                # L.6.2: score >= 6.0 AND not contaminated → allow despite cooldown
+                _contam = _detect_spike_contamination(
+                    tick.symbol, _ceg_sb,
+                    _ceg_spike_ts if _ceg_spike_ts > 0 else None,
+                )
+                _score_chase = float(_ceg_sb.get("score_raw") or 0.0)
+                if not _contam["contaminated"] and _score_chase >= 6.0:
+                    _LOGGER.info(
+                        "[CONSECUTIVE_GUARD] %s CHASE_BYPASS clean | score=%.2f "
+                        "maturity=%.2f cooldown=%ds",
+                        tick.symbol, _score_chase, _contam["maturity_ratio"],
+                        _ceg["remaining_sec"],
+                    )
+                    # Allow through — do NOT return
+                else:
+                    _blk_detail = (
+                        f"contaminated:{_contam['confidence']}"
+                        if _contam["contaminated"]
+                        else f"score:{_score_chase:.2f}<6.0"
+                    )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason=(
+                            f"consecutive_guard:{_ceg['reason']}:{_ceg['remaining_sec']}s"
+                            f"|{_blk_detail}"
+                        ),
+                    )
+                    return
+            else:
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason=f"consecutive_guard:{_ceg['reason']}:{_ceg['remaining_sec']}s",
+                )
+                return
 
         # PASO 2.3h-prep Fase E: maturity data for LLM (initialized here, populated below)
         _mat_elapsed_s_out: float | None = None
