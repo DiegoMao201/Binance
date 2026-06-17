@@ -60,6 +60,7 @@ from src.strategies.deriv_signals import (
     spike_timeout_sec,
 )
 from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
+from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
@@ -3071,6 +3072,21 @@ class DerivDaemon:
         # RNG (cooldown×0.3, POST_CLUSTER_EXHAUSTION) already suppress entries
         # after spikes without a blunt tick-count gate.
 
+        # ── L.1 CONSECUTIVE_ENTRY_GUARD ──────────────────────────────────────
+        # Block if symbol is in corrida-cooldown (2+ losing trades in 600s window).
+        # Cooldown auto-cancels when a real spike arrives (on_spike_detected).
+        # L.2: notify guard of spike so it can release cooldown for the real spike.
+        _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
+        if _ceg_spike_ts > 0:
+            CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
+        _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol)
+        if _ceg["blocked"]:
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason=f"consecutive_guard:{_ceg['reason']}:{_ceg['remaining_sec']}s",
+            )
+            return
+
         # PASO 2.3h-prep Fase E: maturity data for LLM (initialized here, populated below)
         _mat_elapsed_s_out: float | None = None
         _mat_threshold_s_out: float | None = None
@@ -4249,11 +4265,16 @@ class DerivDaemon:
         #   Axis A (Z-score proxy): scarcity_ratio ≥ 1.5 / 2.0
         #   Axis B (time pressure): elapsed_s ≥ EXTREME_TENSION_LIMITS_SEC[symbol]
         # Either axis alone triggers the discount. Combined, they stack.
+        #   Z0 (L.3 2026-06-17): ratio ≥ 0.9 (LISTO) → micro 10% discount
         #   Z1 / time≥70%: partial discount (14%) on regime effective_min
         #   Z2 / time≥100%: full discount (28%) + structure bypass + fast-track
         # Floor DERIV_ELASTIC_FLOOR (5.50) prevents infinite collapse.
+        # L.3 root cause: Z0-Z2 only fired for SECO (ratio≥2.0), leaving LISTO/
+        # CARGANDO without any discount → 0 entries in those states (12h audit).
+        # Z0 restores LISTO eligibility without penalizing SECO.
         _elasticity_z = 0.0
         _elasticity_fast_track = False
+        _is_z0 = False
         _is_z1 = False
         _is_z2 = False
         if _is_bc_bias:
@@ -4261,6 +4282,7 @@ class DerivDaemon:
             _op_kinetic     = float(snap.score_breakdown.get("kinetic_compressed") or 0.0)
             _op_elapsed_s   = float(snap.score_breakdown.get("scarcity_elapsed_s") or 0.0)
             _op_sym_limit   = float(EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000))
+            _el_z0          = float(os.getenv("DERIV_ELASTIC_Z0", "0.9") or 0.9)
             _el_z1          = float(os.getenv("DERIV_ELASTIC_Z1", "1.5") or 1.5)
             _el_z2          = float(os.getenv("DERIV_ELASTIC_Z2", "2.0") or 2.0)
             # Time pressure: full when elapsed ≥ limit, partial at ≥ 70%
@@ -4269,6 +4291,10 @@ class DerivDaemon:
             # Choose the stronger signal between Z-score and time pressure
             _is_z2 = _op_ratio >= _el_z2 or _time_pressure_full
             _is_z1 = _op_ratio >= _el_z1 or _time_pressure_partial
+            # L.3: Z0 — micro-discount for LISTO state (ratio ≥ 0.9) so CARGANDO/LISTO
+            # can clear the regime gate. Audit 12h: 0 entries in those states because
+            # Z1/Z2 only fired at ratio≥1.5 (VENCIDO+), leaving LISTO gated at 6.8+.
+            _is_z0 = _op_ratio >= _el_z0 and not _is_z1 and not _is_z2
             # Effective Z for logging (use ratio if higher, else normalize time)
             _elasticity_z = max(
                 _op_ratio,
@@ -4396,6 +4422,19 @@ class DerivDaemon:
                 tick.symbol, _elasticity_z,
                 snap.score_breakdown.get("scarcity_elapsed_s") or 0.0,
                 EXTREME_TENSION_LIMITS_SEC.get(tick.symbol.upper(), 2000),
+                _original_regime_min, _regime_min,
+            )
+        elif _is_bc_bias and _is_z0:
+            # L.3: micro-discount for LISTO state — restores eligibility for
+            # CARGANDO/LISTO symbols blocked by high effective_min in 12h audit.
+            _el_pct     = float(os.getenv("DERIV_ELASTIC_Z0_DISCOUNT_PCT", "0.10") or 0.10)
+            _regime_min = max(_el_floor, _regime_min * (1.0 - _el_pct))
+            snap.score_breakdown["elasticity_regime_min_original"] = round(_original_regime_min, 2)
+            snap.score_breakdown["elasticity_regime_min_elastic"]  = round(_regime_min, 2)
+            snap.score_breakdown["elasticity_z0_applied"] = True
+            _LOGGER.debug(
+                "[ELASTICITY_Z0] %s ratio=%.2f (LISTO) -> Required Score lowered from %.2f to %.2f",
+                tick.symbol, _op_ratio if _is_bc_bias else 0.0,
                 _original_regime_min, _regime_min,
             )
 
@@ -5711,6 +5750,14 @@ class DerivDaemon:
                             _duration, _pnl, rec.get("side"),
                         )
                     self._risk.register_close(_pnl, symbol=str(rec.get("symbol") or ""))
+                    # L.1 — consecutive entry guard: track close for corrida detection
+                    _cg_sym = str(rec.get("symbol") or "")
+                    CONSECUTIVE_GUARD.record_close(
+                        symbol=_cg_sym,
+                        pnl=_pnl,
+                        exit_reason=str(rec.get("exit_reason") or "unknown"),
+                        last_spike_ts=float(self._risk.get_last_spike_ts(_cg_sym) or 0.0),
+                    )
                     # PASO 2.3h-prep Fase F: link outcome to enriched decision log
                     _rec_sym = str(rec.get("symbol") or "")
                     _rec_did = self._decision_ids.pop(_rec_sym, None)
