@@ -106,6 +106,10 @@ _TIER_QUOTA_TIGHTEN_PP = max(
     0.0,
     min(float(os.getenv("DERIV_TIER_QUOTA_TIGHTEN_PP", "0.03") or 0.03), 0.10),
 )
+_TIER_WAIT_PCT = max(
+    0.05,
+    min(float(os.getenv("DERIV_TIER_WAIT_PCT", "0.15") or 0.15), 0.30),
+)
 _SPIKE_QUOTA_LOOKBACK_HOURS = max(
     1, min(int(os.getenv("DERIV_SPIKE_QUOTA_LOOKBACK_HOURS", "12") or 12), 24)
 )
@@ -867,9 +871,13 @@ class DerivTradeExecutor:
             return out
 
         if _SPIKE_WAIT_FOR_QUOTA_ENABLED and not quota_done:
-            sl_floor = dollar_floor          # SOLO escalón $
+            # K.2: apply both dollar_floor AND wait_tier% to avoid multi-minute
+            # degradation from peak while quota is pending. Previously only
+            # dollar_floor was used (e.g., $2.00 for peak=$2.70 → loses $0.70).
+            _wait_tier_floor = peak_profit * (1.0 - _TIER_WAIT_PCT)
+            sl_floor = max(dollar_floor, _wait_tier_floor)
             out["wait_for_quota"] = True
-            out["tier_active"] = False
+            out["tier_active"] = True
         else:
             sl_floor = max(dollar_floor, tier_floor)
             out["wait_for_quota"] = False
