@@ -30,6 +30,17 @@ _DEFAULT_LOSS_WINDOW_S = 600    # ventana para contar pérdidas consecutivas
 _DEFAULT_MIN_LOSSES = 2         # mínimo de pérdidas para activar cooldown
 _DEFAULT_COOLDOWN_S = 300       # duración del cooldown (5 minutos)
 
+# 500/600 spikes más frecuentes → ventana corta; 900/1000 ciclos más largos → 1200s
+_LOSS_WINDOW_BY_SYMBOL: dict = {
+    "BOOM500": 600, "BOOM600": 600, "CRASH500": 600, "CRASH600": 600,
+    "BOOM900": 1200, "BOOM1000": 1200, "CRASH900": 1200, "CRASH1000": 1200,
+}
+
+# Salidas por tiempo cuentan como pérdida aunque el PnL sea null/0
+_TIMEOUT_EXIT_REASONS: frozenset = frozenset({
+    "max_hold_timeout", "max_hold_after_respite", "max_hold_spike_miss",
+})
+
 
 class ConsecutiveEntryGuard:
     """Rastrea cierres recientes por símbolo y bloquea corridas de pérdidas."""
@@ -187,15 +198,21 @@ class ConsecutiveEntryGuard:
         if not trades:
             return
 
+        loss_window_s = _LOSS_WINDOW_BY_SYMBOL.get(symbol.upper(), _DEFAULT_LOSS_WINDOW_S)
+
         # Solo analizar trades dentro de la ventana
-        window = [t for t in trades if (now - t["ts"]) < _DEFAULT_LOSS_WINDOW_S]
+        window = [t for t in trades if (now - t["ts"]) < loss_window_s]
         if len(window) < _DEFAULT_MIN_LOSSES:
             return
 
         # Contar pérdidas en las últimas N entradas dentro de la ventana
+        # pnl puede ser None (timeout trades) → tratarlo como 0; también contar razones de timeout
         last_n = list(trades)[-4:]  # analizar máx últimas 4
-        recent_window = [t for t in last_n if (now - t["ts"]) < _DEFAULT_LOSS_WINDOW_S]
-        consecutive_losses = sum(1 for t in recent_window if t["pnl"] < 0)
+        recent_window = [t for t in last_n if (now - t["ts"]) < loss_window_s]
+        consecutive_losses = sum(
+            1 for t in recent_window
+            if (t["pnl"] or 0.0) < 0 or t.get("exit_reason") in _TIMEOUT_EXIT_REASONS
+        )
 
         if consecutive_losses >= _DEFAULT_MIN_LOSSES:
             cooldown_end = now + _DEFAULT_COOLDOWN_S
@@ -206,9 +223,9 @@ class ConsecutiveEntryGuard:
             self._cooldown_spike_ts[symbol] = last_spike_ts
             _LOGGER.info(
                 "[CONSECUTIVE_GUARD] %s COOLDOWN activated %.0fs "
-                "| %d/%d recent trades lost | spike_ts_at_create=%.0f | reason=%s",
+                "| %d/%d recent trades lost (window=%ds) | spike_ts_at_create=%.0f | reason=%s",
                 symbol, _DEFAULT_COOLDOWN_S,
-                consecutive_losses, len(recent_window),
+                consecutive_losses, len(recent_window), loss_window_s,
                 last_spike_ts,
                 self._cooldown_reason[symbol],
             )
