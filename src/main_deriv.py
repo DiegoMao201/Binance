@@ -59,6 +59,7 @@ from src.strategies.deriv_signals import (
     passes_atr_volatility_filter,
     spike_timeout_sec,
 )
+from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
@@ -5492,6 +5493,29 @@ class DerivDaemon:
                 self._counters["orders_failed"] += 1
                 _LOGGER.exception("[deriv-daemon] order pipeline crashed (override, suppressed)")
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_crashed")
+        # ── K.5 — PendingOrderManager: evaluate before fresh LLM call ─────────
+        _k5_result = PENDING_MANAGER.evaluate(
+            tick.symbol,
+            current_score=snap.score,
+            current_spike_ts=float(self._risk.get_last_spike_ts(tick.symbol) or 0.0),
+        )
+        _k5_action = _k5_result["action"]
+        _k5_enter_order: PendingOrder | None = None
+
+        if _k5_action == "WAIT":
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="pending_wait")
+            return
+        elif _k5_action == "ABORT":
+            # Conditions degraded — fall through for fresh LLM analysis
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason=f"pending_abort:{_k5_result.get('reason', '')}",
+            )
+        elif _k5_action == "ENTER":
+            # Wait window elapsed with conditions maintained — execute with stored decision
+            _k5_enter_order = _k5_result["order"]
+        # NONE: no pending order — proceed normally
+
         # BLOCK 3 — AI GATE (only reached when NO hard math override fired)
         # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.
         # If AI approves (or is skipped/errored), execute the order.
@@ -5506,6 +5530,23 @@ class DerivDaemon:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("[deriv-daemon] analyst error for %s: %s — proceeding", tick.symbol, exc)
             analysis = None
+
+        # K.5 — ENTER path: override analysis with stored LLM decision from pending order
+        if _k5_enter_order is not None:
+            if analysis is None:
+                _LOGGER.warning("[K5] ENTER %s but analyze() returned None — skipping", tick.symbol)
+                return
+            _k5_waited = int(time.time() - _k5_enter_order.created_at_ts)
+            analysis.ai_approved = True
+            analysis.ai_action = "ENTER_NOW"
+            analysis.ai_skipped = True  # bypass veto block below
+            analysis.ai_size_multiplier = _k5_enter_order.size_multiplier
+            analysis.ai_confidence = _k5_enter_order.confidence
+            analysis.ai_reason = (
+                f"K5_pending_enter(waited={_k5_waited}s,"
+                f"score={snap.score:.2f},min_score={_k5_enter_order.min_score_hold:.2f}): "
+                f"{_k5_enter_order.llm_reason[:120]}"
+            )
 
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
             _probe_ok, _probe_reason = self._allow_ai_veto_recovery_probe(
@@ -5558,6 +5599,28 @@ class DerivDaemon:
                 tick.symbol,
                 _probe_reason,
             )
+
+        # ── K.5 — Intercept PREPARE_AND_WAIT before execution ─────────────────
+        if (
+            analysis is not None
+            and not analysis.ai_skipped
+            and analysis.ai_action == "PREPARE_AND_WAIT"
+            and analysis.ai_wait_seconds > 0
+        ):
+            PENDING_MANAGER.create(PendingOrder(
+                symbol=tick.symbol,
+                created_at_ts=time.time(),
+                spike_ts_at_create=float(self._risk.get_last_spike_ts(tick.symbol) or 0.0),
+                wait_seconds=analysis.ai_wait_seconds,
+                min_score_hold=analysis.ai_min_score_hold,
+                score_at_create=snap.score,
+                size_multiplier=analysis.ai_size_multiplier,
+                confidence=analysis.ai_confidence,
+                llm_reason=analysis.ai_reason[:200],
+                side=snap.side or "",
+            ))
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="pending_created")
+            return
 
         # ── Build order payload (AI-approved path) ─────────────────────────
         _is_mean_rev = bool(snap.score_breakdown.get("mean_rev_mode"))

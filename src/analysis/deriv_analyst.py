@@ -293,6 +293,7 @@ class DerivAnalysis:
     ai_size_multiplier: float = 1.0  # 0.5-1.5
     ai_wait_seconds: int = 0         # for PREPARE_AND_WAIT
     ai_expected_spike_window_sec: int = 0
+    ai_min_score_hold: float = 0.0   # K.5: abort pending order if score drops below this
     pattern_memory_context: dict | None = None
     geometric_structure_context: dict | None = None
 
@@ -568,6 +569,7 @@ def _normalize_ai(d: dict) -> dict:
     d.setdefault("size_multiplier", 1.0)
     d.setdefault("wait_seconds", 0)
     d.setdefault("expected_spike_window_sec", 0)
+    d.setdefault("min_score_hold", 0.0)
     try:
         d["confidence"] = float(d["confidence"])
     except (TypeError, ValueError):
@@ -577,13 +579,17 @@ def _normalize_ai(d: dict) -> dict:
     except (TypeError, ValueError):
         d["size_multiplier"] = 1.0
     try:
-        d["wait_seconds"] = min(120, max(0, int(d["wait_seconds"])))
+        d["wait_seconds"] = min(180, max(0, int(d["wait_seconds"])))
     except (TypeError, ValueError):
         d["wait_seconds"] = 0
     try:
         d["expected_spike_window_sec"] = max(0, int(d["expected_spike_window_sec"]))
     except (TypeError, ValueError):
         d["expected_spike_window_sec"] = 0
+    try:
+        d["min_score_hold"] = max(0.0, float(d["min_score_hold"]))
+    except (TypeError, ValueError):
+        d["min_score_hold"] = 0.0
     return d
 
 
@@ -1113,10 +1119,12 @@ NUNCA uses historial como rechazo absoluto. Cuando la hora buena llega, el bot d
 {{"action": "ENTER_NOW" | "PREPARE_AND_WAIT" | "POSTPONE" | "SKIP",
   "confidence": 0.0-1.0,
   "size_multiplier": 0.5-1.5,
-  "wait_seconds": 0-120,
+  "wait_seconds": 0-180,
+  "min_score_hold": score mínimo para mantener la orden activa (0.0 = sin límite),
   "expected_spike_window_sec": integer,
   "reason": "2-3 frases citando: V2/scarcity bucket, Pattern Memory (n y WR si disponible), Maturity ratio, decisión estratégica justificada"}}
 
+PREPARE_AND_WAIT: el bot monitorea tick a tick durante wait_seconds. Si llega un spike o el score cae bajo min_score_hold → aborta. Si wait_seconds pasan sin degradación → entra. NO llames al LLM de nuevo.
 Confidence mínima para ENTER_NOW: {_min_conf:.2f}. Para PREPARE_AND_WAIT: 0.60 mínimo."""
 
 
@@ -1756,6 +1764,7 @@ class DerivAnalyst:
             analysis.ai_action = _ai_action
             analysis.ai_size_multiplier = float(ai_result.get("size_multiplier", 1.0) or 1.0)
             analysis.ai_wait_seconds = int(ai_result.get("wait_seconds", 0) or 0)
+            analysis.ai_min_score_hold = float(ai_result.get("min_score_hold", 0.0) or 0.0)
             analysis.ai_expected_spike_window_sec = int(ai_result.get("expected_spike_window_sec", 0) or 0)
             analysis.ai_approved = (
                 _model_approved
