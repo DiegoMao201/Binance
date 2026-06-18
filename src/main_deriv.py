@@ -1144,6 +1144,31 @@ class DerivDaemon:
         if _elapsed > _strength_window:
             return True, ""
 
+        # GHOST_BYPASS: within the strength window, score≥7.0 + SMC_FVG/EMA200_SPIKE
+        # have empirical WR=56-60% (450 WIN / 343 EXPIRED ghost records).
+        # These are the trades the PSSV was incorrectly blocking.
+        # Disable: DERIV_GHOST_BYPASS_ENABLE=false
+        _ghost_en = str(os.getenv("DERIV_GHOST_BYPASS_ENABLE", "true")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if _ghost_en:
+            _gb_sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            _gb_setup = str(_gb_sb.get("setup_type") or "").upper()
+            _gb_grade = str(_gb_sb.get("execution_grade") or "").upper()
+            _gb_min = float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+            if (
+                float(snap.score or 0.0) >= _gb_min
+                and _gb_setup in {"SMC_FVG", "EMA200_SPIKE"}
+                and _gb_grade in {"A", "B"}
+            ):
+                _LOGGER.info(
+                    "[GHOST_BYPASS] %s score=%.2f setup=%s grade=%s elapsed=%.0ft → ALLOW (ghost WR=56%%)",
+                    symbol, float(snap.score or 0.0), _gb_setup, _gb_grade, _elapsed,
+                )
+                if isinstance(snap.score_breakdown, dict):
+                    snap.score_breakdown["ghost_bypass_fired"] = True
+                return True, ""
+
         _sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
         _score_margin = float(snap.score or 0.0) - float(score_floor or 0.0)
         _momentum = float(_sb.get("momentum") or 0.0)
@@ -3262,34 +3287,38 @@ class DerivDaemon:
                             )
 
         # ═══════════════════════════════════════════════════════════════════
-        # PASO 2.7 P.2: FRESH_CYCLE_GATE
-        # Cierra el loop: bot conoce imminence_state pero no actuaba sobre FRESH.
-        # Hard-block cuando ticks_desde_último_spike < P25 del símbolo.
-        # Misma filosofía que MATURITY_HARDBLOCK (memoria #19):
-        #   - Solo bloquea zona extrema (primero 25% inter-spike interval)
-        #   - UNKNOWN (sin data) → pasa al pipeline sin bloquear
+        # DRY_GATE: block entries when gap > P90 (statistically overdue zone).
+        # Ghost data proves FRESH=60% WR, DRY=33% WR (all max_hold_timeout).
+        # Blocking FRESH was wrong — we want those entries.
+        # UNKNOWN (cold-start / no pctl) → pass through unchanged.
+        # Disable: DERIV_DRY_GATE_ENABLE=false
         # ═══════════════════════════════════════════════════════════════════
-        if is_spike_market(tick.symbol):
-            _fcg_imm = self._risk.get_spike_imminence_state(tick.symbol)
-            if _fcg_imm.get("state") == "FRESH":
-                _fcg_key = f"{tick.symbol}:fresh_cycle_gate"
-                _fcg_now = time.time()
-                _fcg_last_emit = float(
-                    self._dynamic_inactive_last_emit_ts.get(_fcg_key) or 0.0
+        _dry_gate_en = str(os.getenv("DERIV_DRY_GATE_ENABLE", "true")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if _dry_gate_en and is_spike_market(tick.symbol):
+            _dg_imm = self._risk.get_spike_imminence_state(tick.symbol)
+            if _dg_imm.get("state") == "DRY":
+                _dg_key = f"{tick.symbol}:dry_gate"
+                _dg_now = time.time()
+                _dg_last_emit = float(
+                    self._dynamic_inactive_last_emit_ts.get(_dg_key) or 0.0
                 )
-                if (_fcg_now - _fcg_last_emit) >= 30.0:
-                    self._dynamic_inactive_last_emit_ts[_fcg_key] = _fcg_now
+                if (_dg_now - _dg_last_emit) >= 30.0:
+                    self._dynamic_inactive_last_emit_ts[_dg_key] = _dg_now
+                    _dg_pctl = _dg_imm.get("pctl") or {}
                     _LOGGER.info(
-                        "[FRESH_CYCLE_GATE] BLOCKED %s | ticks_since=%d < P25=%d | state=FRESH",
+                        "[DRY_GATE] BLOCKED %s | ticks_since=%d > P90=%d | WR=33%% empirical",
                         tick.symbol,
-                        _fcg_imm.get("ticks_since_last", 0),
-                        int((_fcg_imm.get("pctl") or [0])[0]),
+                        _dg_imm.get("ticks_since_last", 0),
+                        int(_dg_pctl.get("p90", 0)),
                     )
+                _dg_pctl2 = _dg_imm.get("pctl") or {}
                 self._spike_enrich(
                     tick.symbol, bot_entered=False,
                     block_reason=(
-                        f"fresh_cycle_gate:ticks_since={_fcg_imm.get('ticks_since_last', 0)}"
-                        f"<P25={int((_fcg_imm.get('pctl') or [0])[0])}"
+                        f"dry_gate:ticks_since={_dg_imm.get('ticks_since_last', 0)}"
+                        f">P90={int(_dg_pctl2.get('p90', 0))}"
                     ),
                 )
                 return
