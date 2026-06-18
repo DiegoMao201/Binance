@@ -61,6 +61,10 @@ from src.strategies.deriv_signals import (
 )
 from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
+from src.strategies.pending_entry_watcher import (
+    PENDING_ENTRY_WATCHER,
+    ACTION_ENTER, ACTION_FIRST_WAIT, ACTION_WAIT, ACTION_CANCEL,
+)
 from src.safety.post_spike_contamination import detect_contamination as _detect_spike_contamination
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
@@ -3084,6 +3088,8 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
+            # Spike real detectado → cancelar pending entry (el spike ya llegó)
+            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
         _ceg_sb = self._last_fvg_state.get(tick.symbol.upper(), {})
         _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol, current_sb=_ceg_sb)
         if _ceg.get("max_pressure_override"):
@@ -3131,6 +3137,7 @@ class DerivDaemon:
         # PASO 2.3h-prep Fase E: maturity data for LLM (initialized here, populated below)
         _mat_elapsed_s_out: float | None = None
         _mat_threshold_s_out: float | None = None
+        _mat_median_s_for_pending: float = 600.0  # fallback used by PendingEntryWatcher
         _mat_ratio_out: float | None = None
         _mat_status_out: str | None = None
 
@@ -3150,6 +3157,8 @@ class DerivDaemon:
             _mat_scar = self._risk.get_scarcity_state(tick.symbol)
             _mat_median_s = _mat_scar.get("median_gap_s")
             _mat_elapsed_s = _mat_scar.get("elapsed_s")
+            if _mat_median_s and _mat_median_s > 0:
+                _mat_median_s_for_pending = float(_mat_median_s)
             if _mat_median_s and _mat_elapsed_s is not None and _mat_median_s > 0:
                 # Post-cluster: score is inflated by cluster bonus (spike_cluster_bonus).
                 # Data: cluster entries WR=38.5% (-$0.287/trade) vs 53.5% (-$0.039) single spike.
@@ -5187,6 +5196,24 @@ class DerivDaemon:
                     self._spike_enrich(tick.symbol, bot_entered=False,
                                        block_reason=f"obs_window_blocked:{_obs_sec_ov}s")
                     return
+            # Pending Entry — también aplica en override path
+            _pe_action_ov, _pe_remain_ov = PENDING_ENTRY_WATCHER.on_signal(
+                tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
+            )
+            if _pe_action_ov in (ACTION_FIRST_WAIT, ACTION_WAIT):
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s %s(override) | score=%.2f | remain=%.0fs",
+                    tick.symbol,
+                    "HOLDING" if _pe_action_ov == ACTION_FIRST_WAIT else "CONFIRMING",
+                    snap.score, _pe_remain_ov,
+                )
+                return
+            if _pe_action_ov == ACTION_CANCEL:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s SIGNAL_DROPPED(override) | score=%.2f",
+                    tick.symbol, snap.score,
+                )
+                return
             self._counters["orders_sent"] += 1
             try:
                 result = await self._router.route_order(payload_override)
@@ -5521,6 +5548,32 @@ class DerivDaemon:
                 self._spike_enrich(tick.symbol, bot_entered=False,
                                    block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
+        # ── Pending Entry: aguantar afuera antes de entrar ────────────────────
+        # El bot confirma la señal durante 25% del ciclo (mín 60s, máx 300s).
+        # Si la señal cae fuerte durante ese período → cancela y busca nueva.
+        _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
+            tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
+        )
+        if _pe_action == ACTION_FIRST_WAIT:
+            _LOGGER.info(
+                "[PENDING_ENTRY] %s HOLDING | score=%.2f → confirming %.0fs "
+                "before entry | side=%s",
+                tick.symbol, snap.score, _pe_remain, snap.side,
+            )
+            return
+        if _pe_action == ACTION_WAIT:
+            _LOGGER.info(
+                "[PENDING_ENTRY] %s CONFIRMING | score=%.2f | remain=%.0fs",
+                tick.symbol, snap.score, _pe_remain,
+            )
+            return
+        if _pe_action == ACTION_CANCEL:
+            _LOGGER.info(
+                "[PENDING_ENTRY] %s SIGNAL_DROPPED | score=%.2f — buscando nueva señal",
+                tick.symbol, snap.score,
+            )
+            return
+        # ACTION_ENTER: período confirmado → continúa a la orden real
         # PASO 2.3h-prep Fase F: log enriched decision before routing order
         _dec_id = log_decision(
             symbol=tick.symbol,
