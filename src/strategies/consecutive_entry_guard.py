@@ -36,6 +36,13 @@ _LOSS_WINDOW_BY_SYMBOL: dict = {
     "BOOM900": 1200, "BOOM1000": 1200, "CRASH900": 1200, "CRASH1000": 1200,
 }
 
+# Cooldown por símbolo: 900/1000 tienen ciclos ~720s → cooldown 900s para no perseguir
+# dos ciclos completos consecutivos sin spike
+_COOLDOWN_BY_SYMBOL: dict = {
+    "BOOM900": 900, "CRASH900": 900,
+    "BOOM1000": 900, "CRASH1000": 900,
+}
+
 # Salidas por tiempo cuentan como pérdida aunque el PnL sea null/0
 _TIMEOUT_EXIT_REASONS: frozenset = frozenset({
     "max_hold_timeout", "max_hold_after_respite", "max_hold_spike_miss",
@@ -215,7 +222,8 @@ class ConsecutiveEntryGuard:
         )
 
         if consecutive_losses >= _DEFAULT_MIN_LOSSES:
-            cooldown_end = now + _DEFAULT_COOLDOWN_S
+            cooldown_s = _COOLDOWN_BY_SYMBOL.get(symbol.upper(), _DEFAULT_COOLDOWN_S)
+            cooldown_end = now + cooldown_s
             self._cooldown_until[symbol] = cooldown_end
             self._cooldown_reason[symbol] = (
                 f"consecutive_losses:{consecutive_losses}/{len(recent_window)}_recent"
@@ -224,7 +232,7 @@ class ConsecutiveEntryGuard:
             _LOGGER.info(
                 "[CONSECUTIVE_GUARD] %s COOLDOWN activated %.0fs "
                 "| %d/%d recent trades lost (window=%ds) | spike_ts_at_create=%.0f | reason=%s",
-                symbol, _DEFAULT_COOLDOWN_S,
+                symbol, cooldown_s,
                 consecutive_losses, len(recent_window), loss_window_s,
                 last_spike_ts,
                 self._cooldown_reason[symbol],

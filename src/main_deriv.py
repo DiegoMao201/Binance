@@ -3179,9 +3179,20 @@ class DerivDaemon:
                     "mature"
                 )
                 # PASO 2.6 O.3: hybrid — safety net extremo <15%, resto informativo al LLM
+                # Per-symbol override via DERIV_MATURITY_HARDBLOCK_MAP=BOOM900:0.40,...
                 _mat_hardblock_min = float(
                     os.getenv("DERIV_MATURITY_HARDBLOCK_MIN_RATIO", "0.15")
                 )
+                _mat_hb_map_raw = os.getenv("DERIV_MATURITY_HARDBLOCK_MAP", "")
+                if _mat_hb_map_raw:
+                    for _hb_item in _mat_hb_map_raw.split(","):
+                        _hb_k, _, _hb_v = _hb_item.strip().partition(":")
+                        if _hb_k.strip().upper() == tick.symbol.upper() and _hb_v:
+                            try:
+                                _mat_hardblock_min = float(_hb_v.strip())
+                            except ValueError:
+                                pass
+                            break
                 if _mat_elapsed_s < _mat_threshold_s:
                     _mat_remain_s = _mat_threshold_s - _mat_elapsed_s
                     _mat_key = f"{tick.symbol}:maturity_gate"
