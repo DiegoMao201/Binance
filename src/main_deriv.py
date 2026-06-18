@@ -3434,6 +3434,43 @@ class DerivDaemon:
             snap.score_breakdown["maturity_ratio"] = round(_mat_ratio_out, 3)
             snap.score_breakdown["maturity_status"] = _mat_status_out
 
+        # ═══════════════════════════════════════════════════════════════════
+        # TREND_BLOCK gate: symbols with historically poor TREND WR require
+        # score >= DERIV_TREND_SETUP_MIN_SCORE (default 7.0) for TREND setups.
+        # Runs BEFORE elasticity/TRIPLE_LOCK adjustments so those cannot lower
+        # the floor below this hard threshold for the blocked symbols.
+        # Config: DERIV_TREND_BLOCK_SYMBOLS=CRASH500,... (CSV, already in guard)
+        #         DERIV_TREND_SETUP_MIN_SCORE=7.0
+        # ═══════════════════════════════════════════════════════════════════
+        _tb_setup = str(snap.score_breakdown.get("setup_type") or "").upper()
+        if _tb_setup == "TREND":
+            _tb_raw = str(os.getenv("DERIV_TREND_BLOCK_SYMBOLS", "") or "")
+            _tb_syms = {s.strip().upper() for s in _tb_raw.split(",") if s.strip()}
+            if tick.symbol.upper() in _tb_syms:
+                _tb_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
+                if snap.score < _tb_min:
+                    _tb_key = f"{tick.symbol}:trend_block"
+                    _tb_now = time.time()
+                    _tb_last = float(
+                        self._dynamic_inactive_last_emit_ts.get(_tb_key) or 0.0
+                    )
+                    if (_tb_now - _tb_last) >= 30.0:
+                        self._dynamic_inactive_last_emit_ts[_tb_key] = _tb_now
+                        _LOGGER.info(
+                            "[TREND_BLOCK] BLOCKED %s | setup=TREND score=%.2f < min=%.1f"
+                            " | grade=%s scarcity=%s",
+                            tick.symbol, snap.score, _tb_min,
+                            str(snap.score_breakdown.get("execution_grade") or ""),
+                            str(snap.score_breakdown.get("scarcity_state") or ""),
+                        )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason=(
+                            f"trend_block:score={snap.score:.2f}<{_tb_min}"
+                        ),
+                    )
+                    return
+
         # Cache state for market context telemetry (written on next 60-tick cycle).
         _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
         _cache_sym = tick.symbol.upper()

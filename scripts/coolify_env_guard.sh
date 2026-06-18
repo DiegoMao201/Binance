@@ -47,7 +47,7 @@ REQUIRED_VARS=(
   # 2026-06-11: TREND bloqueado POR SÍMBOLO — solo CRASH (WR=27-38%). BOOM500/600 usan 7.0.
   # CRASH WR: CRASH500=27.1%, CRASH600=38.2%, CRASH900=28.6% → pérdidas sistemáticas.
   # BOOM500 TREND WR=54.5% → no bloquear. BOOM600 sin historial TREND → no bloquear.
-  "DERIV_TREND_BLOCK_SYMBOLS=CRASH500,CRASH600,CRASH900,CRASH1000"
+  "DERIV_TREND_BLOCK_SYMBOLS=CRASH500,CRASH600,CRASH900,CRASH1000,BOOM900"
   "DERIV_TREND_SETUP_MIN_SCORE=7.0"
   # 2026-06-11: max_hold reducido 900→480s — 110 trades timeout costaron -$160 (avg -$1.46 cada uno)
   # 2026-06-12: CRASH900 max_hold 600→750s — P50 gap=523t, con 600s solo 55% prob spike; 750s → ~62%
