@@ -884,10 +884,18 @@ def min_score_for_regime(symbol: str, regime: str) -> float:
 def adaptive_max_hold(symbol: str, regime: str) -> int:
     """Macro-timeout: BOOM/CRASH trending markets get 600s, others 450s.
 
+    Per-symbol override via DERIV_MAX_HOLD_{SYMBOL} env var (e.g. DERIV_MAX_HOLD_BOOM900=720).
     Non-spike markets return 0 (no timeout).
     """
+    import os  # noqa: PLC0415
     if not is_spike_market(symbol):
         return 0
+    env_override = os.getenv(f"DERIV_MAX_HOLD_{symbol.upper()}")
+    if env_override:
+        try:
+            return int(env_override)
+        except ValueError:
+            pass
     r = (regime or "").lower()
     return 600 if r == "trending" else 450
 
