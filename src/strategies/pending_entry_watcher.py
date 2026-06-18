@@ -83,10 +83,12 @@ class PendingEntryWatcher:
                     "confirmations": 1,
                     "last_score": score,
                     "wait_s": wait_s,
+                    "score_sum": score,
+                    "score_count": 1,
                 }
                 _LOGGER.info(
                     "[PENDING_ENTRY] %s STARTED | score=%.2f → wait=%.0fs | "
-                    "cancel_if_score<%.2f | side=%s",
+                    "cancel_if_avg<%.2f | side=%s",
                     symbol, score, wait_s, cancel_score, side,
                 )
                 return (ACTION_FIRST_WAIT, wait_s)
@@ -107,19 +109,26 @@ class PendingEntryWatcher:
                     "confirmations": 1,
                     "last_score": score,
                     "wait_s": wait_s,
+                    "score_sum": score,
+                    "score_count": 1,
                 }
                 return (ACTION_FIRST_WAIT, wait_s)
 
-            # Mismo lado — actualizar score y verificar caída
+            # Mismo lado — acumular score para promedio
             pending["last_score"] = score
             pending["confirmations"] += 1
+            pending["score_sum"] = pending.get("score_sum", score) + score
+            pending["score_count"] = pending.get("score_count", 1) + 1
+            avg_score = pending["score_sum"] / pending["score_count"]
 
-            if score < pending["cancel_score"]:
+            # Cancelar solo si el PROMEDIO cae por debajo del umbral
+            # (un tick bajo no cancela — el ruido tick-a-tick es normal)
+            if avg_score < pending["cancel_score"]:
                 _LOGGER.info(
-                    "[PENDING_ENTRY] %s CANCELLED | score=%.2f < cancel_thr=%.2f "
-                    "(initial=%.2f) confirmaciones=%d",
-                    symbol, score, pending["cancel_score"],
-                    pending["initial_score"], pending["confirmations"],
+                    "[PENDING_ENTRY] %s CANCELLED | avg=%.2f < cancel_thr=%.2f "
+                    "(initial=%.2f last=%.2f) ticks=%d",
+                    symbol, avg_score, pending["cancel_score"],
+                    pending["initial_score"], score, pending["confirmations"],
                 )
                 del self._pending[symbol]
                 return (ACTION_CANCEL, 0.0)
@@ -127,10 +136,10 @@ class PendingEntryWatcher:
             remaining = pending["expires_at"] - now
             if remaining <= 0:
                 _LOGGER.info(
-                    "[PENDING_ENTRY] %s CONFIRMED → ENTERING | score=%.2f "
-                    "(initial=%.2f) | confirmaciones=%d | waited=%.0fs",
-                    symbol, score, pending["initial_score"],
-                    pending["confirmations"], pending["wait_s"],
+                    "[PENDING_ENTRY] %s CONFIRMED → ENTERING | avg=%.2f "
+                    "(initial=%.2f last=%.2f) | ticks=%d | waited=%.0fs",
+                    symbol, avg_score, pending["initial_score"],
+                    score, pending["confirmations"], pending["wait_s"],
                 )
                 del self._pending[symbol]
                 return (ACTION_ENTER, 0.0)
@@ -157,6 +166,7 @@ class PendingEntryWatcher:
                     "remaining_s": max(0, int(p["expires_at"] - now)),
                     "initial_score": p["initial_score"],
                     "last_score": p.get("last_score", p["initial_score"]),
+                    "avg_score": p["score_sum"] / p["score_count"] if p.get("score_count") else p["initial_score"],
                     "cancel_score": p["cancel_score"],
                     "confirmations": p["confirmations"],
                     "side": p["side"],
