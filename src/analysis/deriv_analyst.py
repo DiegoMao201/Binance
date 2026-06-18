@@ -1592,6 +1592,12 @@ class DerivAnalyst:
             _hard_score_floor,
             float(_ai_threshold) + max(0.0, _symbol_bleed_bonus),
         )
+        # TRIPLE_LOCK bypass: when Z≥4.0 ELASTICITY already lowered effective_min,
+        # so the hard floor (6.50) would double-block an authorized entry. Use the
+        # raw ai_threshold instead so the AI's own approval is the deciding factor.
+        _triple_lock_z = float(score_breakdown.get("triple_lock_z") or 0.0)
+        _triple_lock_active = _triple_lock_z >= 4.0
+        _effective_score_floor = float(_ai_threshold) if _triple_lock_active else _symbol_hard_score_floor
         _symbol_min_conf, _quality_note = self._dynamic_ai_min_confidence(symbol)
         _quality_veto, _quality_veto_note = self._quality_veto_for_symbol(symbol)
 
@@ -1605,16 +1611,16 @@ class DerivAnalyst:
             analysis.ai_approved = (
                 _cached_approved
                 and _cached_conf >= _symbol_min_conf
-                and score >= _symbol_hard_score_floor
+                and score >= _effective_score_floor
                 and not _quality_veto
             )
             analysis.ai_confidence = _cached_conf
             _cached_reason = str(cached_ai.get("reason", ""))
             if _cached_approved and not analysis.ai_approved and _cached_conf < _symbol_min_conf:
                 _cached_reason = f"{_cached_reason} | conf_floor:{_cached_conf:.2f}<{_symbol_min_conf:.2f}"
-            if _cached_approved and not analysis.ai_approved and score < _symbol_hard_score_floor:
+            if _cached_approved and not analysis.ai_approved and score < _effective_score_floor:
                 _cached_reason = (
-                    f"{_cached_reason} | score_floor:{score:.2f}<{_symbol_hard_score_floor:.2f}"
+                    f"{_cached_reason} | score_floor:{score:.2f}<{_effective_score_floor:.2f}"
                 )
             if _cached_approved and not analysis.ai_approved and _quality_veto:
                 _cached_reason = f"{_cached_reason} | {_quality_veto_note}"
@@ -1817,7 +1823,7 @@ class DerivAnalyst:
             analysis.ai_approved = (
                 _model_approved
                 and _ai_conf >= _symbol_min_conf
-                and score >= _symbol_hard_score_floor
+                and score >= _effective_score_floor
                 and not _quality_veto
             )
             analysis.ai_confidence = _ai_conf
@@ -1826,9 +1832,9 @@ class DerivAnalyst:
                 analysis.ai_reason = (
                     f"{analysis.ai_reason} | conf_floor:{_ai_conf:.2f}<{_symbol_min_conf:.2f}"
                 )
-            if _model_approved and not analysis.ai_approved and score < _symbol_hard_score_floor:
+            if _model_approved and not analysis.ai_approved and score < _effective_score_floor:
                 analysis.ai_reason = (
-                    f"{analysis.ai_reason} | score_floor:{score:.2f}<{_symbol_hard_score_floor:.2f}"
+                    f"{analysis.ai_reason} | score_floor:{score:.2f}<{_effective_score_floor:.2f}"
                 )
             if _model_approved and not analysis.ai_approved and _quality_veto:
                 analysis.ai_reason = f"{analysis.ai_reason} | {_quality_veto_note}"
