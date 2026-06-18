@@ -88,6 +88,109 @@ async def _load_all_patterns(db_url: str) -> Dict[str, Dict]:
         return {}
 
 
+def check_pm_filter(
+    symbol: str,
+    imminence_state_raw: str | None,
+    score: float,
+    hurst: float,
+    side: str,
+    fvg_tier_raw: str | None,
+    setup_type: str | None,
+) -> Dict[str, Any]:
+    """
+    PASO 2.7 P.4: Pre-LLM filter based on Pattern Memory.
+
+    Uses in-memory cache (_PM_CACHE). Must call after query_pattern_memory
+    has populated the cache at least once; returns PASS if cache is empty.
+
+    Lookup hierarchy:
+    1. Exact 6-dim match (symbol+side+fvg_tier+hurst+imminence+score, n>=5)
+    2. Aggregate without fvg_tier and side (symbol+hurst+imminence+score, n>=10)
+    3. No match → PASS (let LLM decide)
+
+    Block thresholds:
+    - WR < 35% AND n >= 10 → BLOCK (confirmed loser)
+    - WR < 30% AND n >= 5  → BLOCK (extreme losing with small sample)
+    """
+    data = _PM_CACHE.get("data") or {}
+    if not data:
+        return {"action": "PASS", "reason": "cache_empty", "match_level": "none"}
+
+    imminence = _imminence_to_bucket(imminence_state_raw)
+    score_bucket = _score_to_bucket(score)
+    hurst_bucket = _hurst_to_bucket(hurst)
+    fvg_tier = _fvg_to_tier(fvg_tier_raw)
+    sym = (symbol or "").upper()
+    sd = (side or "").lower()
+
+    # 1. Exact 6-dim match
+    exact_key = f"{sym}:{sd}:{fvg_tier}:{hurst_bucket}:{imminence}:{score_bucket}"
+    row = data.get(exact_key)
+    if row and row.get("n_trades", 0) >= 5:
+        verdict = _pm_evaluate(row, "6dim", exact_key, setup_type)
+        if verdict["action"] == "BLOCK":
+            return verdict
+
+    # 2. Aggregate across side+fvg_tier (symbol+hurst+imminence+score)
+    agg_n, agg_wins = 0, 0
+    agg_pnl_sum = 0.0
+    for k, r in data.items():
+        parts = k.split(":")
+        if (
+            len(parts) == 6
+            and parts[0] == sym
+            and parts[3] == hurst_bucket
+            and parts[4] == imminence
+            and parts[5] == score_bucket
+        ):
+            agg_n += r.get("n_trades", 0)
+            agg_wins += r.get("wins", 0)
+            agg_pnl_sum += float(r.get("avg_pnl", 0)) * r.get("n_trades", 0)
+
+    if agg_n >= 10:
+        agg_row = {
+            "n_trades": agg_n,
+            "wins": agg_wins,
+            "wr": agg_wins / agg_n * 100.0,
+            "avg_pnl": agg_pnl_sum / agg_n if agg_n > 0 else 0.0,
+        }
+        verdict = _pm_evaluate(agg_row, "3dim", f"{sym}|{hurst_bucket}|{imminence}|{score_bucket}", setup_type)
+        if verdict["action"] == "BLOCK":
+            return verdict
+
+    return {"action": "PASS", "reason": "acceptable_or_insufficient_data", "match_level": "none"}
+
+
+def _pm_evaluate(row: Dict, match_level: str, pattern_id: str, setup_type: str | None) -> Dict[str, Any]:
+    n = row.get("n_trades", 0)
+    wins = row.get("wins", 0)
+    wr = row.get("wr") if "wr" in row else (wins / n * 100.0 if n > 0 else 0.0)
+    avg_pnl = float(row.get("avg_pnl", 0))
+
+    if wr < 35.0 and n >= 10:
+        return {
+            "action": "BLOCK",
+            "reason": f"losing_pattern wr={wr:.0f}% n={n} avg_pnl=${avg_pnl:.3f}",
+            "match_level": match_level,
+            "pattern_id": pattern_id,
+            "setup_type": setup_type,
+        }
+    if wr < 30.0 and n >= 5:
+        return {
+            "action": "BLOCK",
+            "reason": f"extreme_loser wr={wr:.0f}% n={n}",
+            "match_level": match_level,
+            "pattern_id": pattern_id,
+            "setup_type": setup_type,
+        }
+    return {
+        "action": "PASS",
+        "reason": f"acceptable wr={wr:.0f}% n={n}",
+        "match_level": match_level,
+        "pattern_id": pattern_id,
+    }
+
+
 async def query_pattern_memory(
     symbol: str,
     side: str,

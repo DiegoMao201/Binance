@@ -69,6 +69,7 @@ from src.safety.post_spike_contamination import detect_contamination as _detect_
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
+from src.analysis.pattern_memory_query import check_pm_filter
 
 
 _LOGGER = logging.getLogger("deriv.daemon")
@@ -3260,6 +3261,39 @@ class DerivDaemon:
                                 _mat_median_s, _mat_remain_s, _mat_cl_n,
                             )
 
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO 2.7 P.2: FRESH_CYCLE_GATE
+        # Cierra el loop: bot conoce imminence_state pero no actuaba sobre FRESH.
+        # Hard-block cuando ticks_desde_último_spike < P25 del símbolo.
+        # Misma filosofía que MATURITY_HARDBLOCK (memoria #19):
+        #   - Solo bloquea zona extrema (primero 25% inter-spike interval)
+        #   - UNKNOWN (sin data) → pasa al pipeline sin bloquear
+        # ═══════════════════════════════════════════════════════════════════
+        if is_spike_market(tick.symbol):
+            _fcg_imm = self._risk.get_spike_imminence_state(tick.symbol)
+            if _fcg_imm.get("state") == "FRESH":
+                _fcg_key = f"{tick.symbol}:fresh_cycle_gate"
+                _fcg_now = time.time()
+                _fcg_last_emit = float(
+                    self._dynamic_inactive_last_emit_ts.get(_fcg_key) or 0.0
+                )
+                if (_fcg_now - _fcg_last_emit) >= 30.0:
+                    self._dynamic_inactive_last_emit_ts[_fcg_key] = _fcg_now
+                    _LOGGER.info(
+                        "[FRESH_CYCLE_GATE] BLOCKED %s | ticks_since=%d < P25=%d | state=FRESH",
+                        tick.symbol,
+                        _fcg_imm.get("ticks_since_last", 0),
+                        int((_fcg_imm.get("pctl") or [0])[0]),
+                    )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason=(
+                        f"fresh_cycle_gate:ticks_since={_fcg_imm.get('ticks_since_last', 0)}"
+                        f"<P25={int((_fcg_imm.get('pctl') or [0])[0])}"
+                    ),
+                )
+                return
+
         # types: trend_math, smc_confluence, micro_scalp_mr).
         # Checked BEFORE any scoring so zero CPU is wasted on cooling symbols.
         # Per-symbol override via ASSET_INTEL_PROFILES['cooldown_sec'] takes
@@ -3949,24 +3983,44 @@ class DerivDaemon:
                 snap.score_breakdown["spike_pace_20m"] = _pace.get("spikes_window")
                 snap.score_breakdown["spike_pace_expected_20m"] = _pace.get("expected_window")
             if _pace_state == "HOT":
-                _hot_bon = max(
-                    0.0,
-                    float(os.getenv("DERIV_SPIKE_PACE_HOT_BONUS", "0.5") or 0.5),
-                )
-                # Avoid double-rewarding when the tighter cluster bonus already fired.
-                if _hot_bon > 0.0 and "spike_cluster_bonus" not in snap.score_breakdown:
-                    snap.score = round(min(10.0, snap.score + _hot_bon), 3)
-                    snap.score_breakdown["spike_pace_hot_bonus"] = round(_hot_bon, 3)
-                    snap.reasons.append(
-                        f"spike_pace_HOT: {_pace.get('spikes_window')}/20m "
-                        f"(exp {_pace.get('expected_window')}) → +{_hot_bon:.2f}"
-                    )
-                    _LOGGER.info(
-                        "[PIPELINE] SPIKE_PACE_HOT %s | %s/20m exp=%s ratio=%s → +%.2f score→%.2f",
-                        tick.symbol, _pace.get("spikes_window"),
-                        _pace.get("expected_window"), _pace.get("ratio"),
-                        _hot_bon, snap.score,
-                    )
+                # PASO 2.7 P.3: invertir bug conceptual — cluster reciente=ciclo reseteado
+                # OLD: pace=HOT → score+=0.5 siempre (premiaba zona post-cluster)
+                # NEW: HOT + elapsed<300s → penalizar; HOT + elapsed>600s → bonus suave
+                _p3_ratio = float(_pace.get("ratio") or 0.0)
+                _p3_elapsed = time.time() - (self._risk.get_last_spike_ts(tick.symbol) or 0.0)
+                # Don't double-adjust if cluster bonus already modified score
+                if "spike_cluster_bonus" not in snap.score_breakdown:
+                    if _p3_elapsed < 300 and _p3_ratio >= 1.4:
+                        # Cluster activo + spike reciente → próximo lejano → PENALIZAR
+                        _pace_penalty = float(os.getenv("DERIV_SPIKE_PACE_HOT_PENALTY", "0.5") or 0.5)
+                        snap.score = round(max(0.0, snap.score - _pace_penalty), 3)
+                        snap.score_breakdown["spike_pace_hot_penalty"] = round(_pace_penalty, 3)
+                        snap.reasons.append(
+                            f"spike_pace_HOT_penalty: elapsed={_p3_elapsed:.0f}s<300 ratio={_p3_ratio:.2f} → -{_pace_penalty:.2f}"
+                        )
+                        _LOGGER.info(
+                            "[SPIKE_PACE_HOT_PENALTY] %s score-=%.2f cluster_active elapsed=%.0fs<300 ratio=%.2f score→%.2f",
+                            tick.symbol, _pace_penalty, _p3_elapsed, _p3_ratio, snap.score,
+                        )
+                    elif _p3_elapsed > 600:
+                        # Cluster descansó → posible nuevo ciclo → BONUS suave
+                        _hot_bon = float(os.getenv("DERIV_SPIKE_PACE_HOT_BONUS", "0.3") or 0.3)
+                        snap.score = round(min(10.0, snap.score + _hot_bon), 3)
+                        snap.score_breakdown["spike_pace_hot_bonus"] = round(_hot_bon, 3)
+                        snap.reasons.append(
+                            f"spike_pace_HOT_rested: elapsed={_p3_elapsed:.0f}s>600 → +{_hot_bon:.2f}"
+                        )
+                        _LOGGER.info(
+                            "[SPIKE_PACE_HOT_BONUS] %s score+=%.2f rested elapsed=%.0fs>600 score→%.2f",
+                            tick.symbol, _hot_bon, _p3_elapsed, snap.score,
+                        )
+                    else:
+                        # Zona intermedia 300-600s → neutral, solo registrar
+                        snap.score_breakdown["spike_pace_hot_neutral"] = round(_p3_elapsed, 0)
+                        _LOGGER.info(
+                            "[SPIKE_PACE_HOT_NEUTRAL] %s no_adjustment elapsed=%.0fs ratio=%.2f",
+                            tick.symbol, _p3_elapsed, _p3_ratio,
+                        )
 
         # ── MASTER KEY — pre-gate RNG preview ────────────────────────────────
         # Si score ≥ DERIV_MASTER_KEY_SCORE (default 6.25) Y rng_prob ≥
@@ -5335,6 +5389,40 @@ class DerivDaemon:
             # Wait window elapsed with conditions maintained — execute with stored decision
             _k5_enter_order = _k5_result["order"]
         # NONE: no pending order — proceed normally
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO 2.7 P.4: Pattern Memory pre-LLM filter
+        # Bloquea patrones documentados como perdedores ANTES de gastar tokens.
+        # Cache compartido con deriv_analyst (TTL 5min, ~178 filas).
+        # PASS si cache vacío o datos insuficientes → LLM decide (memoria #11).
+        # ═══════════════════════════════════════════════════════════════════
+        _pm_imm = str(snap.score_breakdown.get("spike_imminence_state") or "")
+        _pm_fvg = str(snap.score_breakdown.get("fvg_tier") or "")
+        _pm_setup = str(snap.score_breakdown.get("setup_type") or "")
+        _pm_hurst = float(snap.score_breakdown.get("hurst") or pre_hurst or 0.5)
+        _pm_check = check_pm_filter(
+            symbol=tick.symbol,
+            imminence_state_raw=_pm_imm,
+            score=snap.score,
+            hurst=_pm_hurst,
+            side=str(snap.side or ""),
+            fvg_tier_raw=_pm_fvg,
+            setup_type=_pm_setup or None,
+        )
+        if _pm_check["action"] == "BLOCK":
+            _LOGGER.info(
+                "[PM_FILTER] %s BLOCKED match=%s | %s | setup=%s",
+                tick.symbol,
+                _pm_check.get("match_level", "?"),
+                _pm_check.get("reason", ""),
+                _pm_check.get("setup_type", ""),
+            )
+            snap.score_breakdown["pm_filter_blocked"] = _pm_check.get("reason", "")
+            self._spike_enrich(
+                tick.symbol, bot_entered=False,
+                block_reason=f"pm_filter:{_pm_check.get('reason', '')}",
+            )
+            return
 
         # BLOCK 3 — AI GATE (only reached when NO hard math override fired)
         # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.

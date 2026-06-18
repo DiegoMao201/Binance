@@ -575,6 +575,37 @@ class MacroHDCalibrator:
 
 
 
+# ─── PASO 2.7 P.5: Fire-and-forget DB persist for spike_events ────────────────
+async def _persist_spike_to_db(
+    symbol: str,
+    direction: str,
+    jump: float,
+    atr: float,
+    ratio: float,
+) -> None:
+    """INSERT spike into spike_events table. Non-blocking — called via create_task."""
+    if not _DERIV_DATABASE_URL:
+        return
+    try:
+        import asyncpg
+        conn = await asyncio.wait_for(
+            asyncpg.connect(_DERIV_DATABASE_URL), timeout=5.0
+        )
+        try:
+            await conn.execute(
+                """
+                INSERT INTO spike_events (symbol, direction, jump, atr, ratio)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                symbol, direction, round(float(jump), 6),
+                round(float(atr), 6), round(float(ratio), 3),
+            )
+        finally:
+            await conn.close()
+    except Exception as _e:
+        _LOGGER.debug("[SPIKE_PERSIST] %s insert failed: %s", symbol, _e)
+
+
 # ─── Snapshot returned to the trader ──────────────────────────────────────────
 @dataclass(slots=True)
 class DerivRiskSnapshot:
@@ -1237,6 +1268,20 @@ class DerivRiskManager:
                             _spike_file.write_text(json.dumps(_existing))
                         except Exception as _e:
                             _LOGGER.debug("[SPIKE_EVENT] failed to persist to JSON: %s", _e)
+                        # PASO 2.7 P.5: persist to spike_events DB (fire-and-forget)
+                        try:
+                            _loop = asyncio.get_event_loop()
+                            if _loop.is_running():
+                                _loop.create_task(
+                                    _persist_spike_to_db(
+                                        symbol, _direction,
+                                        round(_jump, 6),
+                                        round(_recent_atr, 6),
+                                        round(abs(_jump) / _recent_atr, 3),
+                                    )
+                                )
+                        except Exception:
+                            pass
                         # ── Capture pre-spike ATR ──────────────────────────────────
                         # Save ATR from the 30 ticks BEFORE the spike tick so
                         # evaluate() can restore it when retroceso collapses ATR.
