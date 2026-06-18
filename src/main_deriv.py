@@ -3255,12 +3255,19 @@ class DerivDaemon:
         if _sig_last is not None:
             _sig_elapsed_ticks = self._risk.get_tick_count(tick.symbol) - _sig_last
             if _sig_elapsed_ticks < _cd:
-                _LOGGER.debug(
-                    "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%d / %d ticks",
-                    tick.symbol, _sig_elapsed_ticks, _cd,
-                )
-                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
-                return
+                # Bypass cooldown si hay pending entry activo — necesita re-confirmarse
+                if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                    _LOGGER.debug(
+                        "[PIPELINE] COOLDOWN_BYPASS_PENDING %s elapsed=%d/%d ticks — pending active",
+                        tick.symbol, _sig_elapsed_ticks, _cd,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "[PIPELINE] COOLDOWN_ACTIVE %s elapsed=%d / %d ticks",
+                        tick.symbol, _sig_elapsed_ticks, _cd,
+                    )
+                    self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
+                    return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
