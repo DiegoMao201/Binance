@@ -3088,8 +3088,26 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
-            # Spike real detectado → cancelar pending entry (el spike ya llegó)
-            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+            # Cancelar pending SOLO si el spike contradice la dirección apostada.
+            # CRASH spikes van DOWN → preservar pending MULTDOWN (alineado).
+            # BOOM spikes van UP   → preservar pending MULTUP (alineado).
+            # Spike que confirma la dirección → no cancelar, dejar expirar normalmente.
+            _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
+            if _pe_spike_state:
+                _pe_spike_side = _pe_spike_state.get("side", "")
+                _sym_is_crash = "CRASH" in tick.symbol.upper()
+                _spike_aligns_pending = (
+                    (_sym_is_crash and _pe_spike_side == "MULTDOWN") or
+                    (not _sym_is_crash and _pe_spike_side == "MULTUP")
+                )
+                if not _spike_aligns_pending:
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                else:
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s spike aligns with pending %s → preservando "
+                        "(spike confirma dirección de la apuesta)",
+                        tick.symbol, _pe_spike_side,
+                    )
         _ceg_sb = self._last_fvg_state.get(tick.symbol.upper(), {})
         _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol, current_sb=_ceg_sb)
         if _ceg.get("max_pressure_override"):
@@ -3268,6 +3286,19 @@ class DerivDaemon:
                     )
                     self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
                     return
+
+        # Pending entry expirado: si el ventana de confirmación ya venció Y
+        # avg_score ≥ 4.5 a lo largo del ventana, el pending puede saltarse
+        # los gates intermedios — la aprobación original sigue vigente.
+        _pe_expired_bypass = False
+        _pe_exp_avg = 0.0
+        if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+            _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
+            _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
+            _pe_expired_bypass = (
+                int(_pe_exp.get("remaining_s", 999)) <= 0
+                and _pe_exp_avg >= 4.5
+            )
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
@@ -4569,6 +4600,13 @@ class DerivDaemon:
                     )
                     snap.score_breakdown["master_key_bypass"] = "REGIME_SCORE_GATE"
                     snap.score_breakdown["master_key_rng"] = _mk_rng
+                elif _pe_expired_bypass:
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s EXPIRED_BYPASS REGIME_SCORE_GATE | "
+                        "score=%.2f<min=%.2f avg=%.2f≥4.5 → ejecutando entrada confirmada",
+                        tick.symbol, snap.score, _regime_min, _pe_exp_avg,
+                    )
+                    snap.score_breakdown["regime_gate_bypassed_expired_pending"] = True
                 else:
                     return
 
@@ -4694,6 +4732,13 @@ class DerivDaemon:
                 )
                 snap.score_breakdown["master_key_bypass"] = "PROFILE_SCORE_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
+            elif _pe_expired_bypass:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s EXPIRED_BYPASS PROFILE_SCORE_GATE | "
+                    "score=%.2f<min=%.2f avg=%.2f≥4.5",
+                    tick.symbol, snap.score, _profile_min_score, _pe_exp_avg,
+                )
+                snap.score_breakdown["profile_gate_bypassed_expired_pending"] = True
             else:
                 return
 
@@ -4709,46 +4754,54 @@ class DerivDaemon:
             elastic_z2=_is_z2,
         )
         if not _post_spike_ok:
-            self._log_entry_block(
-                tick.symbol,
-                "POST_SPIKE_STRENGTH_VETO",
-                score=snap.score,
-                effective_min_score=_profile_min_score,
-                side=snap.side,
-                regime=snap.regime,
-                hurst=_eval_hurst,
-                score_breakdown=snap.score_breakdown,
-            )
-            self._record_decision(
-                symbol=tick.symbol,
-                allowed=False,
-                side=snap.side,
-                score=snap.score,
-                reason=_post_spike_reason,
-                extra={
-                    "score_breakdown": snap.score_breakdown,
-                    "regime": snap.regime,
-                    "dynamic_cfg": _dyn_cfg,
-                },
-            )
-            self._spike_enrich(
-                tick.symbol,
-                bot_entered=False,
-                block_reason=_post_spike_reason,
-                score=snap.score,
-            )
-            _pssv_setup = str(snap.score_breakdown.get("setup_type") or "")
-            _pssv_grade = str(snap.score_breakdown.get("execution_grade") or "")
-            if _pssv_setup in ("SMC_FVG", "EMA200_SPIKE") and _pssv_grade in ("A", "B") and snap.score >= 7.0:
-                self._ghost_logger.add(
-                    symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
-                    score_raw=float(snap.score), gate="POST_SPIKE_STRENGTH_VETO",
-                    setup_type=_pssv_setup, grade=_pssv_grade,
-                    scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
-                    imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
-                    imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+            if _pe_expired_bypass:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s EXPIRED_BYPASS POST_SPIKE_STRENGTH_VETO | "
+                    "avg=%.2f≥4.5 → ejecutando entrada confirmada",
+                    tick.symbol, _pe_exp_avg,
                 )
-            return
+                snap.score_breakdown["pssv_bypassed_expired_pending"] = True
+            else:
+                self._log_entry_block(
+                    tick.symbol,
+                    "POST_SPIKE_STRENGTH_VETO",
+                    score=snap.score,
+                    effective_min_score=_profile_min_score,
+                    side=snap.side,
+                    regime=snap.regime,
+                    hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol,
+                    allowed=False,
+                    side=snap.side,
+                    score=snap.score,
+                    reason=_post_spike_reason,
+                    extra={
+                        "score_breakdown": snap.score_breakdown,
+                        "regime": snap.regime,
+                        "dynamic_cfg": _dyn_cfg,
+                    },
+                )
+                self._spike_enrich(
+                    tick.symbol,
+                    bot_entered=False,
+                    block_reason=_post_spike_reason,
+                    score=snap.score,
+                )
+                _pssv_setup = str(snap.score_breakdown.get("setup_type") or "")
+                _pssv_grade = str(snap.score_breakdown.get("execution_grade") or "")
+                if _pssv_setup in ("SMC_FVG", "EMA200_SPIKE") and _pssv_grade in ("A", "B") and snap.score >= 7.0:
+                    self._ghost_logger.add(
+                        symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                        score_raw=float(snap.score), gate="POST_SPIKE_STRENGTH_VETO",
+                        setup_type=_pssv_setup, grade=_pssv_grade,
+                        scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                        imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                        imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                    )
+                return
 
         # Per-profile stake cap — overrides global DERIV_MAX_STAKE_USDT for symbols
         # that require reduced exposure (e.g. R_75 during re-validation).
@@ -5068,6 +5121,13 @@ class DerivDaemon:
                 snap.score_breakdown["master_key_bypass"] = "RNG_PROBABILITY_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
                 snap.score_breakdown["rng_actual_at_bypass"] = _rng_prob
+            elif _pe_expired_bypass:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s EXPIRED_BYPASS RNG_PROBABILITY_GATE | "
+                    "prob=%d<threshold=%d avg=%.2f≥4.5",
+                    tick.symbol, _rng_prob, _rng_threshold, _pe_exp_avg,
+                )
+                snap.score_breakdown["rng_gate_bypassed_expired_pending"] = True
             else:
                 return
 
