@@ -5486,56 +5486,67 @@ class DerivDaemon:
             )
 
         if analysis is not None and not analysis.ai_approved and not analysis.ai_skipped:
-            _probe_ok, _probe_reason = self._allow_ai_veto_recovery_probe(
-                tick.symbol,
-                snap,
-                analysis,
-            )
-            if not _probe_ok:
-                reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
-                self._log_entry_block(
-                    tick.symbol, "AI_VETO",
-                    score=snap.score, effective_min_score=snap.effective_min_score,
-                    side=snap.side, regime=snap.regime,
-                    hurst=analysis.hurst if analysis else _eval_hurst,
-                    ai_veto=True, ai_confidence=analysis.ai_confidence,
-                    ai_reason=analysis.ai_reason,
-                    score_breakdown=snap.score_breakdown,
+            # Expired pending entry was approved when created (avg_score high).
+            # The score_floor re-veto fires because current score dropped (e.g. GEO penalty)
+            # but the watcher's avg is still above cancel_score → intent is still valid.
+            # Don't re-block a pending that already passed all gates when it was created.
+            if _pe_expired_bypass:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s EXPIRED_BYPASS AI_VETO | ai_reason=%s → proceeding",
+                    tick.symbol, str(analysis.ai_reason or "")[:80],
                 )
-                _LOGGER.warning(
-                    "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
-                    tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
+                snap.score_breakdown["ai_veto_bypassed_expired_pending"] = True
+            else:
+                _probe_ok, _probe_reason = self._allow_ai_veto_recovery_probe(
+                    tick.symbol,
+                    snap,
+                    analysis,
                 )
-                self._record_decision(
-                    symbol=tick.symbol, allowed=False, side=snap.side,
-                    score=snap.score, reason=reason,
-                    extra={
-                        **decision_extra,
-                        "hurst": analysis.hurst,
-                        "autocorr": analysis.autocorr_lag1,
-                        "vol_regime": analysis.vol_regime,
-                        "ai_model": analysis.ai_model,
-                    },
-                )
-                self._spike_enrich(
-                    tick.symbol, bot_entered=False,
-                    block_reason=f"AI_VETO: {analysis.ai_reason}",
-                    score=snap.score,
-                )
-                return
+                if not _probe_ok:
+                    reason = f"AI_VETO: {analysis.ai_reason} (conf={analysis.ai_confidence:.2f})"
+                    self._log_entry_block(
+                        tick.symbol, "AI_VETO",
+                        score=snap.score, effective_min_score=snap.effective_min_score,
+                        side=snap.side, regime=snap.regime,
+                        hurst=analysis.hurst if analysis else _eval_hurst,
+                        ai_veto=True, ai_confidence=analysis.ai_confidence,
+                        ai_reason=analysis.ai_reason,
+                        score_breakdown=snap.score_breakdown,
+                    )
+                    _LOGGER.warning(
+                        "[AI VETO] Símbolo: %s | Score: %.2f | Conf: %.2f | Razón: %s",
+                        tick.symbol, snap.score, analysis.ai_confidence, analysis.ai_reason,
+                    )
+                    self._record_decision(
+                        symbol=tick.symbol, allowed=False, side=snap.side,
+                        score=snap.score, reason=reason,
+                        extra={
+                            **decision_extra,
+                            "hurst": analysis.hurst,
+                            "autocorr": analysis.autocorr_lag1,
+                            "vol_regime": analysis.vol_regime,
+                            "ai_model": analysis.ai_model,
+                        },
+                    )
+                    self._spike_enrich(
+                        tick.symbol, bot_entered=False,
+                        block_reason=f"AI_VETO: {analysis.ai_reason}",
+                        score=snap.score,
+                    )
+                    return
 
-            snap.score_breakdown["ai_veto_recovery_probe"] = True
-            snap.score_breakdown["ai_veto_recovery_reason"] = _probe_reason
-            snap.score_breakdown["ai_veto_reason"] = str(analysis.ai_reason or "")
-            snap.score_breakdown["ai_veto_confidence"] = round(
-                float(analysis.ai_confidence or 0.0),
-                4,
-            )
-            _LOGGER.info(
-                "[AI-RECOVERY-PROBE] %s bypassing AI veto (%s)",
-                tick.symbol,
-                _probe_reason,
-            )
+                snap.score_breakdown["ai_veto_recovery_probe"] = True
+                snap.score_breakdown["ai_veto_recovery_reason"] = _probe_reason
+                snap.score_breakdown["ai_veto_reason"] = str(analysis.ai_reason or "")
+                snap.score_breakdown["ai_veto_confidence"] = round(
+                    float(analysis.ai_confidence or 0.0),
+                    4,
+                )
+                _LOGGER.info(
+                    "[AI-RECOVERY-PROBE] %s bypassing AI veto (%s)",
+                    tick.symbol,
+                    _probe_reason,
+                )
 
         # ── K.5 — Intercept PREPARE_AND_WAIT before execution ─────────────────
         if (
