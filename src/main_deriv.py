@@ -1107,6 +1107,38 @@ class DerivDaemon:
                 symbol, _cl_n, int(_cl_win), _elapsed, _cl_fresh,
             )
 
+        # GHOST_BYPASS: a confirmed FVG mitigation (SMC_FVG) or EMA200 structural
+        # level (EMA200_SPIKE) with grade A/B + score≥7.0 is a NEW confirmed setup,
+        # not a spike chase. Allow BEFORE the chase_guard — the chase_guard was
+        # designed to block momentum chasing (entering on raw spike momentum without
+        # structural confirmation), which is categorically different from an FVG that
+        # has already been mitigated and validated.
+        # Bug fixed 2026-06-19: ghost_bypass was placed AFTER chase_guard (line 1147),
+        # so for CRASH500 the FVG tier-1 window (80-140t) was always inside the
+        # chase_guard window (0-180t), making ghost_bypass unreachable. Moving it
+        # before the chase_guard fixes CRASH500 and all symbols with similar timing.
+        # Disable: DERIV_GHOST_BYPASS_ENABLE=false
+        _ghost_en = str(os.getenv("DERIV_GHOST_BYPASS_ENABLE", "true")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if _ghost_en:
+            _gb_sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+            _gb_setup = str(_gb_sb.get("setup_type") or "").upper()
+            _gb_grade = str(_gb_sb.get("execution_grade") or "").upper()
+            _gb_min = float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+            if (
+                float(snap.score or 0.0) >= _gb_min
+                and _gb_setup in {"SMC_FVG", "EMA200_SPIKE"}
+                and _gb_grade in {"A", "B"}
+            ):
+                _LOGGER.info(
+                    "[GHOST_BYPASS] %s score=%.2f setup=%s grade=%s elapsed=%.0ft → ALLOW (ghost WR=56%%)",
+                    symbol, float(snap.score or 0.0), _gb_setup, _gb_grade, _elapsed,
+                )
+                if isinstance(snap.score_breakdown, dict):
+                    snap.score_breakdown["ghost_bypass_fired"] = True
+                return True, ""
+
         # Keep safety invariant even if caller path changes in the future.
         if _elapsed < _chase_block:
             return (
@@ -1143,31 +1175,6 @@ class DerivDaemon:
         )
         if _elapsed > _strength_window:
             return True, ""
-
-        # GHOST_BYPASS: within the strength window, score≥7.0 + SMC_FVG/EMA200_SPIKE
-        # have empirical WR=56-60% (450 WIN / 343 EXPIRED ghost records).
-        # These are the trades the PSSV was incorrectly blocking.
-        # Disable: DERIV_GHOST_BYPASS_ENABLE=false
-        _ghost_en = str(os.getenv("DERIV_GHOST_BYPASS_ENABLE", "true")).strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if _ghost_en:
-            _gb_sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
-            _gb_setup = str(_gb_sb.get("setup_type") or "").upper()
-            _gb_grade = str(_gb_sb.get("execution_grade") or "").upper()
-            _gb_min = float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
-            if (
-                float(snap.score or 0.0) >= _gb_min
-                and _gb_setup in {"SMC_FVG", "EMA200_SPIKE"}
-                and _gb_grade in {"A", "B"}
-            ):
-                _LOGGER.info(
-                    "[GHOST_BYPASS] %s score=%.2f setup=%s grade=%s elapsed=%.0ft → ALLOW (ghost WR=56%%)",
-                    symbol, float(snap.score or 0.0), _gb_setup, _gb_grade, _elapsed,
-                )
-                if isinstance(snap.score_breakdown, dict):
-                    snap.score_breakdown["ghost_bypass_fired"] = True
-                return True, ""
 
         _sb = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
         _score_margin = float(snap.score or 0.0) - float(score_floor or 0.0)
