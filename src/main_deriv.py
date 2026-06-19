@@ -276,7 +276,13 @@ def _calculate_rng_probability(
     scarcity_ratio: float,
     cooldown_active: bool,
     implied_structure: bool = False,
-) -> tuple[int, list[str]]:
+    symbol: str = "",
+    side: str = "",
+    fvg_tier_raw: str = "",
+    hurst: float = 0.5,
+    imminence_state: str = "",
+    entry_score: float = 5.0,
+) -> tuple[int, list[str], dict]:
     """Probabilistic RNG alignment score (0-100).
 
     Weights:
@@ -284,13 +290,17 @@ def _calculate_rng_probability(
       30  fvg_bos_validated       — structural algorithm reset confirmed
               OR implied_structure (FASE 4 triple lock: extreme pressure + kinetic giro)
       20  zona_liquidez_macro     — macro liquidity zone (Vision LLM)
-      15  scarcity (inverted)     — overdue = higher spike probability:
-            FRESCO(<0.5×)→0  CARGANDO(<0.9×)→3  LISTO(<1.4×)→8
-            VENCIDO(<2.2×)→12  SECO(≥2.2×)→15  extreme(≥2.8×)→+2
+      15  pm_evidence (D.3)       — Pattern Memory WR evidence replaces scarcity:
+            WR>=60% n>=10→15  WR 50-60%→10  WR 35-50%→5  WR<35%→0  no_data→7
 
     Cooldown veto: if burst retrace < 50%, multiply score by 0.3 (energy not reset).
     implied_structure: FASE 4 — FVG absent but triple lock (extreme pressure + kinetic
         compression) authorises the structural bonus without real BOS confirmation.
+
+    scarcity_state / scarcity_ratio still accepted for telemetry logging by callers
+    but NO LONGER contribute to the score (D.3 2026-06-19).
+
+    Returns: (prob, missing_list, pm_info_dict)
     """
     score = 0
     missing: list[str] = []
@@ -312,24 +322,27 @@ def _calculate_rng_probability(
     else:
         missing.append("zona macro no confirmada")
 
-    # FASE 1: inverted scarcity — overdue = higher spike pressure
-    if scarcity_state == "SECO":
-        score += 15 + (2 if scarcity_ratio >= 2.8 else 0)
-    elif scarcity_state == "VENCIDO":
-        score += 12
-    elif scarcity_state == "LISTO":
-        score += 8
-    elif scarcity_state == "CARGANDO":
-        score += 3
+    # D.3 (2026-06-19): PM evidence replaces scarcity as 4th RNG component.
+    # scarcity_state/ratio still logged for telemetry but do not affect the score.
+    if symbol:
+        from src.analysis.pattern_memory_query import get_pm_rng_points
+        _pm = get_pm_rng_points(
+            symbol=symbol,
+            side=side,
+            fvg_tier_raw=fvg_tier_raw,
+            imminence_state_raw=imminence_state,
+            hurst=hurst,
+            entry_score=entry_score,
+        )
     else:
-        _scar_label = scarcity_state if scarcity_state and scarcity_state not in ("SIN_DATOS", "") else "SIN_DATOS"
-        missing.append(f"scarcity={_scar_label} ({scarcity_ratio:.2f}×)")
+        _pm = {"points": 7, "wr": None, "n": 0, "reason": "no_symbol_neutral"}
+    score += _pm["points"]
 
     if cooldown_active:
         score = round(score * 0.3)
         missing.append("COOLDOWN activo — retroceso <50%")
 
-    return min(score, 100), missing
+    return min(score, 100), missing, _pm
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
@@ -4165,13 +4178,19 @@ class DerivDaemon:
         if _mk_scar_ratio_raw is None:
             _mk_scar_ratio_raw = (self._last_fvg_state.get(_cache_sym) or {}).get("scarcity_ratio")
         _mk_scar_ratio = float(_mk_scar_ratio_raw or 0.0)
-        _mk_rng, _mk_missing = _calculate_rng_probability(
+        _mk_rng, _mk_missing, _mk_pm = _calculate_rng_probability(
             kinetic_score=_mk_kinetic,
             fvg_bos_validated=_mk_fvg_bos,
             zona_liquidez_macro=_mk_vision,
             scarcity_state=_mk_scar,
             scarcity_ratio=_mk_scar_ratio,
             cooldown_active=False,
+            symbol=tick.symbol,
+            side=str(snap.side or ""),
+            fvg_tier_raw=str(snap.score_breakdown.get("fvg_tier") or ""),
+            hurst=float(_eval_hurst if _eval_hurst is not None else 0.5),
+            imminence_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+            entry_score=float(snap.score),
         )
         _mk_score_thr = float(os.getenv("DERIV_MASTER_KEY_SCORE", "6.25") or "6.25")
         _mk_rng_thr   = int(float(os.getenv("DERIV_MASTER_KEY_RNG", "65") or "65"))
@@ -5208,7 +5227,7 @@ class DerivDaemon:
                 _tl_missing.append(f"kinetic_absent(score={_tl_kinetic:.3f})")
             snap.score_breakdown["triple_lock_blocked"] = _tl_missing
 
-        _rng_prob, _rng_missing = _calculate_rng_probability(
+        _rng_prob, _rng_missing, _rng_pm = _calculate_rng_probability(
             kinetic_score=_rng_kinetic,
             fvg_bos_validated=bool(snap.score_breakdown.get("fvg_bos_validated", False)),
             zona_liquidez_macro=_rng_vision,
@@ -5216,12 +5235,22 @@ class DerivDaemon:
             scarcity_ratio=float(snap.score_breakdown.get("scarcity_ratio") or 0.0),
             cooldown_active=_rng_cooldown_active,
             implied_structure=_triple_lock_fired,
+            symbol=tick.symbol,
+            side=str(snap.side or ""),
+            fvg_tier_raw=str(snap.score_breakdown.get("fvg_tier") or ""),
+            hurst=float(_eval_hurst if _eval_hurst is not None else 0.5),
+            imminence_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+            entry_score=float(snap.score),
         )
         _rng_threshold = int(float(os.getenv("DERIV_PROBABILITY_THRESHOLD", "65") or "65"))
 
         snap.score_breakdown["rng_probability"]  = _rng_prob
         snap.score_breakdown["rng_missing"]      = _rng_missing
         snap.score_breakdown["rng_threshold"]    = _rng_threshold
+        snap.score_breakdown["rng_pm_pts"]       = _rng_pm["points"]
+        snap.score_breakdown["rng_pm_wr"]        = _rng_pm["wr"]
+        snap.score_breakdown["rng_pm_n"]         = _rng_pm["n"]
+        snap.score_breakdown["rng_pm_reason"]    = _rng_pm["reason"]
 
         # Keep trifecta fields for UI chip display
         _trifecta_vision   = _rng_vision
@@ -5265,8 +5294,16 @@ class DerivDaemon:
                 score_breakdown=_sb_rng,
             )
             _LOGGER.info(
-                "[RNG_PROBABILITY_GATE] %s BLOCKED prob=%d/100 < threshold=%d | missing=%s",
-                tick.symbol, _rng_prob, _rng_threshold, _rng_missing,
+                "[RNG_PROBABILITY_GATE] %s BLOCKED prob=%d/100 < threshold=%d"
+                " | (K%d+FVG%d+Z%d+PM%d) pm_wr=%s pm_n=%d | missing=%s",
+                tick.symbol, _rng_prob, _rng_threshold,
+                round(_rng_kinetic * 35),
+                30 if (bool(snap.score_breakdown.get("fvg_bos_validated")) or _triple_lock_fired) else 0,
+                20 if _rng_vision else 0,
+                _rng_pm["points"],
+                f"{_rng_pm['wr']:.0f}%" if _rng_pm["wr"] is not None else "no_data",
+                _rng_pm["n"],
+                _rng_missing,
             )
             self._record_decision(
                 symbol=tick.symbol, allowed=False, side=snap.side,

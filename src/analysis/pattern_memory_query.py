@@ -191,6 +191,107 @@ def _pm_evaluate(row: Dict, match_level: str, pattern_id: str, setup_type: str |
     }
 
 
+# ============================================================================
+# D.3 (2026-06-19) — PM como componente del RNG_PROBABILITY
+# Reemplaza el componente 'scarcity' (filosóficamente incorrecto post-spike)
+# con evidencia empírica de Pattern Memory. Usa _PM_CACHE en memoria (sync).
+# ============================================================================
+
+def _pm_to_rng_points(row: dict, match_level: str) -> dict:
+    """Convertir fila PM a puntos RNG (0-15) y metadata."""
+    n = row.get("n_trades", 0)
+    wr = row.get("wr", 0.0)
+    if wr >= 60:
+        pts = 15
+    elif wr >= 50:
+        pts = 10
+    elif wr >= 35:
+        pts = 5
+    else:
+        pts = 0
+    return {"points": pts, "wr": round(wr, 1), "n": n, "reason": f"{match_level}_wr{wr:.0f}_n{n}"}
+
+
+def get_pm_rng_points(
+    symbol: str,
+    side: str,
+    fvg_tier_raw: str | None,
+    imminence_state_raw: str | None,
+    hurst: float,
+    entry_score: float,
+) -> dict:
+    """
+    D.3 — Componente Pattern Memory para RNG_PROBABILITY (0-15 pts).
+
+    Reemplaza scarcity_pts. Usa _PM_CACHE (sync, sin DB hit por tick).
+    Devuelve dict con 'points', 'wr', 'n', 'reason'.
+
+    Tabla de puntos:
+      WR >= 60% n>=10 → 15  (ganador confirmado)
+      WR 50-60% n>=10 → 10  (neutral positivo)
+      WR 35-50% n>=10 →  5  (débil)
+      WR <  35% n>=10 →  0  (perdedor)
+      n  5-9           → escala × 0.7 (muestra pequeña)
+      sin data         →  7  (neutro)
+    """
+    data = _PM_CACHE.get("data") or {}
+    if not data:
+        return {"points": 7, "wr": None, "n": 0, "reason": "cache_empty"}
+
+    imminence = _imminence_to_bucket(imminence_state_raw)
+    score_bucket = _score_to_bucket(entry_score)
+    hurst_bucket = _hurst_to_bucket(hurst)
+    fvg_tier = _fvg_to_tier(fvg_tier_raw)
+    sym = (symbol or "").upper()
+    sd = (side or "").lower()
+
+    # 1. Exact 6-dim match (n>=10)
+    exact_key = f"{sym}:{sd}:{fvg_tier}:{hurst_bucket}:{imminence}:{score_bucket}"
+    row = data.get(exact_key)
+    if row and row.get("n_trades", 0) >= 10:
+        return _pm_to_rng_points(row, "6dim")
+
+    # 2. Aggregate 3-dim: symbol+hurst+imminence+score (n>=10)
+    agg_n, agg_wins, agg_pnl = 0, 0, 0.0
+    for k, r in data.items():
+        parts = k.split(":")
+        if (
+            len(parts) == 6
+            and parts[0] == sym
+            and parts[3] == hurst_bucket
+            and parts[4] == imminence
+            and parts[5] == score_bucket
+        ):
+            n_k = r.get("n_trades", 0)
+            agg_n += n_k
+            agg_wins += r.get("wins", 0)
+            agg_pnl += float(r.get("avg_pnl", 0)) * n_k
+
+    if agg_n >= 10:
+        agg_row = {
+            "n_trades": agg_n,
+            "wins": agg_wins,
+            "wr": agg_wins / agg_n * 100.0,
+            "avg_pnl": agg_pnl / agg_n,
+        }
+        return _pm_to_rng_points(agg_row, "3dim")
+
+    # 3. Small sample (n 5-9) con descuento de confianza
+    if agg_n >= 5:
+        agg_row = {
+            "n_trades": agg_n,
+            "wins": agg_wins,
+            "wr": agg_wins / agg_n * 100.0,
+            "avg_pnl": agg_pnl / agg_n,
+        }
+        result = _pm_to_rng_points(agg_row, "3dim_small")
+        result["points"] = int(result["points"] * 0.7)
+        result["reason"] += "_discounted"
+        return result
+
+    return {"points": 7, "wr": None, "n": agg_n, "reason": "no_data"}
+
+
 async def query_pattern_memory(
     symbol: str,
     side: str,
