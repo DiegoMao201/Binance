@@ -270,13 +270,15 @@ function SymbolCard({ s }) {
     : null;
   const _rngProbC   = _sn?.rng_probability ?? null;
   const _rngThreshC = _sn?.rng_threshold ?? 65;
+  const _evalAgeS   = _sn?.eval_age_s ?? null;
+  const _isStale    = _evalAgeS != null && _evalAgeS > 90;
 
   const _masterRed    = _structConflC
     || _scarcityC === "SECO"
     || (_scarcityC === "VENCIDO" && (_scoreRawC == null || _scoreRawC < 7.0))
     || _gradeC === "C"
     || _ema200LoadedC === false;
-  const _masterGreen  = !_masterRed && _sn != null
+  const _masterGreen  = !_masterRed && !_isStale && _sn != null
     && _rngProbC != null && _rngProbC >= _rngThreshC
     && (_gradeC === "A" || _gradeC === "B")
     && (_scarcityC == null || ["FRESCO","CARGANDO","LISTO"].includes(_scarcityC));
@@ -431,6 +433,25 @@ function SymbolCard({ s }) {
               <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.green, lineHeight: 1 }}>
                 {_rngProbC ?? "–"}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ EVALUACIÓN DETENIDA — cuando bot bloquea antes de risk.evaluate() (ej. MATURITY_HARDBLOCK) ══ */}
+      {_isStale && (
+        <div style={{
+          padding: "6px 12px", background: T.amber + "14",
+          borderBottom: `1px solid ${T.amber}33`,
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.amber, flexShrink: 0 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, color: T.amber, letterSpacing: "0.1em" }}>
+              EVALUACION PAUSADA
+            </div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.amber, opacity: 0.7, marginTop: 1 }}>
+              {`sin eval ${_evalAgeS != null ? Math.round(_evalAgeS) + "s" : "?"} · bot bloqueado antes de scoring`}
             </div>
           </div>
         </div>

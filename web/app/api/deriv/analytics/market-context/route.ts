@@ -217,6 +217,7 @@ export async function GET(request: NextRequest) {
         rng_probability: latest.rng_probability ?? null,
         rng_missing: latest.rng_missing ?? [],
         rng_threshold: latest.rng_threshold ?? 65,
+        eval_age_s: latest.eval_age_s ?? null,
         // ── V2 Progressive Imminence + Ceiling (PASO 2.3e-E.2, from deriv_market_context.json)
         progressive_imminence_bucket:      latest.progressive_imminence_bucket ?? null,
         progressive_imminence_ratio:       latest.progressive_imminence_ratio ?? null,

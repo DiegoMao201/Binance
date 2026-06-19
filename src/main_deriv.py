@@ -1737,6 +1737,9 @@ class DerivDaemon:
                 pass
 
             _fvg_cache = self._last_fvg_state.get(symbol.upper(), {})
+            _eval_ts = _fvg_cache.get("eval_ts", 0)
+            _eval_age_s = round(_now - _eval_ts, 1) if _eval_ts > 0 else None
+            _is_stale = (_eval_age_s is None) or (_eval_age_s > 90)
             _snap = {
                 "ts":                     round(_now, 3),
                 "iso":                    datetime.fromtimestamp(_now, tz=timezone.utc).isoformat(),
@@ -1756,16 +1759,20 @@ class DerivDaemon:
                 "fvg_direction":          _fvg_cache.get("fvg_direction") or None,
                 "fvg_mid":                _fvg_cache.get("fvg_mid"),
                 "smc_bonus":              _fvg_cache.get("smc_bonus"),
-                # Entry quality indicators (operator console)
-                "setup_type":            _fvg_cache.get("setup_type"),
-                "execution_grade":       _fvg_cache.get("execution_grade"),
+                # Entry quality indicators (operator console).
+                # When eval_age_s > 90 (bot blocked before risk.evaluate() — e.g.
+                # MATURITY_HARDBLOCK), clear decision fields so the panel does not
+                # show ENTRADA CONFIRMADA with data that is minutes old.
+                "eval_age_s":            _eval_age_s,
+                "setup_type":            None if _is_stale else _fvg_cache.get("setup_type"),
+                "execution_grade":       None if _is_stale else _fvg_cache.get("execution_grade"),
                 "scarcity_state":        _fvg_cache.get("scarcity_state"),
                 "scarcity_ratio":        _fvg_cache.get("scarcity_ratio"),
                 "spike_imminence_state": _fvg_cache.get("spike_imminence_state"),
                 "spike_imminence_score": _fvg_cache.get("spike_imminence_score"),
                 "geo_channel_pos":       _fvg_cache.get("geo_channel_pos"),
                 "fvg_tier":              _fvg_cache.get("fvg_tier"),
-                "score_raw":             _fvg_cache.get("score_raw"),
+                "score_raw":             None if _is_stale else _fvg_cache.get("score_raw"),
                 # Post-spike blind window: indicators computed in the 120s after a
                 # spike are biased by the spike's price action (FVG, SMC, geo all
                 # reflect the spike anomaly, not the next entry opportunity).
@@ -1799,8 +1806,8 @@ class DerivDaemon:
                 "fvg_anchor_wick_survived": _fvg_cache.get("fvg_anchor_wick_survived"),
                 "fvg_anchor_tol_penalty":   _fvg_cache.get("fvg_anchor_tol_penalty"),
                 "fvg_anchor_mom_penalty":   _fvg_cache.get("fvg_anchor_mom_penalty"),
-                # RNG probability (last known — persisted after each full pipeline run)
-                "rng_probability":          _fvg_cache.get("rng_probability"),
+                # RNG probability (last known — cleared when eval is stale)
+                "rng_probability":          None if _is_stale else _fvg_cache.get("rng_probability"),
                 "rng_threshold":            _fvg_cache.get("rng_threshold", 65),
                 "rng_missing":              _fvg_cache.get("rng_missing") or [],
                 # Trifecta confirmations
@@ -3490,6 +3497,7 @@ class DerivDaemon:
         self._last_fvg_state[_cache_sym].update({
             "setup_type": _sb_now.get("setup_type"),
             "fvg_tier":   _sb_now.get("fvg_tier"),
+            "eval_ts":    time.time(),
         })
         _qf_early_preserve = {
             "execution_grade": _sb_now.get("execution_grade"),
