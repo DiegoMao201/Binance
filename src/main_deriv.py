@@ -3033,11 +3033,13 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False,
                         block_reason="reactivation_awareness_no_fresh_spike",
                     )
-                    if str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}:
-                        if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                            _d6_update_state(tick.symbol, "CANCELLED", reason="reactivation_awareness_gate")
-                    return
+                    if (
+                        str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+                        and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+                    ):
+                        pass  # ghost aprobó — reactivation_awareness no bloquea D.6 pending
+                    else:
+                        return
                 elif _fresh_spike_since_react:
                     # Fresh spike landed → mark awareness satisfied
                     with suppress(Exception):
