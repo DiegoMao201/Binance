@@ -3228,14 +3228,21 @@ class DerivDaemon:
                 _pe_created_at = float(_pe_spike_state.get("created_at") or 0.0)
                 _new_spike_during_pending = _ceg_spike_ts > _pe_created_at
                 if _new_spike_during_pending:
-                    _LOGGER.info(
-                        "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
-                        "spike ts=%.0f > pending_created=%.0f side=%s)",
-                        tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
-                    )
-                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                    if _d6_enabled:
-                        _d6_update_state(tick.symbol, "CANCELLED", reason="spike_anti_chase")
+                    if _d6_enabled and _spike_aligns_pending:
+                        # D.6: spike confirma la dirección del ghost → no cancelar
+                        _LOGGER.info(
+                            "[PENDING_ENTRY] %s D6_SPIKE_CONFIRMS pending %s → ghost preservado",
+                            tick.symbol, _pe_spike_side,
+                        )
+                    else:
+                        _LOGGER.info(
+                            "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
+                            "spike ts=%.0f > pending_created=%.0f side=%s)",
+                            tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
+                        )
+                        PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                        if _d6_enabled:
+                            _d6_update_state(tick.symbol, "CANCELLED", reason="spike_anti_chase")
                 elif not _spike_aligns_pending:
                     _LOGGER.info(
                         "[PENDING_ENTRY] %s SPIKE_OPPOSITE → CANCEL (side=%s)",
