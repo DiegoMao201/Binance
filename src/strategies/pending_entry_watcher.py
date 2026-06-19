@@ -123,7 +123,11 @@ class PendingEntryWatcher:
 
             # Cancelar solo si el PROMEDIO cae por debajo del umbral
             # (un tick bajo no cancela — el ruido tick-a-tick es normal)
-            if avg_score < pending["cancel_score"]:
+            # D.6 GHOST ABSOLUTE: nunca cancelar por score drop — solo spike cancela
+            _d6_abs = str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+            if avg_score < pending["cancel_score"] and not _d6_abs:
                 _LOGGER.info(
                     "[PENDING_ENTRY] %s CANCELLED | avg=%.2f < cancel_thr=%.2f "
                     "(initial=%.2f last=%.2f) ticks=%d",

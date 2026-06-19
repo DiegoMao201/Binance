@@ -67,6 +67,7 @@ from src.strategies.pending_entry_watcher import (
 )
 from src.safety.post_spike_contamination import detect_contamination as _detect_spike_contamination
 from src.utils.deriv_config import DerivSettings, load_deriv_settings
+from src.api.d6_ghost_state import update_d6_state as _d6_update_state
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
 from src.analysis.pattern_memory_query import check_pm_filter
@@ -3157,6 +3158,24 @@ class DerivDaemon:
         # RNG (cooldown×0.3, POST_CLUSTER_EXHAUSTION) already suppress entries
         # after spikes without a blunt tick-count gate.
 
+        # ── D.6 GHOST ABSOLUTE (2026-06-19) ──────────────────────────────────
+        # Filosofía: ghost emite ALLOW → bot entra 60s después. Solo spike cancela.
+        # Ningún gate veta cuando el ghost ha aprobado la señal.
+        _d6_enabled = str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if _d6_enabled:
+            _d6_lfs = self._last_fvg_state.get(tick.symbol.upper(), {})
+            _d6_g_min = float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+            _d6_ghost_likely = (
+                float(_d6_lfs.get("score_raw") or 0.0) >= _d6_g_min
+                and str(_d6_lfs.get("setup_type") or "").upper()
+                    in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
+                and str(_d6_lfs.get("execution_grade") or "").upper() in {"A", "B"}
+            )
+        else:
+            _d6_ghost_likely = False
+
         # ── L.1+L.2+L.6.2+L.6.3 CONSECUTIVE_ENTRY_GUARD ────────────────────
         # Block if symbol is in corrida-cooldown (2+ losing trades in 600s window).
         # L.2: on_spike_detected cancels cooldown when a NEW spike arrives.
@@ -3196,12 +3215,16 @@ class DerivDaemon:
                         tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
                     )
                     PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    if _d6_enabled:
+                        _d6_update_state(tick.symbol, "CANCELLED", reason="spike_anti_chase")
                 elif not _spike_aligns_pending:
                     _LOGGER.info(
                         "[PENDING_ENTRY] %s SPIKE_OPPOSITE → CANCEL (side=%s)",
                         tick.symbol, _pe_spike_side,
                     )
                     PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    if _d6_enabled:
+                        _d6_update_state(tick.symbol, "CANCELLED", reason="spike_opposite")
                 else:
                     _LOGGER.info(
                         "[PENDING_ENTRY] %s spike aligns with pending %s → preservando "
@@ -3215,7 +3238,7 @@ class DerivDaemon:
                 "[CONSECUTIVE_GUARD] %s MAX_PRESSURE_OVERRIDE | %s",
                 tick.symbol, _ceg.get("reason", ""),
             )
-        elif _ceg["blocked"]:
+        elif _ceg["blocked"] and not (_d6_enabled and _d6_ghost_likely):
             if _ceg.get("allow_chase_bypass"):
                 # L.6.2: score >= 6.0 AND not contaminated → allow despite cooldown
                 _contam = _detect_spike_contamination(
@@ -3343,7 +3366,7 @@ class DerivDaemon:
                             in {"A", "B"}
                     )
                     _mat_pending_bypass = PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
-                    if (_mat_ghost_bypass or _mat_pending_bypass) and _mat_ratio_out < _mat_hardblock_min:
+                    if (_mat_ghost_bypass or _mat_pending_bypass or _d6_enabled) and _mat_ratio_out < _mat_hardblock_min:
                         if (_mat_now - _mat_last_emit) >= 30.0:
                             self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
                             _LOGGER.info(
@@ -3394,7 +3417,7 @@ class DerivDaemon:
         _dry_gate_en = str(os.getenv("DERIV_DRY_GATE_ENABLE", "true")).strip().lower() in {
             "1", "true", "yes", "on"
         }
-        if _dry_gate_en and is_spike_market(tick.symbol):
+        if _dry_gate_en and is_spike_market(tick.symbol) and not _d6_enabled:
             _dg_imm = self._risk.get_spike_imminence_state(tick.symbol)
             if _dg_imm.get("state") == "DRY":
                 _dg_key = f"{tick.symbol}:dry_gate"
@@ -3592,6 +3615,23 @@ class DerivDaemon:
             {k: v for k, v in _qf_early_preserve.items() if v is not None}
         )
 
+        # D.6 — detectar ghost-quality setup post-scoring
+        _d6_setup_now = str(snap.score_breakdown.get("setup_type") or "").upper()
+        _d6_grade_now = str(snap.score_breakdown.get("execution_grade") or "").upper()
+        _d6_ghost_fire = (
+            _d6_enabled
+            and _d6_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
+            and _d6_grade_now in {"A", "B"}
+            and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+        )
+        if _d6_ghost_fire:
+            _LOGGER.info(
+                "[D6_GHOST_ALLOW] %s score=%.2f setup=%s grade=%s imm=%s → pending 60s (all gates bypass)",
+                tick.symbol, snap.score, _d6_setup_now, _d6_grade_now,
+                str(snap.score_breakdown.get("spike_imminence_state") or "?"),
+            )
+            snap.score_breakdown["d6_ghost_absolute"] = True
+
         # ═══════════════════════════════════════════════════════════════════
         # TREND_BLOCK gate: symbols with historically poor TREND WR require
         # score >= DERIV_TREND_SETUP_MIN_SCORE (default 7.0) for TREND setups.
@@ -3612,6 +3652,11 @@ class DerivDaemon:
                             "[PENDING_ENTRY] %s EXPIRED_BYPASS TREND_BLOCK | "
                             "score=%.2f<%.1f original_setup=%s avg=%.2f → ejecutando entrada confirmada",
                             tick.symbol, snap.score, _tb_min, _pe_setup_now, _pe_exp_avg,
+                        )
+                    elif _d6_ghost_fire:
+                        _LOGGER.info(
+                            "[D6_GHOST_ALLOW] %s TREND_BLOCK bypass | score=%.2f<%.1f → ghost mandates",
+                            tick.symbol, snap.score, _tb_min,
                         )
                     else:
                         _tb_key = f"{tick.symbol}:trend_block"
@@ -4899,6 +4944,12 @@ class DerivDaemon:
                         tick.symbol, snap.score, _regime_min, _pe_exp_avg,
                     )
                     snap.score_breakdown["regime_gate_bypassed_expired_pending"] = True
+                elif _d6_ghost_fire:
+                    _LOGGER.info(
+                        "[D6_GHOST_ALLOW] %s REGIME_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
+                        tick.symbol, snap.score, _regime_min,
+                    )
+                    snap.score_breakdown["regime_gate_bypassed_d6"] = True
                 else:
                     return
 
@@ -5053,6 +5104,12 @@ class DerivDaemon:
                     tick.symbol, _pe_exp_avg,
                 )
                 snap.score_breakdown["pssv_bypassed_expired_pending"] = True
+            elif _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s POST_SPIKE_STRENGTH_VETO bypass → ghost mandates",
+                    tick.symbol,
+                )
+                snap.score_breakdown["pssv_bypassed_d6"] = True
             else:
                 self._log_entry_block(
                     tick.symbol,
@@ -5456,6 +5513,12 @@ class DerivDaemon:
                     tick.symbol, _rng_prob, _rng_threshold, _pe_exp_avg,
                 )
                 snap.score_breakdown["rng_gate_bypassed_expired_pending"] = True
+            elif _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s RNG_PROBABILITY_GATE bypass | prob=%d<threshold=%d → ghost mandates",
+                    tick.symbol, _rng_prob, _rng_threshold,
+                )
+                snap.score_breakdown["rng_gate_bypassed_d6"] = True
             else:
                 return
 
@@ -5748,6 +5811,12 @@ class DerivDaemon:
                     tick.symbol, str(analysis.ai_reason or "")[:80],
                 )
                 snap.score_breakdown["ai_veto_bypassed_expired_pending"] = True
+            elif _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s AI_VETO bypass | ai_reason=%s → ghost mandates",
+                    tick.symbol, str(analysis.ai_reason or "")[:80],
+                )
+                snap.score_breakdown["ai_veto_bypassed_d6"] = True
             else:
                 _probe_ok, _probe_reason = self._allow_ai_veto_recovery_probe(
                     tick.symbol,
@@ -6008,18 +6077,37 @@ class DerivDaemon:
                 "before entry | side=%s",
                 tick.symbol, snap.score, _pe_remain, snap.side,
             )
+            if _d6_ghost_fire:
+                _d6_update_state(tick.symbol, "PENDING", {
+                    "score": round(float(snap.score), 2),
+                    "setup": _d6_setup_now,
+                    "grade": _d6_grade_now,
+                    "imm_state": str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                    "side": str(snap.side or ""),
+                    "wait_s": round(float(_pe_remain), 0),
+                    "created_at": time.time(),
+                    "expires_at": time.time() + float(_pe_remain),
+                    "remaining_seconds": int(_pe_remain),
+                })
             return
         if _pe_action == ACTION_WAIT:
             _LOGGER.info(
                 "[PENDING_ENTRY] %s CONFIRMING | score=%.2f | remain=%.0fs",
                 tick.symbol, snap.score, _pe_remain,
             )
+            if _d6_ghost_fire:
+                _d6_update_state(tick.symbol, "PENDING", {
+                    "remaining_seconds": int(_pe_remain),
+                    "score": round(float(snap.score), 2),
+                })
             return
         if _pe_action == ACTION_CANCEL:
             _LOGGER.info(
                 "[PENDING_ENTRY] %s SIGNAL_DROPPED | score=%.2f — buscando nueva señal",
                 tick.symbol, snap.score,
             )
+            if _d6_ghost_fire:
+                _d6_update_state(tick.symbol, "CANCELLED", reason="score_drop")
             return
         # ACTION_ENTER: período confirmado → continúa a la orden real
         # PASO 2.3h-prep Fase F: log enriched decision before routing order
@@ -6067,14 +6155,23 @@ class DerivDaemon:
                     tick.symbol, snap.score, ai_note, hurst_note, result,
                 )
                 self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
+                if snap.score_breakdown.get("d6_ghost_absolute"):
+                    _d6_update_state(tick.symbol, "EXECUTED", {
+                        "executed_at": time.time(),
+                        "score": round(float(snap.score), 2),
+                    })
         except OrderRouterError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] router rejected: %s", exc)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_router_error")
+            if snap.score_breakdown.get("d6_ghost_absolute"):
+                _d6_update_state(tick.symbol, "FAILED", reason="order_router_error")
         except DerivClientError as exc:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[deriv-daemon] broker rejected order %s: %s", tick.symbol, exc)
             self._spike_enrich(tick.symbol, bot_entered=False, block_reason="broker_rejected")
+            if snap.score_breakdown.get("d6_ghost_absolute"):
+                _d6_update_state(tick.symbol, "FAILED", reason="broker_rejected")
         except Exception:  # noqa: BLE001
             self._counters["orders_failed"] += 1
             _LOGGER.exception("[deriv-daemon] order pipeline crashed (suppressed)")

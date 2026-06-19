@@ -102,6 +102,89 @@ function Stat({ label, value, color }) {
   );
 }
 
+/* ── D.6 Ghost Live Section ──────────────────────────────────── */
+function GhostLiveSection({ symbol }) {
+  const [ghostState, setGhostState] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/d6-ghost-state", { cache: "no-store" });
+        if (!active) return;
+        const data = res.ok ? await res.json() : null;
+        if (data?.states?.[symbol]) setGhostState(data.states[symbol]);
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 1000);
+    return () => { active = false; clearInterval(id); };
+  }, [symbol]);
+
+  if (!ghostState) return null;
+  const { state, ghost_data: gd = {}, reason } = ghostState;
+
+  const base = {
+    marginTop: 8, padding: "6px 10px", borderRadius: 6,
+    fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+    border: "1px solid currentColor",
+  };
+
+  if (state === "WAITING" || !state) return (
+    <div style={{ ...base, color: "rgba(90,100,115,0.7)", background: "rgba(90,100,115,0.05)" }}>
+      <span style={{ fontWeight: 700 }}>GHOST</span>
+      <span style={{ marginLeft: 8, opacity: 0.6 }}>esperando señal…</span>
+    </div>
+  );
+
+  if (state === "PENDING") {
+    const remaining = gd.remaining_seconds ?? 60;
+    const pct = Math.min(100, Math.max(0, ((60 - remaining) / 60) * 100));
+    return (
+      <div style={{ ...base, color: "#fbbf24", background: "rgba(251,191,36,0.08)" }}>
+        <div style={{ fontWeight: 700 }}>⏳ GHOST PENDING — {remaining}s restantes</div>
+        <div style={{
+          width: "100%", height: 3, background: "rgba(251,191,36,0.2)",
+          borderRadius: 2, margin: "4px 0", overflow: "hidden",
+        }}>
+          <div style={{ width: `${pct}%`, height: "100%", background: "#fbbf24", transition: "width 1s linear" }} />
+        </div>
+        <div style={{ opacity: 0.85 }}>
+          {gd.side === "MULTUP" ? "▲" : gd.side === "MULTDOWN" ? "▼" : "?"}{" "}
+          {gd.setup || "?"} · grade {gd.grade || "?"} · score {gd.score?.toFixed(2) || "?"}
+          {gd.imm_state ? ` · ${gd.imm_state}` : ""}
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "EXECUTED") return (
+    <div style={{ ...base, color: "#22c55e", background: "rgba(34,197,94,0.12)" }}>
+      <div style={{ fontWeight: 700 }}>✅ GHOST EJECUTADO</div>
+      <div style={{ opacity: 0.85 }}>
+        {gd.score ? `score ${gd.score.toFixed(2)}` : ""}
+        {gd.executed_at ? ` · ${new Date(gd.executed_at * 1000).toLocaleTimeString()}` : ""}
+      </div>
+    </div>
+  );
+
+  if (state === "CANCELLED") return (
+    <div style={{ ...base, color: "#f59e0b", background: "rgba(245,158,11,0.08)" }}>
+      <div style={{ fontWeight: 700 }}>⚠️ GHOST CANCELADO</div>
+      <div style={{ opacity: 0.75 }}>{reason || "spike"}</div>
+    </div>
+  );
+
+  if (state === "FAILED") return (
+    <div style={{ ...base, color: "#ef4444", background: "rgba(239,68,68,0.08)" }}>
+      <div style={{ fontWeight: 700 }}>❌ GHOST FALLO API</div>
+      <div style={{ opacity: 0.75 }}>{reason || ""}</div>
+    </div>
+  );
+
+  return null;
+}
+
 /* ── symbol card (fusión: data técnica completa + nuevo visual) ── */
 function SymbolCard({ s }) {
   const [analytics, setAnalytics] = useState(null);
@@ -1051,6 +1134,9 @@ function SymbolCard({ s }) {
             })()}
           </div>
         )}
+
+        {/* D.6 Ghost Live */}
+        <GhostLiveSection symbol={s.symbol} />
       </div>
     </div>
   );
