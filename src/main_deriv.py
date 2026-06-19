@@ -3480,6 +3480,7 @@ class DerivDaemon:
             _pe_valid_imm = {"RIPE", "OVERDUE", "BUILDING", "DRY"}
             if _pe_ghost_likely:
                 _pe_valid_imm.add("FRESH")
+                _pe_valid_imm.add("UNKNOWN")  # post-spike: imm reinicia a UNKNOWN momentáneamente
             _pe_expired_bypass = (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
                 and _pe_score_now >= 7.0
@@ -3606,27 +3607,34 @@ class DerivDaemon:
             if tick.symbol.upper() in _tb_syms:
                 _tb_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
                 if snap.score < _tb_min:
-                    _tb_key = f"{tick.symbol}:trend_block"
-                    _tb_now = time.time()
-                    _tb_last = float(
-                        self._dynamic_inactive_last_emit_ts.get(_tb_key) or 0.0
-                    )
-                    if (_tb_now - _tb_last) >= 30.0:
-                        self._dynamic_inactive_last_emit_ts[_tb_key] = _tb_now
+                    if _pe_expired_bypass:
                         _LOGGER.info(
-                            "[TREND_BLOCK] BLOCKED %s | setup=TREND score=%.2f < min=%.1f"
-                            " | grade=%s scarcity=%s",
-                            tick.symbol, snap.score, _tb_min,
-                            str(snap.score_breakdown.get("execution_grade") or ""),
-                            str(snap.score_breakdown.get("scarcity_state") or ""),
+                            "[PENDING_ENTRY] %s EXPIRED_BYPASS TREND_BLOCK | "
+                            "score=%.2f<%.1f original_setup=%s avg=%.2f → ejecutando entrada confirmada",
+                            tick.symbol, snap.score, _tb_min, _pe_setup_now, _pe_exp_avg,
                         )
-                    self._spike_enrich(
-                        tick.symbol, bot_entered=False,
-                        block_reason=(
-                            f"trend_block:score={snap.score:.2f}<{_tb_min}"
-                        ),
-                    )
-                    return
+                    else:
+                        _tb_key = f"{tick.symbol}:trend_block"
+                        _tb_now = time.time()
+                        _tb_last = float(
+                            self._dynamic_inactive_last_emit_ts.get(_tb_key) or 0.0
+                        )
+                        if (_tb_now - _tb_last) >= 30.0:
+                            self._dynamic_inactive_last_emit_ts[_tb_key] = _tb_now
+                            _LOGGER.info(
+                                "[TREND_BLOCK] BLOCKED %s | setup=TREND score=%.2f < min=%.1f"
+                                " | grade=%s scarcity=%s",
+                                tick.symbol, snap.score, _tb_min,
+                                str(snap.score_breakdown.get("execution_grade") or ""),
+                                str(snap.score_breakdown.get("scarcity_state") or ""),
+                            )
+                        self._spike_enrich(
+                            tick.symbol, bot_entered=False,
+                            block_reason=(
+                                f"trend_block:score={snap.score:.2f}<{_tb_min}"
+                            ),
+                        )
+                        return
 
         # Cache state for market context telemetry (written on next 60-tick cycle).
         _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
