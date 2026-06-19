@@ -3482,6 +3482,7 @@ class DerivDaemon:
         # Ejemplo desbloqueado correctamente: BOOM600 avg=8.99 nuevo spike alineado FRESCO.
         _pe_expired_bypass = False
         _pe_exp_avg = 0.0
+        _d6_expired_force = False
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
             _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
@@ -3511,9 +3512,24 @@ class DerivDaemon:
                 and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
                 and _pe_imm_now in _pe_valid_imm
             )
+            # D.6 EXPIRED FORCE: pending expirado en modo ghost absolute → forzar entrada
+            # Activo cuando D.6 está on Y el pending ya cumplió los 60s.
+            # Bypasea todos los gates downstream igual que _d6_ghost_fire.
+            _d6_expired_force = _d6_enabled and int(_pe_exp.get("remaining_s", 999)) <= 0
+
+            # Panel countdown: actualizar remaining en el archivo aunque score haya bajado
+            if _d6_enabled:
+                _d6_update_state(tick.symbol, "PENDING", {
+                    "remaining_seconds": max(0, int(_pe_exp.get("remaining_s", 0))),
+                    "score": round(float(_pe_score_now), 2),
+                    "grade": _pe_grade_now,
+                    "setup": _pe_setup_now,
+                })
+
             if (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
                 and not _pe_expired_bypass
+                and not _d6_enabled  # D.6: ghost ya aprobó, nunca cancelar al expirar
             ):
                 _LOGGER.info(
                     "[PENDING_ENTRY] %s BYPASS DENEGADO | score=%.2f grade=%s setup=%s imm=%s"
@@ -3631,6 +3647,12 @@ class DerivDaemon:
                 str(snap.score_breakdown.get("spike_imminence_state") or "?"),
             )
             snap.score_breakdown["d6_ghost_absolute"] = True
+        elif _d6_expired_force:
+            _LOGGER.info(
+                "[D6_EXPIRED_FORCE] %s score=%.2f grade=%s → pending expiró, forzando entrada (ghost aprobó al inicio)",
+                tick.symbol, snap.score, _d6_grade_now,
+            )
+            snap.score_breakdown["d6_ghost_absolute"] = True
 
         # ═══════════════════════════════════════════════════════════════════
         # TREND_BLOCK gate: symbols with historically poor TREND WR require
@@ -3653,7 +3675,7 @@ class DerivDaemon:
                             "score=%.2f<%.1f original_setup=%s avg=%.2f → ejecutando entrada confirmada",
                             tick.symbol, snap.score, _tb_min, _pe_setup_now, _pe_exp_avg,
                         )
-                    elif _d6_ghost_fire:
+                    elif _d6_ghost_fire or _d6_expired_force:
                         _LOGGER.info(
                             "[D6_GHOST_ALLOW] %s TREND_BLOCK bypass | score=%.2f<%.1f → ghost mandates",
                             tick.symbol, snap.score, _tb_min,
@@ -4944,7 +4966,7 @@ class DerivDaemon:
                         tick.symbol, snap.score, _regime_min, _pe_exp_avg,
                     )
                     snap.score_breakdown["regime_gate_bypassed_expired_pending"] = True
-                elif _d6_ghost_fire:
+                elif _d6_ghost_fire or _d6_expired_force:
                     _LOGGER.info(
                         "[D6_GHOST_ALLOW] %s REGIME_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
                         tick.symbol, snap.score, _regime_min,
@@ -5104,7 +5126,7 @@ class DerivDaemon:
                     tick.symbol, _pe_exp_avg,
                 )
                 snap.score_breakdown["pssv_bypassed_expired_pending"] = True
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d6_expired_force:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s POST_SPIKE_STRENGTH_VETO bypass → ghost mandates",
                     tick.symbol,
@@ -5513,7 +5535,7 @@ class DerivDaemon:
                     tick.symbol, _rng_prob, _rng_threshold, _pe_exp_avg,
                 )
                 snap.score_breakdown["rng_gate_bypassed_expired_pending"] = True
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d6_expired_force:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s RNG_PROBABILITY_GATE bypass | prob=%d<threshold=%d → ghost mandates",
                     tick.symbol, _rng_prob, _rng_threshold,
@@ -5811,7 +5833,7 @@ class DerivDaemon:
                     tick.symbol, str(analysis.ai_reason or "")[:80],
                 )
                 snap.score_breakdown["ai_veto_bypassed_expired_pending"] = True
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d6_expired_force:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s AI_VETO bypass | ai_reason=%s → ghost mandates",
                     tick.symbol, str(analysis.ai_reason or "")[:80],
@@ -6095,10 +6117,11 @@ class DerivDaemon:
                 "[PENDING_ENTRY] %s CONFIRMING | score=%.2f | remain=%.0fs",
                 tick.symbol, snap.score, _pe_remain,
             )
-            if _d6_ghost_fire:
+            if _d6_enabled:
                 _d6_update_state(tick.symbol, "PENDING", {
                     "remaining_seconds": int(_pe_remain),
                     "score": round(float(snap.score), 2),
+                    "grade": str(snap.score_breakdown.get("execution_grade") or ""),
                 })
             return
         if _pe_action == ACTION_CANCEL:
