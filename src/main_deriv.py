@@ -3465,6 +3465,27 @@ class DerivDaemon:
             snap.score_breakdown["maturity_ratio"] = round(_mat_ratio_out, 3)
             snap.score_breakdown["maturity_status"] = _mat_status_out
 
+        # ── Early panel cache update ──────────────────────────────────────────
+        # Update setup_type / score / grade BEFORE any early-return gate so
+        # the operator panel always shows current tick state, not stale data
+        # from the last good evaluation.  Full cache update still runs below
+        # for ticks that pass all gates.
+        _sb_now = snap.score_breakdown if isinstance(snap.score_breakdown, dict) else {}
+        _cache_sym = tick.symbol.upper()
+        if _cache_sym not in self._last_fvg_state:
+            self._last_fvg_state[_cache_sym] = {}
+        self._last_fvg_state[_cache_sym].update({
+            "setup_type": _sb_now.get("setup_type"),
+            "fvg_tier":   _sb_now.get("fvg_tier"),
+        })
+        _qf_early_preserve = {
+            "execution_grade": _sb_now.get("execution_grade"),
+            "score_raw":       _sb_now.get("score_raw"),
+        }
+        self._last_fvg_state[_cache_sym].update(
+            {k: v for k, v in _qf_early_preserve.items() if v is not None}
+        )
+
         # ═══════════════════════════════════════════════════════════════════
         # TREND_BLOCK gate: symbols with historically poor TREND WR require
         # score >= DERIV_TREND_SETUP_MIN_SCORE (default 7.0) for TREND setups.
