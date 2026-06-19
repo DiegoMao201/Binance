@@ -3114,10 +3114,11 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
-            # Cancelar pending SOLO si el spike contradice la dirección apostada.
-            # CRASH spikes van DOWN → preservar pending MULTDOWN (alineado).
-            # BOOM spikes van UP   → preservar pending MULTUP (alineado).
-            # Spike que confirma la dirección → no cancelar, dejar expirar normalmente.
+            # Cancelar pending en CUALQUIER spike — alineado o no.
+            # Si el spike alinea con la dirección (CRASH+MULTDOWN, BOOM+MULTUP):
+            #   la oportunidad ya ocurrió. Entrar post-spike = perseguir.
+            #   Una señal nueva post-spike creará pending fresco si condiciones lo justifican.
+            # Si el spike contradice la dirección: invalidación obvia → cancelar.
             _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
             if _pe_spike_state:
                 _pe_spike_side = _pe_spike_state.get("side", "")
@@ -3126,14 +3127,13 @@ class DerivDaemon:
                     (_sym_is_crash and _pe_spike_side == "MULTDOWN") or
                     (not _sym_is_crash and _pe_spike_side == "MULTUP")
                 )
-                if not _spike_aligns_pending:
-                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                else:
-                    _LOGGER.info(
-                        "[PENDING_ENTRY] %s spike aligns with pending %s → preservando "
-                        "(spike confirma dirección de la apuesta)",
-                        tick.symbol, _pe_spike_side,
-                    )
+                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s CANCELADO por spike | side=%s reason=%s",
+                    tick.symbol, _pe_spike_side,
+                    "spike_paso_no_perseguir" if _spike_aligns_pending
+                    else "spike_contradicts_direction",
+                )
         _ceg_sb = self._last_fvg_state.get(tick.symbol.upper(), {})
         _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol, current_sb=_ceg_sb)
         if _ceg.get("max_pressure_override"):
