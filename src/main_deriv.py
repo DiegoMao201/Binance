@@ -291,7 +291,7 @@ def _calculate_rng_probability(
       25  fvg_bos_validated       — structural algorithm reset confirmed
               OR implied_structure (FASE 4 triple lock: extreme pressure + kinetic giro)
       15  imm_state_evidence      — spike imminence state (datos ghost histórico 3,955 entradas):
-              DRY/OVERDUE/RIPE=15 BUILDING=10 FRESH=5 UNKNOWN=7
+              ghost_active→15 | DRY/OVERDUE/RIPE=15 BUILDING=12 FRESH=10 UNKNOWN=8
       20  ghost_confirms          — ghost_bypass activo con setup probado: 0/20 pts
       10  zona_liquidez_macro     — bonus Gemini (era 20 pts, reducido: Gemini es volátil)
       ---
@@ -325,15 +325,18 @@ def _calculate_rng_probability(
 
     # imm_state: 0-15 pts — basado en datos ghost histórico (3,955 entradas Jun 9-19)
     # DRY=87%, OVERDUE=76%, RIPE=75%, BUILDING=68%, FRESH=60%, UNKNOWN=51%
+    # D.4 FINAL: si ghost confirmó → 15 pts siempre (timing irrelevante — filosofía Diego)
     _imm_upper = (imminence_state or "").upper().strip()
-    if _imm_upper in ("DRY", "OVERDUE", "RIPE"):
+    if ghost_bypass_fired:
+        _imm_pts = 15  # ghost validó el setup → timing no es restricción
+    elif _imm_upper in ("DRY", "OVERDUE", "RIPE"):
         _imm_pts = 15
     elif _imm_upper == "BUILDING":
-        _imm_pts = 10
+        _imm_pts = 12
     elif _imm_upper == "FRESH":
-        _imm_pts = 5
+        _imm_pts = 10  # NO castigo — filosofía Diego: FRESH=60% WR sigue siendo ganador
     else:
-        _imm_pts = 7  # UNKNOWN/vacío — neutral
+        _imm_pts = 8  # UNKNOWN/vacío — neutral
     score += _imm_pts
 
     # ghost_confirms: 0-20 pts — ghost confirmó setup ganador (GHOST_BYPASS ya validó)
@@ -3181,7 +3184,23 @@ class DerivDaemon:
                     (_sym_is_crash and _pe_spike_side == "MULTDOWN") or
                     (not _sym_is_crash and _pe_spike_side == "MULTUP")
                 )
-                if not _spike_aligns_pending:
+                # D.4 FINAL: anti-chase — spike que llega DURANTE la ventana de espera → CANCEL
+                # Filosofía Diego: "si llega el spike mientras evalúa en esos 60s pues también cancela"
+                # Detectamos spike NUEVO comparando su ts con el momento de creación del pending
+                _pe_created_at = float(_pe_spike_state.get("created_at") or 0.0)
+                _new_spike_during_pending = _ceg_spike_ts > _pe_created_at
+                if _new_spike_during_pending:
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
+                        "spike ts=%.0f > pending_created=%.0f side=%s)",
+                        tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
+                    )
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                elif not _spike_aligns_pending:
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s SPIKE_OPPOSITE → CANCEL (side=%s)",
+                        tick.symbol, _pe_spike_side,
+                    )
                     PENDING_ENTRY_WATCHER.cancel(tick.symbol)
                 else:
                     _LOGGER.info(
@@ -3286,10 +3305,11 @@ class DerivDaemon:
                     "ready" if _mat_ratio_out < 1.0 else
                     "mature"
                 )
-                # PASO 2.6 O.3: hybrid — safety net extremo <15%, resto informativo al LLM
+                # PASO 2.6 O.3: hybrid — safety net extremo <10%, resto informativo al LLM
+                # D.4 FINAL: bajado de 0.15 → 0.10 (ghost bypass cubre early entries con calidad)
                 # Per-symbol override via DERIV_MATURITY_HARDBLOCK_MAP=BOOM900:0.40,...
                 _mat_hardblock_min = float(
-                    os.getenv("DERIV_MATURITY_HARDBLOCK_MIN_RATIO", "0.15")
+                    os.getenv("DERIV_MATURITY_HARDBLOCK_MIN_RATIO", "0.10")
                 )
                 _mat_hb_map_raw = os.getenv("DERIV_MATURITY_HARDBLOCK_MAP", "")
                 if _mat_hb_map_raw:
@@ -3308,8 +3328,31 @@ class DerivDaemon:
                         self._dynamic_inactive_last_emit_ts.get(_mat_key) or 0.0
                     )
                     _mat_now = time.time()
-                    if _mat_ratio_out < _mat_hardblock_min:
-                        # HARD BLOCK — primeros ~15% del ciclo: zona de ruido puro
+                    # D.4 FINAL: bypass MATURITY_HARDBLOCK si ghost-likely o pending activo
+                    # Filosofía Diego: ghost dispara en cualquier momento del ciclo
+                    # ghost-likely proxy: score+setup+grade del tick anterior (snap no disponible aún)
+                    _mat_lfs = self._last_fvg_state.get(tick.symbol.upper(), {})
+                    _mat_ghost_min = float(
+                        os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0
+                    )
+                    _mat_ghost_bypass = (
+                        float(_mat_lfs.get("score_raw") or 0.0) >= _mat_ghost_min
+                        and str(_mat_lfs.get("setup_type") or "").upper()
+                            in {"SMC_FVG", "EMA200_SPIKE"}
+                        and str(_mat_lfs.get("execution_grade") or "").upper()
+                            in {"A", "B"}
+                    )
+                    _mat_pending_bypass = PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+                    if (_mat_ghost_bypass or _mat_pending_bypass) and _mat_ratio_out < _mat_hardblock_min:
+                        if (_mat_now - _mat_last_emit) >= 30.0:
+                            self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
+                            _LOGGER.info(
+                                "[MATURITY_HARDBLOCK] %s BYPASS | ratio=%.3f ghost_likely=%s pending=%s",
+                                tick.symbol, _mat_ratio_out,
+                                _mat_ghost_bypass, _mat_pending_bypass,
+                            )
+                    elif _mat_ratio_out < _mat_hardblock_min:
+                        # HARD BLOCK — primeros ~10% del ciclo: zona de ruido puro (sin ghost/pending)
                         if (_mat_now - _mat_last_emit) >= 30.0:
                             self._dynamic_inactive_last_emit_ts[_mat_key] = _mat_now
                             _LOGGER.info(
@@ -3419,19 +3462,30 @@ class DerivDaemon:
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
             _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
-            # D.4 (2026-06-19) — Regla Diego: "que entre con score 7+ más grade A y FVG confirmado"
+            # D.4 FINAL (2026-06-19) — Regla Diego: "que entre con score 7+ más grade A y FVG confirmado"
             # OLD: avg_score≥6.0 (demasiado laxo → entradas con score=3.82, 13 timeouts)
             # NEW: score raw actual ≥7.0 + grade A/B + setup probado + imm_state ganador
-            _pe_score_now = float(snap.score or 0.0)
-            _pe_grade_now = str(snap.score_breakdown.get("execution_grade") or "").upper()
-            _pe_setup_now = str(snap.score_breakdown.get("setup_type") or "").upper()
-            _pe_imm_now   = str(snap.score_breakdown.get("spike_imminence_state") or "").upper()
+            # NOTA: snap no está definido aún (línea ~3505) — usar _last_fvg_state del tick anterior
+            _pe_lfs = self._last_fvg_state.get(tick.symbol.upper(), {})
+            _pe_score_now = float(_pe_lfs.get("score_raw") or 0.0)
+            _pe_grade_now = str(_pe_lfs.get("execution_grade") or "").upper()
+            _pe_setup_now = str(_pe_lfs.get("setup_type") or "").upper()
+            _pe_imm_now   = str(_pe_lfs.get("spike_imminence_state") or "").upper()
+            # D.4 FINAL: FRESH permitido cuando setup+grade son ghost-worthy (filosofía Diego)
+            _pe_ghost_likely = (
+                _pe_score_now >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+                and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE"}
+                and _pe_grade_now in {"A", "B"}
+            )
+            _pe_valid_imm = {"RIPE", "OVERDUE", "BUILDING", "DRY"}
+            if _pe_ghost_likely:
+                _pe_valid_imm.add("FRESH")
             _pe_expired_bypass = (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
                 and _pe_score_now >= 7.0
                 and _pe_grade_now in {"A", "B"}
                 and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
-                and _pe_imm_now in {"RIPE", "OVERDUE", "BUILDING", "DRY"}
+                and _pe_imm_now in _pe_valid_imm
             )
             if (
                 int(_pe_exp.get("remaining_s", 999)) <= 0

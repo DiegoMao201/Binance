@@ -171,6 +171,7 @@ class PendingEntryWatcher:
                     "confirmations": p["confirmations"],
                     "side": p["side"],
                     "wait_s": p["wait_s"],
+                    "created_at": p.get("created_at", 0.0),
                 }
                 for sym, p in self._pending.items()
             }
