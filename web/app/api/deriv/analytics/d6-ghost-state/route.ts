@@ -34,10 +34,16 @@ export async function GET() {
       const updatedAt = Number(e.updated_at || 0);
       const state = String(e.state || 'WAITING');
       const age = now - updatedAt;
+      const gd = (typeof e.ghost_data === 'object' && e.ghost_data !== null) ? e.ghost_data as Record<string, unknown> : {};
+      const remainingSec = typeof gd.remaining_seconds === 'number' ? gd.remaining_seconds : null;
 
       if ((state === 'EXECUTED' || state === 'CANCELLED' || state === 'FAILED') && age > 90) {
         // Trade terminal — auto-clear al WAITING
         states[sym] = { symbol: sym, state: 'WAITING', updated_at: now, ghost_data: {} };
+      } else if (state === 'PENDING' && remainingSec !== null && remainingSec <= 0) {
+        // Countdown llegó a 0 pero bot nunca ejecutó — stuck, no se ejecutará
+        // (updated_at se refresca cada tick con remaining=0, TTL por age nunca dispara)
+        states[sym] = { ...e, state: 'EXPIRED_GHOST', reason: 'pending_0s_no_execute' };
       } else if (state === 'PENDING' && age > PENDING_TTL_S) {
         // PENDING fantasma — bot no actualizó en >90s, bug visible
         states[sym] = { ...e, state: 'EXPIRED_GHOST', reason: `pending_stale_${Math.round(age)}s` };
