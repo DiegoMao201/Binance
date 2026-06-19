@@ -3114,11 +3114,14 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
-            # Cancelar pending en CUALQUIER spike — alineado o no.
-            # Si el spike alinea con la dirección (CRASH+MULTDOWN, BOOM+MULTUP):
-            #   la oportunidad ya ocurrió. Entrar post-spike = perseguir.
-            #   Una señal nueva post-spike creará pending fresco si condiciones lo justifican.
-            # Si el spike contradice la dirección: invalidación obvia → cancelar.
+            # Cancelar pending SOLO si el spike contradice la dirección apostada.
+            # CRASH spikes van DOWN → preservar pending MULTDOWN (alineado):
+            #   el spike confirma que el mercado sigue en modo CRASH, el pending
+            #   sigue acumulando avg_score para un pe_expired_bypass de calidad.
+            # BOOM spikes van UP → preservar pending MULTUP (mismo razonamiento).
+            # Spike que contradice → dirección inválida → cancelar inmediatamente.
+            # Nota: pe_expired_bypass aplica chequeo de scarcity aguas abajo para
+            # evitar entrada post-spike cuando avg_score es bajo o scarcity=FRESCO.
             _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
             if _pe_spike_state:
                 _pe_spike_side = _pe_spike_state.get("side", "")
@@ -3127,13 +3130,14 @@ class DerivDaemon:
                     (_sym_is_crash and _pe_spike_side == "MULTDOWN") or
                     (not _sym_is_crash and _pe_spike_side == "MULTUP")
                 )
-                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s CANCELADO por spike | side=%s reason=%s",
-                    tick.symbol, _pe_spike_side,
-                    "spike_paso_no_perseguir" if _spike_aligns_pending
-                    else "spike_contradicts_direction",
-                )
+                if not _spike_aligns_pending:
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                else:
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s spike aligns with pending %s → preservando "
+                        "(spike confirma dirección, avg_score acumulando)",
+                        tick.symbol, _pe_spike_side,
+                    )
         _ceg_sb = self._last_fvg_state.get(tick.symbol.upper(), {})
         _ceg = CONSECUTIVE_GUARD.is_blocked(tick.symbol, current_sb=_ceg_sb)
         if _ceg.get("max_pressure_override"):
@@ -3350,18 +3354,35 @@ class DerivDaemon:
                     self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
                     return
 
-        # Pending entry expirado: si el ventana de confirmación ya venció Y
-        # avg_score ≥ 4.5 a lo largo del ventana, el pending puede saltarse
+        # Pending entry expirado: si la ventana de confirmación ya venció Y
+        # avg_score ≥ 6.0 a lo largo de la ventana, el pending puede saltarse
         # los gates intermedios — la aprobación original sigue vigente.
+        # Restricción anti-chase: NO bypass si scarcity=FRESCO (spike recién
+        # ocurrió). En ese estado el spike ya pasó y entrar ahora es perseguirlo.
+        # El avg_score mínimo subió de 4.5 → 6.0 para exigir acumulación de calidad.
         _pe_expired_bypass = False
         _pe_exp_avg = 0.0
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
             _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
+            _pe_scar = str(
+                (self._last_fvg_state.get(tick.symbol.upper()) or {}).get("scarcity_state") or ""
+            )
             _pe_expired_bypass = (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
-                and _pe_exp_avg >= 4.5
+                and _pe_exp_avg >= 6.0
+                and _pe_scar not in ("FRESCO",)
             )
+            if (
+                int(_pe_exp.get("remaining_s", 999)) <= 0
+                and not _pe_expired_bypass
+            ):
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s BYPASS DENEGADO | avg=%.2f (min=6.0) scarcity=%s"
+                    " → cancelando pending (no perseguir post-spike)",
+                    tick.symbol, _pe_exp_avg, _pe_scar,
+                )
+                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
