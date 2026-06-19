@@ -697,8 +697,10 @@ class DerivDaemon:
         _last_spike = self._risk.get_last_spike_ts(symbol)
         if _last_spike <= 0 or (time.time() - _last_spike) > 300.0:
             return
-        _open_contracts = getattr(self._executor, "open_contracts", {})
-        _had_open = bool(_open_contracts.get(symbol) or _open_contracts.get(_su))
+        _had_open = any(
+            oc.symbol in (symbol, _su)
+            for oc in getattr(self._executor, "_open", {}).values()
+        )
         self._risk.enrich_last_spike(
             symbol,
             bot_entered=bot_entered,
@@ -3626,7 +3628,10 @@ class DerivDaemon:
         # D.6 — detectar ghost-quality setup post-scoring
         _d6_setup_now = str(snap.score_breakdown.get("setup_type") or "").upper()
         _d6_grade_now = str(snap.score_breakdown.get("execution_grade") or "").upper()
-        _d6_has_open = bool(getattr(self._executor, "open_contracts", {}).get(tick.symbol))
+        _d6_has_open = any(
+            oc.symbol == tick.symbol
+            for oc in getattr(self._executor, "_open", {}).values()
+        )
         # Si ya hay posición abierta y había un pending huérfano → cancelar antes de continuar
         if _d6_enabled and _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
