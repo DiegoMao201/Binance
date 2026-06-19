@@ -3626,14 +3626,24 @@ class DerivDaemon:
         # D.6 — detectar ghost-quality setup post-scoring
         _d6_setup_now = str(snap.score_breakdown.get("setup_type") or "").upper()
         _d6_grade_now = str(snap.score_breakdown.get("execution_grade") or "").upper()
+        _d6_has_open = bool(getattr(self._executor, "open_contracts", {}).get(tick.symbol))
+        # Si ya hay posición abierta y había un pending huérfano → cancelar antes de continuar
+        if _d6_enabled and _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+            _d6_update_state(tick.symbol, "CANCELLED", reason="position_already_open")
+            _LOGGER.info(
+                "[D6_GHOST_ALLOW] %s phantom pending cancelado — posición ya abierta",
+                tick.symbol,
+            )
         _d6_ghost_fire = (
             _d6_enabled
+            and not _d6_has_open
             and _d6_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
             and _d6_grade_now in {"A", "B"}
             and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
         )
         # D.6.1: si pending ya existe → ghost aprobó en tick original, no re-validar
-        if not _d6_ghost_fire and _d6_enabled and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+        if not _d6_ghost_fire and _d6_enabled and not _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _d6_ghost_fire = True
 
         if _d6_ghost_fire:
@@ -6161,6 +6171,8 @@ class DerivDaemon:
                 )
                 self._spike_enrich(tick.symbol, bot_entered=False,
                                    block_reason="symbol_already_open")
+                if snap.score_breakdown.get("d6_ghost_absolute"):
+                    _d6_update_state(tick.symbol, "CANCELLED", reason="symbol_already_open")
             else:
                 self._counters["orders_ok"] += 1
                 _LOGGER.info(
