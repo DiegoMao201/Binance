@@ -282,67 +282,91 @@ def _calculate_rng_probability(
     hurst: float = 0.5,
     imminence_state: str = "",
     entry_score: float = 5.0,
+    ghost_bypass_fired: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Probabilistic RNG alignment score (0-100).
 
-    Weights:
-      35  kinetic_score (0.0–1.0) — continuous compression: tight drift + deceleration
-      30  fvg_bos_validated       — structural algorithm reset confirmed
+    D.4 (2026-06-19) — Nueva arquitectura empírica (max 100 pts):
+      30  kinetic_score (0.0–1.0) — continuous compression: tight drift + deceleration
+      25  fvg_bos_validated       — structural algorithm reset confirmed
               OR implied_structure (FASE 4 triple lock: extreme pressure + kinetic giro)
-      20  zona_liquidez_macro     — macro liquidity zone (Vision LLM)
-      15  pm_evidence (D.3)       — Pattern Memory WR evidence replaces scarcity:
-            WR>=60% n>=10→15  WR 50-60%→10  WR 35-50%→5  WR<35%→0  no_data→7
+      15  imm_state_evidence      — spike imminence state (datos ghost histórico 3,955 entradas):
+              DRY/OVERDUE/RIPE=15 BUILDING=10 FRESH=5 UNKNOWN=7
+      20  ghost_confirms          — ghost_bypass activo con setup probado: 0/20 pts
+      10  zona_liquidez_macro     — bonus Gemini (era 20 pts, reducido: Gemini es volátil)
+      ---
+      100 total
 
     Cooldown veto: if burst retrace < 50%, multiply score by 0.3 (energy not reset).
     implied_structure: FASE 4 — FVG absent but triple lock (extreme pressure + kinetic
         compression) authorises the structural bonus without real BOS confirmation.
 
-    scarcity_state / scarcity_ratio still accepted for telemetry logging by callers
-    but NO LONGER contribute to the score (D.3 2026-06-19).
+    scarcity_state / scarcity_ratio accepted for telemetry but no longer affect score.
+    PM evidence removed (D.4): cache was always empty → always 7 neutral (dead weight).
 
-    Returns: (prob, missing_list, pm_info_dict)
+    Returns: (prob, missing_list, rng_info_dict)
     """
     score = 0
     missing: list[str] = []
 
-    _kin_pts = round(kinetic_score * 35)
+    # K: 30 pts (era 35)
+    _kin_pts = round(kinetic_score * 30)
     score += _kin_pts
     if _kin_pts == 0:
         missing.append("compresión cinética ausente")
 
+    # FVG: 25 pts (era 30)
     if fvg_bos_validated:
-        score += 30
+        score += 25
     elif implied_structure:
-        score += 30  # FASE 4: triple lock — physical tension replaces structural confirmation
+        score += 25  # FASE 4: triple lock — physical tension replaces structural confirmation
     else:
         missing.append("FVG sin BOS estructural")
 
+    # imm_state: 0-15 pts — basado en datos ghost histórico (3,955 entradas Jun 9-19)
+    # DRY=87%, OVERDUE=76%, RIPE=75%, BUILDING=68%, FRESH=60%, UNKNOWN=51%
+    _imm_upper = (imminence_state or "").upper().strip()
+    if _imm_upper in ("DRY", "OVERDUE", "RIPE"):
+        _imm_pts = 15
+    elif _imm_upper == "BUILDING":
+        _imm_pts = 10
+    elif _imm_upper == "FRESH":
+        _imm_pts = 5
+    else:
+        _imm_pts = 7  # UNKNOWN/vacío — neutral
+    score += _imm_pts
+
+    # ghost_confirms: 0-20 pts — ghost confirmó setup ganador (GHOST_BYPASS ya validó)
+    # ghost_bypass_fired ya requiere score≥7.0 + setup∈{SMC_FVG,EMA200_SPIKE} + grade∈{A,B}
+    _ghost_pts = 20 if ghost_bypass_fired else 0
+    score += _ghost_pts
+
+    # Zona liquidez macro: 10 pts bonus (era 20 — reducido: Gemini es intermitente)
     if zona_liquidez_macro:
-        score += 20
+        score += 10
     else:
         missing.append("zona macro no confirmada")
-
-    # D.3 (2026-06-19): PM evidence replaces scarcity as 4th RNG component.
-    # scarcity_state/ratio still logged for telemetry but do not affect the score.
-    if symbol:
-        from src.analysis.pattern_memory_query import get_pm_rng_points
-        _pm = get_pm_rng_points(
-            symbol=symbol,
-            side=side,
-            fvg_tier_raw=fvg_tier_raw,
-            imminence_state_raw=imminence_state,
-            hurst=hurst,
-            entry_score=entry_score,
-        )
-    else:
-        _pm = {"points": 7, "wr": None, "n": 0, "reason": "no_symbol_neutral"}
-    score += _pm["points"]
 
     if cooldown_active:
         score = round(score * 0.3)
         missing.append("COOLDOWN activo — retroceso <50%")
 
-    return min(score, 100), missing, _pm
+    _rng_info = {
+        "kinetic_pts": _kin_pts,
+        "fvg_pts": 25 if (fvg_bos_validated or implied_structure) else 0,
+        "imm_pts": _imm_pts,
+        "imm_state": imminence_state,
+        "ghost_pts": _ghost_pts,
+        "ghost_fired": ghost_bypass_fired,
+        "zona_pts": 10 if zona_liquidez_macro else 0,
+        # legacy fields (telemetría — no afectan score)
+        "points": _imm_pts,  # compatibilidad panels que leen _pm["points"]
+        "wr": None,
+        "n": 0,
+        "reason": f"imm_{_imm_upper or 'unknown'}_ghost{_ghost_pts}",
+    }
+
+    return min(score, 100), missing, _rng_info
 
 
 # ─── Per-symbol cooldown to prevent burst entries ────────────────────────────
@@ -3395,22 +3419,28 @@ class DerivDaemon:
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
             _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
-            _pe_scar = str(
-                (self._last_fvg_state.get(tick.symbol.upper()) or {}).get("scarcity_state") or ""
-            )
+            # D.4 (2026-06-19) — Regla Diego: "que entre con score 7+ más grade A y FVG confirmado"
+            # OLD: avg_score≥6.0 (demasiado laxo → entradas con score=3.82, 13 timeouts)
+            # NEW: score raw actual ≥7.0 + grade A/B + setup probado + imm_state ganador
+            _pe_score_now = float(snap.score or 0.0)
+            _pe_grade_now = str(snap.score_breakdown.get("execution_grade") or "").upper()
+            _pe_setup_now = str(snap.score_breakdown.get("setup_type") or "").upper()
+            _pe_imm_now   = str(snap.score_breakdown.get("spike_imminence_state") or "").upper()
             _pe_expired_bypass = (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
-                and _pe_exp_avg >= 6.0
-                and (_pe_scar not in ("FRESCO",) or _pe_exp_avg >= 8.0)
+                and _pe_score_now >= 7.0
+                and _pe_grade_now in {"A", "B"}
+                and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
+                and _pe_imm_now in {"RIPE", "OVERDUE", "BUILDING", "DRY"}
             )
             if (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
                 and not _pe_expired_bypass
             ):
                 _LOGGER.info(
-                    "[PENDING_ENTRY] %s BYPASS DENEGADO | avg=%.2f (min=6.0) scarcity=%s"
-                    " → cancelando pending (no perseguir post-spike)",
-                    tick.symbol, _pe_exp_avg, _pe_scar,
+                    "[PENDING_ENTRY] %s BYPASS DENEGADO | score=%.2f grade=%s setup=%s imm=%s"
+                    " → cancelando pending (regla Diego: score≥7.0+grade+setup+imm_ganador)",
+                    tick.symbol, _pe_score_now, _pe_grade_now, _pe_setup_now, _pe_imm_now,
                 )
                 PENDING_ENTRY_WATCHER.cancel(tick.symbol)
 
@@ -4199,6 +4229,7 @@ class DerivDaemon:
             hurst=float(_eval_hurst if _eval_hurst is not None else 0.5),
             imminence_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
             entry_score=float(snap.score),
+            ghost_bypass_fired=bool(snap.score_breakdown.get("ghost_bypass_fired", False)),
         )
         _mk_score_thr = float(os.getenv("DERIV_MASTER_KEY_SCORE", "6.25") or "6.25")
         _mk_rng_thr   = int(float(os.getenv("DERIV_MASTER_KEY_RNG", "65") or "65"))
@@ -5249,6 +5280,7 @@ class DerivDaemon:
             hurst=float(_eval_hurst if _eval_hurst is not None else 0.5),
             imminence_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
             entry_score=float(snap.score),
+            ghost_bypass_fired=bool(snap.score_breakdown.get("ghost_bypass_fired", False)),
         )
         _rng_threshold = int(float(os.getenv("DERIV_PROBABILITY_THRESHOLD", "65") or "65"))
 
@@ -5303,14 +5335,15 @@ class DerivDaemon:
             )
             _LOGGER.info(
                 "[RNG_PROBABILITY_GATE] %s BLOCKED prob=%d/100 < threshold=%d"
-                " | (K%d+FVG%d+Z%d+PM%d) pm_wr=%s pm_n=%d | missing=%s",
+                " | (K%d+FVG%d+IMM%d+GHOST%d+Z%d) imm=%s ghost=%s | missing=%s",
                 tick.symbol, _rng_prob, _rng_threshold,
-                round(_rng_kinetic * 35),
-                30 if (bool(snap.score_breakdown.get("fvg_bos_validated")) or _triple_lock_fired) else 0,
-                20 if _rng_vision else 0,
-                _rng_pm["points"],
-                f"{_rng_pm['wr']:.0f}%" if _rng_pm["wr"] is not None else "no_data",
-                _rng_pm["n"],
+                _rng_pm.get("kinetic_pts", round(_rng_kinetic * 30)),
+                _rng_pm.get("fvg_pts", 0),
+                _rng_pm.get("imm_pts", 7),
+                _rng_pm.get("ghost_pts", 0),
+                _rng_pm.get("zona_pts", 0),
+                _rng_pm.get("imm_state", ""),
+                "YES" if _rng_pm.get("ghost_fired") else "NO",
                 _rng_missing,
             )
             self._record_decision(
@@ -5326,6 +5359,22 @@ class DerivDaemon:
                 tick.symbol, bot_entered=False,
                 block_reason=f"rng_probability:{_rng_prob}/100<{_rng_threshold}",
             )
+            # Ghost recording — capturar setups de calidad bloqueados por RNG (D.4)
+            _rng_ghost_setup = str(snap.score_breakdown.get("setup_type") or "")
+            _rng_ghost_grade = str(snap.score_breakdown.get("execution_grade") or "")
+            if (
+                _rng_ghost_setup in ("SMC_FVG", "EMA200_SPIKE", "TREND")
+                and _rng_ghost_grade in ("A", "B")
+                and snap.score >= 7.0
+            ):
+                self._ghost_logger.add(
+                    symbol=tick.symbol, price=float(tick.price), side=str(snap.side or ""),
+                    score_raw=float(snap.score), gate="RNG_PROBABILITY_GATE",
+                    setup_type=_rng_ghost_setup, grade=_rng_ghost_grade,
+                    scarcity=str(snap.score_breakdown.get("scarcity_state") or ""),
+                    imm_state=str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                    imm_score=float(snap.score_breakdown.get("spike_imminence_score") or 0.0),
+                )
             # MASTER_KEY: preview RNG ≥ threshold means the setup WAS validated earlier
             # in this same tick cycle (FVG may have expired milliseconds later).
             # Allow bypass — the full score ≥ threshold AND structural check already passed.
