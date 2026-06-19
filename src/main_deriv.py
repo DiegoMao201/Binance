@@ -2506,6 +2506,17 @@ class DerivDaemon:
         return True, consec
 
     async def _pipeline(self, tick: NormalisedTick) -> None:
+        # D.6 early: actualizar countdown antes de cualquier gate
+        # Garantiza que el panel nunca muestre EXPIRED_GHOST por blocks transitorios.
+        # Si el pipeline retorna early por cualquier gate, el countdown ya se actualizó.
+        if str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}:
+            if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                _pe_early = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
+                _d6_update_state(tick.symbol, "PENDING", {
+                    "remaining_seconds": max(0, int(_pe_early.get("remaining_s", 0))),
+                    "score": round(float(_pe_early.get("last_score") or 0.0), 2),
+                })
+
         # Refresh vision context file (TTL-cached, offloaded to thread pool)
         await self._try_load_vision_context()
 
@@ -3022,6 +3033,10 @@ class DerivDaemon:
                         tick.symbol, bot_entered=False,
                         block_reason="reactivation_awareness_no_fresh_spike",
                     )
+                    if str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}:
+                        if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                            _d6_update_state(tick.symbol, "CANCELLED", reason="reactivation_awareness_gate")
                     return
                 elif _fresh_spike_since_react:
                     # Fresh spike landed → mark awareness satisfied
