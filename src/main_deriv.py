@@ -5651,8 +5651,15 @@ class DerivDaemon:
         _k5_enter_order: PendingOrder | None = None
 
         if _k5_action == "WAIT":
-            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="pending_wait")
-            return
+            if _pe_expired_bypass:
+                _LOGGER.info(
+                    "[PENDING_ENTRY] %s EXPIRED_BYPASS K5_WAIT | avg=%.2f → ignorando K5 wait"
+                    " (pending expirado confirmado)",
+                    tick.symbol, _pe_exp_avg,
+                )
+            else:
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="pending_wait")
+                return
         elif _k5_action == "ABORT":
             # Conditions degraded — fall through for fresh LLM analysis
             self._spike_enrich(
@@ -5799,6 +5806,7 @@ class DerivDaemon:
             and not analysis.ai_skipped
             and analysis.ai_action == "PREPARE_AND_WAIT"
             and analysis.ai_wait_seconds > 0
+            and not _pe_expired_bypass
         ):
             PENDING_MANAGER.create(PendingOrder(
                 symbol=tick.symbol,
