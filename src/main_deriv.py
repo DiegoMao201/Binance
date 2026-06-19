@@ -3357,9 +3357,12 @@ class DerivDaemon:
         # Pending entry expirado: si la ventana de confirmación ya venció Y
         # avg_score ≥ 6.0 a lo largo de la ventana, el pending puede saltarse
         # los gates intermedios — la aprobación original sigue vigente.
-        # Restricción anti-chase: NO bypass si scarcity=FRESCO (spike recién
-        # ocurrió). En ese estado el spike ya pasó y entrar ahora es perseguirlo.
-        # El avg_score mínimo subió de 4.5 → 6.0 para exigir acumulación de calidad.
+        # Restricción anti-chase: NO bypass si scarcity=FRESCO, SALVO que
+        # avg_score ≥ 8.0 (señal excepcionalmente sólida acumulada a lo largo
+        # de toda la ventana). Con avg ≥ 8.0, un nuevo spike alineado en FRESCO
+        # CONFIRMA la dirección en lugar de perseguir un spike ya muerto.
+        # Ejemplo bloqueado correctamente: CRASH500 avg=7.25 score_actual=0.75 FRESCO.
+        # Ejemplo desbloqueado correctamente: BOOM600 avg=8.99 nuevo spike alineado FRESCO.
         _pe_expired_bypass = False
         _pe_exp_avg = 0.0
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
@@ -3371,7 +3374,7 @@ class DerivDaemon:
             _pe_expired_bypass = (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
                 and _pe_exp_avg >= 6.0
-                and _pe_scar not in ("FRESCO",)
+                and (_pe_scar not in ("FRESCO",) or _pe_exp_avg >= 8.0)
             )
             if (
                 int(_pe_exp.get("remaining_s", 999)) <= 0
