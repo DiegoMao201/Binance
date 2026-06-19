@@ -182,6 +182,13 @@ function GhostLiveSection({ symbol }) {
     </div>
   );
 
+  if (state === "EXPIRED_GHOST") return (
+    <div style={{ ...base, color: "#a855f7", background: "rgba(168,85,247,0.08)", border: "1px solid #a855f7" }}>
+      <div style={{ fontWeight: 700 }}>⚠ GHOST EXPIRADO (bug)</div>
+      <div style={{ opacity: 0.75, fontSize: 10 }}>{reason || "pending sin actualización"}</div>
+    </div>
+  );
+
   return null;
 }
 
