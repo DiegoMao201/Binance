@@ -3675,6 +3675,8 @@ class DerivDaemon:
             oc.symbol == tick.symbol
             for oc in getattr(self._executor, "_open", {}).values()
         )
+        # D.6.5: notificar estado de posición para cooldown post-trade
+        POST_RACHA_COOLDOWN.notify_position_state(tick.symbol, _d6_has_open)
         # Si ya hay posición abierta y había un pending huérfano → cancelar antes de continuar
         if _d6_enabled and _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)

@@ -84,6 +84,10 @@ class PostRachaCooldownTracker:
         self._state: dict[str, _CooldownState] = defaultdict(_CooldownState)
         # Cache de gap_p50 por símbolo (se invalida al agregar spike)
         self._gap_p50_cache: dict[str, float] = {}
+        # Estado de posición por símbolo (para detectar cierre)
+        self._in_trade: dict[str, bool] = defaultdict(bool)
+        # Spikes que llegaron DURANTE una posición abierta
+        self._spikes_in_trade: dict[str, int] = defaultdict(int)
 
         _LOGGER.info(
             "[D6_PR_INIT] enabled=%s | cd: 2=%ds 3=%ds 4=%ds 5+=%ds gap_fallback=%ds",
@@ -123,35 +127,38 @@ class PostRachaCooldownTracker:
         state = self._state[symbol]
         gap_p50 = self._get_gap_p50(symbol)
 
-        # ── Cooldown activo ───────────────────────────────────────────────
-        if state.active and spike_ts <= state.until_ts:
-            if bot_in_position:
-                # Bot cazó el spike durante el cooldown → fin del cooldown
+        # ── Spike durante posición abierta ────────────────────────────────
+        if bot_in_position:
+            # Contar para el cooldown post-trade
+            self._spikes_in_trade[symbol] += 1
+            # Si había cooldown activo → terminarlo (bot cazó el spike)
+            if state.active and spike_ts <= state.until_ts:
                 state.active = False
                 state.until_ts = 0.0
                 _LOGGER.info(
-                    "[D6_PR_COOLDOWN_END] %s | bot en posición durante spike post-racha"
-                    " → cooldown terminado",
-                    symbol,
+                    "[D6_PR_COOLDOWN_END] %s | bot en posición → cooldown cancelado"
+                    " (spikes_in_trade=%d)",
+                    symbol, self._spikes_in_trade[symbol],
                 )
-            else:
-                # Bot perdió otro spike → extender racha y re-iniciar cooldown
-                state.spike_count += 1
-                new_cd = _cooldown_for(state.spike_count)
-                state.until_ts = spike_ts + new_cd
-                _LOGGER.info(
-                    "[D6_PR_COOLDOWN_EXTEND] %s | spike #%d perdido durante cooldown"
-                    " → nuevo cooldown=%ds (total=%ds)",
-                    symbol, state.spike_count, new_cd,
-                    int(state.until_ts - state.started_ts),
-                )
+                self._flush()
+            return  # spikes durante trade no contribuyen a racha de spikes perdidos
+
+        # ── Cooldown activo + spike perdido ────────────────────────────────
+        if state.active and spike_ts <= state.until_ts:
+            # Bot perdió otro spike → extender racha y re-iniciar cooldown
+            state.spike_count += 1
+            new_cd = _cooldown_for(state.spike_count)
+            state.until_ts = spike_ts + new_cd
+            _LOGGER.info(
+                "[D6_PR_COOLDOWN_EXTEND] %s | spike #%d perdido durante cooldown"
+                " → nuevo cooldown=%ds (total=%ds)",
+                symbol, state.spike_count, new_cd,
+                int(state.until_ts - state.started_ts),
+            )
             self._flush()
             return
 
-        # ── Cooldown NO activo → detectar racha nueva ─────────────────────
-        if bot_in_position:
-            # Bot en posición: el spike fue cazado, no hay racha perdida
-            return
+        # ── Cooldown NO activo → detectar racha de spikes perdidos ────────
 
         # Contar cuántos spikes consecutivos RECIENTES tienen gaps < gap_p50
         buf_sorted = sorted(self._spike_buf[symbol])
@@ -212,15 +219,57 @@ class PostRachaCooldownTracker:
             "started_ts": round(state.started_ts, 3),
         }
 
+    def notify_position_state(self, symbol: str, in_position: bool) -> None:
+        """
+        Llamar cada tick con el estado de posición actual del símbolo.
+
+        Detecta el cierre de posición y activa cooldown post-trade si el bot
+        capturó ≥2 spikes durante esa posición.
+        """
+        if not _ENABLED:
+            return
+        was_in = self._in_trade[symbol]
+        self._in_trade[symbol] = in_position
+
+        if not in_position and was_in:
+            # La posición acaba de cerrar
+            spikes = self._spikes_in_trade[symbol]
+            self._spikes_in_trade[symbol] = 0
+            if spikes >= 2:
+                cd_dur = _cooldown_for(spikes)
+                now = time.time()
+                state = self._state[symbol]
+                new_until = now + cd_dur
+                # Solo activar si es más largo que el cooldown actual (si lo hay)
+                if not state.active or new_until > state.until_ts:
+                    state.active = True
+                    state.spike_count = spikes
+                    state.started_ts = now
+                    state.until_ts = new_until
+                    _LOGGER.info(
+                        "[D6_PR_POSTRADE_COOLDOWN] %s | posición cerró con %d spikes"
+                        " durante trade → cooldown=%ds",
+                        symbol, spikes, cd_dur,
+                    )
+                    self._flush()
+
+        elif in_position and not was_in:
+            # Nueva posición abierta → reset contador de spikes durante trade
+            self._spikes_in_trade[symbol] = 0
+
     def force_clear(self, symbol: str | None = None) -> None:
         """Limpiar cooldown. symbol=None limpia todos."""
         if symbol:
             self._state[symbol] = _CooldownState()
             self._last_seen_ts[symbol] = 0.0
+            self._spikes_in_trade[symbol] = 0
+            self._in_trade[symbol] = False
             _LOGGER.info("[D6_PR_FORCE_CLEAR] %s", symbol)
         else:
             self._state.clear()
             self._last_seen_ts.clear()
+            self._spikes_in_trade.clear()
+            self._in_trade.clear()
             _LOGGER.info("[D6_PR_FORCE_CLEAR_ALL]")
         self._flush()
 
