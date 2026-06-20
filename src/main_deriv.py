@@ -5133,6 +5133,12 @@ class DerivDaemon:
                     tick.symbol, snap.score, _profile_min_score, _pe_exp_avg,
                 )
                 snap.score_breakdown["profile_gate_bypassed_expired_pending"] = True
+            elif _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s PROFILE_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
+                    tick.symbol, snap.score, _profile_min_score,
+                )
+                snap.score_breakdown["profile_gate_bypassed_d6"] = True
             else:
                 return
 
