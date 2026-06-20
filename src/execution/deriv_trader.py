@@ -90,18 +90,18 @@ _PROFIT_LOCK_USDT_DEFAULT = max(
 _PROFIT_LOCK_INACTIVE_HOUR = _env_flag(
     "DERIV_PROFIT_LOCK_INACTIVE_UNTIL_NEXT_HOUR", "true"
 )
-_TIER_BASE_PCT = max(
-    0.05,
-    min(float(os.getenv("DERIV_TIER_BASE_PCT", "0.20") or 0.20), 0.40),
-)
-_TIER_MID_PCT = max(
-    0.03,
-    min(float(os.getenv("DERIV_TIER_MID_PCT", "0.10") or 0.10), 0.30),
-)
-_TIER_HIGH_PCT = max(
-    0.02,
-    min(float(os.getenv("DERIV_TIER_HIGH_PCT", "0.05") or 0.05), 0.20),
-)
+# Tier absoluto por peak en dólares (2026-06-20):
+#   peak < T2_THRESH ($1)  → T1_PCT (30%)
+#   peak < T3_THRESH ($2)  → T2_PCT (20%)
+#   peak < T4_THRESH ($4)  → T3_PCT (15%)
+#   peak ≥ T4_THRESH ($4)  → T4_PCT (10%)
+_TIER_T1_PCT = max(0.10, min(float(os.getenv("DERIV_TIER_T1_PCT", "0.30") or 0.30), 0.50))
+_TIER_T2_PCT = max(0.05, min(float(os.getenv("DERIV_TIER_T2_PCT", "0.20") or 0.20), 0.40))
+_TIER_T3_PCT = max(0.03, min(float(os.getenv("DERIV_TIER_T3_PCT", "0.15") or 0.15), 0.30))
+_TIER_T4_PCT = max(0.02, min(float(os.getenv("DERIV_TIER_T4_PCT", "0.10") or 0.10), 0.20))
+_TIER_T2_THRESH = max(0.5, float(os.getenv("DERIV_TIER_T2_THRESH", "1.0") or 1.0))
+_TIER_T3_THRESH = max(1.0, float(os.getenv("DERIV_TIER_T3_THRESH", "2.0") or 2.0))
+_TIER_T4_THRESH = max(2.0, float(os.getenv("DERIV_TIER_T4_THRESH", "4.0") or 4.0))
 _TIER_QUOTA_TIGHTEN_PP = max(
     0.0,
     min(float(os.getenv("DERIV_TIER_QUOTA_TIGHTEN_PP", "0.03") or 0.03), 0.10),
@@ -803,10 +803,9 @@ class DerivTradeExecutor:
         Semantics:
           • Staircase: cada dólar entero alcanzado por peak es un piso fijo.
             peak=$8.51 → dollar_floor=$8.00; peak=$3.40 → dollar_floor=$3.00.
-          • Tier % dinámico por nivel acumulado:
-              peak < profit_lock        → 20%
-              profit_lock ≤ peak < 2×PL → 10%
-              peak ≥ 2×PL               → 5%
+          • Tier % dinámico por peak absoluto en USD:
+              peak < $1  → 30%   peak $1-$2 → 20%
+              peak $2-$4 → 15%   peak ≥ $4  → 10%
           • Spike-quota done: si current_hour ≥ avg de horas previas,
             tier_pct -= TIGHTEN_PP (más estricto, no esperar más).
           • Final SL floor = max(dollar_floor, peak × (1 − tier_pct))
@@ -840,15 +839,16 @@ class DerivTradeExecutor:
         out["quota_remaining"] = max(0, int(quota_target) - int(spikes_1h))
         out["quota_done"] = quota_done
 
-        pl = max(0.5, float(_PROFIT_LOCK_USDT_DEFAULT))
-        if peak_profit >= 2.0 * pl:
-            tier_pct = _TIER_HIGH_PCT
-        elif peak_profit >= pl:
-            tier_pct = _TIER_MID_PCT
+        if peak_profit >= _TIER_T4_THRESH:
+            tier_pct = _TIER_T4_PCT    # ≥$4 → 10%
+        elif peak_profit >= _TIER_T3_THRESH:
+            tier_pct = _TIER_T3_PCT    # $2-$4 → 15%
+        elif peak_profit >= _TIER_T2_THRESH:
+            tier_pct = _TIER_T2_PCT    # $1-$2 → 20%
         else:
-            tier_pct = _TIER_BASE_PCT
+            tier_pct = _TIER_T1_PCT    # <$1 → 30%
         if quota_done:
-            tier_pct = max(_TIER_HIGH_PCT - 0.02, tier_pct - _TIER_QUOTA_TIGHTEN_PP)
+            tier_pct = max(_TIER_T4_PCT - 0.02, tier_pct - _TIER_QUOTA_TIGHTEN_PP)
         tier_pct = max(0.02, min(tier_pct, 0.40))
         out["tier_pct"] = round(tier_pct, 4)
 
