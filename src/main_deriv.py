@@ -5777,6 +5777,11 @@ class DerivDaemon:
                     " (pending expirado confirmado)",
                     tick.symbol, _pe_exp_avg,
                 )
+            elif _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s K5_WAIT bypass → ghost mandates",
+                    tick.symbol,
+                )
             else:
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="pending_wait")
                 return
@@ -5811,19 +5816,25 @@ class DerivDaemon:
             setup_type=_pm_setup or None,
         )
         if _pm_check["action"] == "BLOCK":
-            _LOGGER.info(
-                "[PM_FILTER] %s BLOCKED match=%s | %s | setup=%s",
-                tick.symbol,
-                _pm_check.get("match_level", "?"),
-                _pm_check.get("reason", ""),
-                _pm_check.get("setup_type", ""),
-            )
-            snap.score_breakdown["pm_filter_blocked"] = _pm_check.get("reason", "")
-            self._spike_enrich(
-                tick.symbol, bot_entered=False,
-                block_reason=f"pm_filter:{_pm_check.get('reason', '')}",
-            )
-            return
+            if _d6_ghost_fire:
+                _LOGGER.info(
+                    "[D6_GHOST_ALLOW] %s PM_FILTER bypass | match=%s → ghost mandates",
+                    tick.symbol, _pm_check.get("match_level", "?"),
+                )
+            else:
+                _LOGGER.info(
+                    "[PM_FILTER] %s BLOCKED match=%s | %s | setup=%s",
+                    tick.symbol,
+                    _pm_check.get("match_level", "?"),
+                    _pm_check.get("reason", ""),
+                    _pm_check.get("setup_type", ""),
+                )
+                snap.score_breakdown["pm_filter_blocked"] = _pm_check.get("reason", "")
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason=f"pm_filter:{_pm_check.get('reason', '')}",
+                )
+                return
 
         # BLOCK 3 — AI GATE (only reached when NO hard math override fired)
         # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.
@@ -5933,6 +5944,7 @@ class DerivDaemon:
             and analysis.ai_action == "PREPARE_AND_WAIT"
             and analysis.ai_wait_seconds > 0
             and not _pe_expired_bypass
+            and not _d6_ghost_fire
         ):
             PENDING_MANAGER.create(PendingOrder(
                 symbol=tick.symbol,
