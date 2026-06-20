@@ -136,6 +136,12 @@ _STREAK_SIZE_GOOD_PNL_WINDOW: float = float(os.getenv("DERIV_STREAK_GOOD_PNL_WIN
 _STREAK_SIZE_BAD_PNL_WINDOW: float = float(os.getenv("DERIV_STREAK_BAD_PNL_WINDOW", "-0.20"))
 _STREAK_SIZE_BAD_GUARD_BONUS: float = float(os.getenv("DERIV_STREAK_BAD_GUARD_BONUS", "0.50"))
 
+# ─── D.6 Cost Saving — skip AI_VETO when ghost drives the entry ─────────────
+# Validated 2026-06-20: 100% of trades have d6_ghost_absolute=True.
+# The LLM response was immediately bypassed anyway (lines 5952-5957).
+# Reversible: set DERIV_D6_SKIP_AI_VETO=false to restore full LLM call.
+_D6_SKIP_AI_VETO: bool = _env_flag("DERIV_D6_SKIP_AI_VETO", "true")
+
 # ─── AI-veto recovery probe ───────────────────────────────────────────────
 _AI_VETO_RECOVERY_PROBE_ENABLED: bool = _env_flag("DERIV_AI_VETO_RECOVERY_PROBE_ENABLED", "true")
 _AI_VETO_RECOVERY_MARGIN_MIN: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MARGIN_MIN", "1.00"))
@@ -5910,13 +5916,26 @@ class DerivDaemon:
         # Runs cached LLM analysis (TTL 15 min). If AI vetoes, reject.
         # If AI approves (or is skipped/errored), execute the order.
         # ═══════════════════════════════════════════════════════════════════
+        _skip_analyze = (
+            _D6_SKIP_AI_VETO
+            and (_d6_ghost_fire or _pe_expired_bypass)
+            and _k5_enter_order is None
+        )
         try:
-            analysis = await self._analyst.analyze(
-                symbol=tick.symbol,
-                score=snap.score,
-                side=snap.side,
-                score_breakdown=snap.score_breakdown,
-            )
+            if _skip_analyze:
+                analysis = None
+                snap.score_breakdown["ai_veto_skipped_d6"] = True
+                _LOGGER.info(
+                    "[D6_AI_SKIP] %s | ghost_fire=%s expired_bypass=%s → skip LLM (llm_call_saved=true)",
+                    tick.symbol, bool(_d6_ghost_fire), bool(_pe_expired_bypass),
+                )
+            else:
+                analysis = await self._analyst.analyze(
+                    symbol=tick.symbol,
+                    score=snap.score,
+                    side=snap.side,
+                    score_breakdown=snap.score_breakdown,
+                )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("[deriv-daemon] analyst error for %s: %s — proceeding", tick.symbol, exc)
             analysis = None
