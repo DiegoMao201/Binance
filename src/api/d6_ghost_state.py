@@ -90,3 +90,64 @@ def _flush() -> None:
             json.dump(_state, f)
     except Exception:
         pass
+
+
+def d6_startup_cleanup() -> None:
+    """
+    D.6.3 — Limpieza al arrancar el bot post-deploy.
+
+    Resetea el panel state a WAITING para todos los símbolos y limpia el
+    PendingEntryWatcher. Evita que estados huérfanos del proceso anterior
+    contaminen el panel o generen entradas fantasmas.
+    """
+    import logging
+    _log = logging.getLogger("deriv.daemon")
+    _log.info("[D6_STARTUP] Iniciando cleanup post-deploy D.6.3...")
+
+    _SYMBOLS = [
+        "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
+        "CRASH500", "CRASH600", "CRASH900", "CRASH1000",
+    ]
+
+    # 1. Resetear panel state → todos WAITING
+    try:
+        with _lock:
+            old_non_waiting = sum(1 for v in _state.values() if v.get("state") != "WAITING")
+            _state.clear()
+            for sym in _SYMBOLS:
+                _state[sym] = {
+                    "symbol": sym,
+                    "state": "WAITING",
+                    "updated_at": time.time(),
+                    "ghost_data": {},
+                }
+            _flush()
+        _log.info(
+            "[D6_STARTUP] Panel state limpiado | %d estados huérfanos → WAITING",
+            old_non_waiting,
+        )
+    except Exception as exc:
+        _log.warning("[D6_STARTUP] Panel cleanup error: %s", exc)
+
+    # 2. Vaciar PendingEntryWatcher
+    try:
+        from src.strategies.pending_entry_watcher import PENDING_ENTRY_WATCHER
+        with PENDING_ENTRY_WATCHER._lock:
+            n = len(PENDING_ENTRY_WATCHER._pending)
+            PENDING_ENTRY_WATCHER._pending.clear()
+        _log.info("[D6_STARTUP] PendingEntryWatcher: %d pendings huérfanos eliminados", n)
+    except Exception as exc:
+        _log.warning("[D6_STARTUP] Watcher clear error: %s", exc)
+
+    # 3. Log de configuración activa para auditoría
+    _log.info(
+        "[D6_STARTUP] Config D.6.3 — FORTISIMA: score>=%s grade=A setup=SMC_FVG BOS=True RNG>=%s wait=%ss",
+        os.getenv("DERIV_D6_STRONG_SCORE_MIN", "8.5"),
+        os.getenv("DERIV_D6_STRONG_RNG_MIN", "80"),
+        os.getenv("DERIV_D6_PENDING_STRONG_SEC", "60"),
+    )
+    for sym in _SYMBOLS:
+        wait = os.getenv(f"DERIV_D6_PENDING_NORMAL_{sym}", os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120"))
+        _log.info("[D6_STARTUP] %s normal pending: %ss", sym, wait)
+
+    _log.info("[D6_STARTUP] Cleanup completo. Bot listo para operar D.6.3.")

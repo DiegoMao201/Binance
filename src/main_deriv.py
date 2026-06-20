@@ -400,6 +400,51 @@ class _CooldownGate:
         self._last[symbol] = self._risk.get_tick_count(symbol)
 
 
+# ─── D.6.3 helpers ───────────────────────────────────────────────────────────
+
+def _calculate_pending_wait_seconds(
+    symbol: str,
+    score: float,
+    grade: str,
+    setup_type: str,
+    bos_confirmed: bool,
+    rng_probability: float,
+) -> tuple[int, str]:
+    """
+    D.6.3 — Calcula wait_seconds del pending según calidad de señal + símbolo.
+
+    Returns (wait_seconds, quality_tier).
+    quality_tier: 'fortisima' (60s todos) o 'normal' (diferenciado por símbolo).
+
+    Criterios fortísima (Diego 2026-06-20):
+      score >= DERIV_D6_STRONG_SCORE_MIN (def 8.5)
+      grade == A
+      setup == SMC_FVG
+      bos_confirmed == True
+      rng_probability >= DERIV_D6_STRONG_RNG_MIN (def 80)
+    """
+    strong_score = float(os.getenv("DERIV_D6_STRONG_SCORE_MIN", "8.5") or 8.5)
+    strong_rng   = float(os.getenv("DERIV_D6_STRONG_RNG_MIN",   "80")  or 80)
+
+    is_fortisima = (
+        score >= strong_score
+        and grade == "A"
+        and setup_type == "SMC_FVG"
+        and bos_confirmed
+        and rng_probability >= strong_rng
+    )
+
+    if is_fortisima:
+        wait_s = int(os.getenv("DERIV_D6_PENDING_STRONG_SEC", "60") or 60)
+        return (wait_s, "fortisima")
+
+    sym_upper = symbol.upper()
+    env_key = f"DERIV_D6_PENDING_NORMAL_{sym_upper}"
+    default_wait = int(os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120") or 120)
+    wait_s = int(os.getenv(env_key, default_wait) or default_wait)
+    return (wait_s, "normal")
+
+
 # ─── Daemon orchestrator ─────────────────────────────────────────────────────
 class DerivDaemon:
     def __init__(self, settings: DerivSettings) -> None:
@@ -2212,6 +2257,13 @@ class DerivDaemon:
             sorted(_FORCED_DISABLED_SYMBOLS),
         )
 
+        # D.6.3: limpieza de estados huérfanos post-deploy
+        if str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }:
+            from src.api.d6_ghost_state import d6_startup_cleanup
+            d6_startup_cleanup()
+
         # One-shot history reset: if DERIV_CLEAR_HISTORY_ON_START=true, truncate
         # closed contracts and open contracts files so the dashboard starts fresh.
         if os.getenv("DERIV_CLEAR_HISTORY_ON_START", "").lower() in {"1", "true", "yes"}:
@@ -3487,64 +3539,25 @@ class DerivDaemon:
                     self._spike_enrich(tick.symbol, bot_entered=False, block_reason="signal_cooldown")
                     return
 
-        # Pending entry expirado: si la ventana de confirmación ya venció Y
-        # avg_score ≥ 6.0 a lo largo de la ventana, el pending puede saltarse
-        # los gates intermedios — la aprobación original sigue vigente.
-        # Restricción anti-chase: NO bypass si scarcity=FRESCO, SALVO que
-        # avg_score ≥ 8.0 (señal excepcionalmente sólida acumulada a lo largo
-        # de toda la ventana). Con avg ≥ 8.0, un nuevo spike alineado en FRESCO
-        # CONFIRMA la dirección en lugar de perseguir un spike ya muerto.
-        # Ejemplo bloqueado correctamente: CRASH500 avg=7.25 score_actual=0.75 FRESCO.
-        # Ejemplo desbloqueado correctamente: BOOM600 avg=8.99 nuevo spike alineado FRESCO.
+        # D.6.3: Pending expirado → ejecutar sin re-validar score/grade/setup.
+        # Ghost aprobó al inicio con score≥7.0 — esa aprobación no expira.
+        # Si D6 habilitado: cualquier pending expirado se ejecuta directamente.
+        # Si D6 NO habilitado: mantener lógica legacy (bypass denegado posible).
         _pe_expired_bypass = False
         _pe_exp_avg = 0.0
         if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             _pe_exp = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
             _pe_exp_avg = float(_pe_exp.get("avg_score") or 0.0)
-            _pe_lfs = self._last_fvg_state.get(tick.symbol.upper(), {})
-            _pe_score_now = float(_pe_lfs.get("score_raw") or 0.0)
-            _pe_grade_now = str(_pe_lfs.get("execution_grade") or "").upper()
-            _pe_setup_now = str(_pe_lfs.get("setup_type") or "").upper()
-            _pe_imm_now   = str(_pe_lfs.get("spike_imminence_state") or "").upper()
-            _pe_ghost_likely = (
-                _pe_score_now >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
-                and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE"}
-                and _pe_grade_now in {"A", "B"}
-            )
-            _pe_valid_imm = {"RIPE", "OVERDUE", "BUILDING", "DRY"}
-            if _pe_ghost_likely:
-                _pe_valid_imm.add("FRESH")
-                _pe_valid_imm.add("UNKNOWN")
-            _pe_expired_bypass = (
-                int(_pe_exp.get("remaining_s", 999)) <= 0
-                and _pe_score_now >= 7.0
-                and _pe_grade_now in {"A", "B"}
-                and _pe_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
-                and _pe_imm_now in _pe_valid_imm
-            )
+            _pe_remaining = int(_pe_exp.get("remaining_s", 999))
 
-            # D.6.1: panel countdown — actualizar en cada tick mientras pending está vivo
+            # D.6.3: ghost aprobó → al expirar, bypass sin re-validar
+            _pe_expired_bypass = _d6_enabled and _pe_remaining <= 0
+
+            # Panel countdown (D.6 panel live update)
             if _d6_enabled:
                 _d6_update_state(tick.symbol, "PENDING", {
-                    "remaining_seconds": max(0, int(_pe_exp.get("remaining_s", 0))),
-                    "score": round(float(_pe_score_now), 2),
-                    "grade": _pe_grade_now,
-                    "setup": _pe_setup_now,
+                    "remaining_seconds": max(0, _pe_remaining),
                 })
-
-            # D.6 ACTIVO: ghost ya aprobó al inicio — nunca cancelar al expirar
-            # No-D.6: cancelar si al expirar el score/grade ya no cumple
-            if (
-                int(_pe_exp.get("remaining_s", 999)) <= 0
-                and not _pe_expired_bypass
-                and not _d6_enabled
-            ):
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s BYPASS DENEGADO | score=%.2f grade=%s setup=%s imm=%s"
-                    " → cancelando pending (score cayó durante espera)",
-                    tick.symbol, _pe_score_now, _pe_grade_now, _pe_setup_now, _pe_imm_now,
-                )
-                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 2 — MATH: pure deterministic evaluation (Hurst + SMC + ATR).
@@ -3654,23 +3667,47 @@ class DerivDaemon:
                 "[D6_GHOST_ALLOW] %s phantom pending cancelado — posición ya abierta",
                 tick.symbol,
             )
-        _d6_ghost_fire = (
+        # D.6.3: ghost NEW fire — solo cuando NO hay pending activo ya.
+        # Calcular quality_tier y wait_seconds diferenciados por símbolo.
+        _d6_ghost_fire_new = (
             _d6_enabled
             and not _d6_has_open
+            and not PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
             and _d6_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
             and _d6_grade_now in {"A", "B"}
             and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
         )
-        # D.6.1: si pending ya existe → ghost aprobó en tick original, no re-validar
-        if not _d6_ghost_fire and _d6_enabled and not _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-            _d6_ghost_fire = True
+        # D.6.1 (preservado, silencioso): pending activo → bypass gates sin re-validar score
+        _d6_ghost_pending = (
+            _d6_enabled
+            and not _d6_has_open
+            and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+        )
+        _d6_ghost_fire = _d6_ghost_fire_new or _d6_ghost_pending
 
-        if _d6_ghost_fire:
+        # Calcular wait_seconds y quality_tier solo en NEW fire
+        _d6_pending_wait_s: int = 60
+        _d6_quality_tier: str = "normal"
+        if _d6_ghost_fire_new:
+            _d6_rng_prob = float(snap.score_breakdown.get("rng_probability") or 0.0)
+            _d6_bos = bool(snap.score_breakdown.get("bos_confirmed", False))
+            _d6_pending_wait_s, _d6_quality_tier = _calculate_pending_wait_seconds(
+                symbol=tick.symbol,
+                score=float(snap.score or 0.0),
+                grade=_d6_grade_now,
+                setup_type=_d6_setup_now,
+                bos_confirmed=_d6_bos,
+                rng_probability=_d6_rng_prob,
+            )
             _LOGGER.info(
-                "[D6_GHOST_ALLOW] %s score=%.2f setup=%s grade=%s imm=%s → pending 60s (all gates bypass)",
+                "[D6_GHOST_ALLOW] %s score=%.2f setup=%s grade=%s imm=%s"
+                " → PENDING %ds quality=%s (all gates bypass)",
                 tick.symbol, snap.score, _d6_setup_now, _d6_grade_now,
                 str(snap.score_breakdown.get("spike_imminence_state") or "?"),
+                _d6_pending_wait_s, _d6_quality_tier,
             )
+
+        if _d6_ghost_fire:
             snap.score_breakdown["d6_ghost_absolute"] = True
 
         # ═══════════════════════════════════════════════════════════════════
@@ -3691,8 +3728,8 @@ class DerivDaemon:
                     if _pe_expired_bypass:
                         _LOGGER.info(
                             "[PENDING_ENTRY] %s EXPIRED_BYPASS TREND_BLOCK | "
-                            "score=%.2f<%.1f original_setup=%s avg=%.2f → ejecutando entrada confirmada",
-                            tick.symbol, snap.score, _tb_min, _pe_setup_now, _pe_exp_avg,
+                            "score=%.2f<%.1f avg=%.2f → ejecutando entrada confirmada (D6.3)",
+                            tick.symbol, snap.score, _tb_min, _pe_exp_avg,
                         )
                     elif _d6_ghost_fire:
                         _LOGGER.info(
@@ -6125,22 +6162,24 @@ class DerivDaemon:
                                    block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
         # ── Pending Entry: aguantar afuera antes de entrar ────────────────────
-        # El bot confirma la señal durante 25% del ciclo (mín 60s, máx 300s).
-        # Si la señal cae fuerte durante ese período → cancela y busca nueva.
+        # D.6.3: ghost NEW fire → pasar force_wait_s diferenciado por símbolo+calidad.
+        # Pending existente: watcher ignora force_wait_s (usa el wait_s original).
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
+            force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,
         )
         if _pe_action == ACTION_FIRST_WAIT:
             _LOGGER.info(
-                "[PENDING_ENTRY] %s HOLDING | score=%.2f → confirming %.0fs "
-                "before entry | side=%s",
-                tick.symbol, snap.score, _pe_remain, snap.side,
+                "[D6_PENDING_CREATED] %s | quality=%s wait=%ds | score=%.2f grade=%s setup=%s",
+                tick.symbol, _d6_quality_tier, int(_pe_remain), snap.score,
+                _d6_grade_now, _d6_setup_now,
             )
             if _d6_ghost_fire:
                 _d6_update_state(tick.symbol, "PENDING", {
                     "score": round(float(snap.score), 2),
                     "setup": _d6_setup_now,
                     "grade": _d6_grade_now,
+                    "quality_tier": _d6_quality_tier,
                     "imm_state": str(snap.score_breakdown.get("spike_imminence_state") or ""),
                     "side": str(snap.side or ""),
                     "wait_s": round(float(_pe_remain), 0),

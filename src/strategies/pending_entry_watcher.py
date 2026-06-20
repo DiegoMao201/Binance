@@ -50,6 +50,7 @@ class PendingEntryWatcher:
         side: str,
         score: float,
         median_cycle_s: float = 600.0,
+        force_wait_s: Optional[int] = None,
     ) -> Tuple[str, float]:
         """
         Llamar cuando el pipeline aprueba una entrada (todos los gates pasados).
@@ -60,12 +61,15 @@ class PendingEntryWatcher:
               - (ACTION_WAIT, remaining_s)   — dentro del período, seguir esperando
               - (ACTION_ENTER, 0.0)          — período OK + señal confirmada → ENTRAR
               - (ACTION_CANCEL, 0.0)         — señal cayó → cancelar
+
+        force_wait_s: D.6.3 — override the computed wait time (differentiated by symbol+quality).
+            Only applied on the FIRST call (pending creation). Ignored on re-confirmations.
         """
         if not self._enabled():
             return (ACTION_ENTER, 0.0)
 
         now = time.time()
-        wait_s = self._compute_wait_s(median_cycle_s)
+        wait_s = force_wait_s if force_wait_s is not None else self._compute_wait_s(median_cycle_s)
         drop_frac = float(os.getenv("DERIV_PENDING_ENTRY_DROP_FRAC", "0.65"))
 
         with self._lock:
