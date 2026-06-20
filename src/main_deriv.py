@@ -3206,14 +3206,8 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
-            # Cancelar pending SOLO si el spike contradice la dirección apostada.
-            # CRASH spikes van DOWN → preservar pending MULTDOWN (alineado):
-            #   el spike confirma que el mercado sigue en modo CRASH, el pending
-            #   sigue acumulando avg_score para un pe_expired_bypass de calidad.
-            # BOOM spikes van UP → preservar pending MULTUP (mismo razonamiento).
-            # Spike que contradice → dirección inválida → cancelar inmediatamente.
-            # Nota: pe_expired_bypass aplica chequeo de scarcity aguas abajo para
-            # evitar entrada post-spike cuando avg_score es bajo o scarcity=FRESCO.
+            # D.6.2: cualquier spike NUEVO durante el pending cancela, sin importar dirección.
+            # Spikes anteriores a la creación del pending no cancelan (son contexto histórico).
             _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
             if _pe_spike_state:
                 _pe_spike_side = _pe_spike_state.get("side", "")
@@ -3228,21 +3222,17 @@ class DerivDaemon:
                 _pe_created_at = float(_pe_spike_state.get("created_at") or 0.0)
                 _new_spike_during_pending = _ceg_spike_ts > _pe_created_at
                 if _new_spike_during_pending:
-                    if _d6_enabled and _spike_aligns_pending:
-                        # D.6: spike confirma la dirección del ghost → no cancelar
-                        _LOGGER.info(
-                            "[PENDING_ENTRY] %s D6_SPIKE_CONFIRMS pending %s → ghost preservado",
-                            tick.symbol, _pe_spike_side,
-                        )
-                    else:
-                        _LOGGER.info(
-                            "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
-                            "spike ts=%.0f > pending_created=%.0f side=%s)",
-                            tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
-                        )
-                        PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                        if _d6_enabled:
-                            _d6_update_state(tick.symbol, "CANCELLED", reason="spike_anti_chase")
+                    # D.6.2: cualquier spike durante pending → CANCEL siempre (Diego 2026-06-20)
+                    # Sin importar si el spike alinea o contradice la dirección del ghost.
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
+                        "spike ts=%.0f > pending_created=%.0f side=%s aligned=%s)",
+                        tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
+                        str(_spike_aligns_pending),
+                    )
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    if _d6_enabled:
+                        _d6_update_state(tick.symbol, "CANCELLED", reason="spike_anti_chase")
                 elif not _spike_aligns_pending:
                     _LOGGER.info(
                         "[PENDING_ENTRY] %s SPIKE_OPPOSITE → CANCEL (side=%s)",
