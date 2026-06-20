@@ -61,6 +61,7 @@ from src.strategies.deriv_signals import (
 )
 from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
+from src.strategies.post_racha_cooldown import POST_RACHA_COOLDOWN
 from src.strategies.pending_entry_watcher import (
     PENDING_ENTRY_WATCHER,
     ACTION_ENTER, ACTION_FIRST_WAIT, ACTION_WAIT, ACTION_CANCEL,
@@ -3258,6 +3259,12 @@ class DerivDaemon:
         _ceg_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         if _ceg_spike_ts > 0:
             CONSECUTIVE_GUARD.on_spike_detected(tick.symbol, spike_ts=_ceg_spike_ts)
+            # D.6.5: registrar spike para post-racha cooldown
+            _pr_in_pos = any(
+                oc.symbol == tick.symbol
+                for oc in getattr(self._executor, "_open", {}).values()
+            )
+            POST_RACHA_COOLDOWN.record_spike(tick.symbol, _ceg_spike_ts, _pr_in_pos)
             # D.6.2: cualquier spike NUEVO durante el pending cancela, sin importar dirección.
             # Spikes anteriores a la creación del pending no cancelan (son contexto histórico).
             _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
@@ -3677,6 +3684,17 @@ class DerivDaemon:
             and _d6_grade_now in {"A", "B"}
             and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
         )
+        # D.6.5: post-racha cooldown — bloquear NEW ghost si símbolo en cooldown
+        if _d6_ghost_fire_new and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+            _cd_info = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
+            _LOGGER.info(
+                "[D6_COOLDOWN_BLOCKED] %s | ghost bloqueado por post-racha cooldown"
+                " (spikes=%d, restante=%ds)",
+                tick.symbol,
+                (_cd_info or {}).get("spike_count", 0),
+                (_cd_info or {}).get("remaining_seconds", 0),
+            )
+            _d6_ghost_fire_new = False
         # D.6.1 (preservado, silencioso): pending activo → bypass gates sin re-validar score
         _d6_ghost_pending = (
             _d6_enabled

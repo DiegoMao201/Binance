@@ -102,6 +102,57 @@ function Stat({ label, value, color }) {
   );
 }
 
+/* ── D.6.5 Post-Racha Cooldown Bar ──────────────────────────── */
+function CooldownBar({ cooldown }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!cooldown?.active) return null;
+
+  const nowSec    = now / 1000;
+  const remaining = Math.max(0, cooldown.until_ts - nowSec);
+  const total     = cooldown.until_ts - cooldown.started_ts;
+  const elapsed   = Math.max(0, total - remaining);
+  const pct       = total > 0 ? Math.min(100, Math.max(0, (remaining / total) * 100)) : 0;
+  const spikes    = cooldown.spike_count ?? 0;
+
+  const label = spikes >= 5 ? "5+ spikes" : `${spikes} spikes`;
+  const color = "#f97316"; // naranja — distinto del amber del ghost
+
+  return (
+    <div style={{
+      marginTop: 8, padding: "6px 10px", borderRadius: 6,
+      background: "rgba(249,115,22,0.08)", border: "1px solid rgba(249,115,22,0.35)",
+      fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontWeight: 700, color }}>
+          🧊 POST-RACHA COOLDOWN
+        </span>
+        <span style={{ color, opacity: 0.9 }}>
+          {label} · {Math.ceil(remaining)}s restantes
+        </span>
+      </div>
+      <div style={{
+        width: "100%", height: 4, background: "rgba(249,115,22,0.15)",
+        borderRadius: 2, overflow: "hidden",
+      }}>
+        <div style={{
+          width: `${pct}%`, height: "100%",
+          background: color,
+          transition: "width 1s linear",
+        }} />
+      </div>
+      <div style={{ marginTop: 3, opacity: 0.6, fontSize: 10 }}>
+        Ghost bloqueado · bot esperando ciclo nuevo
+      </div>
+    </div>
+  );
+}
+
 /* ── D.6 Ghost Live Section ──────────────────────────────────── */
 function GhostLiveSection({ symbol }) {
   const [ghostState, setGhostState] = useState(null);
@@ -1156,6 +1207,9 @@ function SymbolCard({ s }) {
             })()}
           </div>
         )}
+
+        {/* D.6.5 Post-Racha Cooldown */}
+        <CooldownBar cooldown={s.postRachaCooldown} />
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />

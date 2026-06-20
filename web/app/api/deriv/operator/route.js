@@ -14,6 +14,7 @@ const CLOSED_FILE = path.join(DERIV_LOGS, "deriv_closed_contracts.json");
 const STATUS_FILE = path.join(DERIV_LOGS, "deriv_status.json");
 const SESSION_FILE = path.join(DERIV_LOGS, "deriv_session.json");
 const VISION_FILE = path.join(DERIV_LOGS, "deriv_vision.json");
+const COOLDOWN_FILE = path.join(DERIV_LOGS, "d6_cooldown_state.json");
 
 async function readJson(file, fallback) {
   try {
@@ -110,14 +111,16 @@ function classifyDecision(d) {
 export async function GET() {
   const nowSec = Date.now() / 1000;
 
-  const [spikesRaw, openRaw, closedRaw, status, session, visionRaw] = await Promise.all([
+  const [spikesRaw, openRaw, closedRaw, status, session, visionRaw, cooldownRaw] = await Promise.all([
     readJson(SPIKE_FILE, []),
     readJson(OPEN_FILE, []),
     readJson(CLOSED_FILE, []),
     readJson(STATUS_FILE, {}),
     readJson(SESSION_FILE, null),
     readJson(VISION_FILE, {}),
+    readJson(COOLDOWN_FILE, {}),
   ]);
+  const cooldownBySymbol = (cooldownRaw && typeof cooldownRaw === "object") ? (cooldownRaw.symbols || {}) : {};
   const visionData = (visionRaw && typeof visionRaw === "object") ? visionRaw : {};
 
   const spikes = (Array.isArray(spikesRaw) ? spikesRaw : [])
@@ -309,6 +312,7 @@ export async function GET() {
       openContract: openBySymbol.get(symbol) || null,
       recentSpikes: sym.slice(-12).reverse(),
       vision: visionData[symbol] || null,
+      postRachaCooldown: cooldownBySymbol[symbol] || null,
     });
   }
 

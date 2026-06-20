@@ -139,7 +139,15 @@ def d6_startup_cleanup() -> None:
     except Exception as exc:
         _log.warning("[D6_STARTUP] Panel cleanup error: %s", exc)
 
-    # 2. Vaciar PendingEntryWatcher
+    # 2. Vaciar PostRachaCooldown
+    try:
+        from src.strategies.post_racha_cooldown import POST_RACHA_COOLDOWN
+        POST_RACHA_COOLDOWN.force_clear()
+        _log.info("[D6_STARTUP] PostRachaCooldown: todos los cooldowns limpiados")
+    except Exception as exc:
+        _log.warning("[D6_STARTUP] PostRachaCooldown clear error: %s", exc)
+
+    # 3. Vaciar PendingEntryWatcher
     try:
         from src.strategies.pending_entry_watcher import PENDING_ENTRY_WATCHER
         with PENDING_ENTRY_WATCHER._lock:
@@ -149,7 +157,7 @@ def d6_startup_cleanup() -> None:
     except Exception as exc:
         _log.warning("[D6_STARTUP] Watcher clear error: %s", exc)
 
-    # 3. Log de configuración activa para auditoría
+    # 4. Log de configuración activa para auditoría
     _log.info(
         "[D6_STARTUP] Config D.6.3 — FORTISIMA: score>=%s grade=A setup=SMC_FVG BOS=True RNG>=%s wait=%ss",
         os.getenv("DERIV_D6_STRONG_SCORE_MIN", "8.5"),
