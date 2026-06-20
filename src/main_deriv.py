@@ -3265,6 +3265,15 @@ class DerivDaemon:
                 for oc in getattr(self._executor, "_open", {}).values()
             )
             POST_RACHA_COOLDOWN.record_spike(tick.symbol, _ceg_spike_ts, _pr_in_pos)
+            # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
+            # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
+            if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_activated")
+                _LOGGER.info(
+                    "[D6_COOLDOWN_CANCEL_PENDING] %s | cooldown activo → pending fantasma cancelado",
+                    tick.symbol,
+                )
             # D.6.2: cualquier spike NUEVO durante el pending cancela, sin importar dirección.
             # Spikes anteriores a la creación del pending no cancelan (son contexto histórico).
             _pe_spike_state = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol)
@@ -3701,6 +3710,20 @@ class DerivDaemon:
             and not _d6_has_open
             and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
         )
+        # D.6.5: cooldown bloquea también el pending existente — el conteo de 120s
+        # solo empieza DESPUÉS de que termina el cooldown, no durante.
+        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+            _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
+            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+            _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_active")
+            _LOGGER.info(
+                "[D6_COOLDOWN_CANCEL_PENDING] %s | pending activo cancelado por cooldown"
+                " (spikes=%d, restante=%ds)",
+                tick.symbol,
+                (_cd_info2 or {}).get("spike_count", 0),
+                (_cd_info2 or {}).get("remaining_seconds", 0),
+            )
+            _d6_ghost_pending = False
         _d6_ghost_fire = _d6_ghost_fire_new or _d6_ghost_pending
 
         # Calcular wait_seconds y quality_tier solo en NEW fire
