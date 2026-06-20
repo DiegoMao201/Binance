@@ -170,7 +170,7 @@ class PostRachaCooldownTracker:
             else:
                 break
 
-        if streak_count >= 2:
+        if streak_count >= 3:
             cd_dur = _cooldown_for(streak_count)
             state.active = True
             state.spike_count = streak_count
@@ -223,8 +223,9 @@ class PostRachaCooldownTracker:
         """
         Llamar cada tick con el estado de posición actual del símbolo.
 
-        Detecta el cierre de posición y activa cooldown post-trade si el bot
-        capturó ≥2 spikes durante esa posición.
+        Si el bot estaba en posición y la cierra, NO activa cooldown — el bot
+        capturó los spikes durante el trade. El ghost puede re-evaluar libremente.
+        Solo hay cooldown si estamos FUERA y pasan ≥3 spikes consecutivos perdidos.
         """
         if not _ENABLED:
             return
@@ -232,26 +233,8 @@ class PostRachaCooldownTracker:
         self._in_trade[symbol] = in_position
 
         if not in_position and was_in:
-            # La posición acaba de cerrar
-            spikes = self._spikes_in_trade[symbol]
+            # Posición cerrada → reset contador, sin cooldown post-trade
             self._spikes_in_trade[symbol] = 0
-            if spikes >= 2:
-                cd_dur = _cooldown_for(spikes)
-                now = time.time()
-                state = self._state[symbol]
-                new_until = now + cd_dur
-                # Solo activar si es más largo que el cooldown actual (si lo hay)
-                if not state.active or new_until > state.until_ts:
-                    state.active = True
-                    state.spike_count = spikes
-                    state.started_ts = now
-                    state.until_ts = new_until
-                    _LOGGER.info(
-                        "[D6_PR_POSTRADE_COOLDOWN] %s | posición cerró con %d spikes"
-                        " durante trade → cooldown=%ds",
-                        symbol, spikes, cd_dur,
-                    )
-                    self._flush()
 
         elif in_position and not was_in:
             # Nueva posición abierta → reset contador de spikes durante trade
