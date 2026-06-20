@@ -99,6 +99,7 @@ _TIER_T1_PCT = max(0.10, min(float(os.getenv("DERIV_TIER_T1_PCT", "0.30") or 0.3
 _TIER_T2_PCT = max(0.05, min(float(os.getenv("DERIV_TIER_T2_PCT", "0.20") or 0.20), 0.40))
 _TIER_T3_PCT = max(0.03, min(float(os.getenv("DERIV_TIER_T3_PCT", "0.15") or 0.15), 0.30))
 _TIER_T4_PCT = max(0.02, min(float(os.getenv("DERIV_TIER_T4_PCT", "0.10") or 0.10), 0.20))
+_TIER_T1_THRESH = max(0.0, float(os.getenv("DERIV_TIER_T1_THRESH", "0.50") or 0.50))
 _TIER_T2_THRESH = max(0.5, float(os.getenv("DERIV_TIER_T2_THRESH", "1.0") or 1.0))
 _TIER_T3_THRESH = max(1.0, float(os.getenv("DERIV_TIER_T3_THRESH", "2.0") or 2.0))
 _TIER_T4_THRESH = max(2.0, float(os.getenv("DERIV_TIER_T4_THRESH", "4.0") or 4.0))
@@ -856,16 +857,22 @@ class DerivTradeExecutor:
         dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
         tier_floor = peak_profit * (1.0 - tier_pct)
 
-        # 2026-05-30 "wait_for_quota v4": reglas explícitas del usuario.
-        # CASO A: peak < $1 → tier % BASE (30%) actúa sobre el peak para
-        # darle respiración pero proteger capital.  Sin dollar_floor.
-        # CASO B: peak ≥ $1 + cuota pendiente → SOLO dollar_floor protege
-        # (escalón duro).  Tier % sigue OFF para esperar más spikes.
+        # Reglas de tier (Diego 2026-06-20):
+        # CASO 0: peak < $0.50 → sin tier activo. El bot espera el max_hold.
+        #         Ganar $0.17-$0.30 no compensa perder el siguiente spike.
+        # CASO A: $0.50 ≤ peak < $1 → tier 30% actúa sobre el peak.
+        # CASO B: peak ≥ $1 + cuota pendiente → SOLO dollar_floor protege.
         # CASO C: peak ≥ $1 + cuota cumplida → tier % + dollar_floor.
-        if peak_profit < 1.0:
+        if peak_profit < _TIER_T1_THRESH:
+            # No hay tier activo debajo del umbral mínimo — dejar que pase max_hold
+            out["tier_active"] = False
+            out["sl_floor"] = None
+            return out
+
+        if peak_profit < _TIER_T2_THRESH:
             out["wait_for_quota"] = False
             out["tier_active"] = True
-            out["sl_floor"] = round(tier_floor, 4)   # ratchet 30% bajo $1
+            out["sl_floor"] = round(tier_floor, 4)   # ratchet 30% entre $0.50 y $1
             out["dollar_floor"] = 0.0
             out["tier_floor"] = round(tier_floor, 4)
             return out
