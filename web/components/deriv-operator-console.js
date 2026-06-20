@@ -139,19 +139,32 @@ function GhostLiveSection({ symbol }) {
 
   if (state === "PENDING") {
     const remaining = gd.remaining_seconds ?? 60;
-    const pct = Math.min(100, Math.max(0, ((60 - remaining) / 60) * 100));
+    const totalWait = gd.wait_s ?? 60;  // D.6.3: 60/120/150/200 según calidad+símbolo
+    const elapsed = totalWait - remaining;
+    const pct = Math.min(100, Math.max(0, (elapsed / totalWait) * 100));
+    const isFortisima = gd.quality_tier === "fortisima";
+    const pendingColor = isFortisima ? "#f59e0b" : "#fbbf24";
+    const pendingBg   = isFortisima ? "rgba(245,158,11,0.12)" : "rgba(251,191,36,0.08)";
+    const qualityLabel = isFortisima ? "⚡ FORTÍSIMA" : "NORMAL";
+    const dirArrow = gd.side === "MULTUP" ? "▲" : gd.side === "MULTDOWN" ? "▼" : "?";
     return (
-      <div style={{ ...base, color: "#fbbf24", background: "rgba(251,191,36,0.08)" }}>
-        <div style={{ fontWeight: 700 }}>⏳ GHOST PENDING — {remaining}s restantes</div>
+      <div style={{ ...base, color: pendingColor, background: pendingBg }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontWeight: 700 }}>⏳ GHOST PENDING — {remaining}s / {totalWait}s</span>
+          <span style={{
+            fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: isFortisima ? "rgba(245,158,11,0.25)" : "rgba(251,191,36,0.15)",
+            color: pendingColor, letterSpacing: "0.05em",
+          }}>{qualityLabel}</span>
+        </div>
         <div style={{
-          width: "100%", height: 3, background: "rgba(251,191,36,0.2)",
+          width: "100%", height: 3, background: `${pendingColor}33`,
           borderRadius: 2, margin: "4px 0", overflow: "hidden",
         }}>
-          <div style={{ width: `${pct}%`, height: "100%", background: "#fbbf24", transition: "width 1s linear" }} />
+          <div style={{ width: `${pct}%`, height: "100%", background: pendingColor, transition: "width 1s linear" }} />
         </div>
         <div style={{ opacity: 0.85 }}>
-          {gd.side === "MULTUP" ? "▲" : gd.side === "MULTDOWN" ? "▼" : "?"}{" "}
-          {gd.setup || "?"} · grade {gd.grade || "?"} · score {gd.score?.toFixed(2) || "?"}
+          {dirArrow}{" "}{gd.setup || "?"} · grade {gd.grade || "?"} · score {gd.score?.toFixed(2) || "?"}
           {gd.imm_state ? ` · ${gd.imm_state}` : ""}
         </div>
       </div>
@@ -162,7 +175,9 @@ function GhostLiveSection({ symbol }) {
     <div style={{ ...base, color: "#22c55e", background: "rgba(34,197,94,0.12)" }}>
       <div style={{ fontWeight: 700 }}>✅ GHOST EJECUTADO</div>
       <div style={{ opacity: 0.85 }}>
-        {gd.score ? `score ${gd.score.toFixed(2)}` : ""}
+        {gd.ghost_score_at_approval ? `score ${Number(gd.ghost_score_at_approval).toFixed(2)}` : gd.score ? `score ${gd.score.toFixed(2)}` : ""}
+        {gd.quality_tier ? ` · ${gd.quality_tier === "fortisima" ? "⚡fortísima" : "normal"}` : ""}
+        {gd.wait_seconds_used ? ` · wait ${gd.wait_seconds_used}s` : ""}
         {gd.executed_at ? ` · ${new Date(gd.executed_at * 1000).toLocaleTimeString()}` : ""}
       </div>
     </div>

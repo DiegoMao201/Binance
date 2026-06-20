@@ -41,16 +41,26 @@ def update_d6_state(
     state: WAITING | PENDING | EXECUTED | CANCELLED | FAILED
     """
     sym = symbol.upper()
-    entry: Dict[str, Any] = {
-        "symbol": sym,
-        "state": state,
-        "updated_at": time.time(),
-        "ghost_data": ghost_data or {},
-    }
-    if reason is not None:
-        entry["reason"] = reason
+    now = time.time()
 
     with _lock:
+        existing = _state.get(sym, {})
+        # Merge ghost_data when updating a live PENDING → keeps quality_tier, wait_s, etc.
+        # set at creation; tick-level updates (remaining_seconds only) don't wipe them.
+        if state == "PENDING" and existing.get("state") == "PENDING" and ghost_data:
+            merged = {**existing.get("ghost_data", {}), **ghost_data}
+        else:
+            merged = ghost_data or {}
+
+        entry: Dict[str, Any] = {
+            "symbol": sym,
+            "state": state,
+            "updated_at": now,
+            "ghost_data": merged,
+        }
+        if reason is not None:
+            entry["reason"] = reason
+
         _state[sym] = entry
         _flush()
 
