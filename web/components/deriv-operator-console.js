@@ -258,6 +258,54 @@ function GhostLiveSection({ symbol }) {
   return null;
 }
 
+/* ── D.6.7 Regime Badge ─────────────────────────────────────────────────── */
+function RegimeBadge({ regimeData }) {
+  const REGIME_STYLES = {
+    BUENO:    { bg: T.green  + "10", border: T.green  + "44", text: T.green,  dot: T.green,  label: "BUENO",    action: "opera todo"    },
+    MEDIOCRE: { bg: T.amber  + "10", border: T.amber  + "44", text: T.amber,  dot: T.amber,  label: "MEDIOCRE", action: "opera 1 de 2"  },
+    "DIFÍCIL":{ bg: "#ff9f4310",     border: "#ff9f4344",     text: T.orange, dot: T.orange, label: "DIFÍCIL",  action: "opera 1 de 3"  },
+    CRÍTICO:  { bg: T.red    + "10", border: T.red    + "44", text: T.red,    dot: T.red,    label: "CRÍTICO",  action: "opera 1 de 4"  },
+  };
+  const regime = regimeData?.regime;
+  if (!regime) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", gap: 7,
+        padding: "5px 10px", margin: "0 12px 6px",
+        borderRadius: 5, background: T.bg2, border: `1px solid ${T.border}`,
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.mute, display: "inline-block" }} />
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>RÉGIMEN D.6.7 — sin datos (feature off o sin trades)</span>
+      </div>
+    );
+  }
+  const st = REGIME_STYLES[regime] || REGIME_STYLES["BUENO"];
+  const tout = regimeData?.last_eval_ts > 0 ? null : null; // timeout_pct not in state file yet — shown via pending_count proxy
+  const skip = regimeData?.skip ?? 0;
+  const opp  = regimeData?.opportunity_count ?? 0;
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "5px 10px", margin: "0 12px 6px",
+      borderRadius: 5, background: st.bg, border: `1px solid ${st.border}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot, display: "inline-block",
+          boxShadow: skip > 0 ? `0 0 5px ${st.dot}` : "none" }} />
+        <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: st.text, letterSpacing: "0.05em" }}>
+          RÉGIMEN {st.label}
+        </span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: st.text, opacity: 0.75 }}>
+          · {st.action}
+        </span>
+      </div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
+        {skip > 0 ? `skip ${skip} · opp ${opp}` : `opp ${opp}`}
+      </div>
+    </div>
+  );
+}
+
 /* ── symbol card (fusión: data técnica completa + nuevo visual) ── */
 function SymbolCard({ s }) {
   const [analytics, setAnalytics] = useState(null);
@@ -529,14 +577,21 @@ function SymbolCard({ s }) {
         }}>{S.label}</span>
       </div>
 
-      {/* compact message — 1 línea de contexto */}
-      <div style={{
-        padding: "6px 12px", background: S.dot + "0e",
-        borderBottom: `1px solid ${S.dot}22`,
-      }}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800, color: S.dot }}>
-          {msgEmoji} {msgLine}
-        </span>
+      {/* compact message — solo para estados críticos (no decorativos) */}
+      {(isInactive || (isManualOnly && scoreGap0 != null && scoreGap0 <= 0)) && (
+        <div style={{
+          padding: "6px 12px", background: S.dot + "0e",
+          borderBottom: `1px solid ${S.dot}22`,
+        }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, fontWeight: 800, color: S.dot }}>
+            {msgEmoji} {msgLine}
+          </span>
+        </div>
+      )}
+
+      {/* D.6.7 Regime Badge */}
+      <div style={{ paddingTop: 6 }}>
+        <RegimeBadge regimeData={s.d67Regime} />
       </div>
 
       {/* ══ CASCADE MOMENTUM (solo cuando está activo) ══ */}
@@ -557,42 +612,7 @@ function SymbolCard({ s }) {
         </div>
       )}
 
-      {/* ══ GO — banner hero cuando todos los filtros pasan ══ */}
-      {_masterGreen && (
-        <div style={{
-          padding: "8px 12px", background: T.green + "12",
-          borderBottom: `1px solid ${T.green}33`,
-          display: "flex", alignItems: "center", gap: 10,
-        }}>
-          <div style={{
-            width: 13, height: 13, borderRadius: "50%", flexShrink: 0,
-            background: T.green, boxShadow: `0 0 10px ${T.green}`,
-          }} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 12, fontWeight: 800,
-              color: T.green, letterSpacing: "0.12em" }}>
-              ENTRADA CONFIRMADA
-            </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.green, opacity: 0.7, marginTop: 1 }}>
-              {_setupTypeC} · GRADE {_gradeC} · {_scarcityC}
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 14, flexShrink: 0, alignItems: "flex-end" }}>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>SCORE</div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.green, lineHeight: 1 }}>
-                {_scoreRawC?.toFixed(1) ?? "–"}
-              </div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 7, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>PROB RNG</div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.green, lineHeight: 1 }}>
-                {_rngProbC ?? "–"}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ENTRADA CONFIRMADA removido (Diego 2026-06-20) — redundante con SETUP+GRADE+SCAR abajo */}
 
       {/* ══ EVALUACIÓN DETENIDA — cuando bot bloquea antes de risk.evaluate() (ej. MATURITY_HARDBLOCK) ══ */}
       {_isStale && (
@@ -658,17 +678,11 @@ function SymbolCard({ s }) {
             <div style={{ height: "100%", width: `${_dispPct}%`, background: _dispScoreC, transition: "width 500ms ease" }} />
           </div>
         )}
-        {live && (
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 5 }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>régimen <b style={{ color: T.text }}>{live.regime || "–"}</b></span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>dir <b style={{ color: sideColor(live.side) }}>{sideLabel(live.side)}</b></span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>Hurst <b style={{ color: T.text }}>{num(live.hurst, 3)}</b></span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.textD }}>vol <b style={{ color: T.text }}>{live.volRegime || "–"}</b></span>
-            {isVetado && live?.label && (
-              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, background: T.amber + "12", border: `1px solid ${T.amber}33`, borderRadius: 4, padding: "1px 5px" }}>
-                ⛔ {live.label}
-              </span>
-            )}
+        {live && isVetado && live?.label && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 5 }}>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, background: T.amber + "12", border: `1px solid ${T.amber}33`, borderRadius: 4, padding: "1px 5px" }}>
+              ⛔ {live.label}
+            </span>
           </div>
         )}
         {/* ── Gate diagnostics row ── */}
@@ -1213,6 +1227,17 @@ function SymbolCard({ s }) {
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />
+
+        {/* Hurst compacto al pie (info de fondo, no decisor) */}
+        {hurst != null && (
+          <div style={{ padding: "4px 12px 6px", borderTop: `1px solid ${T.border}` }}>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>
+              Hurst <b style={{ color: hurstColor }}>{num(hurst, 3)}</b>
+              <span style={{ opacity: 0.6 }}> · {hurstLabel}</span>
+              {live?.volRegime && <span style={{ opacity: 0.6 }}> · vol {live.volRegime}</span>}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
