@@ -145,11 +145,14 @@ class RegimeSkipFilter:
         cutoff = now - _WINDOW_S
 
         recent_trades = [(ts, is_to) for ts, is_to in st.trade_results if ts >= cutoff]
-        if recent_trades:
-            timeouts = sum(1 for _, is_to in recent_trades if is_to)
-            timeout_pct = timeouts / len(recent_trades)
-        else:
-            timeout_pct = 0.0
+        if not recent_trades:
+            # Sin trades en la ventana → no hay suficiente datos para clasificar.
+            # Mantener régimen actual (default BUENO en startup, conservador).
+            _LOGGER.debug("[D67_EVAL] %s | sin trades en ventana %ds → régimen sin cambio", symbol, _WINDOW_S)
+            return
+
+        timeouts = sum(1 for _, is_to in recent_trades if is_to)
+        timeout_pct = timeouts / len(recent_trades)
 
         recent_spikes = [ts for ts in st.spike_ts_buf if ts >= cutoff]
         window_h = _WINDOW_S / 3600.0
