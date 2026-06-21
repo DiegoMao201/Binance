@@ -147,6 +147,14 @@ def d6_startup_cleanup() -> None:
     except Exception as exc:
         _log.warning("[D6_STARTUP] PostRachaCooldown clear error: %s", exc)
 
+    # 2b. Vaciar RegimeSkipFilter (D.6.7)
+    try:
+        from src.strategies.regime_skip_filter import REGIME_SKIP_FILTER
+        REGIME_SKIP_FILTER.force_clear()
+        _log.info("[D6_STARTUP] RegimeSkipFilter: estado limpiado")
+    except Exception as exc:
+        _log.warning("[D6_STARTUP] RegimeSkipFilter clear error: %s", exc)
+
     # 3. Vaciar PendingEntryWatcher
     try:
         from src.strategies.pending_entry_watcher import PENDING_ENTRY_WATCHER

@@ -62,6 +62,7 @@ from src.strategies.deriv_signals import (
 from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
 from src.strategies.post_racha_cooldown import POST_RACHA_COOLDOWN
+from src.strategies.regime_skip_filter import REGIME_SKIP_FILTER
 from src.strategies.pending_entry_watcher import (
     PENDING_ENTRY_WATCHER,
     ACTION_ENTER, ACTION_FIRST_WAIT, ACTION_WAIT, ACTION_CANCEL,
@@ -3271,6 +3272,8 @@ class DerivDaemon:
                 for oc in getattr(self._executor, "_open", {}).values()
             )
             POST_RACHA_COOLDOWN.record_spike(tick.symbol, _ceg_spike_ts, _pr_in_pos)
+            # D.6.7: registrar spike para regime filter
+            REGIME_SKIP_FILTER.record_spike(tick.symbol, _ceg_spike_ts)
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
             # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
             if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
@@ -3711,6 +3714,9 @@ class DerivDaemon:
                 (_cd_info or {}).get("spike_count", 0),
                 (_cd_info or {}).get("remaining_seconds", 0),
             )
+            _d6_ghost_fire_new = False
+        # D.6.7: regime skip filter — saltar oportunidad según régimen reciente por símbolo
+        if _d6_ghost_fire_new and REGIME_SKIP_FILTER.should_skip(tick.symbol):
             _d6_ghost_fire_new = False
         # D.6.1 (preservado, silencioso): pending activo → bypass gates sin re-validar score
         _d6_ghost_pending = (
@@ -6590,6 +6596,12 @@ class DerivDaemon:
                         exit_reason=str(rec.get("exit_reason") or "unknown"),
                         last_spike_ts=float(self._risk.get_last_spike_ts(_cg_sym) or 0.0),
                     )
+                    # D.6.7: registrar cierre para regime filter
+                    REGIME_SKIP_FILTER.record_trade_closed(
+                        symbol=_cg_sym,
+                        exit_reason=str(rec.get("exit_reason") or "unknown"),
+                        closed_ts=_closed_ts,
+                    )
                     # PASO 2.3h-prep Fase F: link outcome to enriched decision log
                     _rec_sym = str(rec.get("symbol") or "")
                     _rec_did = self._decision_ids.pop(_rec_sym, None)
@@ -6603,6 +6615,7 @@ class DerivDaemon:
                         )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("[deriv-daemon] reaper iteration failed")
+            REGIME_SKIP_FILTER.persist_state()
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._settings.poll_seconds
