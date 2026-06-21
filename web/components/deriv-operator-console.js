@@ -325,12 +325,16 @@ function RegimeBadgeV2({ regimeData }) {
   if (!regimeData?.regime) {
     return (
       <div style={{
-        display: "flex", alignItems: "center", gap: 7,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
         padding: "5px 10px", margin: "0 12px 6px",
-        borderRadius: 5, background: T.bg2, border: `1px solid ${T.border}`,
+        borderRadius: 5, background: T.amber + "08", border: `1px solid ${T.amber}22`,
       }}>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.mute, display: "inline-block" }} />
-        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>RÉGIMEN D.7.0 — sin datos</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.amber, display: "inline-block", opacity: 0.4 }} />
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: T.amber, letterSpacing: "0.05em", opacity: 0.5 }}>MEDIOCRE</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, opacity: 0.4 }}>· opera 1/2</span>
+        </div>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>sin eval</span>
       </div>
     );
   }
