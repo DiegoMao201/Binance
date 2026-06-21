@@ -314,6 +314,65 @@ function RegimeBadge({ regimeData }) {
   );
 }
 
+/* ── D.7.0 Regime Badge v2 (Burst + Performance + Frequency) ── */
+function RegimeBadgeV2({ regimeData }) {
+  const STYLES = {
+    BUENO:    { bg: T.green  + "10", border: T.green  + "44", text: T.green,  dot: T.green,  action: "opera todo"   },
+    MEDIOCRE: { bg: T.amber  + "10", border: T.amber  + "44", text: T.amber,  dot: T.amber,  action: "opera 1/2"    },
+    DIFICIL:  { bg: "#ff9f4310",     border: "#ff9f4344",     text: T.orange, dot: T.orange, action: "opera 1/3"    },
+    CRITICO:  { bg: T.red    + "10", border: T.red    + "44", text: T.red,    dot: T.red,    action: "opera 1/4"    },
+  };
+  if (!regimeData?.regime) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", gap: 7,
+        padding: "5px 10px", margin: "0 12px 6px",
+        borderRadius: 5, background: T.bg2, border: `1px solid ${T.border}`,
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.mute, display: "inline-block" }} />
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>RÉGIMEN D.7.0 — sin datos</span>
+      </div>
+    );
+  }
+  const st = STYLES[regimeData.regime] || STYLES.MEDIOCRE;
+  const skip  = regimeData.skip_rate ?? 0;
+  const cnt   = regimeData.pending_intent_counter ?? 0;
+  const wr5   = regimeData.wr_5 != null ? `WR5 ${regimeData.wr_5}%` : null;
+  const pnl2h = regimeData.pnl_2h != null ? `PnL ${regimeData.pnl_2h >= 0 ? "+" : ""}${Number(regimeData.pnl_2h).toFixed(2)}` : null;
+  const loss  = regimeData.consecutive_losses != null ? `L${regimeData.consecutive_losses}` : null;
+  const aln   = regimeData.aligned_per_h != null ? `${regimeData.aligned_per_h}/h` : null;
+  const ts    = regimeData.timing_state ? regimeData.timing_state.replace(/_/g, " ") : null;
+  return (
+    <div style={{
+      padding: "5px 10px", margin: "0 12px 6px",
+      borderRadius: 5, background: st.bg, border: `1px solid ${st.border}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot, display: "inline-block",
+            boxShadow: skip > 0 ? `0 0 5px ${st.dot}` : "none" }} />
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: st.text, letterSpacing: "0.05em" }}>
+            {regimeData.regime}
+          </span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: st.text, opacity: 0.75 }}>
+            · {st.action}
+          </span>
+        </div>
+        {ts && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>{ts}</span>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 2, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap" }}>
+        {wr5 && <span>{wr5}</span>}
+        {pnl2h && <span style={{ color: regimeData.pnl_2h >= 0 ? T.green : T.red }}>{pnl2h}</span>}
+        {loss && <span style={{ color: regimeData.consecutive_losses >= 2 ? T.orange : T.textD }}>loss {loss}</span>}
+        {aln && <span>aln {aln}</span>}
+        <span style={{ color: T.mute }}>intents {cnt}</span>
+      </div>
+    </div>
+  );
+}
+
 /* ── symbol card (fusión: data técnica completa + nuevo visual) ── */
 function SymbolCard({ s }) {
   const [analytics, setAnalytics] = useState(null);
@@ -597,9 +656,9 @@ function SymbolCard({ s }) {
         </div>
       )}
 
-      {/* D.6.7 Regime Badge */}
+      {/* D.7.0 Regime Badge v2 */}
       <div style={{ paddingTop: 6 }}>
-        <RegimeBadge regimeData={s.d67Regime} />
+        <RegimeBadgeV2 regimeData={s.d70Regime} />
       </div>
 
       {/* ══ CASCADE MOMENTUM (solo cuando está activo) ══ */}

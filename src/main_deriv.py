@@ -63,6 +63,7 @@ from src.strategies.pending_order_manager import PENDING_MANAGER, PendingOrder
 from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
 from src.strategies.post_racha_cooldown import POST_RACHA_COOLDOWN
 from src.strategies.regime_skip_filter import REGIME_SKIP_FILTER
+from src.strategies.regime_detector_v2 import REGIME_DETECTOR_V2
 from src.strategies.pending_entry_watcher import (
     PENDING_ENTRY_WATCHER,
     ACTION_ENTER, ACTION_FIRST_WAIT, ACTION_WAIT, ACTION_CANCEL,
@@ -3274,6 +3275,14 @@ class DerivDaemon:
             POST_RACHA_COOLDOWN.record_spike(tick.symbol, _ceg_spike_ts, _pr_in_pos)
             # D.6.7: registrar spike para regime filter
             REGIME_SKIP_FILTER.record_spike(tick.symbol, _ceg_spike_ts)
+            # D.7.0: registrar spike — aligned=True cuando no hay posición abierta
+            REGIME_DETECTOR_V2.record_spike(
+                symbol=tick.symbol,
+                spike_ts=_ceg_spike_ts,
+                direction="NA",
+                ratio=1.0,
+                aligned_with_open_position=not _pr_in_pos,
+            )
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
             # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
             if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
@@ -6237,6 +6246,20 @@ class DerivDaemon:
             force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,
         )
         if _pe_action == ACTION_FIRST_WAIT:
+            # D.7.0: filtro de régimen a nivel PENDING INTENT (una llamada por intent, no por tick)
+            if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
+                _d70_skip, _d70_info = REGIME_DETECTOR_V2.should_skip(tick.symbol)
+                if _d70_skip:
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    _LOGGER.info(
+                        "[D70_SKIP] %s | regime=%s skip=%d counter=%d | "
+                        "T=%s P=%s wr5=%.0f%% pnl2h=$%.2f loss=%d",
+                        tick.symbol, _d70_info["regime"], _d70_info["skip_rate"],
+                        _d70_info["pending_intent_counter"], _d70_info["timing"],
+                        _d70_info["performance"], _d70_info["wr_5"],
+                        _d70_info["pnl_2h"], _d70_info["consecutive_losses"],
+                    )
+                    return
             _LOGGER.info(
                 "[D6_PENDING_CREATED] %s | quality=%s wait=%ds | score=%.2f grade=%s setup=%s",
                 tick.symbol, _d6_quality_tier, int(_pe_remain), snap.score,
@@ -6602,6 +6625,13 @@ class DerivDaemon:
                         exit_reason=str(rec.get("exit_reason") or "unknown"),
                         closed_ts=_closed_ts,
                     )
+                    # D.7.0: registrar cierre para performance tracking
+                    REGIME_DETECTOR_V2.record_trade_closed(
+                        symbol=_cg_sym,
+                        closed_ts=_closed_ts,
+                        pnl=_pnl,
+                        is_timeout="timeout" in str(rec.get("exit_reason") or "").lower(),
+                    )
                     # PASO 2.3h-prep Fase F: link outcome to enriched decision log
                     _rec_sym = str(rec.get("symbol") or "")
                     _rec_did = self._decision_ids.pop(_rec_sym, None)
@@ -6616,6 +6646,7 @@ class DerivDaemon:
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("[deriv-daemon] reaper iteration failed")
             REGIME_SKIP_FILTER.persist_state()
+            REGIME_DETECTOR_V2.persist_state()
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._settings.poll_seconds

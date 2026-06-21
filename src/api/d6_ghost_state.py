@@ -155,6 +155,14 @@ def d6_startup_cleanup() -> None:
     except Exception as exc:
         _log.warning("[D6_STARTUP] RegimeSkipFilter clear error: %s", exc)
 
+    # 2c. Vaciar RegimeDetectorV2 (D.7.0)
+    try:
+        from src.strategies.regime_detector_v2 import REGIME_DETECTOR_V2
+        REGIME_DETECTOR_V2.force_clear()
+        _log.info("[D6_STARTUP] RegimeDetectorV2: estado limpiado")
+    except Exception as exc:
+        _log.warning("[D6_STARTUP] RegimeDetectorV2 clear error: %s", exc)
+
     # 3. Vaciar PendingEntryWatcher
     try:
         from src.strategies.pending_entry_watcher import PENDING_ENTRY_WATCHER
