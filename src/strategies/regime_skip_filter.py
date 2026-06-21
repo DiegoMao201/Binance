@@ -26,8 +26,9 @@ from typing import Optional
 
 _LOGGER = logging.getLogger("deriv.daemon")
 
-_STATE_DIR  = os.getenv("DERIV_STATE_DIR") or os.getenv("BOT_STATE_DIR") or "/data/logs"
-_STATE_FILE = os.path.join(_STATE_DIR, "d67_regime_state.json")
+_STATE_DIR    = os.getenv("DERIV_STATE_DIR") or os.getenv("BOT_STATE_DIR") or "/data/logs"
+_STATE_FILE   = os.path.join(_STATE_DIR, "d67_regime_state.json")
+_CLOSED_FILE  = os.path.join(_STATE_DIR, "deriv_closed_contracts.json")
 
 _ENABLED = (
     os.getenv("DERIV_D67_REGIME_FILTER_ENABLED", "false")
@@ -213,14 +214,46 @@ class RegimeSkipFilter:
             _LOGGER.warning("[D67_PERSIST_ERR] %s", exc)
 
     def force_clear(self, symbol: Optional[str] = None) -> None:
-        """Limpiar estado. symbol=None limpia todos los símbolos."""
+        """Limpiar estado y recargar historial del JSON de trades."""
         if symbol:
             self._syms.pop(symbol, None)
             _LOGGER.info("[D67_FORCE_CLEAR] %s", symbol)
         else:
             self._syms.clear()
             _LOGGER.info("[D67_FORCE_CLEAR_ALL]")
+        self._preload_from_history()
         self.persist_state()
+
+    def _preload_from_history(self) -> None:
+        """
+        Precarga trades cerrados del JSON histórico en el buffer en memoria.
+        Solo carga los de la ventana activa (_WINDOW_S). Llamado en startup.
+        """
+        if not _ENABLED:
+            return
+        try:
+            raw = Path(_CLOSED_FILE).read_text(encoding="utf-8")
+            trades = json.loads(raw)
+            if not isinstance(trades, list):
+                return
+            cutoff = time.time() - _WINDOW_S
+            loaded = 0
+            for rec in trades:
+                ts = float(rec.get("closed_at_ts") or 0)
+                if ts < cutoff:
+                    continue
+                sym = str(rec.get("symbol") or "")
+                if not sym:
+                    continue
+                is_timeout = rec.get("exit_reason") == "max_hold_timeout"
+                self._syms[sym].trade_results.append((ts, is_timeout))
+                loaded += 1
+            _LOGGER.info(
+                "[D67_PRELOAD] %d trades cargados en ventana %ds desde %s",
+                loaded, _WINDOW_S, _CLOSED_FILE,
+            )
+        except Exception as exc:
+            _LOGGER.warning("[D67_PRELOAD_ERR] %s", exc)
 
     def get_state(self) -> dict:
         """Estado actual para API/panel."""
