@@ -280,9 +280,14 @@ function RegimeBadge({ regimeData }) {
     );
   }
   const st = REGIME_STYLES[regime] || REGIME_STYLES["BUENO"];
-  const tout = regimeData?.last_eval_ts > 0 ? null : null; // timeout_pct not in state file yet — shown via pending_count proxy
-  const skip = regimeData?.skip ?? 0;
-  const opp  = regimeData?.opportunity_count ?? 0;
+  const skip          = regimeData?.skip ?? 0;
+  const opp           = regimeData?.opportunity_count ?? 0;
+  const silRatio      = regimeData?.silence_ratio ?? null;
+  const silColor      = silRatio === null ? T.mute
+                      : silRatio >= 2.0  ? T.red
+                      : silRatio >= 1.5  ? T.orange
+                      : silRatio >= 1.0  ? T.amber
+                      : T.mute;
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -299,8 +304,11 @@ function RegimeBadge({ regimeData }) {
           · {st.action}
         </span>
       </div>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
-        {skip > 0 ? `skip ${skip} · opp ${opp}` : `opp ${opp}`}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
+        {silRatio !== null && (
+          <span style={{ color: silColor }}>{"sil " + silRatio.toFixed(2) + "\xD7"}</span>
+        )}
+        <span>{skip > 0 ? `skip ${skip} · opp ${opp}` : `opp ${opp}`}</span>
       </div>
     </div>
   );

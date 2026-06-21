@@ -46,18 +46,59 @@ _MEDIOCRE_TIMEOUT_MAX = float(os.getenv("DERIV_D67_MEDIOCRE_TIMEOUT_MAX", "0.50"
 _MEDIOCRE_SPIKES_MIN  = float(os.getenv("DERIV_D67_MEDIOCRE_SPIKES_MIN",  "1.0")  or 1.0)
 _DIFICIL_TIMEOUT_MAX  = float(os.getenv("DERIV_D67_DIFICIL_TIMEOUT_MAX",  "0.70") or 0.70)
 
+# D.6.9 — Silence ratio: tiempo desde último spike / p50 gap típico
+_D69_SILENCE_FALLBACK_S     = int(os.getenv("DERIV_D69_SILENCE_FALLBACK_SEC",    "300") or 300)
+_D69_SILENCE_MEDIOCRE_RATIO = float(os.getenv("DERIV_D69_SILENCE_MEDIOCRE_RATIO", "1.0") or 1.0)
+_D69_SILENCE_DIFICIL_RATIO  = float(os.getenv("DERIV_D69_SILENCE_DIFICIL_RATIO",  "1.5") or 1.5)
+_D69_SILENCE_CRITICO_RATIO  = float(os.getenv("DERIV_D69_SILENCE_CRITICO_RATIO",  "2.0") or 2.0)
+
 REGIME_NAMES = {0: "BUENO", 1: "MEDIOCRE", 2: "DIFÍCIL", 3: "CRÍTICO"}
 
 
-def _classify_regime(timeout_pct: float, spikes_per_h: float) -> int:
-    """Retorna skip count: 0=BUENO, 1=MEDIOCRE, 2=DIFÍCIL, 3=CRÍTICO."""
-    if timeout_pct < _BUENO_TIMEOUT_MAX and spikes_per_h >= _BUENO_SPIKES_MIN:
-        return 0
-    if timeout_pct < _MEDIOCRE_TIMEOUT_MAX and spikes_per_h >= _MEDIOCRE_SPIKES_MIN:
-        return 1
-    if timeout_pct < _DIFICIL_TIMEOUT_MAX:
+def _classify_regime(timeout_pct: float, spikes_per_h: float, silence_ratio: float = 0.0) -> int:
+    """
+    Retorna skip: 0=BUENO, 1=MEDIOCRE, 2=DIFÍCIL, 3=CRÍTICO.
+    D.6.9: lógica OR — el peor criterio gana. silence_ratio es métrica reactiva.
+    """
+    # CRÍTICO si CUALQUIERA falla:
+    if (timeout_pct >= _DIFICIL_TIMEOUT_MAX
+            or spikes_per_h < _MEDIOCRE_SPIKES_MIN
+            or silence_ratio >= _D69_SILENCE_CRITICO_RATIO):
+        return 3
+    # DIFÍCIL si CUALQUIERA falla:
+    if (timeout_pct >= _MEDIOCRE_TIMEOUT_MAX
+            or spikes_per_h < _BUENO_SPIKES_MIN
+            or silence_ratio >= _D69_SILENCE_DIFICIL_RATIO):
         return 2
-    return 3
+    # MEDIOCRE si CUALQUIERA falla:
+    if (timeout_pct >= _BUENO_TIMEOUT_MAX
+            or silence_ratio >= _D69_SILENCE_MEDIOCRE_RATIO):
+        return 1
+    return 0
+
+
+def _calc_silence_ratio(spike_ts_buf: deque) -> tuple:
+    """
+    Calcula (current_silence_s, typical_gap_s, silence_ratio) desde buffer de spikes.
+    Usa p50 de gaps entre spikes consecutivos. Requiere >=5 spikes para p50 real.
+    """
+    if not spike_ts_buf:
+        return 0.0, float(_D69_SILENCE_FALLBACK_S), 0.0
+
+    now = time.time()
+    current_silence = max(0.0, now - spike_ts_buf[-1])
+
+    if len(spike_ts_buf) >= 5:
+        sorted_ts = sorted(spike_ts_buf)
+        gaps = sorted([sorted_ts[i] - sorted_ts[i - 1] for i in range(1, len(sorted_ts))])
+        typical_gap = gaps[len(gaps) // 2]  # p50
+    else:
+        typical_gap = float(_D69_SILENCE_FALLBACK_S)
+
+    if typical_gap <= 0:
+        return current_silence, typical_gap, 0.0
+
+    return current_silence, typical_gap, current_silence / typical_gap
 
 
 @dataclass
@@ -69,6 +110,10 @@ class _SymbolState:
     opportunity_count: int = 0      # oportunidades vistas en régimen actual
     trade_results: deque = field(default_factory=lambda: deque(maxlen=300))  # (ts, is_timeout)
     spike_ts_buf: deque = field(default_factory=lambda: deque(maxlen=300))   # timestamps de spikes
+    # D.6.9 — último cálculo de silence_ratio (para panel y debug)
+    last_silence_ratio: float = 0.0
+    last_current_silence_s: float = 0.0
+    last_typical_gap_s: float = 0.0
 
 
 class RegimeSkipFilter:
@@ -81,12 +126,15 @@ class RegimeSkipFilter:
         self._syms: dict[str, _SymbolState] = defaultdict(_SymbolState)
         _LOGGER.info(
             "[D67_INIT] enabled=%s | eval=%ds window=%ds hysteresis=%d"
-            " | BUENO(t<%.0f%% sp/h>=%.1f) MEDIOCRE(t<%.0f%% sp/h>=%.1f) DIFÍCIL(t<%.0f%%)",
+            " | tout: CRIT>=%.0f%% DIF>=%.0f%% MED>=%.0f%%"
+            " | spikes: CRIT<%.1f DIF<%.1f"
+            " | [D69] silence_fallback=%ds CRIT>=%.1f DIF>=%.1f MED>=%.1f",
             _ENABLED,
             _EVAL_INTERVAL_S, _WINDOW_S, _HYSTERESIS,
-            _BUENO_TIMEOUT_MAX * 100, _BUENO_SPIKES_MIN,
-            _MEDIOCRE_TIMEOUT_MAX * 100, _MEDIOCRE_SPIKES_MIN,
-            _DIFICIL_TIMEOUT_MAX * 100,
+            _DIFICIL_TIMEOUT_MAX * 100, _MEDIOCRE_TIMEOUT_MAX * 100, _BUENO_TIMEOUT_MAX * 100,
+            _MEDIOCRE_SPIKES_MIN, _BUENO_SPIKES_MIN,
+            _D69_SILENCE_FALLBACK_S,
+            _D69_SILENCE_CRITICO_RATIO, _D69_SILENCE_DIFICIL_RATIO, _D69_SILENCE_MEDIOCRE_RATIO,
         )
 
     # ─── Registro de eventos ──────────────────────────────────────────────────
@@ -159,7 +207,17 @@ class RegimeSkipFilter:
         window_h = _WINDOW_S / 3600.0
         spikes_per_h = len(recent_spikes) / window_h if window_h > 0 else 0.0
 
-        new_skip = _classify_regime(timeout_pct, spikes_per_h)
+        # D.6.9 — silence_ratio: métrica reactiva sobre silencio actual
+        cur_sil, typ_gap, silence_ratio = _calc_silence_ratio(st.spike_ts_buf)
+        st.last_silence_ratio = silence_ratio
+        st.last_current_silence_s = cur_sil
+        st.last_typical_gap_s = typ_gap
+        _LOGGER.info(
+            "[D69_SILENCE_RATIO] %s silence=%.0fs typical=%.0fs ratio=%.2f n_spikes=%d",
+            symbol, cur_sil, typ_gap, silence_ratio, len(st.spike_ts_buf),
+        )
+
+        new_skip = _classify_regime(timeout_pct, spikes_per_h, silence_ratio)
 
         if new_skip == st.pending_skip:
             st.pending_count += 1
@@ -175,17 +233,17 @@ class RegimeSkipFilter:
             st.opportunity_count = 0  # reset al cambiar régimen
             _LOGGER.info(
                 "[D67_REGIME_CHANGE] %s | %s→%s (skip=%d)"
-                " | timeout_pct=%.1f%% spikes/h=%.1f trades=%d",
+                " | timeout_pct=%.1f%% spikes/h=%.1f silence_ratio=%.2f trades=%d",
                 symbol, old, new, new_skip,
-                timeout_pct * 100, spikes_per_h, len(recent_trades),
+                timeout_pct * 100, spikes_per_h, silence_ratio, len(recent_trades),
             )
             self.persist_state()
         else:
             _LOGGER.debug(
                 "[D67_EVAL] %s | regime=%s | timeout_pct=%.1f%% spikes/h=%.1f"
-                " trades=%d | pending=%s x%d",
+                " silence_ratio=%.2f trades=%d | pending=%s x%d",
                 symbol, REGIME_NAMES.get(st.current_skip, "?"),
-                timeout_pct * 100, spikes_per_h, len(recent_trades),
+                timeout_pct * 100, spikes_per_h, silence_ratio, len(recent_trades),
                 REGIME_NAMES.get(st.pending_skip, "?"), st.pending_count,
             )
 
@@ -206,6 +264,10 @@ class RegimeSkipFilter:
                     "pending_regime": REGIME_NAMES.get(st.pending_skip, "?"),
                     "pending_count": st.pending_count,
                     "last_eval_ts": round(st.last_eval_ts, 3),
+                    # D.6.9
+                    "silence_ratio": round(st.last_silence_ratio, 2),
+                    "current_silence_s": round(st.last_current_silence_s, 0),
+                    "typical_gap_s": round(st.last_typical_gap_s, 0),
                 }
             Path(_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
             with open(_STATE_FILE, "w", encoding="utf-8") as f:
