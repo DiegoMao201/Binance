@@ -3275,12 +3275,14 @@ class DerivDaemon:
             POST_RACHA_COOLDOWN.record_spike(tick.symbol, _ceg_spike_ts, _pr_in_pos)
             # D.6.7: registrar spike para regime filter
             REGIME_SKIP_FILTER.record_spike(tick.symbol, _ceg_spike_ts)
-            # D.7.0: registrar spike — aligned=True cuando no hay posición abierta
+            # D.7.0/D.8.0: registrar spike con direction y ratio reales
+            _d70_dir = "UP" if tick.symbol.startswith("BOOM") else "DOWN"
+            _d70_ratio = self._risk.get_last_spike_ratio(tick.symbol)
             REGIME_DETECTOR_V2.record_spike(
                 symbol=tick.symbol,
                 spike_ts=_ceg_spike_ts,
-                direction="NA",
-                ratio=1.0,
+                direction=_d70_dir,
+                ratio=_d70_ratio,
                 aligned_with_open_position=not _pr_in_pos,
             )
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
