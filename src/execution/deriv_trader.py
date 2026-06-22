@@ -857,12 +857,12 @@ class DerivTradeExecutor:
         dollar_floor = float(int(peak_profit)) if peak_profit >= 1.0 else 0.0
         tier_floor = peak_profit * (1.0 - tier_pct)
 
-        # Reglas de tier (Diego 2026-06-20):
+        # Reglas de tier (Diego 2026-06-20, D.7.3 2026-06-21):
         # CASO 0: peak < $0.50 → sin tier activo. El bot espera el max_hold.
         #         Ganar $0.17-$0.30 no compensa perder el siguiente spike.
         # CASO A: $0.50 ≤ peak < $1 → tier 30% actúa sobre el peak.
-        # CASO B: peak ≥ $1 + cuota pendiente → SOLO dollar_floor protege.
-        # CASO C: peak ≥ $1 + cuota cumplida → tier % + dollar_floor.
+        # CASO B/C: peak ≥ $1 → SOLO el % del tier protege (sin piso duro en $).
+        #           dollar_floor se calcula pero es solo para display/telemetría.
         if peak_profit < _TIER_T1_THRESH:
             # No hay tier activo debajo del umbral mínimo — dejar que pase max_hold
             out["tier_active"] = False
@@ -878,15 +878,13 @@ class DerivTradeExecutor:
             return out
 
         if _SPIKE_WAIT_FOR_QUOTA_ENABLED and not quota_done:
-            # K.2: apply both dollar_floor AND wait_tier% to avoid multi-minute
-            # degradation from peak while quota is pending. Previously only
-            # dollar_floor was used (e.g., $2.00 for peak=$2.70 → loses $0.70).
+            # K.2: wait_tier% protege mientras cuota pendiente (dollar_floor eliminado D.7.3).
             _wait_tier_floor = peak_profit * (1.0 - _TIER_WAIT_PCT)
-            sl_floor = max(dollar_floor, _wait_tier_floor)
+            sl_floor = _wait_tier_floor
             out["wait_for_quota"] = True
             out["tier_active"] = True
         else:
-            sl_floor = max(dollar_floor, tier_floor)
+            sl_floor = tier_floor
             out["wait_for_quota"] = False
             out["tier_active"] = True
 
