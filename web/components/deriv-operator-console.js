@@ -317,10 +317,19 @@ function RegimeBadge({ regimeData }) {
 /* ── D.7.0 Regime Badge v2 (Burst + Performance + Frequency) ── */
 function RegimeBadgeV2({ regimeData }) {
   const STYLES = {
-    BUENO:    { bg: T.green  + "10", border: T.green  + "44", text: T.green,  dot: T.green,  action: "opera todo"   },
-    MEDIOCRE: { bg: T.amber  + "10", border: T.amber  + "44", text: T.amber,  dot: T.amber,  action: "opera 1/2"    },
-    DIFICIL:  { bg: "#ff9f4310",     border: "#ff9f4344",     text: T.orange, dot: T.orange, action: "opera 1/3"    },
-    CRITICO:  { bg: T.red    + "10", border: T.red    + "44", text: T.red,    dot: T.red,    action: "opera 1/4"    },
+    BUENO:    { bg: T.green  + "10", border: T.green  + "44", text: T.green,  dot: T.green,  action: "+0s"   },
+    MEDIOCRE: { bg: T.amber  + "10", border: T.amber  + "44", text: T.amber,  dot: T.amber,  action: "+2 min" },
+    DIFICIL:  { bg: "#ff9f4310",     border: "#ff9f4344",     text: T.orange, dot: T.orange, action: "+4 min" },
+    CRITICO:  { bg: T.red    + "10", border: T.red    + "44", text: T.red,    dot: T.red,    action: "+6 min" },
+  };
+  const TIMING_LABELS = {
+    IN_BURST:         "🔥 ráfaga",
+    POST_BURST_EARLY: "🌙 post-ráfaga",
+    POST_BURST_DEEP:  "💤 post-ráfaga prof.",
+    UNIFORM_FAST:     "⚡ uniforme rápido",
+    UNIFORM_NORMAL:   "〰 uniforme",
+    UNIFORM_SLOW:     "🐢 uniforme lento",
+    DEAD:             "☠️ muerto",
   };
   if (!regimeData?.regime) {
     return (
@@ -332,46 +341,63 @@ function RegimeBadgeV2({ regimeData }) {
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.amber, display: "inline-block", opacity: 0.4 }} />
           <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: T.amber, letterSpacing: "0.05em", opacity: 0.5 }}>MEDIOCRE</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, opacity: 0.4 }}>· opera 1/2</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, opacity: 0.4 }}>· +2 min</span>
         </div>
         <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>sin eval</span>
       </div>
     );
   }
-  const st = STYLES[regimeData.regime] || STYLES.MEDIOCRE;
-  const skip  = regimeData.skip_rate ?? 0;
-  const cnt   = regimeData.pending_intent_counter ?? 0;
-  const wr5   = regimeData.wr_5 != null ? `WR5 ${regimeData.wr_5}%` : null;
-  const pnl2h = regimeData.pnl_2h != null ? `PnL ${regimeData.pnl_2h >= 0 ? "+" : ""}${Number(regimeData.pnl_2h).toFixed(2)}` : null;
-  const loss  = regimeData.consecutive_losses != null ? `L${regimeData.consecutive_losses}` : null;
-  const aln   = regimeData.aligned_per_h != null ? `${regimeData.aligned_per_h}/h` : null;
-  const ts    = regimeData.timing_state ? regimeData.timing_state.replace(/_/g, " ") : null;
+  const st        = STYLES[regimeData.regime] || STYLES.MEDIOCRE;
+  const tsLabel   = TIMING_LABELS[regimeData.timing_state] || (regimeData.timing_state || "").replace(/_/g, " ");
+  const wr5       = regimeData.wr_5 ?? 0;
+  const pnl2h     = regimeData.pnl_2h ?? 0;
+  const losses    = regimeData.consecutive_losses ?? 0;
+  const aln       = regimeData.aligned_per_h ?? 0;
+  const cv        = regimeData.gap_cv ?? 0;
+  const silenceS  = regimeData.current_silence_s ?? 0;
+  const silMin    = Math.floor(silenceS / 60);
+  const silSec    = Math.floor(silenceS % 60);
+  const wrColor   = wr5 >= 40 ? T.green : wr5 >= 25 ? T.amber : T.red;
+  const pnlColor  = pnl2h >= 0 ? T.green : pnl2h >= -2 ? T.amber : T.red;
+  const lossColor = losses === 0 ? T.textD : losses < 3 ? T.amber : T.red;
   return (
     <div style={{
-      padding: "5px 10px", margin: "0 12px 6px",
+      padding: "6px 10px", margin: "0 12px 6px",
       borderRadius: 5, background: st.bg, border: `1px solid ${st.border}`,
+      display: "flex", flexDirection: "column", gap: 3,
     }}>
+      {/* Fila 1: régimen + acción + timing */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot, display: "inline-block",
-            boxShadow: skip > 0 ? `0 0 5px ${st.dot}` : "none" }} />
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.dot, display: "inline-block" }} />
           <span style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 800, color: st.text, letterSpacing: "0.05em" }}>
             {regimeData.regime}
           </span>
           <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: st.text, opacity: 0.75 }}>
-            · {st.action}
+            · pending {st.action}
           </span>
         </div>
-        {ts && (
-          <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>{ts}</span>
+        {tsLabel && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>{tsLabel}</span>
         )}
       </div>
-      <div style={{ display: "flex", gap: 8, marginTop: 2, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap" }}>
-        {wr5 && <span>{wr5}</span>}
-        {pnl2h && <span style={{ color: regimeData.pnl_2h >= 0 ? T.green : T.red }}>{pnl2h}</span>}
-        {loss && <span style={{ color: regimeData.consecutive_losses >= 2 ? T.orange : T.textD }}>loss {loss}</span>}
-        {aln && <span>aln {aln}</span>}
-        <span style={{ color: T.mute }}>intents {cnt}</span>
+      {/* Fila 2: PERF */}
+      <div style={{ display: "flex", gap: 6, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ color: T.mute }}>PERF</span>
+        <span style={{ color: wrColor }}>WR5 {wr5}%</span>
+        <span style={{ color: T.mute }}>·</span>
+        <span style={{ color: pnlColor }}>PnL2h {pnl2h >= 0 ? "+" : ""}{Number(pnl2h).toFixed(2)}</span>
+        <span style={{ color: T.mute }}>·</span>
+        <span style={{ color: lossColor }}>losses {losses}</span>
+      </div>
+      {/* Fila 3: TIMING */}
+      <div style={{ display: "flex", gap: 6, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ color: T.mute }}>TIMING</span>
+        <span>sil {silMin}m{silSec}s</span>
+        <span style={{ color: T.mute }}>·</span>
+        <span>cv {Number(cv).toFixed(2)}</span>
+        <span style={{ color: T.mute }}>·</span>
+        <span>aln {Number(aln).toFixed(1)}/h</span>
       </div>
     </div>
   );

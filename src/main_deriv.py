@@ -6241,25 +6241,27 @@ class DerivDaemon:
         # ── Pending Entry: aguantar afuera antes de entrar ────────────────────
         # D.6.3: ghost NEW fire → pasar force_wait_s diferenciado por símbolo+calidad.
         # Pending existente: watcher ignora force_wait_s (usa el wait_s original).
+        # D.7.1: extender wait según régimen (BUENO +0s, MEDIOCRE +120s, DIFICIL +240s, CRITICO +360s)
+        if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
+            try:
+                _d71_ext_s, _d71_info = REGIME_DETECTOR_V2.get_pending_extension(tick.symbol)
+                if _d71_ext_s > 0:
+                    _d71_wait_base = _d6_pending_wait_s
+                    _d6_pending_wait_s += _d71_ext_s
+                    _LOGGER.info(
+                        "[D71_PENDING_EXTENDED] %s wait=%ds (base=%ds + ext=%ds) | "
+                        "regime=%s T=%s P=%s wr5=%.0f%% pnl2h=$%.2f loss=%d",
+                        tick.symbol, _d6_pending_wait_s, _d71_wait_base, _d71_ext_s,
+                        _d71_info["regime"], _d71_info["timing"], _d71_info["performance"],
+                        _d71_info["wr_5"], _d71_info["pnl_2h"], _d71_info["consecutive_losses"],
+                    )
+            except Exception as _d71_exc:
+                _LOGGER.warning("[D71_EXT_ERR] %s: %s", tick.symbol, _d71_exc)
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
             force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,
         )
         if _pe_action == ACTION_FIRST_WAIT:
-            # D.7.0: filtro de régimen a nivel PENDING INTENT (una llamada por intent, no por tick)
-            if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
-                _d70_skip, _d70_info = REGIME_DETECTOR_V2.should_skip(tick.symbol)
-                if _d70_skip:
-                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                    _LOGGER.info(
-                        "[D70_SKIP] %s | regime=%s skip=%d counter=%d | "
-                        "T=%s P=%s wr5=%.0f%% pnl2h=$%.2f loss=%d",
-                        tick.symbol, _d70_info["regime"], _d70_info["skip_rate"],
-                        _d70_info["pending_intent_counter"], _d70_info["timing"],
-                        _d70_info["performance"], _d70_info["wr_5"],
-                        _d70_info["pnl_2h"], _d70_info["consecutive_losses"],
-                    )
-                    return
             _LOGGER.info(
                 "[D6_PENDING_CREATED] %s | quality=%s wait=%ds | score=%.2f grade=%s setup=%s",
                 tick.symbol, _d6_quality_tier, int(_pe_remain), snap.score,

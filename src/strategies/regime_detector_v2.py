@@ -445,47 +445,60 @@ class RegimeDetectorV2:
             freq_info["aligned_per_h"], timing_info["current_silence_s"], timing_info["gap_cv"],
         )
 
-    def should_skip(self, symbol: str) -> Tuple[bool, dict]:
-        """
-        Decidir si saltar este PENDING INTENT (NO tick).
+    # ============================================================
+    # D.7.1: PENDING EXTENSION — reemplaza should_skip como mecanismo activo
+    # ============================================================
 
-        IMPORTANTE: esta función debe llamarse UNA SOLA VEZ por intento
-        de crear pending nuevo, no en cada tick de ghost.
+    REGIME_PENDING_EXTENSION: Dict[str, int] = {
+        "BUENO":    0,    # sin extensión (pending base normal)
+        "MEDIOCRE": 120,  # +2 min
+        "DIFICIL":  240,  # +4 min
+        "CRITICO":  360,  # +6 min
+    }
+
+    def get_pending_extension(self, symbol: str) -> Tuple[int, dict]:
+        """
+        D.7.1 — Retornar segundos a SUMAR al pending wait base del símbolo.
+
+        BUENO:    +0s   (pending base normal)
+        MEDIOCRE: +120s (+2 min)
+        DIFICIL:  +240s (+4 min)
+        CRITICO:  +360s (+6 min)
+
+        Evalúa régimen si toca (cada eval_interval).
+        Returns: (segundos_extra, info_dict)
         """
         if not self._enabled:
-            return False, {"regime": "DISABLED", "skip_rate": 0}
+            return 0, {"regime": "DISABLED", "extension_s": 0}
 
         state = self._states[symbol]
         now = time.time()
 
-        # Evaluar si toca
         if (now - state.last_eval_ts) >= self._eval_interval:
             try:
                 self._evaluate_symbol(symbol)
             except Exception as exc:
-                _LOGGER.warning("[D70_EVAL_ERR] %s: %s", symbol, exc)
+                _LOGGER.warning("[D71_EVAL_ERR] %s: %s", symbol, exc)
 
-        # Skip rate logic: opera cuando counter % (skip_rate + 1) == 1
-        skip_rate = state.skip_rate
-        state.pending_intent_counter += 1
-
-        if skip_rate == 0:
-            _should_skip = False
-        else:
-            _should_skip = (state.pending_intent_counter % (skip_rate + 1)) != 1
+        extension_s = self.REGIME_PENDING_EXTENSION.get(state.current_regime, 0)
 
         info = {
             "regime": state.current_regime,
-            "skip_rate": skip_rate,
-            "pending_intent_counter": state.pending_intent_counter,
+            "extension_s": extension_s,
             "timing": state.last_timing_state,
             "performance": state.last_performance_state,
             "wr_5": state.last_wr_5,
             "pnl_2h": state.last_pnl_2h,
             "consecutive_losses": state.last_consecutive_losses,
+            "aligned_per_h": state.last_aligned_per_h,
         }
 
-        return _should_skip, info
+        return extension_s, info
+
+    def should_skip(self, symbol: str) -> Tuple[bool, dict]:
+        """OBSOLETO en D.7.1 — mantenido por compatibilidad, retorna siempre False."""
+        _, info = self.get_pending_extension(symbol)
+        return False, info
 
     def get_state_snapshot(self) -> dict:
         """Snapshot para panel/debug."""
