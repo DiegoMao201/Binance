@@ -6257,6 +6257,23 @@ class DerivDaemon:
                     )
             except Exception as _d71_exc:
                 _LOGGER.warning("[D71_EXT_ERR] %s: %s", tick.symbol, _d71_exc)
+        # D.7.4: +300s si el spike previo fue grande (ratio>=100) o extremo (ratio>=200).
+        # Filosofía: preferimos esperar más y perder el spike que aumentar drawdown.
+        if _d6_ghost_fire_new:
+            try:
+                _d74_ratio = self._risk.get_last_spike_ratio(tick.symbol)
+                if _d74_ratio >= 100.0:
+                    _d74_ext = 300
+                    _d74_wait_base = _d6_pending_wait_s
+                    _d6_pending_wait_s += _d74_ext
+                    _d74_scale = "EXTREMO" if _d74_ratio >= 200 else "GRANDE"
+                    _LOGGER.info(
+                        "[D74_RATIO_EXT] %s wait+=%ds (base=%ds → %ds) | ratio=%.1f scale=%s",
+                        tick.symbol, _d74_ext, _d74_wait_base, _d6_pending_wait_s,
+                        _d74_ratio, _d74_scale,
+                    )
+            except Exception as _d74_exc:
+                _LOGGER.warning("[D74_EXT_ERR] %s: %s", tick.symbol, _d74_exc)
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
             force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,

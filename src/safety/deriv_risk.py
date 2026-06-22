@@ -724,6 +724,8 @@ class DerivRiskManager:
         self._ingest_tick_count: dict[str, int] = {}
         # Tick count at the moment of the last detected spike (for ticks_since_last_spike).
         self._last_spike_tick: dict[str, int] = {}
+        # D.7.4: ratio (abs_jump/atr) of the most recent spike per symbol.
+        self._last_spike_ratio: dict[str, float] = {}
         # Rolling inter-spike intervals in tick domain (noise-filtered).
         # Used by main_deriv spike_pre_filter to adapt min_post window per symbol.
         self._spike_intervals: dict[str, list[int]] = {}
@@ -1183,8 +1185,9 @@ class DerivRiskManager:
                                 (buf[-1] - _ema200_at_spike) / _ema200_at_spike, 5
                             )
                         # Update trackers
-                        self._last_spike_ts[symbol]   = _spike_ts
-                        self._last_spike_tick[symbol] = _cur_tick_n
+                        self._last_spike_ts[symbol]    = _spike_ts
+                        self._last_spike_tick[symbol]  = _cur_tick_n
+                        self._last_spike_ratio[symbol] = round(abs(_jump) / _recent_atr, 2)  # D.7.4
                         _recent = self._spike_recent_ts.setdefault(symbol, [])
                         _recent.append(_spike_ts)
                         _cutoff = _spike_ts - self._spike_count_window_sec
@@ -1363,6 +1366,13 @@ class DerivRiskManager:
         DURING the wait period and cancel stale entries.
         """
         return self._last_spike_ts.get(symbol, 0.0)
+
+    def get_last_spike_ratio(self, symbol: str) -> float:
+        """D.7.4: ratio (abs_jump/atr) of the most recent spike for *symbol*.
+
+        Returns 0.0 if no spike has been observed yet.
+        """
+        return self._last_spike_ratio.get(symbol, 0.0)
 
     # ── 2026-06-02 LIVE SCARCITY ("seco/lento") — operator directive ────────
     # Mirrors EXACTLY the manual-operator card (web/app/api/deriv/operator):
