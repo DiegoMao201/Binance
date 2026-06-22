@@ -462,12 +462,20 @@ class RegimeDetectorV2:
         "CRITICO":    0,  # silencio largo, spike inminente, ENTRAR YA
     }
 
-    # DESCARGADO — lógica NORMAL: símbolo agotado, esperar más
+    # DESCARGADO — lógica NORMAL: símbolo agotado, esperar más (BOOM500/CRASH500)
     REGIME_PENDING_EXTENSION_DISCHARGED: Dict[str, int] = {
         "BUENO":      0,
-        "MEDIOCRE": 120,
-        "DIFICIL":  240,
-        "CRITICO":  360,
+        "MEDIOCRE": 240,
+        "DIFICIL":  360,
+        "CRITICO":  480,
+    }
+
+    # DESCARGADO — BOOM1000/CRASH1000: spikes más raros → penalizar más tras descarga
+    REGIME_PENDING_EXTENSION_DISCHARGED_1000: Dict[str, int] = {
+        "BUENO":      0,
+        "MEDIOCRE": 600,
+        "DIFICIL":  720,
+        "CRITICO":  900,
     }
 
     DISCHARGE_RATIO_SUM_THRESHOLD: float = 120.0
@@ -505,8 +513,9 @@ class RegimeDetectorV2:
         """
         D.8.0 — Segundos a SUMAR al pending base.
 
-        FRESCO (suma ratios <120):   CRITICO→+0s, DIFICIL→+60s, MEDIOCRE→+180s, BUENO→+300s
-        DESCARGADO (suma >=120):     BUENO→+0s, MEDIOCRE→+120s, DIFICIL→+240s, CRITICO→+360s
+        FRESCO (suma ratios <120):    CRITICO→+0s, DIFICIL→+60s, MEDIOCRE→+180s, BUENO→+300s
+        DESCARGADO 500 (suma >=120):  BUENO→+0s, MEDIOCRE→+240s, DIFICIL→+360s, CRITICO→+480s
+        DESCARGADO 1000 (suma >=120): BUENO→+0s, MEDIOCRE→+600s, DIFICIL→+720s, CRITICO→+900s
 
         Evalúa régimen si toca (cada eval_interval).
         """
@@ -528,7 +537,12 @@ class RegimeDetectorV2:
         is_discharged, ratio_info = self.is_symbol_discharged(symbol, bot_side)
 
         if is_discharged:
-            extension_s = self.REGIME_PENDING_EXTENSION_DISCHARGED.get(state.current_regime, 0)
+            _discharged_tbl = (
+                self.REGIME_PENDING_EXTENSION_DISCHARGED_1000
+                if symbol.upper() in {"BOOM1000", "CRASH1000"}
+                else self.REGIME_PENDING_EXTENSION_DISCHARGED
+            )
+            extension_s = _discharged_tbl.get(state.current_regime, 0)
             mode = "DISCHARGED"
         else:
             extension_s = self.REGIME_PENDING_EXTENSION_FRESH.get(state.current_regime, 0)
