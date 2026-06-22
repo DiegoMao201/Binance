@@ -545,6 +545,61 @@ class RegimeDetectorV2:
         self._trades_buffer.clear()
         _LOGGER.info("[D70_FORCE_CLEAR_ALL]")
 
+    def _preload_from_json(self) -> None:
+        """D.7.4: Precarga buffers desde JSON en disco al startup para evitar WR5=0%.
+
+        Lee los últimos 4h de spikes y 2h de trades desde los archivos live.
+        Operación best-effort: cualquier error es silencioso.
+        """
+        import os
+        base = os.path.dirname(STATE_FILE)
+        cutoff_trades = time.time() - 7200   # 2h para WR5 y pnl_2h
+        cutoff_spikes = time.time() - 14400  # 4h para timing
+
+        # Preload trades
+        trades_path = os.path.join(base, "deriv_closed_contracts.json")
+        if os.path.exists(trades_path):
+            try:
+                with open(trades_path, "r", encoding="utf-8") as _f:
+                    _all = json.load(_f)
+                _loaded = 0
+                for _t in _all:
+                    _ts = float(_t.get("closed_at_ts") or 0)
+                    if _ts < cutoff_trades:
+                        continue
+                    _sym = str(_t.get("symbol") or "").upper()
+                    _pnl = float(_t.get("realized_pnl_usdt") or 0)
+                    _reason = str(_t.get("exit_reason") or _t.get("closed_by") or "")
+                    _is_timeout = "timeout" in _reason.lower() or "max_hold" in _reason.lower()
+                    self.record_trade_closed(_sym, _ts, _pnl, _is_timeout)
+                    _loaded += 1
+                _LOGGER.info("[D74_PRELOAD] trades=%d (last 2h) from %s", _loaded, trades_path)
+            except Exception as _e:
+                _LOGGER.debug("[D74_PRELOAD] trades error: %s", _e)
+
+        # Preload spikes
+        spikes_path = os.path.join(base, "deriv_spike_events.json")
+        if os.path.exists(spikes_path):
+            try:
+                with open(spikes_path, "r", encoding="utf-8") as _f:
+                    _all = json.load(_f)
+                _loaded = 0
+                for _s in _all:
+                    _ts = float(_s.get("ts") or 0)
+                    if _ts < cutoff_spikes:
+                        continue
+                    _sym = str(_s.get("symbol") or "").upper()
+                    _dir = str(_s.get("direction") or "UP")
+                    _ratio = float(_s.get("ratio") or 0)
+                    _had_pos = bool(_s.get("had_open_pos") or False)
+                    self.record_spike(_sym, _ts, _dir, _ratio, _had_pos)
+                    _loaded += 1
+                _LOGGER.info("[D74_PRELOAD] spikes=%d (last 4h) from %s", _loaded, spikes_path)
+            except Exception as _e:
+                _LOGGER.debug("[D74_PRELOAD] spikes error: %s", _e)
+
 
 # Singleton global
 REGIME_DETECTOR_V2 = RegimeDetectorV2()
+# D.7.4: precarga buffers desde disco para evitar WR5=0% post-restart
+REGIME_DETECTOR_V2._preload_from_json()
