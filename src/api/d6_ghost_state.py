@@ -155,11 +155,12 @@ def d6_startup_cleanup() -> None:
     except Exception as exc:
         _log.warning("[D6_STARTUP] RegimeSkipFilter clear error: %s", exc)
 
-    # 2c. Vaciar RegimeDetectorV2 (D.7.0)
+    # 2c. Vaciar RegimeDetectorV2 (D.7.0) y recargar buffers desde disco
     try:
         from src.strategies.regime_detector_v2 import REGIME_DETECTOR_V2
         REGIME_DETECTOR_V2.force_clear()
         _log.info("[D6_STARTUP] RegimeDetectorV2: estado limpiado")
+        REGIME_DETECTOR_V2._preload_from_json()  # D.7.4: evita WR5=0% post-restart
     except Exception as exc:
         _log.warning("[D6_STARTUP] RegimeDetectorV2 clear error: %s", exc)
 

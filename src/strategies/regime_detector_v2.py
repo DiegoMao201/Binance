@@ -601,5 +601,3 @@ class RegimeDetectorV2:
 
 # Singleton global
 REGIME_DETECTOR_V2 = RegimeDetectorV2()
-# D.7.4: precarga buffers desde disco para evitar WR5=0% post-restart
-REGIME_DETECTOR_V2._preload_from_json()
