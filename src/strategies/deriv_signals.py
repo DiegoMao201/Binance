@@ -331,8 +331,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # ── Geo gate: BOOM needs price below channel mid ──
         # BOOM spikes UP from accumulation zones. Extended prices = wrong entry timing.
         "geo_entry_max": 0.50,          # Phase 31: 0.40→0.50 to allow more setups while collecting data
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
-        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — BOOM fixed stake target
+        "stake_max_usdt": 10.00,         # Phase 31: DEMO $5.00 stakes
+        "stake_target_usdt": 10.00,      # 2026-05-29: user directive — BOOM fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 31: align with other BOOM profiles → sl_usd > broker floor
         "spike_capture_tp_usdt": 0.15,  # Phase 31: small spikes still valid exits
         "spike_profit_delta_usdt": 0.10,
@@ -361,8 +361,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.50,          # cap geo — previous batch failed at geo+1.48; 0.50 blocks those
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00 → 67% broker_sl_hit, 85% sin cruzar $0.10).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -393,8 +393,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "sl_multiplier":120,            # Prueba4-restart: 240→120,
         "tp_multiplier": 6.0,
         "trailing_mode": "none",
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
-        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — BOOM fixed stake target
+        "stake_max_usdt": 10.00,         # Phase 31: DEMO $5.00 stakes (was 1.80)
+        "stake_target_usdt": 10.00,      # 2026-05-29: user directive — BOOM fixed stake target
         "stop_loss_pct_override": 0.36, # Phase 27: align with BOOM600/900 → sl_usd > broker floor
         # ── Batch analysis 2026-05-18 ──────────────────────────────────────
         # Sole loss had H=0.402 (below meaningful persistence for spike setup).
@@ -447,8 +447,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "require_fvg_mitigation": False,
         "fvg_tier_minimo": "any",
         "block_bc_escape_env": False,
-        "stake_max_usdt": 5.00,         # Phase 31: DEMO $5.00 stakes
-        "stake_target_usdt": 5.00,      # 2026-05-29: user directive — CRASH fixed stake target
+        "stake_max_usdt": 10.00,         # Phase 31: DEMO $5.00 stakes
+        "stake_target_usdt": 10.00,      # 2026-05-29: user directive — CRASH fixed stake target
         "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00). Limita whipsaw temprano.
     },
     "CRASH500": {
@@ -483,8 +483,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # Empirical WR for these entries is <14%. Hard veto (-2.0) blocks them.
         "geo_extended_veto_min": -0.70,
         "trail_floor_min_usdt": 0.20,   # eliminate floor=-1.00 legacy issue
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00). Limita whipsaw temprano.
         "min_score": 4.5,              # Phase 32: profile gate, let risk engine gate
         # 2026-05-29 user directive: CRASH puede entrar sin FVG (block_bc_escape_env=False).
@@ -532,8 +532,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         # 2026-05-29 user directive: CRASH no necesita FVG.
         "require_fvg_mitigation": False,
         "fvg_tier_minimo": "any",
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
         # 2026-05-29 user directive: bajar score para que opere y permitir entradas sin FVG.
         "min_score": 4.8,
@@ -570,8 +570,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -611,8 +611,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 5.00,
-        "stake_target_usdt": 5.00,
+        "stake_max_usdt": 10.00,
+        "stake_target_usdt": 10.00,
         "stop_loss_pct_override": 0.40, # SL=$2.00 fijo (igual familia).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -650,8 +650,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,          # tighter geo for higher-quality entries
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — BOOM at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — BOOM at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.36,
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
@@ -687,8 +687,8 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "hurst_min_spike": 0.43,
         "geo_entry_min": -999,
         "geo_entry_max": 0.30,
-        "stake_max_usdt": 5.00,         # 2026-05-29: user directive — CRASH at $5
-        "stake_target_usdt": 5.00,      # Final target applied in main_deriv stake policy
+        "stake_max_usdt": 10.00,         # 2026-05-29: user directive — CRASH at $5
+        "stake_target_usdt": 10.00,      # Final target applied in main_deriv stake policy
         "stop_loss_pct_override": 0.40, # 2026-05-31: SL=$2.00 fijo (era $1.00).
         "trail_stop_floor_min": 0.20,
         "ratchet_enabled": True,
