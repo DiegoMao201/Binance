@@ -6242,38 +6242,28 @@ class DerivDaemon:
         # D.6.3: ghost NEW fire → pasar force_wait_s diferenciado por símbolo+calidad.
         # Pending existente: watcher ignora force_wait_s (usa el wait_s original).
         # D.7.1: extender wait según régimen (BUENO +0s, MEDIOCRE +120s, DIFICIL +240s, CRITICO +360s)
+        # D.8.0: régimen invertido + guard ratios sumados (reemplaza D.7.1 + D.7.4)
         if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
             try:
-                _d71_ext_s, _d71_info = REGIME_DETECTOR_V2.get_pending_extension(tick.symbol)
-                if _d71_ext_s > 0:
-                    _d71_wait_base = _d6_pending_wait_s
-                    _d6_pending_wait_s += _d71_ext_s
-                    _LOGGER.info(
-                        "[D71_PENDING_EXTENDED] %s wait=%ds (base=%ds + ext=%ds) | "
-                        "regime=%s T=%s P=%s wr5=%.0f%% pnl2h=$%.2f loss=%d",
-                        tick.symbol, _d6_pending_wait_s, _d71_wait_base, _d71_ext_s,
-                        _d71_info["regime"], _d71_info["timing"], _d71_info["performance"],
-                        _d71_info["wr_5"], _d71_info["pnl_2h"], _d71_info["consecutive_losses"],
-                    )
-            except Exception as _d71_exc:
-                _LOGGER.warning("[D71_EXT_ERR] %s: %s", tick.symbol, _d71_exc)
-        # D.7.4: +300s si el spike previo fue grande (ratio>=100) o extremo (ratio>=200).
-        # Filosofía: preferimos esperar más y perder el spike que aumentar drawdown.
-        if _d6_ghost_fire_new:
-            try:
-                _d74_ratio = self._risk.get_last_spike_ratio(tick.symbol)
-                if _d74_ratio >= 100.0:
-                    _d74_ext = 300
-                    _d74_wait_base = _d6_pending_wait_s
-                    _d6_pending_wait_s += _d74_ext
-                    _d74_scale = "EXTREMO" if _d74_ratio >= 200 else "GRANDE"
-                    _LOGGER.info(
-                        "[D74_RATIO_EXT] %s wait+=%ds (base=%ds → %ds) | ratio=%.1f scale=%s",
-                        tick.symbol, _d74_ext, _d74_wait_base, _d6_pending_wait_s,
-                        _d74_ratio, _d74_scale,
-                    )
-            except Exception as _d74_exc:
-                _LOGGER.warning("[D74_EXT_ERR] %s: %s", tick.symbol, _d74_exc)
+                _d80_bot_side = "MULTUP" if tick.symbol.startswith("BOOM") else "MULTDOWN"
+                _d80_ext_s, _d80_info = REGIME_DETECTOR_V2.get_pending_extension(
+                    tick.symbol, _d80_bot_side
+                )
+                _d80_wait_base = _d6_pending_wait_s
+                _d6_pending_wait_s += _d80_ext_s
+                _LOGGER.info(
+                    "[D80_PENDING] %s wait=%ds (base=%ds + ext=%ds) | "
+                    "mode=%s regime=%s | sum_ratios_10m=%.0f (n=%d max=%.0f thr=%.0f) | "
+                    "T=%s P=%s wr5=%.0f%% pnl2h=$%.2f",
+                    tick.symbol, _d6_pending_wait_s, _d80_wait_base, _d80_ext_s,
+                    _d80_info["mode"], _d80_info["regime"],
+                    _d80_info["sum_ratios_10m"], _d80_info["count_aligned_10m"],
+                    _d80_info["max_ratio_10m"], _d80_info["threshold"],
+                    _d80_info["timing"], _d80_info["performance"],
+                    _d80_info["wr_5"], _d80_info["pnl_2h"],
+                )
+            except Exception as _d80_exc:
+                _LOGGER.warning("[D80_EXT_ERR] %s: %s", tick.symbol, _d80_exc)
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
             force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,

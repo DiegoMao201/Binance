@@ -446,27 +446,69 @@ class RegimeDetectorV2:
         )
 
     # ============================================================
-    # D.7.1: PENDING EXTENSION — reemplaza should_skip como mecanismo activo
+    # D.8.0: RÉGIMEN INVERTIDO + GUARD RATIOS SUMADOS
+    # Reemplaza D.7.1 (extensión lineal) + D.7.4 (+300s fijo por ratio).
+    #
+    # Filosofía Diego 2026-06-22:
+    #   FRESCO (suma ratios <120 en 10min): silencio largo = spike inminente = ENTRAR YA
+    #   DESCARGADO (suma >=120 en 10min):  símbolo agotado = esperar recuperación
     # ============================================================
 
-    REGIME_PENDING_EXTENSION: Dict[str, int] = {
-        "BUENO":    0,    # sin extensión (pending base normal)
-        "MEDIOCRE": 120,  # +2 min
-        "DIFICIL":  240,  # +4 min
-        "CRITICO":  360,  # +6 min
+    # FRESCO — lógica INVERTIDA: silencio→entrar rápido, mercado activo→esperar
+    REGIME_PENDING_EXTENSION_FRESH: Dict[str, int] = {
+        "BUENO":    300,  # mercado activo, aún tiene gasolina, esperar
+        "MEDIOCRE": 180,
+        "DIFICIL":   60,  # silencio empieza, entrar rápido
+        "CRITICO":    0,  # silencio largo, spike inminente, ENTRAR YA
     }
 
-    def get_pending_extension(self, symbol: str) -> Tuple[int, dict]:
-        """
-        D.7.1 — Retornar segundos a SUMAR al pending wait base del símbolo.
+    # DESCARGADO — lógica NORMAL: símbolo agotado, esperar más
+    REGIME_PENDING_EXTENSION_DISCHARGED: Dict[str, int] = {
+        "BUENO":      0,
+        "MEDIOCRE": 120,
+        "DIFICIL":  240,
+        "CRITICO":  360,
+    }
 
-        BUENO:    +0s   (pending base normal)
-        MEDIOCRE: +120s (+2 min)
-        DIFICIL:  +240s (+4 min)
-        CRITICO:  +360s (+6 min)
+    DISCHARGE_RATIO_SUM_THRESHOLD: float = 120.0
+
+    def get_aligned_ratio_sum_10min(self, symbol: str, bot_side: str) -> Tuple[float, dict]:
+        """Suma de ratios de spikes alineados con bot_side en últimos 10 min."""
+        now = time.time()
+        cutoff = now - 600
+        direction = "UP" if bot_side == "MULTUP" else "DOWN"
+
+        aligned = [
+            s for s in self._spikes_buffer[symbol]
+            if s.ts >= cutoff and s.direction == direction
+        ]
+        sum_ratios = sum(s.ratio for s in aligned)
+        count = len(aligned)
+        max_ratio = max((s.ratio for s in aligned), default=0.0)
+
+        return sum_ratios, {
+            "sum_ratios_10m": sum_ratios,
+            "count_aligned_10m": count,
+            "max_ratio_10m": max_ratio,
+            "direction": direction,
+        }
+
+    def is_symbol_discharged(self, symbol: str, bot_side: str) -> Tuple[bool, dict]:
+        """True si suma ratios alineados en 10min >= DISCHARGE_RATIO_SUM_THRESHOLD."""
+        sum_ratios, info = self.get_aligned_ratio_sum_10min(symbol, bot_side)
+        is_discharged = sum_ratios >= self.DISCHARGE_RATIO_SUM_THRESHOLD
+        info["threshold"] = self.DISCHARGE_RATIO_SUM_THRESHOLD
+        info["is_discharged"] = is_discharged
+        return is_discharged, info
+
+    def get_pending_extension(self, symbol: str, bot_side: str = None) -> Tuple[int, dict]:
+        """
+        D.8.0 — Segundos a SUMAR al pending base.
+
+        FRESCO (suma ratios <120):   CRITICO→+0s, DIFICIL→+60s, MEDIOCRE→+180s, BUENO→+300s
+        DESCARGADO (suma >=120):     BUENO→+0s, MEDIOCRE→+120s, DIFICIL→+240s, CRITICO→+360s
 
         Evalúa régimen si toca (cada eval_interval).
-        Returns: (segundos_extra, info_dict)
         """
         if not self._enabled:
             return 0, {"regime": "DISABLED", "extension_s": 0}
@@ -478,13 +520,29 @@ class RegimeDetectorV2:
             try:
                 self._evaluate_symbol(symbol)
             except Exception as exc:
-                _LOGGER.warning("[D71_EVAL_ERR] %s: %s", symbol, exc)
+                _LOGGER.warning("[D80_EVAL_ERR] %s: %s", symbol, exc)
 
-        extension_s = self.REGIME_PENDING_EXTENSION.get(state.current_regime, 0)
+        if bot_side is None:
+            bot_side = "MULTUP" if symbol.startswith("BOOM") else "MULTDOWN"
+
+        is_discharged, ratio_info = self.is_symbol_discharged(symbol, bot_side)
+
+        if is_discharged:
+            extension_s = self.REGIME_PENDING_EXTENSION_DISCHARGED.get(state.current_regime, 0)
+            mode = "DISCHARGED"
+        else:
+            extension_s = self.REGIME_PENDING_EXTENSION_FRESH.get(state.current_regime, 0)
+            mode = "FRESH"
 
         info = {
             "regime": state.current_regime,
             "extension_s": extension_s,
+            "mode": mode,
+            "is_discharged": is_discharged,
+            "sum_ratios_10m": ratio_info["sum_ratios_10m"],
+            "count_aligned_10m": ratio_info["count_aligned_10m"],
+            "max_ratio_10m": ratio_info["max_ratio_10m"],
+            "threshold": self.DISCHARGE_RATIO_SUM_THRESHOLD,
             "timing": state.last_timing_state,
             "performance": state.last_performance_state,
             "wr_5": state.last_wr_5,
@@ -496,14 +554,24 @@ class RegimeDetectorV2:
         return extension_s, info
 
     def should_skip(self, symbol: str) -> Tuple[bool, dict]:
-        """OBSOLETO en D.7.1 — mantenido por compatibilidad, retorna siempre False."""
+        """OBSOLETO — mantenido por compatibilidad."""
         _, info = self.get_pending_extension(symbol)
         return False, info
 
     def get_state_snapshot(self) -> dict:
         """Snapshot para panel/debug."""
-        return {
-            sym: {
+        snapshot = {}
+        for sym, state in self._states.items():
+            bot_side = "MULTUP" if sym.startswith("BOOM") else "MULTDOWN"
+            try:
+                sum_ratios, ratio_info = self.get_aligned_ratio_sum_10min(sym, bot_side)
+                is_discharged = sum_ratios >= self.DISCHARGE_RATIO_SUM_THRESHOLD
+            except Exception:
+                sum_ratios = 0.0
+                is_discharged = False
+                ratio_info = {"count_aligned_10m": 0, "max_ratio_10m": 0.0}
+
+            snapshot[sym] = {
                 "regime": state.current_regime,
                 "skip_rate": state.skip_rate,
                 "pending_intent_counter": state.pending_intent_counter,
@@ -520,9 +588,13 @@ class RegimeDetectorV2:
                 "consecutive_losses": state.last_consecutive_losses,
                 "aligned_per_h": round(state.last_aligned_per_h, 1),
                 "last_eval_ts": state.last_eval_ts,
+                "is_discharged": is_discharged,
+                "sum_ratios_10m": round(sum_ratios, 0),
+                "count_aligned_10m": ratio_info.get("count_aligned_10m", 0),
+                "max_ratio_10m": round(ratio_info.get("max_ratio_10m", 0.0), 0),
+                "threshold": self.DISCHARGE_RATIO_SUM_THRESHOLD,
             }
-            for sym, state in self._states.items()
-        }
+        return snapshot
 
     def persist_state(self) -> None:
         """Guardar snapshot al JSON para panel/debug."""
