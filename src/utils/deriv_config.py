@@ -203,14 +203,8 @@ def load_deriv_settings() -> DerivSettings:
         user_id=user_id,
         symbols=_get_tuple(
             "DERIV_SYMBOLS",
-            # Default universe: volatility indices + BOOM/CRASH (full active family)
-            # Override via DERIV_SYMBOLS env var (comma-separated) in Coolify.
-            # BOOM300/CRASH300 are intentionally omitted until ≥20 trades confirm edge.
-            ("R_100", "R_75", "R_50",
-             "BOOM1000", "CRASH1000",
-             "BOOM500",  "CRASH500",
-             "BOOM900",  "CRASH900",
-             "BOOM600",  "CRASH600"),
+            # D.8.0: solo 4 símbolos activos — BOOM600/CRASH600/BOOM900/CRASH900 desactivados.
+            ("BOOM500", "CRASH500", "BOOM1000", "CRASH1000"),
         ),
         dry_run=_get_bool("DERIV_DRY_RUN", True),
         bankroll_usdt=_get_float("DERIV_BANKROLL_USDT", 50.0),

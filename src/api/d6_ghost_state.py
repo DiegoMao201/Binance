@@ -114,10 +114,7 @@ def d6_startup_cleanup() -> None:
     _log = logging.getLogger("deriv.daemon")
     _log.info("[D6_STARTUP] Iniciando cleanup post-deploy D.6.3...")
 
-    _SYMBOLS = [
-        "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
-        "CRASH500", "CRASH600", "CRASH900", "CRASH1000",
-    ]
+    _SYMBOLS = ["BOOM500", "CRASH500", "BOOM1000", "CRASH1000"]
 
     # 1. Resetear panel state → todos WAITING
     try:

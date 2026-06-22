@@ -198,7 +198,7 @@ _DYNAMIC_INACTIVE_BYPASS_ENABLE: bool = _env_flag(
 )
 _DYNAMIC_INACTIVE_BYPASS_SYMBOLS: set[str] = _env_symbol_set(
     "DERIV_DYNAMIC_INACTIVE_BYPASS_SYMBOLS",
-    "CRASH300,CRASH500,CRASH600,CRASH900,CRASH1000,BOOM500,BOOM600,BOOM900,BOOM1000",
+    "CRASH500,CRASH1000,BOOM500,BOOM1000",
 )
 
 # ─── Dynamic score-gate shaping (sniper mode) ──────────────────────────────
@@ -2401,10 +2401,7 @@ class DerivDaemon:
             )
         # ── PROFILE_SCORE_MIN — log score_min for all active BOOM/CRASH + R_* profiles ─
         # Confirms which minimum is active in the deployed container vs what's coded.
-        _SPIKE_SYMS = [
-            "BOOM300", "BOOM500", "BOOM600", "BOOM900", "BOOM1000",
-            "CRASH300", "CRASH500", "CRASH600", "CRASH900", "CRASH1000",
-        ]
+        _SPIKE_SYMS = ["BOOM500", "BOOM1000", "CRASH500", "CRASH1000"]
         for _psym in _SPIKE_SYMS:
             _prf = get_asset_profile(_psym)
             _LOGGER.info(
