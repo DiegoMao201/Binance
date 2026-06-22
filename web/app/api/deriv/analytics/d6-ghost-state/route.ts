@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 const BOT_LOGS = process.env.DERIV_STATE_DIR || process.env.BOT_STATE_DIR || '/data/logs';
 const D6_STATE_FILE = path.join(BOT_LOGS, 'd6_ghost_state.json');
 
-const SYMBOLS = ['BOOM500', 'BOOM600', 'BOOM900', 'BOOM1000', 'CRASH500', 'CRASH600', 'CRASH900', 'CRASH1000'];
+const SYMBOLS = ['BOOM500', 'BOOM1000', 'CRASH500', 'CRASH1000'];
 
 // PENDING sin actualización >90s → EXPIRED_GHOST; EXPIRED_GHOST >120s → WAITING
 const PENDING_TTL_S = 90;
