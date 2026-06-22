@@ -6242,6 +6242,7 @@ class DerivDaemon:
         # Pending existente: watcher ignora force_wait_s (usa el wait_s original).
         # D.7.1: extender wait según régimen (BUENO +0s, MEDIOCRE +120s, DIFICIL +240s, CRITICO +360s)
         # D.8.0: régimen invertido + guard ratios sumados (reemplaza D.7.1 + D.7.4)
+        _d80_info: dict = {}
         if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
             try:
                 _d80_bot_side = "MULTUP" if tick.symbol.startswith("BOOM") else "MULTDOWN"
@@ -6280,6 +6281,8 @@ class DerivDaemon:
                     "grade": _d6_grade_now,
                     "quality_tier": _d6_quality_tier,
                     "imm_state": str(snap.score_breakdown.get("spike_imminence_state") or ""),
+                    "d80_mode": str(_d80_info.get("mode") or ""),
+                    "d80_sum": round(float(_d80_info.get("sum_ratios_10m") or 0), 0),
                     "side": str(snap.side or ""),
                     "wait_s": round(float(_pe_remain), 0),
                     "created_at": time.time(),

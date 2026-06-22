@@ -216,7 +216,8 @@ function GhostLiveSection({ symbol }) {
         </div>
         <div style={{ opacity: 0.85 }}>
           {dirArrow}{" "}{gd.setup || "?"} · grade {gd.grade || "?"} · score {gd.score?.toFixed(2) || "?"}
-          {gd.imm_state ? ` · ${gd.imm_state}` : ""}
+          {gd.imm_state ? ` · imm:${gd.imm_state}` : ""}
+          {gd.d80_mode ? ` · D80:${gd.d80_mode}${gd.d80_sum > 0 ? `(Σ${gd.d80_sum})` : ""}` : ""}
         </div>
       </div>
     );
