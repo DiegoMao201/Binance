@@ -28,6 +28,34 @@ async function readJson(file, fallback) {
 
 const HOUR = 3600;
 
+// Calcula WR5, PnL2h y consecutive_losses desde los trades reales del JSON.
+// El buffer in-memory de D70 se vacía en cada deploy — estos valores son la verdad.
+function computeSymbolTradeStats(closedContracts, symbol, nowSec) {
+  const symTrades = closedContracts
+    .filter((t) => t.symbol === symbol && t.closed_at_ts)
+    .sort((a, b) => (a.closed_at_ts || 0) - (b.closed_at_ts || 0));
+
+  if (symTrades.length === 0) {
+    return { wr_5: null, pnl_2h: null, consecutive_losses: null, n_trades: 0 };
+  }
+
+  const last5 = symTrades.slice(-5);
+  const wins5 = last5.filter((t) => (t.realized_pnl_usdt || 0) > 0).length;
+  const wr_5 = Math.round((wins5 / last5.length) * 100);
+
+  const ts2hAgo = nowSec - 2 * HOUR;
+  const trades2h = symTrades.filter((t) => (t.closed_at_ts || 0) >= ts2hAgo);
+  const pnl_2h = Math.round(trades2h.reduce((s, t) => s + (t.realized_pnl_usdt || 0), 0) * 100) / 100;
+
+  let consecutive_losses = 0;
+  for (let i = symTrades.length - 1; i >= 0; i--) {
+    if ((symTrades[i].realized_pnl_usdt || 0) > 0) break;
+    consecutive_losses++;
+  }
+
+  return { wr_5, pnl_2h, consecutive_losses, n_trades: symTrades.length };
+}
+
 function median(arr) {
   if (!arr.length) return null;
   const s = [...arr].sort((a, b) => a - b);
@@ -320,7 +348,15 @@ export async function GET() {
       vision: visionData[symbol] || null,
       postRachaCooldown: cooldownBySymbol[symbol] || null,
       d67Regime: d67BySymbol[symbol] || null,
-      d70Regime: d70BySymbol[symbol] || null,
+      d70Regime: (() => {
+        const base = d70BySymbol[symbol] || null;
+        if (!base) return null;
+        const stats = computeSymbolTradeStats(closedContracts, symbol, nowSec);
+        if (stats.n_trades > 0) {
+          return { ...base, wr_5: stats.wr_5, pnl_2h: stats.pnl_2h, consecutive_losses: stats.consecutive_losses };
+        }
+        return base;
+      })(),
     });
   }
 

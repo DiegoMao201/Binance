@@ -349,17 +349,20 @@ function RegimeBadgeV2({ regimeData }) {
   }
   const st        = STYLES[regimeData.regime] || STYLES.MEDIOCRE;
   const tsLabel   = TIMING_LABELS[regimeData.timing_state] || (regimeData.timing_state || "").replace(/_/g, " ");
-  const wr5       = regimeData.wr_5 ?? 0;
-  const pnl2h     = regimeData.pnl_2h ?? 0;
-  const losses    = regimeData.consecutive_losses ?? 0;
+  const wr5       = regimeData.wr_5;
+  const pnl2h     = regimeData.pnl_2h;
+  const losses    = regimeData.consecutive_losses;
   const aln       = regimeData.aligned_per_h ?? 0;
-  const cv        = regimeData.gap_cv ?? 0;
+  const cvRaw     = regimeData.gap_cv ?? 0;
   const silenceS  = regimeData.current_silence_s ?? 0;
   const silMin    = Math.floor(silenceS / 60);
   const silSec    = Math.floor(silenceS % 60);
-  const wrColor   = wr5 >= 40 ? T.green : wr5 >= 25 ? T.amber : T.red;
-  const pnlColor  = pnl2h >= 0 ? T.green : pnl2h >= -2 ? T.amber : T.red;
-  const lossColor = losses === 0 ? T.textD : losses < 3 ? T.amber : T.red;
+  const hasPerf   = wr5 != null && pnl2h != null;
+  const wrColor   = !hasPerf ? T.mute : wr5 >= 40 ? T.green : wr5 >= 25 ? T.amber : T.red;
+  const pnlColor  = !hasPerf ? T.mute : pnl2h >= 0 ? T.green : pnl2h >= -2 ? T.amber : T.red;
+  const lossColor = !hasPerf ? T.mute : (losses || 0) === 0 ? T.textD : (losses || 0) < 3 ? T.amber : T.red;
+  // cv=0 sin datos suficientes → mostrar "—"
+  const cvStr     = cvRaw > 0 ? Number(cvRaw).toFixed(2) : "—";
   return (
     <div style={{
       padding: "6px 10px", margin: "0 12px 6px",
@@ -384,18 +387,24 @@ function RegimeBadgeV2({ regimeData }) {
       {/* Fila 2: PERF */}
       <div style={{ display: "flex", gap: 6, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ color: T.mute }}>PERF</span>
-        <span style={{ color: wrColor }}>WR5 {wr5}%</span>
-        <span style={{ color: T.mute }}>·</span>
-        <span style={{ color: pnlColor }}>PnL2h {pnl2h >= 0 ? "+" : ""}{Number(pnl2h).toFixed(2)}</span>
-        <span style={{ color: T.mute }}>·</span>
-        <span style={{ color: lossColor }}>losses {losses}</span>
+        {hasPerf ? (
+          <>
+            <span style={{ color: wrColor }}>WR5 {wr5}%</span>
+            <span style={{ color: T.mute }}>·</span>
+            <span style={{ color: pnlColor }}>PnL2h {(pnl2h || 0) >= 0 ? "+" : ""}{Number(pnl2h).toFixed(2)}</span>
+            <span style={{ color: T.mute }}>·</span>
+            <span style={{ color: lossColor }}>losses {losses ?? 0}</span>
+          </>
+        ) : (
+          <span style={{ color: T.mute, opacity: 0.6 }}>sin trades aún</span>
+        )}
       </div>
       {/* Fila 3: TIMING */}
       <div style={{ display: "flex", gap: 6, fontFamily: FONT_MONO, fontSize: 8, color: T.textD, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ color: T.mute }}>TIMING</span>
         <span>sil {silMin}m{silSec}s</span>
         <span style={{ color: T.mute }}>·</span>
-        <span>cv {Number(cv).toFixed(2)}</span>
+        <span>cv {cvStr}</span>
         <span style={{ color: T.mute }}>·</span>
         <span>aln {Number(aln).toFixed(1)}/h</span>
       </div>
