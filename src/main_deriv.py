@@ -642,6 +642,8 @@ class DerivDaemon:
         self._sym_last_inactive_reason: dict[str, str] = {}
         self._sym_reactivation_ts: dict[str, float] = {}
         self._sym_inactive_streak: dict[str, int] = {}
+        # D.9.0 TIMEOUT_REENTRY: BOOM500/CRASH500 → re-entra 30s tras max_hold
+        self._d9_state: dict[str, dict] = {}  # symbol → {armed_close_ts, consumed}
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -2563,6 +2565,76 @@ class DerivDaemon:
             return False, consec
         return True, consec
 
+    # ── D.9.0 TIMEOUT_REENTRY ──────────────────────────────────────────────────
+    _D9_SYMS: frozenset[str] = frozenset(["BOOM500", "CRASH500"])
+    _D9_DELAY_S: float = 30.0
+
+    def _d9_check(self, symbol: str) -> dict:
+        """Comprueba si aplica D.9 reentry. Retorna {fire, side, elapsed} o {fire: False}."""
+        sym = symbol.upper()
+        if sym not in self._D9_SYMS:
+            return {"fire": False}
+        mh = self._executor.get_maxhold_exit_info(symbol)
+        if not mh["is_maxhold"]:
+            self._d9_state.pop(sym, None)
+            return {"fire": False}
+        close_ts = mh["closed_at_ts"]
+        st = self._d9_state.get(sym, {})
+        if st.get("armed_close_ts") != close_ts:
+            self._d9_state[sym] = {"armed_close_ts": close_ts, "consumed": False}
+        if self._d9_state[sym].get("consumed"):
+            return {"fire": False}
+        elapsed = time.time() - close_ts
+        if elapsed < self._D9_DELAY_S:
+            return {"fire": False}
+        side = "MULTUP" if "BOOM" in sym else "MULTDOWN"
+        return {"fire": True, "side": side, "elapsed": elapsed}
+
+    async def _d9_execute(self, tick: NormalisedTick, side: str, elapsed: float) -> None:
+        """Ejecuta re-entrada directa D.9 sin confirmación de señal."""
+        sym = tick.symbol.upper()
+        if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+            _LOGGER.info("[D9_REENTRY] %s pending ya activo — descartando", tick.symbol)
+            self._d9_state[sym]["consumed"] = True
+            return
+        profile = get_asset_profile(tick.symbol)
+        stake = float(self._settings.min_stake_usdt or 10.0)
+        multiplier = int(self._settings.multiplier or 200)
+        sl_pct = float(profile.get("stop_loss_pct_override") or self._settings.stop_loss_pct)
+        tp_pct = float(self._settings.take_profit_pct)
+        max_hold = float(profile.get("max_hold_seconds") or 600.0)
+        payload: dict[str, Any] = {
+            "broker": "deriv",
+            "symbol": tick.symbol,
+            "side": side,
+            "stake_usdt": stake,
+            "multiplier": multiplier,
+            "stop_loss_pct": sl_pct,
+            "take_profit_pct": tp_pct,
+            "score_breakdown": {"d9_timeout_reentry": True, "spike_entry": True},
+            "max_hold_seconds": max_hold,
+        }
+        self._d9_state[sym]["consumed"] = True
+        try:
+            self._counters["orders_sent"] += 1
+            result = await self._router.route_order(payload)
+            if (result or {}).get("status") == "symbol_already_open":
+                self._counters["orders_sent"] -= 1
+                _LOGGER.info("[D9_REENTRY] %s symbol_already_open — skip", tick.symbol)
+            else:
+                self._counters["orders_ok"] += 1
+                _LOGGER.info(
+                    "[D9_REENTRY] %s EJECUTADA | side=%s | max_hold=%.0fs | +%.0fs post-timeout | %s",
+                    tick.symbol, side, max_hold, elapsed, result,
+                )
+                _d6_update_state(tick.symbol, "EXECUTED", {
+                    "executed_at": time.time(), "score": 0.0,
+                    "quality_tier": "d9_reentry",
+                })
+        except Exception as exc:
+            self._counters["orders_failed"] += 1
+            _LOGGER.warning("[D9_REENTRY] %s error: %s", tick.symbol, exc)
+
     async def _pipeline(self, tick: NormalisedTick) -> None:
         # D.6 early: actualizar countdown antes de cualquier gate
         # Garantiza que el panel nunca muestre EXPIRED_GHOST por blocks transitorios.
@@ -2577,6 +2649,15 @@ class DerivDaemon:
 
         # Refresh vision context file (TTL-cached, offloaded to thread pool)
         await self._try_load_vision_context()
+
+        # ═══════════════════════════════════════════════════════════════════
+        # D.9.0 — TIMEOUT_REENTRY: BOOM500/CRASH500 30s tras max_hold
+        # Bypasea todos los gates. Se ejecuta antes del cooldown gate.
+        # ═══════════════════════════════════════════════════════════════════
+        _d9 = self._d9_check(tick.symbol)
+        if _d9["fire"]:
+            await self._d9_execute(tick, _d9["side"], _d9["elapsed"])
+            return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)

@@ -2754,6 +2754,14 @@ class DerivTradeExecutor:
             return None
         return float(last.get("closed_at_ts") or 0) or None
 
+    def get_maxhold_exit_info(self, symbol: str) -> dict[str, Any]:
+        """D.9.0: True si el último trade del símbolo cerró por max_hold (cualquier variante)."""
+        last = self._last_closed_sym.get(symbol.upper())
+        if last is None:
+            return {"is_maxhold": False, "closed_at_ts": 0.0}
+        is_maxhold = str(last.get("exit_reason") or "").startswith("max_hold")
+        return {"is_maxhold": is_maxhold, "closed_at_ts": float(last.get("closed_at_ts") or 0)}
+
     def _get_structural_state(self, symbol: str) -> dict[str, Any]:
         """
         Retorna el estado estructural base del símbolo para structural_exit y Hold LLM.
