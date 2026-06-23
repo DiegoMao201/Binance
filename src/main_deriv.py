@@ -644,6 +644,9 @@ class DerivDaemon:
         self._sym_inactive_streak: dict[str, int] = {}
         # D.9.0 TIMEOUT_REENTRY: BOOM500/CRASH500 → re-entra 30s tras max_hold
         self._d9_state: dict[str, dict] = {}  # symbol → {armed_close_ts, consumed}
+        # D.deploy SYNC GATE: bloquear todos los símbolos hasta primer spike post-deploy
+        self._startup_ts: float = time.time()
+        self._post_deploy_spike_gate: set[str] = {s.upper() for s in settings.symbols}
         self._dynamic_configs: dict[str, dict[str, Any]] = {}
         self._dynamic_last_refresh: str | None = None
         self._dynamic_last_error_ts: float = 0.0
@@ -2601,7 +2604,6 @@ class DerivDaemon:
         stake = float(self._settings.min_stake_usdt or 10.0)
         multiplier = int(self._settings.multiplier or 200)
         sl_pct = float(profile.get("stop_loss_pct_override") or self._settings.stop_loss_pct)
-        tp_pct = float(self._settings.take_profit_pct)
         max_hold = float(profile.get("max_hold_seconds") or 600.0)
         payload: dict[str, Any] = {
             "broker": "deriv",
@@ -2610,7 +2612,7 @@ class DerivDaemon:
             "stake_usdt": stake,
             "multiplier": multiplier,
             "stop_loss_pct": sl_pct,
-            "take_profit_pct": tp_pct,
+            "take_profit_pct": 0.99,  # broker TP fuera de rango — tier staircase controla salida
             "score_breakdown": {"d9_timeout_reentry": True, "spike_entry": True},
             "max_hold_seconds": max_hold,
         }
@@ -2658,6 +2660,24 @@ class DerivDaemon:
         if _d9["fire"]:
             await self._d9_execute(tick, _d9["side"], _d9["elapsed"])
             return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # D.deploy SYNC GATE — bloquear hasta primer spike post-deploy
+        # Garantiza que cada símbolo entra sincronizado con el mercado.
+        # Se libera en cuanto llega un spike real posterior al startup_ts.
+        # ═══════════════════════════════════════════════════════════════════
+        _dp_sym = tick.symbol.upper()
+        if _dp_sym in self._post_deploy_spike_gate:
+            _dp_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
+            if _dp_spike_ts > self._startup_ts:
+                self._post_deploy_spike_gate.discard(_dp_sym)
+                _LOGGER.info(
+                    "[DEPLOY_SYNC] %s — primer spike post-deploy detectado (%.0fs tras startup) → gate liberado",
+                    tick.symbol, _dp_spike_ts - self._startup_ts,
+                )
+            else:
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="awaiting_post_deploy_spike")
+                return
 
         # ═══════════════════════════════════════════════════════════════════
         # BLOCK 1 — GATE: trade-level cooldown (one trade per symbol at a time)

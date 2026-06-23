@@ -85,7 +85,7 @@ _SPIKE_TIER_TP_WINDOW_PCT = max(
 # - Profit-lock: cuando el contrato cierra con realized_pnl >= profit_lock_usdt,
 #   el símbolo queda inactivo hasta el cambio de hora UTC siguiente.
 _PROFIT_LOCK_USDT_DEFAULT = max(
-    0.0, float(os.getenv("DERIV_PROFIT_LOCK_USDT_PER_SYMBOL", "2.0") or 2.0)
+    0.0, float(os.getenv("DERIV_PROFIT_LOCK_USDT_PER_SYMBOL", "5.0") or 5.0)
 )
 _PROFIT_LOCK_INACTIVE_HOUR = _env_flag(
     "DERIV_PROFIT_LOCK_INACTIVE_UNTIL_NEXT_HOUR", "true"
