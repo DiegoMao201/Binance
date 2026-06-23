@@ -501,11 +501,22 @@ class RegimeDetectorV2:
             "direction": direction,
         }
 
+    def _discharge_threshold(self, symbol: str) -> float:
+        """Threshold per-símbolo: DERIV_DISCHARGE_THRESHOLD_{SYM} o global 120."""
+        per_sym = os.getenv(f"DERIV_DISCHARGE_THRESHOLD_{symbol.upper()}", "").strip()
+        if per_sym:
+            try:
+                return float(per_sym)
+            except ValueError:
+                pass
+        return self.DISCHARGE_RATIO_SUM_THRESHOLD
+
     def is_symbol_discharged(self, symbol: str, bot_side: str) -> Tuple[bool, dict]:
-        """True si suma ratios alineados en 10min >= DISCHARGE_RATIO_SUM_THRESHOLD."""
+        """True si suma ratios alineados en 10min >= threshold (per-símbolo o global 120)."""
         sum_ratios, info = self.get_aligned_ratio_sum_10min(symbol, bot_side)
-        is_discharged = sum_ratios >= self.DISCHARGE_RATIO_SUM_THRESHOLD
-        info["threshold"] = self.DISCHARGE_RATIO_SUM_THRESHOLD
+        threshold = self._discharge_threshold(symbol)
+        is_discharged = sum_ratios >= threshold
+        info["threshold"] = threshold
         info["is_discharged"] = is_discharged
         return is_discharged, info
 
@@ -579,11 +590,13 @@ class RegimeDetectorV2:
             bot_side = "MULTUP" if sym.startswith("BOOM") else "MULTDOWN"
             try:
                 sum_ratios, ratio_info = self.get_aligned_ratio_sum_10min(sym, bot_side)
-                is_discharged = sum_ratios >= self.DISCHARGE_RATIO_SUM_THRESHOLD
+                threshold = self._discharge_threshold(sym)
+                is_discharged = sum_ratios >= threshold
             except Exception:
                 sum_ratios = 0.0
                 is_discharged = False
                 ratio_info = {"count_aligned_10m": 0, "max_ratio_10m": 0.0}
+                threshold = self.DISCHARGE_RATIO_SUM_THRESHOLD
 
             snapshot[sym] = {
                 "regime": state.current_regime,
@@ -606,7 +619,7 @@ class RegimeDetectorV2:
                 "sum_ratios_10m": round(sum_ratios, 0),
                 "count_aligned_10m": ratio_info.get("count_aligned_10m", 0),
                 "max_ratio_10m": round(ratio_info.get("max_ratio_10m", 0.0), 0),
-                "threshold": self.DISCHARGE_RATIO_SUM_THRESHOLD,
+                "threshold": threshold,
             }
         return snapshot
 
