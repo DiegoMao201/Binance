@@ -2716,6 +2716,9 @@ class DerivTradeExecutor:
             "peak_profit": float(record.get("peak_profit") or 0),
             "realized_pnl_usdt": pnl,
             "closed_at_ts": float(record.get("closed_at_ts") or 0),
+            "opened_at_ts": float(record.get("opened_at_ts") or 0),
+            "side": str(record.get("side") or ""),
+            "score_breakdown": record.get("score_breakdown") or {},
         }
         _is_dry = (
             record.get("exit_reason") == "max_hold_timeout"
@@ -2766,7 +2769,13 @@ class DerivTradeExecutor:
         exit_reason = str(last.get("exit_reason") or "")
         peak_profit = float(last.get("peak_profit") or 0)
         is_maxhold = exit_reason.startswith("max_hold") and peak_profit == 0.0
-        return {"is_maxhold": is_maxhold, "closed_at_ts": float(last.get("closed_at_ts") or 0)}
+        return {
+            "is_maxhold": is_maxhold,
+            "closed_at_ts": float(last.get("closed_at_ts") or 0),
+            "opened_at_ts": float(last.get("opened_at_ts") or 0),
+            "side": str(last.get("side") or ""),
+            "score_breakdown": last.get("score_breakdown") or {},
+        }
 
     def _get_structural_state(self, symbol: str) -> dict[str, Any]:
         """

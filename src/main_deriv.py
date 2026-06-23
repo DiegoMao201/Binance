@@ -2570,10 +2570,30 @@ class DerivDaemon:
 
     # ── D.9.0 TIMEOUT_REENTRY ──────────────────────────────────────────────────
     _D9_SYMS: frozenset[str] = frozenset(["BOOM500", "CRASH500"])
-    _D9_DELAY_S: float = 30.0
+    _D9_DELAY_S: float = 0.0  # D.9.1: entrada instantánea (era 30s)
+
+    def _d9_had_spike_during_hold(self, symbol: str, opened_at_ts: float, closed_at_ts: float) -> bool:
+        """True si hubo algún spike en dirección del símbolo durante el hold D.9."""
+        expected_dir = "UP" if "BOOM" in symbol else "DOWN"
+        try:
+            buf = REGIME_DETECTOR_V2._spikes_buffer.get(symbol)
+            if not buf:
+                return False
+            for spike in buf:
+                if opened_at_ts <= spike.ts <= closed_at_ts and spike.direction == expected_dir:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _d9_check(self, symbol: str) -> dict:
-        """Comprueba si aplica D.9 reentry. Retorna {fire, side, elapsed} o {fire: False}."""
+        """Comprueba si aplica D.9 reentry. Retorna {fire, side, elapsed} o {fire: False}.
+
+        Lógica de cadena (D.9.1):
+        - Si el trade anterior era D.9 Y tuvo spike → no re-disparar (ciclo normal).
+        - Si el trade anterior era D.9 Y no tuvo spike → re-disparar (seguir intentando).
+        - Si el trade anterior NO era D.9 → disparo normal, una sola vez (consumed).
+        """
         sym = symbol.upper()
         if sym not in self._D9_SYMS:
             return {"fire": False}
@@ -2584,8 +2604,23 @@ class DerivDaemon:
         close_ts = mh["closed_at_ts"]
         st = self._d9_state.get(sym, {})
         if st.get("armed_close_ts") != close_ts:
-            self._d9_state[sym] = {"armed_close_ts": close_ts, "consumed": False}
-        if self._d9_state[sym].get("consumed"):
+            was_d9 = bool((mh.get("score_breakdown") or {}).get("d9_timeout_reentry"))
+            had_spike = False
+            if was_d9:
+                had_spike = self._d9_had_spike_during_hold(
+                    sym, mh.get("opened_at_ts", 0.0), close_ts
+                )
+            self._d9_state[sym] = {
+                "armed_close_ts": close_ts,
+                "consumed": False,
+                "was_d9_reentry": was_d9,
+                "had_spike": had_spike,
+            }
+        st = self._d9_state[sym]
+        # D.9 reentry captó spike (aunque sea pequeño) → volver a ciclo normal
+        if st.get("was_d9_reentry") and st.get("had_spike"):
+            return {"fire": False}
+        if st.get("consumed"):
             return {"fire": False}
         elapsed = time.time() - close_ts
         if elapsed < self._D9_DELAY_S:
