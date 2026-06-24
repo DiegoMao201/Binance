@@ -14,12 +14,13 @@ const C1_BOOM_MIN  = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MIN_PCT  || 
 const C1_CRASH_MAX = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MAX_PCT || '-0.005');
 const C1_PENDING   = parseInt(process.env.DERIV_D10_PENDING_CAMINO1_SEC || '120', 10);
 
-// Camino 2 — Pattern PN.5
-const C2_ENABLED   = (process.env.DERIV_D10_PN5_ENABLED ?? 'true').toLowerCase() !== 'false';
-const C2_BOOM_MIN  = parseFloat(process.env.DERIV_D10_PN5_BOOM500_SLOPE_MIN_PCT  || '0.018');
-const C2_CRASH_MAX = parseFloat(process.env.DERIV_D10_PN5_CRASH500_SLOPE_MAX_PCT || '-0.022');
-const C2_CAMBIO_MIN = parseFloat(process.env.DERIV_D10_PN5_CAMBIO_MIN_PCT || '0.015');
-const C2_PENDING   = parseInt(process.env.DERIV_D10_PENDING_CAMINO2_SEC || '5', 10);
+// Camino 2 — Tendencia extrema + estable (|cambio| PEQUEÑO = no revierte)
+const C2_ENABLED    = (process.env.DERIV_D10_PN5_ENABLED ?? 'true').toLowerCase() !== 'false';
+const C2_BOOM_MIN   = parseFloat(process.env.DERIV_D10_PN5_BOOM500_SLOPE_MIN_PCT  || '0.018');
+const C2_CRASH_MAX  = parseFloat(process.env.DERIV_D10_PN5_CRASH500_SLOPE_MAX_PCT || '-0.022');
+const C2_CAMBIO_MAX = parseFloat(process.env.DERIV_D10_PN5_CAMBIO_MAX_PCT || '0.010'); // umbral MÁXIMO de cambio (estable)
+const C2_STABILIZE  = parseInt(process.env.DERIV_D10_PN5_STABILIZE_SEC || '60', 10);   // 60s propio (no 180s global)
+const C2_PENDING    = parseInt(process.env.DERIV_D10_PENDING_CAMINO2_SEC || '5', 10);
 
 // Camino 3 — Breakout (slope opuesto + giro)
 const C3_ENABLED    = (process.env.DERIV_D10_BREAKOUT_ENABLED ?? 'true').toLowerCase() !== 'false';
@@ -67,9 +68,10 @@ function detectCamino(
   const abs_cambio = hasCambio ? Math.abs(cambio_pct!) : 0;
 
   if (C2_ENABLED && hasCambio) {
-    if (isBoom  && slope_pct >= C2_BOOM_MIN  && abs_cambio >= C2_CAMBIO_MIN)
+    // C2: slope extremo en dirección correcta + cambio PEQUEÑO (tendencia estable)
+    if (isBoom  && slope_pct >= C2_BOOM_MIN  && abs_cambio <= C2_CAMBIO_MAX)
       return { camino: 'camino2_pn5', pending_sec: C2_PENDING };
-    if (!isBoom && slope_pct <= C2_CRASH_MAX && abs_cambio >= C2_CAMBIO_MIN)
+    if (!isBoom && slope_pct <= C2_CRASH_MAX && abs_cambio <= C2_CAMBIO_MAX)
       return { camino: 'camino2_pn5', pending_sec: C2_PENDING };
   }
 
@@ -153,7 +155,7 @@ export async function GET() {
       stabilize_sec: STABILIZE_SEC,
       thresholds: {
         c1: { boom_min: C1_BOOM_MIN, crash_max: C1_CRASH_MAX, pending: C1_PENDING },
-        c2: { enabled: C2_ENABLED, boom_min: C2_BOOM_MIN, crash_max: C2_CRASH_MAX, cambio_min: C2_CAMBIO_MIN, pending: C2_PENDING },
+        c2: { enabled: C2_ENABLED, boom_min: C2_BOOM_MIN, crash_max: C2_CRASH_MAX, cambio_max: C2_CAMBIO_MAX, stabilize: C2_STABILIZE, pending: C2_PENDING },
         c3: { enabled: C3_ENABLED, boom_max: C3_BOOM_MAX, crash_min: C3_CRASH_MIN, cambio_min: C3_CAMBIO_MIN, pending: C3_PENDING },
       },
     };

@@ -210,7 +210,7 @@ function SlopeGateSection({ symbol }) {
   const c3 = thresholds.c3 || {};
   const c1_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c1.boom_min : slope_pct <= c1.crash_max);
   const c2_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c2.boom_min : slope_pct <= c2.crash_max);
-  const c2_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) >= c2.cambio_min;
+  const c2_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) <= c2.cambio_max;
   const c3_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c3.boom_max : slope_pct >= c3.crash_min);
   const c3_cambio_ok = cambio_pct != null && (isBoom ? cambio_pct >= c3.cambio_min : cambio_pct <= -c3.cambio_min);
 
@@ -299,7 +299,7 @@ function SlopeGateSection({ symbol }) {
               {isBoom ? "≥" : "≤"}{fmtThr(isBoom ? c2.boom_min : c2.crash_max)}
             </div>
             <div style={{ color: c2_cambio_ok ? T.green : T.mute, opacity: 0.9 }}>
-              Δ≥{fmtThr(c2.cambio_min)} {c2_cambio_ok ? "✓" : "✗"}
+              Δ≤{fmtThr(c2.cambio_max)} {c2_cambio_ok ? "✓" : "✗"}
             </div>
           </div>
           {/* C3 — Breakout */}
