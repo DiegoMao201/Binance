@@ -1,20 +1,24 @@
 """D.10.1 — Slope Tracker con triple lógica de entrada para BOOM500/CRASH500.
 
-CAMINO 1 — Slope Level (normalizado %/min, calibrado con N=13,639 spikes):
-  BOOM500:  slope_pct >= +0.005%/min  → 53-56% spikes grandes
-  CRASH500: slope_pct <= -0.005%/min  → 52-55% spikes grandes
+BOOM500 siempre tiene slope NEGATIVO (precio baja entre spikes → spike = reversal UP).
+CRASH500 siempre tiene slope POSITIVO (precio sube entre spikes → spike = reversal DOWN).
+Entramos en el estado NORMAL del mercado, esperando la reversión (spike).
+
+CAMINO 1 — Slope Level (estado normal del mercado = condición pre-spike):
+  BOOM500:  slope_pct <= -0.005%/min  (bajando = estado normal → esperar spike UP)
+  CRASH500: slope_pct >= +0.005%/min  (subiendo = estado normal → esperar spike DOWN)
   Pending: 120s (DERIV_D10_PENDING_CAMINO1_SEC)
   Stabilize: 180s global post-spike
 
-CAMINO 2 — Tendencia extrema + estable (confirma dirección sin revertir):
-  BOOM500:  slope_pct >= +0.018%/min (P75) AND |cambio| <= 0.010% (estable)
-  CRASH500: slope_pct <= -0.022%/min (P25) AND |cambio| <= 0.010% (estable)
+CAMINO 2 — Tendencia extrema + estable (alta confianza en spike grande):
+  BOOM500:  slope_pct <= -0.018%/min (bajada fuerte) AND |cambio| <= 0.010% (estable)
+  CRASH500: slope_pct >= +0.022%/min (subida fuerte) AND |cambio| <= 0.010% (estable)
   Pending: 5s (DERIV_D10_PENDING_CAMINO2_SEC, casi inmediato)
   Stabilize: 60s propio (DERIV_D10_PN5_STABILIZE_SEC) — más rápido que C1/C3
 
-CAMINO 3 — Pattern BREAKOUT (pendiente opuesta + giro grande = reversión):
-  BOOM500:  slope_pct <= -0.005% (bajando) AND cambio >= +0.015% (giro arriba)
-  CRASH500: slope_pct >= +0.005% (subiendo) AND cambio <= -0.015% (giro abajo)
+CAMINO 3 — Breakout inminente (pendiente normal + giro hacia spike):
+  BOOM500:  slope_pct <= -0.005% (normal bajando) AND cambio >= +0.015% (pendiente aumenta → spike UP inminente)
+  CRASH500: slope_pct >= +0.005% (normal subiendo) AND cambio <= -0.015% (pendiente cae → spike DOWN inminente)
   Pending: 120s (DERIV_D10_PENDING_CAMINO3_SEC, conservador)
   Stabilize: 180s global post-spike
 
@@ -69,20 +73,24 @@ class SlopeTracker:
         self.log_interval_sec = _int("DERIV_D10_LOG_INTERVAL_SEC", 30)
         self.log_path = os.getenv("DERIV_D10_LOG_PATH", "/data/logs/slope_history.jsonl")
 
-        # CAMINO 1 — Slope Level
-        self.c1_boom500_min_pct = _float("DERIV_D10_BOOM500_SLOPE_MIN_PCT", 0.005)
-        self.c1_crash500_max_pct = _float("DERIV_D10_CRASH500_SLOPE_MAX_PCT", -0.005)
+        # CAMINO 1 — Slope Level (estado normal del mercado)
+        # BOOM500: slope <= max_pct (negativo = bajando normal antes del spike UP)
+        # CRASH500: slope >= min_pct (positivo = subiendo normal antes del spike DOWN)
+        self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
+        self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
         self.c1_pending_sec = _int("DERIV_D10_PENDING_CAMINO1_SEC", 120)
 
-        # CAMINO 2 — Tendencia extrema + ESTABLE (cambio PEQUEÑO = no revierte)
+        # CAMINO 2 — Tendencia extrema + ESTABLE (mayor confianza, entrada rápida)
+        # BOOM500: slope muy negativo + cambio pequeño → bajada fuerte y estable → spike grande
+        # CRASH500: slope muy positivo + cambio pequeño → subida fuerte y estable → spike grande
         self.c2_enabled = _bool("DERIV_D10_PN5_ENABLED")
-        self.c2_boom500_min_pct = _float("DERIV_D10_PN5_BOOM500_SLOPE_MIN_PCT", 0.018)
-        self.c2_crash500_max_pct = _float("DERIV_D10_PN5_CRASH500_SLOPE_MAX_PCT", -0.022)
+        self.c2_boom500_max_pct = _float("DERIV_D10_PN5_BOOM500_SLOPE_MAX_PCT", -0.018)
+        self.c2_crash500_min_pct = _float("DERIV_D10_PN5_CRASH500_SLOPE_MIN_PCT", 0.022)
         self.c2_cambio_max_pct = _float("DERIV_D10_PN5_CAMBIO_MAX_PCT", 0.010)  # umbral MÁXIMO (estabilidad)
         self.c2_stabilize_sec = _int("DERIV_D10_PN5_STABILIZE_SEC", 60)          # solo 60s post-spike
         self.c2_pending_sec = max(1, _int("DERIV_D10_PENDING_CAMINO2_SEC", 5))
 
-        # CAMINO 3 — Breakout (pendiente opuesta + giro grande hacia dirección spike)
+        # CAMINO 3 — Breakout inminente (pendiente normal + giro hacia spike)
         self.c3_enabled = _bool("DERIV_D10_BREAKOUT_ENABLED")
         self.c3_boom500_slope_max_pct = _float("DERIV_D10_BREAKOUT_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c3_crash500_slope_min_pct = _float("DERIV_D10_BREAKOUT_CRASH500_SLOPE_MIN_PCT", 0.005)
@@ -193,16 +201,16 @@ class SlopeTracker:
 
         # ══════════════════════════════════════════════════════════════════
         # CAMINO 2 — Tendencia extrema + ESTABLE (solo 60s post-spike)
-        # Condición: slope fuerte en dirección correcta Y |cambio| pequeño
-        # = mercado lleva rato en tendencia confirmada sin revertir → spike probable
+        # BOOM500: bajada muy fuerte + estable → spike grande UP inminente
+        # CRASH500: subida muy fuerte + estable → spike grande DOWN inminente
         # ══════════════════════════════════════════════════════════════════
         if self.c2_enabled and elapsed >= self.c2_stabilize_sec and cambio_pct is not None:
             abs_cambio = abs(cambio_pct)
             if sym == "BOOM500":
-                if slope_pct >= self.c2_boom500_min_pct and abs_cambio <= self.c2_cambio_max_pct:
+                if slope_pct <= self.c2_boom500_max_pct and abs_cambio <= self.c2_cambio_max_pct:
                     return True, "camino2_pn5", {**details, "pending_sec": self.c2_pending_sec}
             elif sym == "CRASH500":
-                if slope_pct <= self.c2_crash500_max_pct and abs_cambio <= self.c2_cambio_max_pct:
+                if slope_pct >= self.c2_crash500_min_pct and abs_cambio <= self.c2_cambio_max_pct:
                     return True, "camino2_pn5", {**details, "pending_sec": self.c2_pending_sec}
 
         # Gate global: estabilización post-spike 180s (C1 y C3 requieren esto)
@@ -210,8 +218,9 @@ class SlopeTracker:
             return False, f"stabilizing_{elapsed:.0f}s_of_{self.stabilize_sec}s", {}
 
         # ══════════════════════════════════════════════════════════════════
-        # CAMINO 3 — Breakout (pendiente opuesta + giro grande)
-        # = mercado iba en contra pero empieza a revertir → spike inminente
+        # CAMINO 3 — Breakout inminente (pendiente normal + giro hacia spike)
+        # BOOM500: bajando (normal) + slope aumentando → reversión UP inminente
+        # CRASH500: subiendo (normal) + slope cayendo → reversión DOWN inminente
         # ══════════════════════════════════════════════════════════════════
         if self.c3_enabled and cambio_pct is not None:
             if sym == "BOOM500":
@@ -222,22 +231,24 @@ class SlopeTracker:
                     return True, "camino3_breakout", {**details, "pending_sec": self.c3_pending_sec}
 
         # ══════════════════════════════════════════════════════════════════
-        # CAMINO 1 — Slope Level (gate por defecto)
+        # CAMINO 1 — Slope Level (estado normal del mercado, gate por defecto)
+        # BOOM500 normalmente baja → slope <= max (negativo) → spike UP esperable
+        # CRASH500 normalmente sube → slope >= min (positivo) → spike DOWN esperable
         # ══════════════════════════════════════════════════════════════════
         if sym == "BOOM500":
-            if slope_pct >= self.c1_boom500_min_pct:
+            if slope_pct <= self.c1_boom500_max_pct:
                 return True, "camino1_level", {**details, "pending_sec": self.c1_pending_sec}
             return (
                 False,
-                f"c1_bloqueado_slope={slope_pct:+.6f}_min={self.c1_boom500_min_pct:+.4f}",
+                f"c1_bloqueado_slope={slope_pct:+.6f}_max={self.c1_boom500_max_pct:+.4f}",
                 details,
             )
         else:  # CRASH500
-            if slope_pct <= self.c1_crash500_max_pct:
+            if slope_pct >= self.c1_crash500_min_pct:
                 return True, "camino1_level", {**details, "pending_sec": self.c1_pending_sec}
             return (
                 False,
-                f"c1_bloqueado_slope={slope_pct:+.6f}_max={self.c1_crash500_max_pct:+.4f}",
+                f"c1_bloqueado_slope={slope_pct:+.6f}_min={self.c1_crash500_min_pct:+.4f}",
                 details,
             )
 

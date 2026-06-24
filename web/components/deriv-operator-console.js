@@ -190,7 +190,7 @@ function SlopeGateSection({ symbol }) {
   // Slope bar: mapear [-0.06, +0.06] %/min → [0, 100]%
   const mapToBar = (v) => Math.max(1, Math.min(99, ((v + 0.06) / 0.12) * 100));
   const slopeBarPct = slope_pct != null ? mapToBar(slope_pct) : null;
-  const c1Thr = isBoom ? thresholds.c1?.boom_min : thresholds.c1?.crash_max;
+  const c1Thr = isBoom ? thresholds.c1?.boom_max : thresholds.c1?.crash_min;
   const thrBarPct = c1Thr != null ? mapToBar(c1Thr) : null;
 
   const CAMINO_LABELS = {
@@ -208,8 +208,8 @@ function SlopeGateSection({ symbol }) {
   const c1 = thresholds.c1 || {};
   const c2 = thresholds.c2 || {};
   const c3 = thresholds.c3 || {};
-  const c1_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c1.boom_min : slope_pct <= c1.crash_max);
-  const c2_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c2.boom_min : slope_pct <= c2.crash_max);
+  const c1_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c1.boom_max : slope_pct >= c1.crash_min);
+  const c2_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c2.boom_max : slope_pct >= c2.crash_min);
   const c2_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) <= c2.cambio_max;
   const c3_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c3.boom_max : slope_pct >= c3.crash_min);
   const c3_cambio_ok = cambio_pct != null && (isBoom ? cambio_pct >= c3.cambio_min : cambio_pct <= -c3.cambio_min);
@@ -282,7 +282,7 @@ function SlopeGateSection({ symbol }) {
               {c1_slope_ok ? "✓" : "✗"} C1 NIVEL
             </div>
             <div style={{ color: T.mute }}>
-              {isBoom ? "≥" : "≤"}{fmtThr(isBoom ? c1.boom_min : c1.crash_max)}
+              {isBoom ? "≤" : "≥"}{fmtThr(isBoom ? c1.boom_max : c1.crash_min)}
             </div>
             <div style={{ color: T.mute, opacity: 0.7 }}>{c1.pending ?? 120}s pend</div>
           </div>
@@ -296,7 +296,7 @@ function SlopeGateSection({ symbol }) {
               {(c2_slope_ok && c2_cambio_ok) ? "✓" : c2.enabled === false ? "–" : "✗"} C2 PN.5
             </div>
             <div style={{ color: c2_slope_ok ? T.green : T.mute }}>
-              {isBoom ? "≥" : "≤"}{fmtThr(isBoom ? c2.boom_min : c2.crash_max)}
+              {isBoom ? "≤" : "≥"}{fmtThr(isBoom ? c2.boom_max : c2.crash_min)}
             </div>
             <div style={{ color: c2_cambio_ok ? T.green : T.mute, opacity: 0.9 }}>
               Δ≤{fmtThr(c2.cambio_max)} {c2_cambio_ok ? "✓" : "✗"}
