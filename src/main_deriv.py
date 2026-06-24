@@ -145,7 +145,7 @@ _STREAK_SIZE_BAD_GUARD_BONUS: float = float(os.getenv("DERIV_STREAK_BAD_GUARD_BO
 _D6_SKIP_AI_VETO: bool = _env_flag("DERIV_D6_SKIP_AI_VETO", "true")
 
 # ─── AI-veto recovery probe ───────────────────────────────────────────────
-_AI_VETO_RECOVERY_PROBE_ENABLED: bool = _env_flag("DERIV_AI_VETO_RECOVERY_PROBE_ENABLED", "true")
+_AI_VETO_RECOVERY_PROBE_ENABLED: bool = False  # D.9.2: disabled — crea pendings sin control de posición ni D80
 _AI_VETO_RECOVERY_MARGIN_MIN: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MARGIN_MIN", "1.00"))
 _AI_VETO_RECOVERY_MIN_CONF: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_CONF", "0.25"))
 _AI_VETO_RECOVERY_MIN_ATR_SCORE: float = float(os.getenv("DERIV_AI_VETO_RECOVERY_MIN_ATR_SCORE", "0.90"))
@@ -3924,13 +3924,7 @@ class DerivDaemon:
             if tick.symbol.upper() in _tb_syms:
                 _tb_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
                 if snap.score < _tb_min:
-                    if _pe_expired_bypass:
-                        _LOGGER.info(
-                            "[PENDING_ENTRY] %s EXPIRED_BYPASS TREND_BLOCK | "
-                            "score=%.2f<%.1f avg=%.2f → ejecutando entrada confirmada (D6.3)",
-                            tick.symbol, snap.score, _tb_min, _pe_exp_avg,
-                        )
-                    elif _d6_ghost_fire:
+                    if _d6_ghost_fire:
                         _LOGGER.info(
                             "[D6_GHOST_ALLOW] %s TREND_BLOCK bypass | score=%.2f<%.1f → ghost mandates",
                             tick.symbol, snap.score, _tb_min,
@@ -5214,13 +5208,6 @@ class DerivDaemon:
                     )
                     snap.score_breakdown["master_key_bypass"] = "REGIME_SCORE_GATE"
                     snap.score_breakdown["master_key_rng"] = _mk_rng
-                elif _pe_expired_bypass:
-                    _LOGGER.info(
-                        "[PENDING_ENTRY] %s EXPIRED_BYPASS REGIME_SCORE_GATE | "
-                        "score=%.2f<min=%.2f avg=%.2f≥4.5 → ejecutando entrada confirmada",
-                        tick.symbol, snap.score, _regime_min, _pe_exp_avg,
-                    )
-                    snap.score_breakdown["regime_gate_bypassed_expired_pending"] = True
                 elif _d6_ghost_fire:
                     _LOGGER.info(
                         "[D6_GHOST_ALLOW] %s REGIME_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
@@ -5352,13 +5339,6 @@ class DerivDaemon:
                 )
                 snap.score_breakdown["master_key_bypass"] = "PROFILE_SCORE_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
-            elif _pe_expired_bypass:
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s EXPIRED_BYPASS PROFILE_SCORE_GATE | "
-                    "score=%.2f<min=%.2f avg=%.2f≥4.5",
-                    tick.symbol, snap.score, _profile_min_score, _pe_exp_avg,
-                )
-                snap.score_breakdown["profile_gate_bypassed_expired_pending"] = True
             elif _d6_ghost_fire:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s PROFILE_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
@@ -5380,14 +5360,7 @@ class DerivDaemon:
             elastic_z2=_is_z2,
         )
         if not _post_spike_ok:
-            if _pe_expired_bypass:
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s EXPIRED_BYPASS POST_SPIKE_STRENGTH_VETO | "
-                    "avg=%.2f≥4.5 → ejecutando entrada confirmada",
-                    tick.symbol, _pe_exp_avg,
-                )
-                snap.score_breakdown["pssv_bypassed_expired_pending"] = True
-            elif _d6_ghost_fire:
+            if _d6_ghost_fire:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s POST_SPIKE_STRENGTH_VETO bypass → ghost mandates",
                     tick.symbol,
@@ -5789,13 +5762,6 @@ class DerivDaemon:
                 snap.score_breakdown["master_key_bypass"] = "RNG_PROBABILITY_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
                 snap.score_breakdown["rng_actual_at_bypass"] = _rng_prob
-            elif _pe_expired_bypass:
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s EXPIRED_BYPASS RNG_PROBABILITY_GATE | "
-                    "prob=%d<threshold=%d avg=%.2f≥4.5",
-                    tick.symbol, _rng_prob, _rng_threshold, _pe_exp_avg,
-                )
-                snap.score_breakdown["rng_gate_bypassed_expired_pending"] = True
             elif _d6_ghost_fire:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s RNG_PROBABILITY_GATE bypass | prob=%d<threshold=%d → ghost mandates",
@@ -5938,8 +5904,27 @@ class DerivDaemon:
                                        block_reason=f"obs_window_blocked:{_obs_sec_ov}s")
                     return
             # Pending Entry — también aplica en override path
+            # D.9.2: D80 obligatorio — ratio siempre se aplica, también en override
+            _ov_is_new = not PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+            _ov_force_wait_s: int | None = None
+            if _ov_is_new:
+                _ov_base_wait = int(PENDING_ENTRY_WATCHER._compute_wait_s(_mat_median_s_for_pending))
+                if REGIME_DETECTOR_V2.is_enabled():
+                    try:
+                        _ov_d80_side = "MULTUP" if tick.symbol.startswith("BOOM") else "MULTDOWN"
+                        _ov_d80_ext, _ = REGIME_DETECTOR_V2.get_pending_extension(tick.symbol, _ov_d80_side)
+                        _ov_force_wait_s = _ov_base_wait + _ov_d80_ext
+                        _LOGGER.info(
+                            "[D80_PENDING_OV] %s wait=%ds (base=%ds + ext=%ds) | override path",
+                            tick.symbol, _ov_force_wait_s, _ov_base_wait, _ov_d80_ext,
+                        )
+                    except Exception:
+                        _ov_force_wait_s = _ov_base_wait
+                else:
+                    _ov_force_wait_s = _ov_base_wait
             _pe_action_ov, _pe_remain_ov = PENDING_ENTRY_WATCHER.on_signal(
                 tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
+                force_wait_s=_ov_force_wait_s,
             )
             if _pe_action_ov in (ACTION_FIRST_WAIT, ACTION_WAIT):
                 _LOGGER.info(
@@ -5997,13 +5982,7 @@ class DerivDaemon:
         _k5_enter_order: PendingOrder | None = None
 
         if _k5_action == "WAIT":
-            if _pe_expired_bypass:
-                _LOGGER.info(
-                    "[PENDING_ENTRY] %s EXPIRED_BYPASS K5_WAIT | avg=%.2f → ignorando K5 wait"
-                    " (pending expirado confirmado)",
-                    tick.symbol, _pe_exp_avg,
-                )
-            elif _d6_ghost_fire:
+            if _d6_ghost_fire:
                 _LOGGER.info(
                     "[D6_GHOST_ALLOW] %s K5_WAIT bypass → ghost mandates",
                     tick.symbol,
@@ -6068,7 +6047,7 @@ class DerivDaemon:
         # ═══════════════════════════════════════════════════════════════════
         _skip_analyze = (
             _D6_SKIP_AI_VETO
-            and (_d6_ghost_fire or _pe_expired_bypass)
+            and _d6_ghost_fire
             and _k5_enter_order is None
         )
         try:
@@ -6374,35 +6353,40 @@ class DerivDaemon:
                                    block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
         # ── Pending Entry: aguantar afuera antes de entrar ────────────────────
-        # D.6.3: ghost NEW fire → pasar force_wait_s diferenciado por símbolo+calidad.
-        # Pending existente: watcher ignora force_wait_s (usa el wait_s original).
-        # D.7.1: extender wait según régimen (BUENO +0s, MEDIOCRE +120s, DIFICIL +240s, CRITICO +360s)
-        # D.8.0: régimen invertido + guard ratios sumados (reemplaza D.7.1 + D.7.4)
+        # D.9.2: D80 obligatorio en TODA ruta de pending nuevo — pending y ratio siempre se aplican.
+        # Ghost NEW fire: base = _calculate_pending_wait_seconds() ya computado en _d6_pending_wait_s.
+        # Cualquier otra ruta (expired, normal): base = _compute_wait_s(median).
+        # D80 extiende SIEMPRE el base cuando hay pending nuevo, sin importar la ruta de entrada.
         _d80_info: dict = {}
-        if _d6_ghost_fire_new and REGIME_DETECTOR_V2.is_enabled():
-            try:
-                _d80_bot_side = "MULTUP" if tick.symbol.startswith("BOOM") else "MULTDOWN"
-                _d80_ext_s, _d80_info = REGIME_DETECTOR_V2.get_pending_extension(
-                    tick.symbol, _d80_bot_side
-                )
-                _d80_wait_base = _d6_pending_wait_s
-                _d6_pending_wait_s += _d80_ext_s
-                _LOGGER.info(
-                    "[D80_PENDING] %s wait=%ds (base=%ds + ext=%ds) | "
-                    "mode=%s regime=%s | sum_ratios_10m=%.0f (n=%d max=%.0f thr=%.0f) | "
-                    "T=%s P=%s wr5=%.0f%% pnl2h=$%.2f",
-                    tick.symbol, _d6_pending_wait_s, _d80_wait_base, _d80_ext_s,
-                    _d80_info["mode"], _d80_info["regime"],
-                    _d80_info["sum_ratios_10m"], _d80_info["count_aligned_10m"],
-                    _d80_info["max_ratio_10m"], _d80_info["threshold"],
-                    _d80_info["timing"], _d80_info["performance"],
-                    _d80_info["wr_5"], _d80_info["pnl_2h"],
-                )
-            except Exception as _d80_exc:
-                _LOGGER.warning("[D80_EXT_ERR] %s: %s", tick.symbol, _d80_exc)
+        _d80_is_new_pending = not PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+        if _d80_is_new_pending:
+            if not _d6_ghost_fire_new:
+                # Non-ghost path: calcular base desde median (no usar el default de 60s hardcoded)
+                _d6_pending_wait_s = int(PENDING_ENTRY_WATCHER._compute_wait_s(_mat_median_s_for_pending))
+            if REGIME_DETECTOR_V2.is_enabled():
+                try:
+                    _d80_bot_side = "MULTUP" if tick.symbol.startswith("BOOM") else "MULTDOWN"
+                    _d80_ext_s, _d80_info = REGIME_DETECTOR_V2.get_pending_extension(
+                        tick.symbol, _d80_bot_side
+                    )
+                    _d80_wait_base = _d6_pending_wait_s
+                    _d6_pending_wait_s += _d80_ext_s
+                    _LOGGER.info(
+                        "[D80_PENDING] %s wait=%ds (base=%ds + ext=%ds) | "
+                        "mode=%s regime=%s | sum_ratios_10m=%.0f (n=%d max=%.0f thr=%.0f) | "
+                        "T=%s P=%s wr5=%.0f%% pnl2h=$%.2f",
+                        tick.symbol, _d6_pending_wait_s, _d80_wait_base, _d80_ext_s,
+                        _d80_info["mode"], _d80_info["regime"],
+                        _d80_info["sum_ratios_10m"], _d80_info["count_aligned_10m"],
+                        _d80_info["max_ratio_10m"], _d80_info["threshold"],
+                        _d80_info["timing"], _d80_info["performance"],
+                        _d80_info["wr_5"], _d80_info["pnl_2h"],
+                    )
+                except Exception as _d80_exc:
+                    _LOGGER.warning("[D80_EXT_ERR] %s: %s", tick.symbol, _d80_exc)
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
-            force_wait_s=_d6_pending_wait_s if _d6_ghost_fire_new else None,
+            force_wait_s=_d6_pending_wait_s if _d80_is_new_pending else None,
         )
         if _pe_action == ACTION_FIRST_WAIT:
             _LOGGER.info(
