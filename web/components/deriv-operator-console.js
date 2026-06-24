@@ -153,6 +153,129 @@ function CooldownBar({ cooldown }) {
   );
 }
 
+/* ── D.10.0 Slope Gate Section — solo BOOM500/CRASH500 ──────── */
+function SlopeGateSection({ symbol }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    if (!symbol.includes("500")) return;
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/d10-slope-state", { cache: "no-store" });
+        if (!active) return;
+        const json = res.ok ? await res.json() : null;
+        if (json?.[symbol.toUpperCase()]) setData(json[symbol.toUpperCase()]);
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 3000);
+    return () => { active = false; clearInterval(id); };
+  }, [symbol]);
+
+  if (!symbol.includes("500")) return null;
+  if (!data?.available) return null;
+
+  const { slope, estabilizado, passing, threshold, block_reason, n_prices, age_s, spike_ts, stabilize_sec } = data;
+  const isBoom = symbol.toUpperCase().startsWith("BOOM");
+
+  // Color: verde=pasa, rojo=bloquea, gris=estabilizando/sin datos
+  const isStabilizing = !estabilizado || n_prices < 10;
+  const gateColor = isStabilizing ? T.mute : passing ? T.green : T.red;
+
+  // Slope bar: mapear [-2, +2] → [0%, 100%], marker en threshold y en slope actual
+  const mapToBar = (v) => Math.max(1, Math.min(99, ((v + 2.0) / 4.0) * 100));
+  const slopeBarPct = slope != null ? mapToBar(slope) : null;
+  const thrBarPct = mapToBar(threshold);
+
+  const fmtS = (v) => v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(3)}`;
+  const fmtT = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+
+  // Stabilizing countdown
+  const nowSec = Date.now() / 1000;
+  const elapsed_s = spike_ts > 0 ? Math.round(nowSec - spike_ts) : null;
+  const stabPct = elapsed_s != null ? Math.min(100, Math.round((elapsed_s / (stabilize_sec || 180)) * 100)) : 0;
+
+  return (
+    <div style={{
+      marginTop: 6, padding: "7px 10px", borderRadius: 6,
+      background: isStabilizing
+        ? "rgba(90,100,115,0.06)"
+        : passing ? "rgba(34,211,163,0.07)" : "rgba(255,93,108,0.07)",
+      border: `1px solid ${gateColor}44`,
+      fontFamily: FONT_MONO, fontSize: 11,
+    }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+        <span style={{ fontWeight: 800, color: gateColor, letterSpacing: "0.07em", fontSize: 10 }}>
+          {isStabilizing ? "◌" : passing ? "✓" : "✗"} D.10.0 SLOPE GATE
+        </span>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: gateColor }}>
+          {fmtS(slope)} <span style={{ fontSize: 9, fontWeight: 400, color: T.mute }}>pts/min</span>
+        </span>
+      </div>
+
+      {/* Slope bar con marker de threshold */}
+      <div style={{ position: "relative", width: "100%", height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, marginBottom: 4 }}>
+        {/* Threshold line */}
+        <div style={{
+          position: "absolute", left: `${thrBarPct}%`,
+          top: -1, width: 2, height: 8,
+          background: T.textD, opacity: 0.45, borderRadius: 1,
+        }} />
+        {/* Slope cursor */}
+        {slopeBarPct != null && (
+          <div style={{
+            position: "absolute",
+            left: `${slopeBarPct}%`,
+            top: -1, transform: "translateX(-50%)",
+            width: 4, height: 8,
+            background: gateColor, borderRadius: 2,
+            transition: "left 1s ease",
+          }} />
+        )}
+        {/* Fill bar up to slope */}
+        {slopeBarPct != null && !isStabilizing && (
+          <div style={{
+            position: "absolute", left: 0,
+            width: `${slopeBarPct}%`, height: "100%",
+            background: gateColor, opacity: 0.2, borderRadius: 3,
+          }} />
+        )}
+      </div>
+
+      {/* Labels + info */}
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: T.mute }}>
+        <span>
+          {isStabilizing && !estabilizado && elapsed_s != null
+            ? `estabilizando ${elapsed_s}s/${stabilize_sec || 180}s`
+            : isStabilizing
+              ? `datos insuf (${n_prices} pts)`
+              : passing
+                ? `pasa — umbral ${isBoom ? "≥" : "≤"}${fmtT(threshold)}`
+                : `bloqueado — umbral ${isBoom ? "≥" : "≤"}${fmtT(threshold)}`
+          }
+        </span>
+        <span style={{ opacity: 0.6 }}>
+          n={n_prices}{age_s != null && age_s > 10 ? ` · ${age_s}s` : ""}
+        </span>
+      </div>
+
+      {/* Stabilizing progress bar */}
+      {!estabilizado && elapsed_s != null && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ height: 3, borderRadius: 2, background: "rgba(255,255,255,0.05)", overflow: "hidden" }}>
+            <div style={{ width: `${stabPct}%`, height: "100%", background: T.mute, transition: "width 3s linear" }} />
+          </div>
+          <div style={{ fontSize: 8, color: T.mute, marginTop: 2, opacity: 0.6 }}>
+            esperando estabilización post-spike ({stabPct}%)
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── D.6 Ghost Live Section ──────────────────────────────────── */
 function GhostLiveSection({ symbol }) {
   const [ghostState, setGhostState] = useState(null);
@@ -193,10 +316,11 @@ function GhostLiveSection({ symbol }) {
     const totalWait = gd.wait_s ?? 60;  // D.6.3: 60/120/150/200 según calidad+símbolo
     const elapsed = totalWait - remaining;
     const pct = Math.min(100, Math.max(0, (elapsed / totalWait) * 100));
+    const isD10 = gd.quality_tier === "d10_slope_gate";
     const isFortisima = gd.quality_tier === "fortisima";
-    const pendingColor = isFortisima ? "#f59e0b" : "#fbbf24";
-    const pendingBg   = isFortisima ? "rgba(245,158,11,0.12)" : "rgba(251,191,36,0.08)";
-    const qualityLabel = isFortisima ? "⚡ FORTÍSIMA" : "NORMAL";
+    const pendingColor = isD10 ? T.cyan : isFortisima ? "#f59e0b" : "#fbbf24";
+    const pendingBg   = isD10 ? "rgba(98,212,255,0.10)" : isFortisima ? "rgba(245,158,11,0.12)" : "rgba(251,191,36,0.08)";
+    const qualityLabel = isD10 ? "D10 SLOPE" : isFortisima ? "⚡ FORTÍSIMA" : "NORMAL";
     const dirArrow = gd.side === "MULTUP" ? "▲" : gd.side === "MULTDOWN" ? "▼" : "?";
     return (
       <div style={{ ...base, color: pendingColor, background: pendingBg }}>
@@ -204,7 +328,7 @@ function GhostLiveSection({ symbol }) {
           <span style={{ fontWeight: 700 }}>⏳ GHOST PENDING — {remaining}s / {totalWait}s</span>
           <span style={{
             fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-            background: isFortisima ? "rgba(245,158,11,0.25)" : "rgba(251,191,36,0.15)",
+            background: isD10 ? "rgba(98,212,255,0.22)" : isFortisima ? "rgba(245,158,11,0.25)" : "rgba(251,191,36,0.15)",
             color: pendingColor, letterSpacing: "0.05em",
           }}>{qualityLabel}</span>
         </div>
@@ -1331,6 +1455,9 @@ function SymbolCard({ s }) {
 
         {/* D.6.5 Post-Racha Cooldown */}
         <CooldownBar cooldown={s.postRachaCooldown} />
+
+        {/* D.10.0 Slope Gate — solo BOOM500/CRASH500 */}
+        <SlopeGateSection symbol={s.symbol} />
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />

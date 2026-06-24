@@ -64,6 +64,7 @@ from src.strategies.consecutive_entry_guard import CONSECUTIVE_GUARD
 from src.strategies.post_racha_cooldown import POST_RACHA_COOLDOWN
 from src.strategies.regime_skip_filter import REGIME_SKIP_FILTER
 from src.strategies.regime_detector_v2 import REGIME_DETECTOR_V2
+from src.strategies.slope_tracker import SlopeTracker
 from src.strategies.pending_entry_watcher import (
     PENDING_ENTRY_WATCHER,
     ACTION_ENTER, ACTION_FIRST_WAIT, ACTION_WAIT, ACTION_CANCEL,
@@ -610,6 +611,8 @@ class DerivDaemon:
         self._sym_inactive_streak: dict[str, int] = {}
         # D.9.0 TIMEOUT_REENTRY: BOOM500/CRASH500 → re-entra 30s tras max_hold
         self._d9_state: dict[str, dict] = {}  # symbol → {armed_close_ts, consumed}
+        # D.9.0 MR_REENTRY: BOOM500/CRASH500 → reentry sin penalización post-tier en zona MR
+        self._d9_mr_state: dict[str, dict] = {}  # symbol → {armed_close_ts, consumed}
         # D.deploy SYNC GATE: bloquear todos los símbolos hasta primer spike post-deploy
         self._startup_ts: float = time.time()
         self._post_deploy_spike_gate: set[str] = {s.upper() for s in settings.symbols}
@@ -645,6 +648,7 @@ class DerivDaemon:
             window_sec=float(os.getenv("DERIV_GHOST_WINDOW_SEC", "600") or 600),
             sl_pct=float(os.getenv("DERIV_GHOST_SL_PCT", "0.025") or 0.025),
         )
+        self._slope_tracker = SlopeTracker()
         # Telemetría in-memory (anillos) para que el frontend audite por qué
         # entra (o no entra) el bot. Se serializa junto al status cada 10s.
         self._last_ticks: dict[str, dict[str, Any]] = {}    # symbol → {price, ts}
@@ -2467,6 +2471,7 @@ class DerivDaemon:
         self._velocity.ingest_tick(tick.symbol, tick.price)
         _ghost_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         self._ghost_logger.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
+        self._slope_tracker.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
 
         # Market-context snapshot (every 60 ticks ≈ 60 s)
         self._maybe_write_market_context(tick.symbol)
@@ -2638,6 +2643,97 @@ class DerivDaemon:
             self._counters["orders_failed"] += 1
             _LOGGER.warning("[D9_REENTRY] %s error: %s", tick.symbol, exc)
 
+    # ── D.9.0 MR_REENTRY ──────────────────────────────────────────────────────
+    _D9_MR_SYMS: frozenset[str] = frozenset(["BOOM500", "CRASH500"])
+
+    def _d9_mr_check(self, symbol: str, hurst: float | None) -> dict:
+        """D.9.0 MR REENTRY: reentry sin penalización post-tier en zona Hurst MR.
+
+        Condiciones:
+        - Solo BOOM500/CRASH500
+        - DERIV_D9_MR_REENTRY_ENABLED=true
+        - Último trade cerró por tier_staircase
+        - Hurst pasa el gate D9_HURST_GATE
+        - Hurst en zona MR del símbolo
+        """
+        sym = symbol.upper()
+        if sym not in self._D9_MR_SYMS:
+            return {"fire": False}
+        if str(os.getenv("DERIV_D9_MR_REENTRY_ENABLED", "true")).lower() not in {"1", "true", "yes", "on"}:
+            return {"fire": False}
+        if hurst is None:
+            return {"fire": False}
+
+        ti = self._executor.get_tier_exit_info(symbol)
+        if not ti["is_tier"]:
+            return {"fire": False}
+
+        close_ts = ti["closed_at_ts"]
+        st_mr = self._d9_mr_state.get(sym, {})
+        if st_mr.get("armed_close_ts") != close_ts:
+            self._d9_mr_state[sym] = {"armed_close_ts": close_ts, "consumed": False}
+        if self._d9_mr_state[sym].get("consumed"):
+            return {"fire": False}
+
+        # Verificar que Hurst pasa el gate D9_HURST_GATE (si está activo)
+        gate_enabled = str(os.getenv("DERIV_D9_HURST_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+        if gate_enabled:
+            if sym == "BOOM500":
+                gate_max = float(os.getenv("DERIV_D9_HURST_BOOM500_MAX", "0.52"))
+                if hurst > gate_max:
+                    return {"fire": False}
+            elif sym == "CRASH500":
+                gate_max = float(os.getenv("DERIV_D9_HURST_CRASH500_MAX", "0.48"))
+                if hurst > gate_max:
+                    return {"fire": False}
+
+        # Verificar zona MR específica por símbolo
+        in_mr_zone = False
+        if sym == "BOOM500":
+            mr_max = float(os.getenv("DERIV_D9_MR_REENTRY_BOOM500_MAX", "0.52"))
+            in_mr_zone = (hurst <= mr_max)
+        elif sym == "CRASH500":
+            mr_min = float(os.getenv("DERIV_D9_MR_REENTRY_CRASH500_MIN", "0.20"))
+            mr_max = float(os.getenv("DERIV_D9_MR_REENTRY_CRASH500_MAX", "0.44"))
+            in_mr_zone = (mr_min <= hurst <= mr_max)
+
+        if not in_mr_zone:
+            return {"fire": False}
+
+        side = ti.get("side") or ("MULTUP" if "BOOM" in sym else "MULTDOWN")
+        elapsed = time.time() - close_ts
+        return {"fire": True, "side": side, "elapsed": elapsed, "hurst": hurst}
+
+    async def _d9_mr_execute(self, tick: NormalisedTick, side: str, hurst: float, elapsed: float) -> None:
+        """D.9.0 MR REENTRY: crea pending normal sin penalizaciones (ghost path lo ejecutará)."""
+        sym = tick.symbol.upper()
+        if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+            _LOGGER.info("[D9_MR_REENTRY] %s pending ya activo — descartando", tick.symbol)
+            self._d9_mr_state[sym]["consumed"] = True
+            return
+        # Pending normal del símbolo (sin D80 extension, sin régimen, sin AI_VETO)
+        _normal_wait = int(os.getenv(f"DERIV_D6_PENDING_NORMAL_{sym}",
+                                     os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120")) or 120)
+        self._d9_mr_state[sym]["consumed"] = True
+        # Registrar pending via PendingEntryWatcher (ghost path lo recoge en siguientes ticks)
+        PENDING_ENTRY_WATCHER.on_signal(
+            tick.symbol, side, score=7.5,
+            median_cycle_s=600.0, force_wait_s=_normal_wait,
+        )
+        _d6_update_state(tick.symbol, "PENDING", {
+            "score": 7.5,
+            "side": side,
+            "quality_tier": "d9_mr_reentry",
+            "wait_s": _normal_wait,
+            "created_at": time.time(),
+            "expires_at": time.time() + _normal_wait,
+            "remaining_seconds": _normal_wait,
+        })
+        _LOGGER.info(
+            "[D9_MR_REENTRY] %s ACTIVADO | side=%s | H=%.3f | wait=%ds | +%.0fs post-tier",
+            tick.symbol, side, hurst, _normal_wait, elapsed,
+        )
+
     async def _pipeline(self, tick: NormalisedTick) -> None:
         # D.6 early: actualizar countdown antes de cualquier gate
         # Garantiza que el panel nunca muestre EXPIRED_GHOST por blocks transitorios.
@@ -2654,13 +2750,62 @@ class DerivDaemon:
         await self._try_load_vision_context()
 
         # ═══════════════════════════════════════════════════════════════════
-        # D.9.0 — TIMEOUT_REENTRY: BOOM500/CRASH500 30s tras max_hold
+        # D.9.0 — TIMEOUT_REENTRY: BOOM500/CRASH500 tras max_hold
         # Bypasea todos los gates. Se ejecuta antes del cooldown gate.
         # ═══════════════════════════════════════════════════════════════════
         _d9 = self._d9_check(tick.symbol)
         if _d9["fire"]:
             await self._d9_execute(tick, _d9["side"], _d9["elapsed"])
             return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # D.9.0 — MR_REENTRY: BOOM500/CRASH500 reentry sin penalización post-tier
+        # Registra pending con tiempo normal. El ghost path lo ejecuta.
+        # Bypasea cooldown, régimen, AI_VETO. Hurst gate SÍ aplica.
+        # ═══════════════════════════════════════════════════════════════════
+        _d9_pre_hurst_mr = float(self._analyst.get_history_summary().get(tick.symbol, {}).get("hurst") or 0) or None
+        _d9mr = self._d9_mr_check(tick.symbol, _d9_pre_hurst_mr)
+        if _d9mr["fire"]:
+            await self._d9_mr_execute(tick, _d9mr["side"], _d9mr["hurst"], _d9mr["elapsed"])
+            return
+
+        # ═══════════════════════════════════════════════════════════════════
+        # D.10.0 — SLOPE LEVEL GATE: BOOM500/CRASH500 únicamente.
+        # Crea pending cuando la pendiente del precio confirma zona de entrada.
+        # Si no hay pending: evalúa slope gate → bloquea o crea pending y retorna.
+        # Si pending activo: cae al ghost path sin retornar (ejecución normal).
+        # Bypass: cooldown, régimen, AI_VETO (igual que D9_MR_REENTRY).
+        # Kill switch: DERIV_D10_SLOPE_GATE_ENABLED=false
+        # ═══════════════════════════════════════════════════════════════════
+        if tick.symbol.upper() in {"BOOM500", "CRASH500"}:
+            if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
+                if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                    _d10_ok, _d10_reason, _d10_slope = self._slope_tracker.can_enter(tick.symbol)
+                    if not _d10_ok:
+                        self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+                        return
+                    # Slope gate pasa: crear pending y retornar
+                    _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
+                    _d10_wait = int(os.getenv("DERIV_D10_PENDING_SEC", "120") or 120)
+                    PENDING_ENTRY_WATCHER.on_signal(
+                        tick.symbol, _d10_side, score=7.5,
+                        median_cycle_s=600.0, force_wait_s=_d10_wait,
+                    )
+                    _d6_update_state(tick.symbol, "PENDING", {
+                        "score": 7.5,
+                        "side": _d10_side,
+                        "quality_tier": "d10_slope_gate",
+                        "wait_s": _d10_wait,
+                        "created_at": time.time(),
+                        "expires_at": time.time() + _d10_wait,
+                        "remaining_seconds": _d10_wait,
+                    })
+                    _LOGGER.info(
+                        "[D10_PASSED] %s slope=%s wait=%ds",
+                        tick.symbol, _d10_reason, _d10_wait,
+                    )
+                    return
+                # Pending activo → cae al ghost path sin retornar
 
         # ═══════════════════════════════════════════════════════════════════
         # D.deploy SYNC GATE — bloquear hasta primer spike post-deploy
@@ -3386,7 +3531,17 @@ class DerivDaemon:
             )
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
             # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
-            if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+            # D.10.0: pendings d10_slope_gate en BOOM500/CRASH500 quedan exentos del cancel.
+            _d10_pg_exempt = (
+                str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+                and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+                and (PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") == "d10_slope_gate"
+            )
+            if (
+                POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol)
+                and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+                and not _d10_pg_exempt
+            ):
                 PENDING_ENTRY_WATCHER.cancel(tick.symbol)
                 _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_activated")
                 _LOGGER.info(
@@ -3708,6 +3863,32 @@ class DerivDaemon:
         pre_hurst  = float(_raw_hurst) if _raw_hurst not in (None, 0) else None
         pre_autocorr = float(pre_analysis.get("autocorr_lag1") or 0.0)
 
+        # ═══════════════════════════════════════════════════════════════════
+        # D.9.0 — HURST PENDING CANCEL: si hay pending en tránsito y Hurst
+        # sube por encima del umbral (mercado con fuerza = zona desfavorable)
+        # → cancelar y esperar nueva señal. Aplica a todos los símbolos.
+        # Kill switch: DERIV_D9_HURST_CANCEL_ENABLED=false
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            str(os.getenv("DERIV_D9_HURST_CANCEL_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+            and pre_hurst is not None
+            and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+        ):
+            # BOOM500 usa su gate_max (0.52) — zona post-spike 0.49-0.52 no se cancela
+            _d9hc_thr = (
+                float(os.getenv("DERIV_D9_HURST_BOOM500_MAX", "0.52"))
+                if tick.symbol.upper() == "BOOM500"
+                else float(os.getenv("DERIV_D9_HURST_CANCEL_MAX", "0.50"))
+            )
+            if pre_hurst > _d9hc_thr:
+                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _d6_update_state(tick.symbol, "CANCELLED", reason=f"D9_HURST_CANCEL: H={pre_hurst:.3f}>{_d9hc_thr}")
+                _LOGGER.info(
+                    "[D9_HURST_CANCEL] %s pending cancelado — H=%.3f>%.2f",
+                    tick.symbol, pre_hurst, _d9hc_thr,
+                )
+                return
+
         # ── Random-Walk pre-filter (R_* only) — regime-split logic ─────────
         # Classifies the Hurst zone and decides:
         #   H < 0.45  (mean_reverting) → allow, enforce score ≥ 9.0 downstream
@@ -3836,7 +4017,13 @@ class DerivDaemon:
         )
         # D.6.5: cooldown bloquea también el pending existente — el conteo de 120s
         # solo empieza DESPUÉS de que termina el cooldown, no durante.
-        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+        # D.10.0: pendings d10_slope_gate en BOOM500/CRASH500 quedan exentos del cancel.
+        _d10_ghost_exempt = (
+            str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+            and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+            and (PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") == "d10_slope_gate"
+        )
+        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and not _d10_ghost_exempt:
             _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
             _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_active")
@@ -6309,6 +6496,43 @@ class DerivDaemon:
                 self._spike_enrich(tick.symbol, bot_entered=False,
                                    block_reason=f"obs_window_blocked:{_obs_sec}s")
                 return
+        # ═══════════════════════════════════════════════════════════════════
+        # D.9.0 — HURST GATE: BOOM500/CRASH500 entrada solo en zona H correcta
+        # Aplica solo a nuevos pendientes. Si no hay Hurst (cold start) → permitir.
+        # BOOM500: bloquea si H > 0.48 (igual que CRASH500 — H bajo = MR = ganador)
+        # CRASH500: bloquea si H > 0.48
+        # Kill switch: DERIV_D9_HURST_GATE_ENABLED=false
+        # ═══════════════════════════════════════════════════════════════════
+        if (
+            str(os.getenv("DERIV_D9_HURST_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+            and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+            and not PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
+            and pre_hurst is not None
+        ):
+            _d9hg_sym = tick.symbol.upper()
+            _d9hg_blocked = False
+            _d9hg_reason = ""
+            if _d9hg_sym == "BOOM500":
+                _d9hg_max = float(os.getenv("DERIV_D9_HURST_BOOM500_MAX", "0.52"))
+                if pre_hurst > _d9hg_max:
+                    _d9hg_blocked = True
+                    _d9hg_reason = f"BOOM500_H={pre_hurst:.3f}>{_d9hg_max}"
+            else:  # CRASH500
+                _d9hg_max = float(os.getenv("DERIV_D9_HURST_CRASH500_MAX", "0.48"))
+                if pre_hurst > _d9hg_max:
+                    _d9hg_blocked = True
+                    _d9hg_reason = f"CRASH500_H={pre_hurst:.3f}>{_d9hg_max}"
+            if _d9hg_blocked:
+                _LOGGER.info("[D9_HURST_GATE] BLOCKED %s H=%.3f reason=%s", tick.symbol, pre_hurst, _d9hg_reason)
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=snap.score, reason=f"D9_HURST_GATE: {_d9hg_reason}",
+                    extra={**decision_extra, "hurst": pre_hurst},
+                )
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d9_hurst_gate")
+                return
+            _LOGGER.info("[D9_HURST_GATE] PASSED %s H=%.3f", tick.symbol, pre_hurst)
+
         # ── Pending Entry: aguantar afuera antes de entrar ────────────────────
         # D.9.2: D80 obligatorio en TODA ruta de pending nuevo — pending y ratio siempre se aplican.
         # Ghost NEW fire: base = _calculate_pending_wait_seconds() ya computado en _d6_pending_wait_s.
@@ -6341,6 +6565,79 @@ class DerivDaemon:
                     )
                 except Exception as _d80_exc:
                     _LOGGER.warning("[D80_EXT_ERR] %s: %s", tick.symbol, _d80_exc)
+            # ═══════════════════════════════════════════════════════════════
+            # D.9.0 — HURST PENDING ADJUSTMENT: BOOM1000/CRASH1000
+            # CRASH1000: H < 0.45 → -200s | H > 0.48 → +200s
+            # BOOM1000:  H < 0.46 → +200s | H > 0.48 → -200s
+            # Kill switch: DERIV_D9_HURST_1000_ADJ_ENABLED=false
+            # ═══════════════════════════════════════════════════════════════
+            if (
+                str(os.getenv("DERIV_D9_HURST_1000_ADJ_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+                and tick.symbol.upper() in {"BOOM1000", "CRASH1000"}
+                and pre_hurst is not None
+            ):
+                _d9ha_sym = tick.symbol.upper()
+                _d9ha_adj_s = int(os.getenv("DERIV_D9_HURST_1000_ADJ_S", "200") or 200)
+                _d9ha_delta = 0
+                _d9ha_reason = ""
+                if _d9ha_sym == "CRASH1000":
+                    _d9ha_low = float(os.getenv("DERIV_D9_HURST_CRASH1000_LOW", "0.45"))
+                    _d9ha_high = float(os.getenv("DERIV_D9_HURST_CRASH1000_HIGH", "0.48"))
+                    if pre_hurst < _d9ha_low:
+                        _d9ha_delta = -_d9ha_adj_s
+                        _d9ha_reason = f"H={pre_hurst:.3f}<{_d9ha_low} → -{_d9ha_adj_s}s"
+                    elif pre_hurst > _d9ha_high:
+                        _d9ha_delta = +_d9ha_adj_s
+                        _d9ha_reason = f"H={pre_hurst:.3f}>{_d9ha_high} → +{_d9ha_adj_s}s"
+                elif _d9ha_sym == "BOOM1000":
+                    _d9ha_low = float(os.getenv("DERIV_D9_HURST_BOOM1000_LOW", "0.45"))
+                    _d9ha_high = float(os.getenv("DERIV_D9_HURST_BOOM1000_HIGH", "0.48"))
+                    if pre_hurst < _d9ha_low:
+                        _d9ha_delta = -_d9ha_adj_s
+                        _d9ha_reason = f"H={pre_hurst:.3f}<{_d9ha_low} → -{_d9ha_adj_s}s"
+                    elif pre_hurst > _d9ha_high:
+                        _d9ha_delta = +_d9ha_adj_s
+                        _d9ha_reason = f"H={pre_hurst:.3f}>{_d9ha_high} → +{_d9ha_adj_s}s"
+                if _d9ha_delta != 0:
+                    _d9ha_before = _d6_pending_wait_s
+                    _d6_pending_wait_s = max(60, _d6_pending_wait_s + _d9ha_delta)
+                    _LOGGER.info(
+                        "[D9_HURST_1000_ADJ] %s %s | pending %ds→%ds",
+                        tick.symbol, _d9ha_reason, _d9ha_before, _d6_pending_wait_s,
+                    )
+            # ═══════════════════════════════════════════════════════════════
+            # D.9.0 — HURST PENDING RESET: BOOM500/CRASH500
+            # H < 0.45 → resetea al pending normal (cancela ext D80)
+            # Lógica simétrica: H bajo = MR = favorece ambos
+            # Kill switch: DERIV_D9_HURST_500_ADJ_ENABLED=false
+            # ═══════════════════════════════════════════════════════════════
+            if (
+                str(os.getenv("DERIV_D9_HURST_500_ADJ_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+                and tick.symbol.upper() in {"CRASH500", "BOOM500"}
+                and pre_hurst is not None
+            ):
+                _d9h5_sym = tick.symbol.upper()
+                _d9h5_low = float(os.getenv(f"DERIV_D9_HURST_{_d9h5_sym}_LOW", "0.45"))
+                # BOOM500: zona post-spike (0.49-0.52) también usa pending normal
+                _d9h5_spike_lo = float(os.getenv("DERIV_D9_HURST_BOOM500_SPIKE_LO", "0.49"))
+                _d9h5_spike_hi = float(os.getenv("DERIV_D9_HURST_BOOM500_SPIKE_HI", "0.52"))
+                _d9h5_in_mr = pre_hurst < _d9h5_low
+                _d9h5_in_spike = (
+                    _d9h5_sym == "BOOM500"
+                    and _d9h5_spike_lo <= pre_hurst <= _d9h5_spike_hi
+                )
+                if _d9h5_in_mr or _d9h5_in_spike:
+                    _d9h5_normal = int(
+                        os.getenv(f"DERIV_D6_PENDING_NORMAL_{_d9h5_sym}",
+                                   os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120")) or 120
+                    )
+                    _d9h5_before = _d6_pending_wait_s
+                    _d6_pending_wait_s = max(60, _d9h5_normal)
+                    _d9h5_zone = "spike_zone" if _d9h5_in_spike else "mr_zone"
+                    _LOGGER.info(
+                        "[D9_HURST_500_ADJ] %s H=%.3f %s → normal %ds (era %ds)",
+                        tick.symbol, pre_hurst, _d9h5_zone, _d6_pending_wait_s, _d9h5_before,
+                    )
         _pe_action, _pe_remain = PENDING_ENTRY_WATCHER.on_signal(
             tick.symbol, snap.side, snap.score, _mat_median_s_for_pending,
             force_wait_s=_d6_pending_wait_s if _d80_is_new_pending else None,
