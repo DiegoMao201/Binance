@@ -411,42 +411,8 @@ class _CooldownGate:
 
 # ─── D.6.3 helpers ───────────────────────────────────────────────────────────
 
-def _calculate_pending_wait_seconds(
-    symbol: str,
-    score: float,
-    grade: str,
-    setup_type: str,
-    bos_confirmed: bool,
-    rng_probability: float,
-) -> tuple[int, str]:
-    """
-    D.6.3 — Calcula wait_seconds del pending según calidad de señal + símbolo.
-
-    Returns (wait_seconds, quality_tier).
-    quality_tier: 'fortisima' (60s todos) o 'normal' (diferenciado por símbolo).
-
-    Criterios fortísima (Diego 2026-06-20):
-      score >= DERIV_D6_STRONG_SCORE_MIN (def 8.5)
-      grade == A
-      setup == SMC_FVG
-      bos_confirmed == True
-      rng_probability >= DERIV_D6_STRONG_RNG_MIN (def 80)
-    """
-    strong_score = float(os.getenv("DERIV_D6_STRONG_SCORE_MIN", "8.5") or 8.5)
-    strong_rng   = float(os.getenv("DERIV_D6_STRONG_RNG_MIN",   "80")  or 80)
-
-    is_fortisima = (
-        score >= strong_score
-        and grade == "A"
-        and setup_type == "SMC_FVG"
-        and bos_confirmed
-        and rng_probability >= strong_rng
-    )
-
-    if is_fortisima:
-        wait_s = int(os.getenv("DERIV_D6_PENDING_STRONG_SEC", "60") or 60)
-        return (wait_s, "fortisima")
-
+def _calculate_pending_wait_seconds(symbol: str) -> tuple[int, str]:
+    """D.9.3 — Wait del pending = siempre el tiempo normal por símbolo (sin fast-track fortísima)."""
     sym_upper = symbol.upper()
     env_key = f"DERIV_D6_PENDING_NORMAL_{sym_upper}"
     default_wait = int(os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120") or 120)
@@ -3885,19 +3851,10 @@ class DerivDaemon:
         _d6_ghost_fire = _d6_ghost_fire_new or _d6_ghost_pending
 
         # Calcular wait_seconds y quality_tier solo en NEW fire
-        _d6_pending_wait_s: int = 60
+        _d6_pending_wait_s: int = 0
         _d6_quality_tier: str = "normal"
         if _d6_ghost_fire_new:
-            _d6_rng_prob = float(snap.score_breakdown.get("rng_probability") or 0.0)
-            _d6_bos = bool(snap.score_breakdown.get("bos_confirmed", False))
-            _d6_pending_wait_s, _d6_quality_tier = _calculate_pending_wait_seconds(
-                symbol=tick.symbol,
-                score=float(snap.score or 0.0),
-                grade=_d6_grade_now,
-                setup_type=_d6_setup_now,
-                bos_confirmed=_d6_bos,
-                rng_probability=_d6_rng_prob,
-            )
+            _d6_pending_wait_s, _d6_quality_tier = _calculate_pending_wait_seconds(tick.symbol)
             _LOGGER.info(
                 "[D6_GHOST_ALLOW] %s score=%.2f setup=%s grade=%s imm=%s"
                 " → PENDING %ds quality=%s (all gates bypass)",

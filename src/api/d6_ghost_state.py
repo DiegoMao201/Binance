@@ -172,14 +172,9 @@ def d6_startup_cleanup() -> None:
         _log.warning("[D6_STARTUP] Watcher clear error: %s", exc)
 
     # 4. Log de configuración activa para auditoría
-    _log.info(
-        "[D6_STARTUP] Config D.6.3 — FORTISIMA: score>=%s grade=A setup=SMC_FVG BOS=True RNG>=%s wait=%ss",
-        os.getenv("DERIV_D6_STRONG_SCORE_MIN", "8.5"),
-        os.getenv("DERIV_D6_STRONG_RNG_MIN", "80"),
-        os.getenv("DERIV_D6_PENDING_STRONG_SEC", "60"),
-    )
+    _log.info("[D6_STARTUP] Config D.9.3 — fortísima eliminada, todo pending usa tiempo normal por símbolo")
     for sym in _SYMBOLS:
         wait = os.getenv(f"DERIV_D6_PENDING_NORMAL_{sym}", os.getenv("DERIV_D6_PENDING_NORMAL_DEFAULT", "120"))
         _log.info("[D6_STARTUP] %s normal pending: %ss", sym, wait)
 
-    _log.info("[D6_STARTUP] Cleanup completo. Bot listo para operar D.6.3.")
+    _log.info("[D6_STARTUP] Cleanup completo. Bot listo para operar D.9.3.")
