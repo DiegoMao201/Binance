@@ -463,16 +463,18 @@ class RegimeDetectorV2:
     }
 
     # DESCARGADO — lógica NORMAL: símbolo agotado, esperar más (BOOM500/CRASH500)
+    # D.9.3: BUENO ya no es 0 — si ratio>=120, SIEMPRE se agrega tiempo sin excepción.
     REGIME_PENDING_EXTENSION_DISCHARGED: Dict[str, int] = {
-        "BUENO":      0,
+        "BUENO":    120,
         "MEDIOCRE": 240,
         "DIFICIL":  360,
         "CRITICO":  480,
     }
 
     # DESCARGADO — BOOM1000/CRASH1000: spikes más raros → penalizar más tras descarga
+    # D.9.3: BUENO ya no es 0 — si ratio>=120, SIEMPRE se agrega tiempo sin excepción.
     REGIME_PENDING_EXTENSION_DISCHARGED_1000: Dict[str, int] = {
-        "BUENO":      0,
+        "BUENO":    300,
         "MEDIOCRE": 600,
         "DIFICIL":  720,
         "CRITICO":  900,
