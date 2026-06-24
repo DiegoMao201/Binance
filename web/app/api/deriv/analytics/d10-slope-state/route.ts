@@ -7,11 +7,26 @@ export const dynamic = 'force-dynamic';
 
 const BOT_LOGS = process.env.DERIV_STATE_DIR || process.env.BOT_STATE_DIR || '/data/logs';
 const SLOPE_LOG = path.join(BOT_LOGS, 'slope_history.jsonl');
-
-// Mirrors DERIV_D10_* env var defaults from slope_tracker.py
-const BOOM500_SLOPE_MIN = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MIN || '0.24');
-const CRASH500_SLOPE_MAX = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MAX || '-0.90');
 const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180', 10);
+
+// Camino 1 — Slope Level (%/min)
+const C1_BOOM_MIN  = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MIN_PCT  || '0.005');
+const C1_CRASH_MAX = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MAX_PCT || '-0.005');
+const C1_PENDING   = parseInt(process.env.DERIV_D10_PENDING_CAMINO1_SEC || '120', 10);
+
+// Camino 2 — Pattern PN.5
+const C2_ENABLED   = (process.env.DERIV_D10_PN5_ENABLED ?? 'true').toLowerCase() !== 'false';
+const C2_BOOM_MIN  = parseFloat(process.env.DERIV_D10_PN5_BOOM500_SLOPE_MIN_PCT  || '0.018');
+const C2_CRASH_MAX = parseFloat(process.env.DERIV_D10_PN5_CRASH500_SLOPE_MAX_PCT || '-0.022');
+const C2_CAMBIO_MIN = parseFloat(process.env.DERIV_D10_PN5_CAMBIO_MIN_PCT || '0.015');
+const C2_PENDING   = parseInt(process.env.DERIV_D10_PENDING_CAMINO2_SEC || '5', 10);
+
+// Camino 3 — Breakout (slope opuesto + giro)
+const C3_ENABLED    = (process.env.DERIV_D10_BREAKOUT_ENABLED ?? 'true').toLowerCase() !== 'false';
+const C3_BOOM_MAX   = parseFloat(process.env.DERIV_D10_BREAKOUT_BOOM500_SLOPE_MAX_PCT   || '-0.005');
+const C3_CRASH_MIN  = parseFloat(process.env.DERIV_D10_BREAKOUT_CRASH500_SLOPE_MIN_PCT  || '0.005');
+const C3_CAMBIO_MIN = parseFloat(process.env.DERIV_D10_BREAKOUT_CAMBIO_MIN_PCT || '0.015');
+const C3_PENDING    = parseInt(process.env.DERIV_D10_PENDING_CAMINO3_SEC || '120', 10);
 
 interface SlopeEntry {
   ts: number;
@@ -20,7 +35,8 @@ interface SlopeEntry {
   spike_ts: number;
   estabilizado: boolean;
   n_prices: number;
-  slope: number | null;
+  slope_pct: number | null;
+  cambio_pct?: number | null;
 }
 
 async function readLastLines(file: string, n: number): Promise<string[]> {
@@ -28,8 +44,7 @@ async function readLastLines(file: string, n: number): Promise<string[]> {
     const stat = await fs.stat(file);
     const size = stat.size;
     if (size === 0) return [];
-    // 150 bytes/entry × 60 entries = 9 KB
-    const readSize = Math.min(size, 9216);
+    const readSize = Math.min(size, 12288);
     const fd = await fs.open(file, 'r');
     const buf = Buffer.alloc(readSize);
     await fd.read(buf, 0, readSize, size - readSize);
@@ -40,8 +55,35 @@ async function readLastLines(file: string, n: number): Promise<string[]> {
   }
 }
 
-function fmtSlope(v: number): string {
-  return `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
+interface CaminoResult { camino: string; pending_sec: number }
+
+function detectCamino(
+  sym: string,
+  slope_pct: number,
+  cambio_pct: number | null | undefined,
+): CaminoResult | null {
+  const isBoom = sym === 'BOOM500';
+  const hasCambio = cambio_pct != null;
+  const abs_cambio = hasCambio ? Math.abs(cambio_pct!) : 0;
+
+  if (C2_ENABLED && hasCambio) {
+    if (isBoom  && slope_pct >= C2_BOOM_MIN  && abs_cambio >= C2_CAMBIO_MIN)
+      return { camino: 'camino2_pn5', pending_sec: C2_PENDING };
+    if (!isBoom && slope_pct <= C2_CRASH_MAX && abs_cambio >= C2_CAMBIO_MIN)
+      return { camino: 'camino2_pn5', pending_sec: C2_PENDING };
+  }
+
+  if (C3_ENABLED && hasCambio) {
+    if (isBoom  && slope_pct <= C3_BOOM_MAX  && cambio_pct! >= C3_CAMBIO_MIN)
+      return { camino: 'camino3_breakout', pending_sec: C3_PENDING };
+    if (!isBoom && slope_pct >= C3_CRASH_MIN && cambio_pct! <= -C3_CAMBIO_MIN)
+      return { camino: 'camino3_breakout', pending_sec: C3_PENDING };
+  }
+
+  if (isBoom  && slope_pct >= C1_BOOM_MIN)  return { camino: 'camino1_level', pending_sec: C1_PENDING };
+  if (!isBoom && slope_pct <= C1_CRASH_MAX) return { camino: 'camino1_level', pending_sec: C1_PENDING };
+
+  return null;
 }
 
 export async function GET() {
@@ -54,7 +96,7 @@ export async function GET() {
       const entry = JSON.parse(line) as SlopeEntry;
       const sym = String(entry.symbol || '').toUpperCase();
       if (!bySymbol[sym] || entry.ts > bySymbol[sym].ts) bySymbol[sym] = entry;
-    } catch { /* skip malformed */ }
+    } catch { /* skip */ }
   }
 
   const result: Record<string, unknown> = { updated_at: now };
@@ -67,8 +109,11 @@ export async function GET() {
     }
 
     const age_s = Math.round(now - e.ts);
-    const slope = e.slope;
+    const slope_pct = e.slope_pct;
+    const cambio_pct = e.cambio_pct ?? null;
     let passing = false;
+    let active_camino: string | null = null;
+    let pending_sec: number | null = null;
     let block_reason = '';
 
     if (!e.estabilizado) {
@@ -76,33 +121,41 @@ export async function GET() {
       block_reason = `stabilizing_${elapsed}s_of_${STABILIZE_SEC}s`;
     } else if (e.n_prices < 10) {
       block_reason = `insuf_data_${e.n_prices}_pts`;
-    } else if (slope == null) {
+    } else if (slope_pct == null) {
       block_reason = 'slope_calc_error';
-    } else if (sym === 'BOOM500') {
-      passing = slope >= BOOM500_SLOPE_MIN;
-      block_reason = passing
-        ? `${fmtSlope(slope)}>=${fmtSlope(BOOM500_SLOPE_MIN)}`
-        : `${fmtSlope(slope)}<${fmtSlope(BOOM500_SLOPE_MIN)}`;
     } else {
-      passing = slope <= CRASH500_SLOPE_MAX;
-      block_reason = passing
-        ? `${fmtSlope(slope)}<=${fmtSlope(CRASH500_SLOPE_MAX)}`
-        : `${fmtSlope(slope)}>${fmtSlope(CRASH500_SLOPE_MAX)}`;
+      const res = detectCamino(sym, slope_pct, cambio_pct);
+      if (res) {
+        passing = true;
+        active_camino = res.camino;
+        pending_sec = res.pending_sec;
+        block_reason = `${active_camino} slope=${slope_pct >= 0 ? '+' : ''}${slope_pct.toFixed(5)}%`;
+      } else {
+        const isBoom = sym === 'BOOM500';
+        block_reason = `bloqueado slope=${slope_pct >= 0 ? '+' : ''}${slope_pct.toFixed(5)}% umbral_c1=${isBoom ? '>=' : '<='}${isBoom ? C1_BOOM_MIN : C1_CRASH_MAX}%`;
+      }
     }
 
     result[sym] = {
       symbol: sym,
       available: true,
-      slope,
+      slope_pct,
+      cambio_pct,
       estabilizado: e.estabilizado,
       spike_ts: e.spike_ts,
       n_prices: e.n_prices,
       price: e.price,
       passing,
-      threshold: sym === 'BOOM500' ? BOOM500_SLOPE_MIN : CRASH500_SLOPE_MAX,
+      active_camino,
+      pending_sec,
       block_reason,
       age_s,
       stabilize_sec: STABILIZE_SEC,
+      thresholds: {
+        c1: { boom_min: C1_BOOM_MIN, crash_max: C1_CRASH_MAX, pending: C1_PENDING },
+        c2: { enabled: C2_ENABLED, boom_min: C2_BOOM_MIN, crash_max: C2_CRASH_MAX, cambio_min: C2_CAMBIO_MIN, pending: C2_PENDING },
+        c3: { enabled: C3_ENABLED, boom_max: C3_BOOM_MAX, crash_min: C3_CRASH_MIN, cambio_min: C3_CAMBIO_MIN, pending: C3_PENDING },
+      },
     };
   }
 

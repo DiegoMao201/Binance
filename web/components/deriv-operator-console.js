@@ -153,7 +153,7 @@ function CooldownBar({ cooldown }) {
   );
 }
 
-/* ── D.10.0 Slope Gate Section — solo BOOM500/CRASH500 ──────── */
+/* ── D.10.1 Slope Gate Section — BOOM500/CRASH500, triple lógica ── */
 function SlopeGateSection({ symbol }) {
   const [data, setData] = useState(null);
 
@@ -176,25 +176,43 @@ function SlopeGateSection({ symbol }) {
   if (!symbol.includes("500")) return null;
   if (!data?.available) return null;
 
-  const { slope, estabilizado, passing, threshold, block_reason, n_prices, age_s, spike_ts, stabilize_sec } = data;
+  const {
+    slope_pct, cambio_pct, estabilizado, passing, active_camino, pending_sec,
+    n_prices, age_s, spike_ts, stabilize_sec, thresholds = {},
+  } = data;
   const isBoom = symbol.toUpperCase().startsWith("BOOM");
-
-  // Color: verde=pasa, rojo=bloquea, gris=estabilizando/sin datos
   const isStabilizing = !estabilizado || n_prices < 10;
   const gateColor = isStabilizing ? T.mute : passing ? T.green : T.red;
 
-  // Slope bar: mapear [-2, +2] → [0%, 100%], marker en threshold y en slope actual
-  const mapToBar = (v) => Math.max(1, Math.min(99, ((v + 2.0) / 4.0) * 100));
-  const slopeBarPct = slope != null ? mapToBar(slope) : null;
-  const thrBarPct = mapToBar(threshold);
+  const fmtP  = (v) => v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(5)}%`;
+  const fmtThr = (v) => v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
 
-  const fmtS = (v) => v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(3)}`;
-  const fmtT = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+  // Slope bar: mapear [-0.06, +0.06] %/min → [0, 100]%
+  const mapToBar = (v) => Math.max(1, Math.min(99, ((v + 0.06) / 0.12) * 100));
+  const slopeBarPct = slope_pct != null ? mapToBar(slope_pct) : null;
+  const c1Thr = isBoom ? thresholds.c1?.boom_min : thresholds.c1?.crash_max;
+  const thrBarPct = c1Thr != null ? mapToBar(c1Thr) : null;
 
-  // Stabilizing countdown
+  const CAMINO_LABELS = {
+    "camino1_level":   "C1 NIVEL",
+    "camino2_pn5":     "C2 PN.5",
+    "camino3_breakout":"C3 BREAK",
+  };
+  const caminoLabel = active_camino ? (CAMINO_LABELS[active_camino] || active_camino) : null;
+
   const nowSec = Date.now() / 1000;
   const elapsed_s = spike_ts > 0 ? Math.round(nowSec - spike_ts) : null;
   const stabPct = elapsed_s != null ? Math.min(100, Math.round((elapsed_s / (stabilize_sec || 180)) * 100)) : 0;
+
+  // Evaluar cada camino individualmente (para display)
+  const c1 = thresholds.c1 || {};
+  const c2 = thresholds.c2 || {};
+  const c3 = thresholds.c3 || {};
+  const c1_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c1.boom_min : slope_pct <= c1.crash_max);
+  const c2_slope_ok = slope_pct != null && (isBoom ? slope_pct >= c2.boom_min : slope_pct <= c2.crash_max);
+  const c2_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) >= c2.cambio_min;
+  const c3_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c3.boom_max : slope_pct >= c3.crash_min);
+  const c3_cambio_ok = cambio_pct != null && (isBoom ? cambio_pct >= c3.cambio_min : cambio_pct <= -c3.cambio_min);
 
   return (
     <div style={{
@@ -206,54 +224,113 @@ function SlopeGateSection({ symbol }) {
       fontFamily: FONT_MONO, fontSize: 11,
     }}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
-        <span style={{ fontWeight: 800, color: gateColor, letterSpacing: "0.07em", fontSize: 10 }}>
-          {isStabilizing ? "◌" : passing ? "✓" : "✗"} D.10.0 SLOPE GATE
-        </span>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: gateColor }}>
-          {fmtS(slope)} <span style={{ fontSize: 9, fontWeight: 400, color: T.mute }}>pts/min</span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ fontWeight: 800, color: gateColor, letterSpacing: "0.07em", fontSize: 10 }}>
+            {isStabilizing ? "◌" : passing ? "✓" : "✗"} D.10.1 SLOPE
+          </span>
+          {!isStabilizing && caminoLabel && (
+            <span style={{
+              fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
+              background: `${gateColor}22`, color: gateColor, letterSpacing: "0.05em",
+            }}>{caminoLabel}{pending_sec != null ? ` ${pending_sec}s` : ""}</span>
+          )}
+        </div>
+        <span style={{ fontFamily: FONT_MONO, fontSize: 12, fontWeight: 800, color: gateColor }}>
+          {fmtP(slope_pct)}
         </span>
       </div>
 
-      {/* Slope bar con marker de threshold */}
-      <div style={{ position: "relative", width: "100%", height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, marginBottom: 4 }}>
-        {/* Threshold line */}
-        <div style={{
-          position: "absolute", left: `${thrBarPct}%`,
-          top: -1, width: 2, height: 8,
-          background: T.textD, opacity: 0.45, borderRadius: 1,
-        }} />
-        {/* Slope cursor */}
-        {slopeBarPct != null && (
-          <div style={{
-            position: "absolute",
-            left: `${slopeBarPct}%`,
-            top: -1, transform: "translateX(-50%)",
-            width: 4, height: 8,
-            background: gateColor, borderRadius: 2,
-            transition: "left 1s ease",
-          }} />
-        )}
-        {/* Fill bar up to slope */}
-        {slopeBarPct != null && !isStabilizing && (
-          <div style={{
-            position: "absolute", left: 0,
-            width: `${slopeBarPct}%`, height: "100%",
-            background: gateColor, opacity: 0.2, borderRadius: 3,
-          }} />
-        )}
-      </div>
+      {/* Slope bar */}
+      {!isStabilizing && (
+        <div style={{ position: "relative", width: "100%", height: 5, background: "rgba(255,255,255,0.06)", borderRadius: 3, marginBottom: 5 }}>
+          {thrBarPct != null && (
+            <div style={{
+              position: "absolute", left: `${thrBarPct}%`,
+              top: -1, width: 2, height: 7,
+              background: T.textD, opacity: 0.5, borderRadius: 1,
+            }} />
+          )}
+          {slopeBarPct != null && (
+            <div style={{
+              position: "absolute", left: `${slopeBarPct}%`,
+              top: -1, transform: "translateX(-50%)",
+              width: 4, height: 7, background: gateColor, borderRadius: 2,
+              transition: "left 1s ease",
+            }} />
+          )}
+          {slopeBarPct != null && (
+            <div style={{
+              position: "absolute", left: 0,
+              width: `${slopeBarPct}%`, height: "100%",
+              background: gateColor, opacity: 0.18, borderRadius: 3,
+            }} />
+          )}
+        </div>
+      )}
 
-      {/* Labels + info */}
+      {/* Caminos grid — 3 columnas */}
+      {!isStabilizing && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 3, marginBottom: 4 }}>
+          {/* C1 — Nivel */}
+          <div style={{
+            padding: "3px 5px", borderRadius: 4, fontSize: 9,
+            background: c1_slope_ok ? "rgba(34,211,163,0.10)" : "rgba(255,93,108,0.06)",
+            border: `1px solid ${c1_slope_ok ? T.green : T.red}33`,
+          }}>
+            <div style={{ fontWeight: 700, color: c1_slope_ok ? T.green : T.red, marginBottom: 1 }}>
+              {c1_slope_ok ? "✓" : "✗"} C1 NIVEL
+            </div>
+            <div style={{ color: T.mute }}>
+              {isBoom ? "≥" : "≤"}{fmtThr(isBoom ? c1.boom_min : c1.crash_max)}
+            </div>
+            <div style={{ color: T.mute, opacity: 0.7 }}>{c1.pending ?? 120}s pend</div>
+          </div>
+          {/* C2 — PN.5 */}
+          <div style={{
+            padding: "3px 5px", borderRadius: 4, fontSize: 9,
+            background: (c2_slope_ok && c2_cambio_ok) ? "rgba(34,211,163,0.10)" : "rgba(255,255,255,0.03)",
+            border: `1px solid ${(c2_slope_ok && c2_cambio_ok) ? T.green + "55" : "rgba(255,255,255,0.08)"}`,
+          }}>
+            <div style={{ fontWeight: 700, color: (c2_slope_ok && c2_cambio_ok) ? T.green : T.mute, marginBottom: 1 }}>
+              {(c2_slope_ok && c2_cambio_ok) ? "✓" : c2.enabled === false ? "–" : "✗"} C2 PN.5
+            </div>
+            <div style={{ color: c2_slope_ok ? T.green : T.mute }}>
+              {isBoom ? "≥" : "≤"}{fmtThr(isBoom ? c2.boom_min : c2.crash_max)}
+            </div>
+            <div style={{ color: c2_cambio_ok ? T.green : T.mute, opacity: 0.9 }}>
+              Δ≥{fmtThr(c2.cambio_min)} {c2_cambio_ok ? "✓" : "✗"}
+            </div>
+          </div>
+          {/* C3 — Breakout */}
+          <div style={{
+            padding: "3px 5px", borderRadius: 4, fontSize: 9,
+            background: (c3_slope_ok && c3_cambio_ok) ? "rgba(34,211,163,0.10)" : "rgba(255,255,255,0.03)",
+            border: `1px solid ${(c3_slope_ok && c3_cambio_ok) ? T.green + "55" : "rgba(255,255,255,0.08)"}`,
+          }}>
+            <div style={{ fontWeight: 700, color: (c3_slope_ok && c3_cambio_ok) ? T.green : T.mute, marginBottom: 1 }}>
+              {(c3_slope_ok && c3_cambio_ok) ? "✓" : c3.enabled === false ? "–" : "✗"} C3 BREAK
+            </div>
+            <div style={{ color: c3_slope_ok ? T.green : T.mute }}>
+              {isBoom ? "≤" : "≥"}{fmtThr(isBoom ? c3.boom_max : c3.crash_min)}
+            </div>
+            <div style={{ color: c3_cambio_ok ? T.green : T.mute, opacity: 0.9 }}>
+              Δ≥{fmtThr(c3.cambio_min)} {c3_cambio_ok ? "✓" : "✗"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delta cambio + info */}
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: T.mute }}>
         <span>
           {isStabilizing && !estabilizado && elapsed_s != null
             ? `estabilizando ${elapsed_s}s/${stabilize_sec || 180}s`
             : isStabilizing
               ? `datos insuf (${n_prices} pts)`
-              : passing
-                ? `pasa — umbral ${isBoom ? "≥" : "≤"}${fmtT(threshold)}`
-                : `bloqueado — umbral ${isBoom ? "≥" : "≤"}${fmtT(threshold)}`
+              : cambio_pct != null
+                ? `Δ ${fmtP(cambio_pct)} cada 30s`
+                : "sin Δ (primera medición)"
           }
         </span>
         <span style={{ opacity: 0.6 }}>
@@ -261,7 +338,7 @@ function SlopeGateSection({ symbol }) {
         </span>
       </div>
 
-      {/* Stabilizing progress bar */}
+      {/* Progress bar estabilización */}
       {!estabilizado && elapsed_s != null && (
         <div style={{ marginTop: 4 }}>
           <div style={{ height: 3, borderRadius: 2, background: "rgba(255,255,255,0.05)", overflow: "hidden" }}>
@@ -316,11 +393,15 @@ function GhostLiveSection({ symbol }) {
     const totalWait = gd.wait_s ?? 60;  // D.6.3: 60/120/150/200 según calidad+símbolo
     const elapsed = totalWait - remaining;
     const pct = Math.min(100, Math.max(0, (elapsed / totalWait) * 100));
-    const isD10 = gd.quality_tier === "d10_slope_gate";
+    const isD10 = String(gd.quality_tier || "").startsWith("d10_");
     const isFortisima = gd.quality_tier === "fortisima";
     const pendingColor = isD10 ? T.cyan : isFortisima ? "#f59e0b" : "#fbbf24";
     const pendingBg   = isD10 ? "rgba(98,212,255,0.10)" : isFortisima ? "rgba(245,158,11,0.12)" : "rgba(251,191,36,0.08)";
-    const qualityLabel = isD10 ? "D10 SLOPE" : isFortisima ? "⚡ FORTÍSIMA" : "NORMAL";
+    const d10CaminoMap = { camino1_level: "C1", camino2_pn5: "C2 PN.5", camino3_breakout: "C3 BREAK" };
+    const d10Tag = isD10 ? String(gd.quality_tier).replace("d10_", "") : "";
+    const qualityLabel = isD10
+      ? `D10 ${d10CaminoMap[d10Tag] || d10Tag.toUpperCase()}`
+      : isFortisima ? "⚡ FORTÍSIMA" : "NORMAL";
     const dirArrow = gd.side === "MULTUP" ? "▲" : gd.side === "MULTDOWN" ? "▼" : "?";
     return (
       <div style={{ ...base, color: pendingColor, background: pendingBg }}>

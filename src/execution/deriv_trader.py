@@ -2777,6 +2777,22 @@ class DerivTradeExecutor:
             "score_breakdown": last.get("score_breakdown") or {},
         }
 
+    def get_tier_exit_info(self, symbol: str) -> dict[str, Any]:
+        """D.9.0 MR REENTRY: True si el último trade cerró por tier_staircase."""
+        last = self._last_closed_sym.get(symbol.upper())
+        if last is None:
+            return {"is_tier": False, "closed_at_ts": 0.0, "side": ""}
+        exit_reason = str(last.get("exit_reason") or "")
+        is_tier = exit_reason.startswith("tier_staircase")
+        return {
+            "is_tier": is_tier,
+            "exit_reason": exit_reason,
+            "closed_at_ts": float(last.get("closed_at_ts") or 0),
+            "opened_at_ts": float(last.get("opened_at_ts") or 0),
+            "side": str(last.get("side") or ""),
+            "score_breakdown": last.get("score_breakdown") or {},
+        }
+
     def _get_structural_state(self, symbol: str) -> dict[str, Any]:
         """
         Retorna el estado estructural base del símbolo para structural_exit y Hold LLM.

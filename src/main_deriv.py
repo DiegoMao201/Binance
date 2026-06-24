@@ -2780,13 +2780,14 @@ class DerivDaemon:
         if tick.symbol.upper() in {"BOOM500", "CRASH500"}:
             if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                    _d10_ok, _d10_reason, _d10_slope = self._slope_tracker.can_enter(tick.symbol)
+                    _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
                     if not _d10_ok:
                         self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
                         return
-                    # Slope gate pasa: crear pending y retornar
+                    # D.10.1: slope gate pasa — crear pending con wait por camino
                     _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
-                    _d10_wait = int(os.getenv("DERIV_D10_PENDING_SEC", "120") or 120)
+                    _d10_wait = int(_d10_det.get("pending_sec", 120))
+                    _d10_qtier = f"d10_{_d10_camino}"
                     PENDING_ENTRY_WATCHER.on_signal(
                         tick.symbol, _d10_side, score=7.5,
                         median_cycle_s=600.0, force_wait_s=_d10_wait,
@@ -2794,15 +2795,18 @@ class DerivDaemon:
                     _d6_update_state(tick.symbol, "PENDING", {
                         "score": 7.5,
                         "side": _d10_side,
-                        "quality_tier": "d10_slope_gate",
+                        "quality_tier": _d10_qtier,
                         "wait_s": _d10_wait,
                         "created_at": time.time(),
                         "expires_at": time.time() + _d10_wait,
                         "remaining_seconds": _d10_wait,
+                        "slope_pct": _d10_det.get("slope_pct"),
+                        "cambio_pct": _d10_det.get("cambio_pct"),
                     })
                     _LOGGER.info(
-                        "[D10_PASSED] %s slope=%s wait=%ds",
-                        tick.symbol, _d10_reason, _d10_wait,
+                        "[D10_PASSED] %s camino=%s slope_pct=%s cambio_pct=%s wait=%ds",
+                        tick.symbol, _d10_camino,
+                        _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
                     )
                     return
                 # Pending activo → cae al ghost path sin retornar
@@ -3531,11 +3535,11 @@ class DerivDaemon:
             )
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
             # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
-            # D.10.0: pendings d10_slope_gate en BOOM500/CRASH500 quedan exentos del cancel.
+            # D.10.1: pendings d10_* en BOOM500/CRASH500 quedan exentos del cancel.
             _d10_pg_exempt = (
                 str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
                 and tick.symbol.upper() in {"BOOM500", "CRASH500"}
-                and (PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") == "d10_slope_gate"
+                and str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "").startswith("d10_")
             )
             if (
                 POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol)
@@ -4017,11 +4021,11 @@ class DerivDaemon:
         )
         # D.6.5: cooldown bloquea también el pending existente — el conteo de 120s
         # solo empieza DESPUÉS de que termina el cooldown, no durante.
-        # D.10.0: pendings d10_slope_gate en BOOM500/CRASH500 quedan exentos del cancel.
+        # D.10.1: pendings d10_* en BOOM500/CRASH500 quedan exentos del cancel.
         _d10_ghost_exempt = (
             str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
             and tick.symbol.upper() in {"BOOM500", "CRASH500"}
-            and (PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") == "d10_slope_gate"
+            and str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "").startswith("d10_")
         )
         if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and not _d10_ghost_exempt:
             _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
@@ -7017,6 +7021,20 @@ class DerivDaemon:
                         pnl=_pnl,
                         is_timeout="timeout" in str(rec.get("exit_reason") or "").lower(),
                     )
+                    # D.10.1 CAMINO 4: re-entrada post-tier — resetear slope_anterior
+                    # para permitir nueva entrada inmediata sin esperar historial.
+                    _d10_exit = str(rec.get("exit_reason") or "")
+                    if (
+                        str(os.getenv("DERIV_D10_REENTRY_POST_TIER_ENABLED", "true")).lower()
+                        in {"1", "true", "yes", "on"}
+                        and _cg_sym.upper() in {"BOOM500", "CRASH500"}
+                        and _d10_exit.startswith("tier_staircase")
+                    ):
+                        self._slope_tracker.on_position_close_tier(_cg_sym)
+                        _LOGGER.info(
+                            "[D10_TIER_CLOSE] %s exit=%s → slope_anterior reset para re-entrada",
+                            _cg_sym, _d10_exit,
+                        )
                     # PASO 2.3h-prep Fase F: link outcome to enriched decision log
                     _rec_sym = str(rec.get("symbol") or "")
                     _rec_did = self._decision_ids.pop(_rec_sym, None)
