@@ -213,6 +213,10 @@ _DYNAMIC_GATE_CALM_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_CALM_CEI
 _DYNAMIC_GATE_SLOW_CEILING: float = float(os.getenv("DERIV_DYNAMIC_GATE_SLOW_CEILING", "7.0"))
 _DYNAMIC_GATE_FAST_FLOOR: float = float(os.getenv("DERIV_DYNAMIC_GATE_FAST_FLOOR", "6.5"))
 
+# Symbols with an active D10 pending — used to exempt them from spike/cooldown cancels.
+# The watcher doesn't store quality_tier, so we track membership here explicitly.
+_D10_PENDING_SYMS: set[str] = set()
+
 
 # ── PASO 2.3e-B (2026-06-15, Diego) — Progressive imminence + Compound Hurst-Time ──
 # Filosofía "bot astuto": evaluación continua vs. estados binarios.
@@ -2806,11 +2810,10 @@ class DerivDaemon:
                     self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_deploy_sync_wait")
                     _d10_entry_suppressed = True
                     # Cancelar pending que pudo haberse creado con datos pre-reinicio
-                    if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                        _pe_q = str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "")
-                        if _pe_q.startswith("d10_"):
-                            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                            _d6_update_state(tick.symbol, "CANCELLED", reason="d10_deploy_sync_wait")
+                    if PENDING_ENTRY_WATCHER.is_pending(tick.symbol) and tick.symbol.upper() in _D10_PENDING_SYMS:
+                        PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                        _D10_PENDING_SYMS.discard(tick.symbol.upper())
+                        _d6_update_state(tick.symbol, "CANCELLED", reason="d10_deploy_sync_wait")
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
                     # D.10.1 MAX_HOLD+SPIKE GATE: si el último hold capturó un spike
                     # (profit negativo pero spike ocurrió), esperar nuevo spike post-cierre.
@@ -2856,6 +2859,7 @@ class DerivDaemon:
                                     tick.symbol, _d10_side, score=7.5,
                                     median_cycle_s=600.0, force_wait_s=_d10_wait,
                                 )
+                                _D10_PENDING_SYMS.add(tick.symbol.upper())
                                 _d6_update_state(tick.symbol, "PENDING", {
                                     "score": 7.5,
                                     "side": _d10_side,
@@ -2875,12 +2879,14 @@ class DerivDaemon:
                                 return
                 # Pending activo → refrescar countdown en disco (evita EXPIRED_GHOST:
                 # _PENDING_TTL_S=90s < D10 wait=120s → sin refresh el panel marca bug)
-                if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                    _pe_refresh = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
-                    if str(_pe_refresh.get("quality_tier", "")).startswith("d10_"):
+                if tick.symbol.upper() in _D10_PENDING_SYMS:
+                    if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                        _pe_refresh = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
                         _d6_update_state(tick.symbol, "PENDING", {
                             "remaining_seconds": max(0, int(_pe_refresh.get("remaining_s") or 0)),
                         })
+                    else:
+                        _D10_PENDING_SYMS.discard(tick.symbol.upper())
 
         # ═══════════════════════════════════════════════════════════════════
         # D.deploy SYNC GATE — bloquear hasta primer spike post-deploy
@@ -3610,7 +3616,8 @@ class DerivDaemon:
             _d10_pg_exempt = (
                 str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
                 and tick.symbol.upper() in {"BOOM500", "CRASH500"}
-                and str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "").startswith("d10_")
+                and tick.symbol.upper() in _D10_PENDING_SYMS
+                and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
             )
             if (
                 POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol)
@@ -3618,6 +3625,7 @@ class DerivDaemon:
                 and not _d10_pg_exempt
             ):
                 PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
                 _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_activated")
                 _LOGGER.info(
                     "[D6_COOLDOWN_CANCEL_PENDING] %s | cooldown activo → pending fantasma cancelado",
@@ -3658,6 +3666,7 @@ class DerivDaemon:
                             str(_spike_aligns_pending), str(_d10_pg_exempt),
                         )
                         PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                        _D10_PENDING_SYMS.discard(tick.symbol.upper())
                         if _d6_enabled:
                             _reason_ac = "spike_opposite_d10" if _d10_pg_exempt else "spike_anti_chase"
                             _d6_update_state(tick.symbol, "CANCELLED", reason=_reason_ac)
@@ -3667,6 +3676,7 @@ class DerivDaemon:
                         tick.symbol, _pe_spike_side,
                     )
                     PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    _D10_PENDING_SYMS.discard(tick.symbol.upper())
                     if _d6_enabled:
                         _d6_update_state(tick.symbol, "CANCELLED", reason="spike_opposite")
                 else:
@@ -3968,6 +3978,7 @@ class DerivDaemon:
             )
             if pre_hurst > _d9hc_thr:
                 PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
                 _d6_update_state(tick.symbol, "CANCELLED", reason=f"D9_HURST_CANCEL: H={pre_hurst:.3f}>{_d9hc_thr}")
                 _LOGGER.info(
                     "[D9_HURST_CANCEL] %s pending cancelado — H=%.3f>%.2f",
@@ -4066,6 +4077,7 @@ class DerivDaemon:
         # Si ya hay posición abierta y había un pending huérfano → cancelar antes de continuar
         if _d6_enabled and _d6_has_open and PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+            _D10_PENDING_SYMS.discard(tick.symbol.upper())
             _d6_update_state(tick.symbol, "CANCELLED", reason="position_already_open")
             _LOGGER.info(
                 "[D6_GHOST_ALLOW] %s phantom pending cancelado — posición ya abierta",
@@ -4113,6 +4125,7 @@ class DerivDaemon:
         if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
             _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+            _D10_PENDING_SYMS.discard(tick.symbol.upper())
             _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_active")
             _LOGGER.info(
                 "[D6_COOLDOWN_CANCEL_PENDING] %s | pending activo cancelado por cooldown"
@@ -6195,18 +6208,27 @@ class DerivDaemon:
                         tick.symbol, snap.score, result,
                     )
                     self._spike_enrich(tick.symbol, bot_entered=True, score=snap.score)
+                    if snap.score_breakdown.get("d6_ghost_absolute"):
+                        _d6_update_state(tick.symbol, "EXECUTED", {
+                            "executed_at": time.time(),
+                            "score": round(float(snap.score), 2),
+                        })
+                    _D10_PENDING_SYMS.discard(tick.symbol.upper())
             except OrderRouterError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] router rejected (override): %s", exc)
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_router_error")
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
             except DerivClientError as exc:
                 self._counters["orders_failed"] += 1
                 _LOGGER.warning("[deriv-daemon] broker rejected order %s (override): %s", tick.symbol, exc)
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="broker_rejected")
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
             except Exception:  # noqa: BLE001
                 self._counters["orders_failed"] += 1
                 _LOGGER.exception("[deriv-daemon] order pipeline crashed (override, suppressed)")
                 self._spike_enrich(tick.symbol, bot_entered=False, block_reason="order_crashed")
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
         # ── K.5 — PendingOrderManager: evaluate before fresh LLM call ─────────
         _k5_result = PENDING_MANAGER.evaluate(
             tick.symbol,
@@ -6772,10 +6794,12 @@ class DerivDaemon:
                 "[PENDING_ENTRY] %s SIGNAL_DROPPED | score=%.2f — buscando nueva señal",
                 tick.symbol, snap.score,
             )
+            _D10_PENDING_SYMS.discard(tick.symbol.upper())
             if _d6_ghost_fire:
                 _d6_update_state(tick.symbol, "CANCELLED", reason="score_drop")
             return
         # ACTION_ENTER: período confirmado → continúa a la orden real
+        _D10_PENDING_SYMS.discard(tick.symbol.upper())
         # PASO 2.3h-prep Fase F: log enriched decision before routing order
         _dec_id = log_decision(
             symbol=tick.symbol,

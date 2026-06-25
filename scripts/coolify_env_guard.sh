@@ -40,10 +40,13 @@ REQUIRED_VARS=(
   # Tick subscription: solo BOOM500/CRASH500 (activos) + BOOM1000/CRASH1000 (medición D10).
   # 600/900 completamente excluidos — sin ticks, sin trades, sin nada.
   "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM1000,CRASH1000"
-  # D.10.1 — Slope gate: 0s estabilización (2×120s de ventanas son suficiente), C1 umbral 0.005%
+  # D.10.1 — Slope gate: 0s estabilización, C1 umbral 0.003%, pending C1=120s
   "DERIV_D10_SPIKE_STABILIZE_SEC=0"
   "DERIV_D10_PN5_STABILIZE_SEC=0"
-  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.005"
+  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.003"
+  "DERIV_D10_PENDING_CAMINO1_SEC=120"
+  # D.9.0 — Hurst cancel: desactivado — no quiero que cancele ghost pending de D10
+  "DERIV_D9_HURST_CANCEL_ENABLED=false"
   # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
   "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000,R_50,R_75,R_100"
   # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
@@ -72,6 +75,14 @@ REQUIRED_VARS=(
   "DERIV_DRY_OVERRIDE_SCORE_MAP="
 )
 
+FRONTEND_ID="${FRONTEND_ID:-m0ks004osk4cw444gsokg8os}"
+FRONTEND_ENV="/data/coolify/applications/${FRONTEND_ID}/.env"
+FRONTEND_REQUIRED_VARS=(
+  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.003"
+  "DERIV_D10_PENDING_CAMINO1_SEC=120"
+  "DERIV_D9_HURST_CANCEL_ENABLED=false"
+)
+
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(ts)] $*"; }
 
@@ -98,6 +109,15 @@ fi
 
 CHANGED=0
 
+# Ensure volume mount for patched main_deriv.py survives Coolify redeploys.
+PATCH_MOUNT="'\/data\/deriv-bot-patches\/main_deriv.py:\/app\/src\/main_deriv.py'"
+COMPOSE_FILE="${APP_BASE}/docker-compose.yaml"
+if [[ -f "${COMPOSE_FILE}" ]] && ! grep -q "deriv-bot-patches/main_deriv.py" "${COMPOSE_FILE}"; then
+  log "MISSING volume mount for main_deriv.py patch → adding to compose"
+  sed -i "s|'/data/deriv-logs:/data/logs'|'/data/deriv-logs:/data/logs'\n            - '/data/deriv-bot-patches/main_deriv.py:/app/src/main_deriv.py'|" "${COMPOSE_FILE}"
+  CHANGED=1
+fi
+
 for KV in "${REQUIRED_VARS[@]}"; do
   KEY="${KV%%=*}"
   VAL="${KV#*=}"
@@ -117,7 +137,33 @@ for KV in "${REQUIRED_VARS[@]}"; do
   fi
 done
 
-if [[ "${CHANGED}" -eq 0 ]]; then
+# Also guard frontend env vars
+FRONTEND_CHANGED=0
+if [[ -f "${FRONTEND_ENV}" ]]; then
+  for KV in "${FRONTEND_REQUIRED_VARS[@]}"; do
+    KEY="${KV%%=*}"; VAL="${KV#*=}"
+    CURRENT_LINE="$(grep -E "^${KEY}=" "${FRONTEND_ENV}" || true)"
+    CURRENT_VAL="${CURRENT_LINE#*=}"
+    if [[ -z "${CURRENT_LINE}" ]]; then
+      log "FRONTEND MISSING ${KEY} -> append"
+      echo "${KV}" >> "${FRONTEND_ENV}"
+      FRONTEND_CHANGED=1
+    elif [[ "${CURRENT_VAL}" != "${VAL}" ]]; then
+      log "FRONTEND MISMATCH ${KEY} (have=${CURRENT_VAL} want=${VAL}) -> replace"
+      ESC_VAL="$(printf '%s' "${VAL}" | sed -e 's/[\/&]/\\&/g')"
+      sed -i "s#^${KEY}=.*#${KEY}=${ESC_VAL}#" "${FRONTEND_ENV}"
+      FRONTEND_CHANGED=1
+    fi
+  done
+  if [[ "${FRONTEND_CHANGED}" -eq 1 ]]; then
+    log "frontend env mutated; recreating frontend container"
+    cd "/data/coolify/applications/${FRONTEND_ID}"
+    docker compose up -d --force-recreate || log "WARN frontend recreate failed (non-fatal)"
+    cd "${APP_BASE}"
+  fi
+fi
+
+if [[ "${CHANGED}" -eq 0 && "${FRONTEND_CHANGED}" -eq 0 ]]; then
   # quiet exit
   exit 0
 fi

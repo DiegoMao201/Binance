@@ -209,6 +209,9 @@ function SlopeGateSection({ symbol }) {
   const c2 = thresholds.c2 || {};
   const c3 = thresholds.c3 || {};
   const c1_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c1.boom_max : slope_pct >= c1.crash_min);
+  const c1_cambio_min = c1.cambio_min ?? 0.003;
+  const c1_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) >= c1_cambio_min;
+  const c1_ok = c1_slope_ok && c1_cambio_ok;
   const c2_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c2.boom_max : slope_pct >= c2.crash_min);
   const c2_cambio_ok = cambio_pct != null && Math.abs(cambio_pct) <= c2.cambio_max;
   const c3_slope_ok = slope_pct != null && (isBoom ? slope_pct <= c3.boom_max : slope_pct >= c3.crash_min);
@@ -272,17 +275,20 @@ function SlopeGateSection({ symbol }) {
       {/* Caminos grid — 3 columnas */}
       {!isStabilizing && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 3, marginBottom: 4 }}>
-          {/* C1 — Nivel */}
+          {/* C1 — Nivel: slope + |cambio| >= min */}
           <div style={{
             padding: "3px 5px", borderRadius: 4, fontSize: 9,
-            background: c1_slope_ok ? "rgba(34,211,163,0.10)" : "rgba(255,93,108,0.06)",
-            border: `1px solid ${c1_slope_ok ? T.green : T.red}33`,
+            background: c1_ok ? "rgba(34,211,163,0.10)" : c1_slope_ok ? "rgba(245,196,60,0.07)" : "rgba(255,93,108,0.06)",
+            border: `1px solid ${c1_ok ? T.green : c1_slope_ok ? T.amber : T.red}33`,
           }}>
-            <div style={{ fontWeight: 700, color: c1_slope_ok ? T.green : T.red, marginBottom: 1 }}>
-              {c1_slope_ok ? "✓" : "✗"} C1 NIVEL
+            <div style={{ fontWeight: 700, color: c1_ok ? T.green : c1_slope_ok ? T.amber : T.red, marginBottom: 1 }}>
+              {c1_ok ? "✓" : "✗"} C1 NIVEL
             </div>
-            <div style={{ color: T.mute }}>
+            <div style={{ color: c1_slope_ok ? T.green : T.mute }}>
               {isBoom ? "≤" : "≥"}{fmtThr(isBoom ? c1.boom_max : c1.crash_min)}
+            </div>
+            <div style={{ color: c1_cambio_ok ? T.green : T.red, opacity: 0.9 }}>
+              |Δ|≥{fmtThr(c1_cambio_min)} {c1_cambio_ok ? "✓" : "✗"}
             </div>
             <div style={{ color: T.mute, opacity: 0.7 }}>{c1.pending ?? 120}s pend</div>
           </div>
@@ -455,9 +461,9 @@ function GhostLiveSection({ symbol }) {
   );
 
   if (state === "EXPIRED_GHOST") return (
-    <div style={{ ...base, color: "#a855f7", background: "rgba(168,85,247,0.08)", border: "1px solid #a855f7" }}>
-      <div style={{ fontWeight: 700 }}>⚠ GHOST EXPIRADO (bug)</div>
-      <div style={{ opacity: 0.75, fontSize: 10 }}>{reason || "pending sin actualización"}</div>
+    <div style={{ ...base, color: T.mute, background: "rgba(90,100,115,0.06)", border: `1px solid ${T.mute}44` }}>
+      <div style={{ fontWeight: 700, opacity: 0.8 }}>◌ GHOST LIMPIANDO</div>
+      <div style={{ opacity: 0.55, fontSize: 10 }}>{reason || "pending sin actualización"} · limpiando...</div>
     </div>
   );
 

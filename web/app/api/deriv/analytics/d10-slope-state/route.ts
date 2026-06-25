@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 
 const BOT_LOGS = process.env.DERIV_STATE_DIR || process.env.BOT_STATE_DIR || '/data/logs';
 const SLOPE_LOG = path.join(BOT_LOGS, 'slope_history.jsonl');
-const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180', 10);
+const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '0', 10);
 
 // Camino 1 — Slope Level + dinámica detectada (|cambio| >= MIN, cualquier dirección)
 // cambio≈0 → BLOQUEA: tendencia estable, spike aún lejos
@@ -15,7 +15,7 @@ const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180
 // cambio=null bloquea C1 (necesita ~240s de historia post-spike)
 const C1_BOOM_MAX    = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MAX_PCT  || '-0.005');
 const C1_CRASH_MIN   = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MIN_PCT || '0.005');
-const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.005');
+const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.003');
 const C1_PENDING     = parseInt(process.env.DERIV_D10_PENDING_CAMINO1_SEC || '120', 10);
 
 // Camino 2 — Tendencia extrema + estable (|cambio| PEQUEÑO = tendencia confirmada)
