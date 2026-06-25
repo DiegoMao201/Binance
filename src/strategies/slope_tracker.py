@@ -52,6 +52,8 @@ class SymbolSlopeState:
     precios_buffer: deque = field(default_factory=lambda: deque(maxlen=1000))
     ultimo_log_ts: float = 0.0
     estabilizado: bool = False
+    delta_grace_until: float = 0.0  # ts mínimo para delta válido post-spike
+    spike_count: int = 0             # acumulador de spikes detectados
 
 
 class SlopeTracker:
@@ -93,6 +95,12 @@ class SlopeTracker:
         # |cambio| >= MIN → PENDING: cualquier cambio en la pendiente = dinámica activa
         #   (aceleración: slope 1.0→1.2 ó desaceleración: 1.0→0.8 ambos son señal)
         # cambio=None → bloquea: menos de 240s de historia post-spike
+        # Delta grace: segundos post-spike antes de que el diferencial de pendiente
+        # se considere limpio. Protege C2/C3 de datos contaminados del período de
+        # recuperación. C1 usa c1_min_data_sec como guarda mínimo independiente.
+        self.delta_grace_sec = _int("DERIV_D10_DELTA_GRACE_SEC", 240)
+        self.c1_min_data_sec = _int("DERIV_D10_CAMINO1_MIN_DATA_SEC", 60)
+
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
         self.c1_cambio_min_pct = _float("DERIV_D10_C1_CAMBIO_MIN_PCT", 0.005)
@@ -134,9 +142,11 @@ class SlopeTracker:
             st.ultimo_spike_ts = last_spike_ts
             st.precios_buffer.clear()
             st.estabilizado = False
+            st.delta_grace_until = last_spike_ts + self.delta_grace_sec
+            st.spike_count += 1
             logger.info(
-                "[D10] %s nuevo spike ts=%.0f → buffer reset (buf_prev=%d)",
-                sym, last_spike_ts, old_buf,
+                "[D10_RESET_POST_SPIKE] %s spike_count=%d buf_prev=%d delta_valid_at=%.0f (en %.0fs)",
+                sym, st.spike_count, old_buf, st.delta_grace_until, self.delta_grace_sec,
             )
 
         if not st.estabilizado and st.ultimo_spike_ts > 0:
@@ -195,16 +205,22 @@ class SlopeTracker:
         # Positivo = pendiente aumentando, Negativo = pendiente cayendo
         cambio_pct = self._calc_cambio(st, now)
 
+        # Delta grace: datos post-spike limpios solo tras delta_grace_sec
+        delta_valid = (st.delta_grace_until <= 0.0) or (now >= st.delta_grace_until)
+        seg_hasta_delta = round(max(0.0, st.delta_grace_until - now), 1) if not delta_valid else 0.0
+
         details: dict = {
             "slope_pct": round(slope_pct, 6),
             "cambio_pct": round(cambio_pct, 6) if cambio_pct is not None else None,
             "n_precios": len(recent),
+            "delta_valid": delta_valid,
+            "seg_hasta_delta_valid": seg_hasta_delta,
         }
 
         # ══════════════════════════════════════════════════════════════════
         # CAMINO 2 — Tendencia extrema + ESTABLE (solo 60s post-spike)
         # ══════════════════════════════════════════════════════════════════
-        if self.c2_enabled and elapsed >= self.c2_stabilize_sec and cambio_pct is not None:
+        if self.c2_enabled and elapsed >= self.c2_stabilize_sec and cambio_pct is not None and delta_valid:
             abs_cambio = abs(cambio_pct)
             if sym == "BOOM500":
                 if slope_pct <= self.c2_boom500_max_pct and abs_cambio <= self.c2_cambio_max_pct:
@@ -220,7 +236,7 @@ class SlopeTracker:
         # ══════════════════════════════════════════════════════════════════
         # CAMINO 3 — Breakout inminente (pendiente normal + giro hacia spike)
         # ══════════════════════════════════════════════════════════════════
-        if self.c3_enabled and cambio_pct is not None:
+        if self.c3_enabled and cambio_pct is not None and delta_valid:
             if sym == "BOOM500":
                 if slope_pct <= self.c3_boom500_slope_max_pct and cambio_pct >= self.c3_cambio_min_pct:
                     return True, "camino3_breakout", {**details, "pending_sec": self.c3_pending_sec}
@@ -234,7 +250,11 @@ class SlopeTracker:
         # |cambio| >= MIN → PENDING: cualquier movimiento en la pendiente es señal
         #   slope 0.012→0.008 ó 0.012→0.016 = ambos marcan posible spike
         # cambio=None → bloquea: menos de 240s de historia post-spike
+        # min_data_sec (60s) → guarda contra datos muy frescos aunque cambio != None
         # ══════════════════════════════════════════════════════════════════
+        if st.ultimo_spike_ts > 0 and elapsed < self.c1_min_data_sec:
+            return False, f"c1_bloqueado_min_data_{elapsed:.0f}s_of_{self.c1_min_data_sec}s", details
+
         if cambio_pct is None:
             return False, "c1_bloqueado_cambio_insuf_historia", details
 
@@ -330,12 +350,16 @@ class SlopeTracker:
         recent = [(t, p) for t, p in st.precios_buffer if t >= cutoff]
         slope_pct = self._calc_slope_pct(recent) if len(recent) >= 10 else None
         cambio_pct = self._calc_cambio(st, ts) if slope_pct is not None else None
+        delta_valid = (st.delta_grace_until <= 0.0) or (ts >= st.delta_grace_until)
         entry = {
             "ts": round(ts, 3),
             "symbol": symbol,
             "price": round(price, 4),
             "spike_ts": round(st.ultimo_spike_ts, 3),
+            "spike_count": st.spike_count,
             "estabilizado": st.estabilizado,
+            "delta_valid": delta_valid,
+            "seg_hasta_delta_valid": round(max(0.0, st.delta_grace_until - ts), 1) if not delta_valid else 0.0,
             "n_prices": len(recent),
             "slope_pct": round(slope_pct, 6) if slope_pct is not None else None,
             "cambio_pct": round(cambio_pct, 6) if cambio_pct is not None else None,

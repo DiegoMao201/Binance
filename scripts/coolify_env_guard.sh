@@ -49,6 +49,13 @@ REQUIRED_VARS=(
   "DERIV_D10_GHOST_STAKE_USDT=10.0"
   # FIX 1: bypass snap.allowed para D10 pending activo (kill switch: false revierte)
   "DERIV_D10_GHOST_FIRE_BYPASS_SNAP=true"
+  # FIX 2: delta grace post-spike (240s) — bloquea C2/C3 con datos sucios. C1 mín 60s.
+  "DERIV_D10_DELTA_GRACE_SEC=240"
+  "DERIV_D10_CAMINO1_MIN_DATA_SEC=60"
+  # FIX 3: max_hold 600s via spike_wait_timeout. DERIV_SPIKE_SL_ONLY_MODE+DISABLE_SPIKE_TIMEOUT
+  # fuerzan max_hold=0 en el contrato; el timeout real viene de este mapa.
+  # 420s → 600s para BOOM500/CRASH500 (antes se agotaban en ~482s incl. LLM respite).
+  "DERIV_SPIKE_WAIT_TIMEOUT_SEC_MAP=BOOM500:600,CRASH500:600,BOOM1000:600,CRASH1000:600"
   # D.9.0 — Hurst cancel: desactivado — no quiero que cancele ghost pending de D10
   "DERIV_D9_HURST_CANCEL_ENABLED=false"
   # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
@@ -113,12 +120,16 @@ fi
 
 CHANGED=0
 
-# Ensure volume mount for patched main_deriv.py survives Coolify redeploys.
-PATCH_MOUNT="'\/data\/deriv-bot-patches\/main_deriv.py:\/app\/src\/main_deriv.py'"
+# Ensure volume mounts for patched files survive Coolify redeploys.
 COMPOSE_FILE="${APP_BASE}/docker-compose.yaml"
 if [[ -f "${COMPOSE_FILE}" ]] && ! grep -q "deriv-bot-patches/main_deriv.py" "${COMPOSE_FILE}"; then
   log "MISSING volume mount for main_deriv.py patch → adding to compose"
   sed -i "s|'/data/deriv-logs:/data/logs'|'/data/deriv-logs:/data/logs'\n            - '/data/deriv-bot-patches/main_deriv.py:/app/src/main_deriv.py'|" "${COMPOSE_FILE}"
+  CHANGED=1
+fi
+if [[ -f "${COMPOSE_FILE}" ]] && [[ -f "/data/deriv-bot-patches/slope_tracker.py" ]] && ! grep -q "deriv-bot-patches/slope_tracker.py" "${COMPOSE_FILE}"; then
+  log "MISSING volume mount for slope_tracker.py patch → adding to compose"
+  sed -i "s|'\/data\/deriv-bot-patches\/main_deriv.py:\/app\/src\/main_deriv.py'|'/data/deriv-bot-patches/main_deriv.py:/app/src/main_deriv.py'\n            - '/data/deriv-bot-patches/slope_tracker.py:/app/src/strategies/slope_tracker.py'|" "${COMPOSE_FILE}"
   CHANGED=1
 fi
 
@@ -169,6 +180,13 @@ fi
 
 if [[ "${CHANGED}" -eq 0 && "${FRONTEND_CHANGED}" -eq 0 ]]; then
   # quiet exit
+  exit 0
+fi
+
+# Solo reiniciar el bot si el ENV del bot cambió (CHANGED=1).
+# Cambios solo en el frontend (FRONTEND_CHANGED=1) no requieren reiniciar el bot.
+if [[ "${CHANGED}" -eq 0 ]]; then
+  log "guard cycle complete (solo frontend changed=${FRONTEND_CHANGED}, bot sin reiniciar)"
   exit 0
 fi
 
