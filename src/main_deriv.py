@@ -2547,6 +2547,12 @@ class DerivDaemon:
             )
             return
         async with lock:
+            # entrada_diego gestiona BOOM500/CRASH500 cuando está activo — pipeline principal no opera
+            if (
+                self._entrada_diego.is_enabled()
+                and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+            ):
+                return
             try:
                 await self._pipeline(tick)
             except Exception:  # noqa: BLE001
