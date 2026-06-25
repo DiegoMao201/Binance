@@ -269,13 +269,25 @@ class SlopeTracker:
         Ventana reciente:  [now - W, now)
         Ventana anterior:  [now - 2W, now - W)
         cambio = slope_reciente - slope_anterior
+
+        IMPORTANTE: solo usa datos POST-ESTABILIZACIÓN (t >= spike_ts + stabilize_sec).
+        Excluir el período de recuperación post-spike (0..stabilize_sec) que es muy
+        volátil y haría el diferencial grande siempre, generando falsas señales en C1.
+        Con esto, cambio solo refleja dinámica del mercado ya estabilizado.
+        El primer cambio válido aparece en: spike_ts + stabilize_sec + 2×W
         """
         w = self.cambio_window_sec
         t_mid = now - w
         t_old = now - 2 * w
 
-        reciente = [(t, p) for t, p in st.precios_buffer if t >= t_mid]
-        anterior = [(t, p) for t, p in st.precios_buffer if t_old <= t < t_mid]
+        # Excluir datos de la ventana de recuperación post-spike
+        t_stabilized = (
+            st.ultimo_spike_ts + self.stabilize_sec
+            if st.ultimo_spike_ts > 0 else 0.0
+        )
+
+        reciente = [(t, p) for t, p in st.precios_buffer if t >= t_mid and t >= t_stabilized]
+        anterior = [(t, p) for t, p in st.precios_buffer if t_old <= t < t_mid and t >= t_stabilized]
 
         if len(reciente) < 5 or len(anterior) < 5:
             return None
