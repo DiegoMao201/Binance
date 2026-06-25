@@ -342,8 +342,17 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma post-spike ──────── */
+const ED_STAKE_LADDER = [10, 20, 40, 60];
+
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
+  const [now, setNow]         = useState(Date.now());
+
+  // Ticker local cada 500ms → countdown fluido sin depender del API
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (!["CRASH500", "BOOM500"].includes(symbol)) return;
@@ -355,7 +364,8 @@ function EntradaDiegoSection({ symbol }) {
         const data = res.ok ? await res.json() : null;
         if (!data) return;
         if (!data.enabled) { setEdState({ enabled: false }); return; }
-        if (data[symbol]) setEdState({ ...data[symbol], enabled: true });
+        // Guardamos _fetched_at para interpolar remaining_s localmente
+        if (data[symbol]) setEdState({ ...data[symbol], enabled: true, _fetched_at: Date.now() });
       } catch { /* noop */ }
     };
     doFetch();
@@ -366,7 +376,15 @@ function EntradaDiegoSection({ symbol }) {
   if (!["CRASH500", "BOOM500"].includes(symbol)) return null;
   if (!edState || !edState.enabled) return null;
 
-  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0 } = edState;
+  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0, _fetched_at } = edState;
+
+  // Countdown interpolado localmente — suave entre fetches
+  const secsSinceFetch = _fetched_at ? (now - _fetched_at) / 1000 : 0;
+  const remaining_live = Math.max(0, remaining_s - secsSinceFetch);
+
+  // Stake actual según nivel martingale
+  const stake = ED_STAKE_LADDER[Math.min(reopens, ED_STAKE_LADDER.length - 1)];
+  const martingaleLevel = reopens > 0 ? ` M${Math.min(reopens + 1, 4)}` : "";
 
   const PHASE_COLOR = {
     IDLE:         "rgba(90,100,115,0.7)",
@@ -391,18 +409,22 @@ function EntradaDiegoSection({ symbol }) {
   );
 
   const maxS = { ENTRY_WAIT: 300, OPEN: 600, PROFIT_TIMER: 180, COOLDOWN: 300 }[phase] || 1;
-  const elapsed = maxS - remaining_s;
-  const pct = Math.min(100, Math.max(0, (elapsed / maxS) * 100));
+  const pct  = Math.min(100, Math.max(0, ((maxS - remaining_live) / maxS) * 100));
+
+  const secs   = Math.round(remaining_live);
+  const mins   = Math.floor(secs / 60);
+  const secsR  = secs % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secsR}s` : `${secs}s`;
+
+  const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
+  const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`;
 
   const PHASE_LABEL = {
-    ENTRY_WAIT:   `⏳ WAIT ${Math.round(remaining_s)}s — abriendo post-spike`,
-    OPEN:         `📈 OPEN — ${Math.round(remaining_s)}s restantes`,
-    PROFIT_TIMER: `⏱ PROFIT+ TIMER — cierra en ${Math.round(remaining_s)}s`,
-    COOLDOWN:     `❄️ COOLDOWN — ${Math.round(remaining_s)}s`,
+    ENTRY_WAIT:   `abriendo en ${timeStr} · $${stake}${martingaleLevel}`,
+    OPEN:         `OPEN ${timeStr} · $${stake}${martingaleLevel}`,
+    PROFIT_TIMER: `cerrando en ${timeStr}`,
+    COOLDOWN:     `próxima entrada en ${timeStr}`,
   };
-
-  const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#888";
-  const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(4)}$`;
 
   return (
     <div style={{ ...base, color, background: `${color}14` }}>
@@ -412,20 +434,19 @@ function EntradaDiegoSection({ symbol }) {
           fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
           background: `${color}25`, color, letterSpacing: "0.05em",
         }}>{phase}</span>
+        {(phase === "OPEN" || phase === "PROFIT_TIMER") && (
+          <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{pnlStr}</span>
+        )}
       </div>
       <div style={{
         width: "100%", height: 3, background: `${color}33`,
         borderRadius: 2, margin: "4px 0", overflow: "hidden",
       }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: color, transition: "width 1s linear" }} />
+        <div style={{ width: `${pct}%`, height: "100%", background: color }} />
       </div>
       <div style={{ opacity: 0.85 }}>
         {PHASE_LABEL[phase] || phase}
-        {contract_id ? ` · #${contract_id}` : ""}
-        {phase === "OPEN" || phase === "PROFIT_TIMER" ? (
-          <span style={{ color: pnlColor, marginLeft: 5 }}>{pnlStr}</span>
-        ) : null}
-        {reopens > 0 ? ` · reopen×${reopens}` : ""}
+        {contract_id && phase === "OPEN" ? ` · #${contract_id}` : ""}
       </div>
     </div>
   );
