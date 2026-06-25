@@ -2248,6 +2248,17 @@ class DerivDaemon:
             from src.api.d6_ghost_state import d6_startup_cleanup
             d6_startup_cleanup()
 
+        # D.10.1: resetear estado D10 en disco al arrancar — siempre, independiente de
+        # D6_GHOST_ABSOLUTE_ENABLED. Sin esto el archivo d6_ghost_state.json mantiene
+        # el PENDING del run anterior y el panel muestra EXPIRED_GHOST indefinidamente.
+        try:
+            from src.api.d6_ghost_state import update_d6_state as _d10_state_reset
+            for _d10_rst_sym in ["BOOM500", "CRASH500"]:
+                _d10_state_reset(_d10_rst_sym, "WAITING")
+            _LOGGER.info("[D10_STARTUP] estados D10 reseteados a WAITING en disco")
+        except Exception as _d10_rst_exc:
+            _LOGGER.warning("[D10_STARTUP] error reset estado: %s", _d10_rst_exc)
+
         # One-shot history reset: if DERIV_CLEAR_HISTORY_ON_START=true, truncate
         # closed contracts and open contracts files so the dashboard starts fresh.
         if os.getenv("DERIV_CLEAR_HISTORY_ON_START", "").lower() in {"1", "true", "yes"}:
