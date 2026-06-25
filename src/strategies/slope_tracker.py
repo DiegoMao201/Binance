@@ -4,11 +4,12 @@ BOOM500 siempre tiene slope NEGATIVO (precio baja entre spikes → spike = rever
 CRASH500 siempre tiene slope POSITIVO (precio sube entre spikes → spike = reversal DOWN).
 Entramos en el estado NORMAL del mercado, esperando la reversión (spike).
 
-CAMINO 1 — Slope Level (estado normal del mercado = condición pre-spike):
-  BOOM500:  slope_pct <= -0.005%/min  (bajando = estado normal → esperar spike UP)
-  CRASH500: slope_pct >= +0.005%/min  (subiendo = estado normal → esperar spike DOWN)
+CAMINO 1 — Slope Level + tendencia sostenida:
+  BOOM500:  slope_pct <= -0.005%/min AND |cambio| <= C1_CAMBIO_MAX (tendencia estable ≥2 min)
+  CRASH500: slope_pct >= +0.005%/min AND |cambio| <= C1_CAMBIO_MAX (tendencia estable ≥2 min)
+  cambio=None bloquea: necesita 240s de historia (2 × cambio_window_sec)
   Pending: 120s (DERIV_D10_PENDING_CAMINO1_SEC)
-  Stabilize: 180s global post-spike
+  Stabilize: 180s global post-spike + 240s buffer para cambio
 
 CAMINO 2 — Tendencia extrema + estable (alta confianza en spike grande):
   BOOM500:  slope_pct <= -0.018%/min (bajada fuerte) AND |cambio| <= 0.010% (estable)
@@ -82,9 +83,12 @@ class SlopeTracker:
         # cambio_pct = slope(últimos N seg) − slope(N seg anteriores)
         self.cambio_window_sec = _int("DERIV_D10_CAMBIO_WINDOW_SEC", 120)
 
-        # CAMINO 1 — Slope Level (estado normal del mercado)
+        # CAMINO 1 — Slope Level (estado normal + tendencia sostenida)
+        # Requiere slope en dirección correcta Y cambio estable (tendencia consistente ≥ 2 min)
+        # cambio_pct None → bloquea (menos de 240s de historia post-spike)
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
+        self.c1_cambio_max_pct = _float("DERIV_D10_C1_CAMBIO_MAX_PCT", 0.006)
         self.c1_pending_sec = _int("DERIV_D10_PENDING_CAMINO1_SEC", 120)
 
         # CAMINO 2 — Tendencia extrema + ESTABLE
@@ -218,8 +222,20 @@ class SlopeTracker:
                     return True, "camino3_breakout", {**details, "pending_sec": self.c3_pending_sec}
 
         # ══════════════════════════════════════════════════════════════════
-        # CAMINO 1 — Slope Level (estado normal del mercado, gate por defecto)
+        # CAMINO 1 — Slope Level + tendencia sostenida (≥2 min estable)
+        # Requiere slope en dirección correcta Y |cambio| ≤ umbral
+        # cambio=None → bloquea: menos de 240s de historia post-spike
         # ══════════════════════════════════════════════════════════════════
+        if cambio_pct is None:
+            return False, "c1_bloqueado_cambio_insuf_historia", details
+
+        if abs(cambio_pct) > self.c1_cambio_max_pct:
+            return (
+                False,
+                f"c1_bloqueado_cambio={cambio_pct:+.6f}_max={self.c1_cambio_max_pct:+.4f}",
+                details,
+            )
+
         if sym == "BOOM500":
             if slope_pct <= self.c1_boom500_max_pct:
                 return True, "camino1_level", {**details, "pending_sec": self.c1_pending_sec}
