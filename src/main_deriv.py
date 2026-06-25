@@ -3685,7 +3685,7 @@ class DerivDaemon:
                 "[CONSECUTIVE_GUARD] %s MAX_PRESSURE_OVERRIDE | %s",
                 tick.symbol, _ceg.get("reason", ""),
             )
-        elif _ceg["blocked"] and not (_d6_enabled and _d6_ghost_likely):
+        elif _ceg["blocked"] and not (_d6_enabled and _d6_ghost_likely) and not _d10_pg_exempt:
             if _ceg.get("allow_chase_bypass"):
                 # L.6.2: score >= 6.0 AND not contaminated → allow despite cooldown
                 _contam = _detect_spike_contamination(
@@ -3866,7 +3866,7 @@ class DerivDaemon:
         }
         if _dry_gate_en and is_spike_market(tick.symbol) and not _d6_enabled:
             _dg_imm = self._risk.get_spike_imminence_state(tick.symbol)
-            if _dg_imm.get("state") == "DRY":
+            if _dg_imm.get("state") == "DRY" and not _d10_pg_exempt:
                 _dg_key = f"{tick.symbol}:dry_gate"
                 _dg_now = time.time()
                 _dg_last_emit = float(
@@ -4115,7 +4115,7 @@ class DerivDaemon:
         # solo empieza DESPUÉS de que termina el cooldown, no durante.
         # D.10.1: pending d10_* aplica las mismas reglas que ghost regular —
         # si llega un spike durante el pending, cooldown lo cancela igual.
-        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and not _d10_pg_exempt:
             _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
             _D10_PENDING_SYMS.discard(tick.symbol.upper())
@@ -4161,9 +4161,9 @@ class DerivDaemon:
             if tick.symbol.upper() in _tb_syms:
                 _tb_min = float(os.getenv("DERIV_TREND_SETUP_MIN_SCORE", "7.0") or 7.0)
                 if snap.score < _tb_min:
-                    if _d6_ghost_fire:
+                    if _d6_ghost_fire or _d10_pg_exempt:
                         _LOGGER.info(
-                            "[D6_GHOST_ALLOW] %s TREND_BLOCK bypass | score=%.2f<%.1f → ghost mandates",
+                            "[D6_GHOST_ALLOW] %s TREND_BLOCK bypass | score=%.2f<%.1f → ghost/d10 mandates",
                             tick.symbol, snap.score, _tb_min,
                         )
                     else:
@@ -5131,16 +5131,16 @@ class DerivDaemon:
             )
             _prog_ratio = _prog_bonus_info["ratio"]
 
-            # Aplicar bono progresivo al score
+            # Aplicar bono progresivo al score (no aplica para D10: slope/delta reemplazan timing)
             _prog_score_bonus = float(_prog_bonus_info["score_bonus"])
-            if _prog_score_bonus > 0.0:
+            if _prog_score_bonus > 0.0 and not _d10_pg_exempt:
                 snap.score = round(min(10.0, snap.score + _prog_score_bonus), 3)
 
-            # Compound Hurst + Time signal (sin cambios vs V1)
+            # Compound Hurst + Time signal (no aplica para D10: timing gestionado por delta grace)
             _prog_hurst = float(_eval_hurst if _eval_hurst is not None else 0.5)
             _prog_compound = _compute_hurst_time_compound_bonus(_prog_hurst, _prog_ratio)
             _prog_compound_bonus = float(_prog_compound["bonus"])
-            if _prog_compound_bonus != 0.0:
+            if _prog_compound_bonus != 0.0 and not _d10_pg_exempt:
                 snap.score = round(min(10.0, max(0.0, snap.score + _prog_compound_bonus)), 3)
 
             # Registrar en score_breakdown para auditoría (V2: nuevas claves ceiling_*)
@@ -5167,6 +5167,26 @@ class DerivDaemon:
                     _prog_ceiling_s, _prog_ceiling_info["source"],
                     _prog_elapsed_s, snap.score,
                 )
+
+        # D.10.1 — Fast path: slope+delta confirmados → solo score mínimo bloquea
+        # Todos los gates de timing, régimen y AI quedan anulados para D10 pending.
+        if _d10_pg_exempt:
+            _d10_min_s = float(os.getenv("DERIV_D10_GHOST_MIN_SCORE", "5.5") or 5.5)
+            if snap.score < _d10_min_s:
+                self._log_entry_block(
+                    tick.symbol, "D10_SCORE_GATE",
+                    score=snap.score, effective_min_score=_d10_min_s,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                _D10_PENDING_SYMS.discard(tick.symbol.upper())
+                return
+            snap.score_breakdown["d10_gate_passed"] = True
+            _LOGGER.info(
+                "[D10_GATE_PASS] %s score=%.2f≥%.2f → gates bypassed (slope/delta confirmed)",
+                tick.symbol, snap.score, _d10_min_s,
+            )
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
@@ -5445,9 +5465,9 @@ class DerivDaemon:
                     )
                     snap.score_breakdown["master_key_bypass"] = "REGIME_SCORE_GATE"
                     snap.score_breakdown["master_key_rng"] = _mk_rng
-                elif _d6_ghost_fire:
+                elif _d6_ghost_fire or _d10_pg_exempt:
                     _LOGGER.info(
-                        "[D6_GHOST_ALLOW] %s REGIME_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
+                        "[D6_GHOST_ALLOW] %s REGIME_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost/d10 mandates",
                         tick.symbol, snap.score, _regime_min,
                     )
                     snap.score_breakdown["regime_gate_bypassed_d6"] = True
@@ -5576,9 +5596,9 @@ class DerivDaemon:
                 )
                 snap.score_breakdown["master_key_bypass"] = "PROFILE_SCORE_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s PROFILE_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s PROFILE_SCORE_GATE bypass | score=%.2f<min=%.2f → ghost/d10 mandates",
                     tick.symbol, snap.score, _profile_min_score,
                 )
                 snap.score_breakdown["profile_gate_bypassed_d6"] = True
@@ -5597,9 +5617,9 @@ class DerivDaemon:
             elastic_z2=_is_z2,
         )
         if not _post_spike_ok:
-            if _d6_ghost_fire:
+            if _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s POST_SPIKE_STRENGTH_VETO bypass → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s POST_SPIKE_STRENGTH_VETO bypass → ghost/d10 mandates",
                     tick.symbol,
                 )
                 snap.score_breakdown["pssv_bypassed_d6"] = True
@@ -5777,7 +5797,7 @@ class DerivDaemon:
             # D.10 ghost bypass: pending D10 activo ignora snap.allowed/side.
             # Kill switch: DERIV_D10_GHOST_FIRE_BYPASS_SNAP=false revierte.
             _d10_snap_bypass = (
-                _d6_ghost_fire
+                (_d6_ghost_fire or _d10_pg_exempt)
                 and tick.symbol.upper() in _D10_PENDING_SYMS
                 and str(os.getenv("DERIV_D10_GHOST_FIRE_BYPASS_SNAP", "true")).lower() in {"1", "true", "yes", "on"}
             )
@@ -6015,9 +6035,9 @@ class DerivDaemon:
                 snap.score_breakdown["master_key_bypass"] = "RNG_PROBABILITY_GATE"
                 snap.score_breakdown["master_key_rng"] = _mk_rng
                 snap.score_breakdown["rng_actual_at_bypass"] = _rng_prob
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s RNG_PROBABILITY_GATE bypass | prob=%d<threshold=%d → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s RNG_PROBABILITY_GATE bypass | prob=%d<threshold=%d → ghost/d10 mandates",
                     tick.symbol, _rng_prob, _rng_threshold,
                 )
                 snap.score_breakdown["rng_gate_bypassed_d6"] = True
@@ -6250,9 +6270,9 @@ class DerivDaemon:
         _k5_enter_order: PendingOrder | None = None
 
         if _k5_action == "WAIT":
-            if _d6_ghost_fire:
+            if _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s K5_WAIT bypass → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s K5_WAIT bypass → ghost/d10 mandates",
                     tick.symbol,
                 )
             else:
@@ -6289,9 +6309,9 @@ class DerivDaemon:
             setup_type=_pm_setup or None,
         )
         if _pm_check["action"] == "BLOCK":
-            if _d6_ghost_fire:
+            if _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s PM_FILTER bypass | match=%s → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s PM_FILTER bypass | match=%s → ghost/d10 mandates",
                     tick.symbol, _pm_check.get("match_level", "?"),
                 )
             else:
@@ -6314,9 +6334,12 @@ class DerivDaemon:
         # If AI approves (or is skipped/errored), execute the order.
         # ═══════════════════════════════════════════════════════════════════
         _skip_analyze = (
-            _D6_SKIP_AI_VETO
-            and _d6_ghost_fire
-            and _k5_enter_order is None
+            (
+                _D6_SKIP_AI_VETO
+                and _d6_ghost_fire
+                and _k5_enter_order is None
+            )
+            or _d10_pg_exempt
         )
         try:
             if _skip_analyze:
@@ -6365,9 +6388,9 @@ class DerivDaemon:
                     tick.symbol, str(analysis.ai_reason or "")[:80],
                 )
                 snap.score_breakdown["ai_veto_bypassed_expired_pending"] = True
-            elif _d6_ghost_fire:
+            elif _d6_ghost_fire or _d10_pg_exempt:
                 _LOGGER.info(
-                    "[D6_GHOST_ALLOW] %s AI_VETO bypass | ai_reason=%s → ghost mandates",
+                    "[D6_GHOST_ALLOW] %s AI_VETO bypass | ai_reason=%s → ghost/d10 mandates",
                     tick.symbol, str(analysis.ai_reason or "")[:80],
                 )
                 snap.score_breakdown["ai_veto_bypassed_d6"] = True
