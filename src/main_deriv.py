@@ -2789,48 +2789,67 @@ class DerivDaemon:
                 if _d10_has_open:
                     return  # posición ya abierta → no crear pending D10
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                    # Cooldown post-racha: bloquea creación de pending (no bloquea scoring)
-                    if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
-                        _d10_cd = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol) or {}
-                        _LOGGER.info(
-                            "[D10] %s cooldown activo (spikes=%d restante=%ds) → sin pending",
-                            tick.symbol, _d10_cd.get("spike_count", 0), _d10_cd.get("remaining_seconds", 0),
+                    # D.10.1 MAX_HOLD+SPIKE GATE: si el último hold capturó un spike
+                    # (profit negativo pero spike ocurrió), esperar nuevo spike post-cierre.
+                    # "abrir de una" solo aplica cuando NO hubo spike durante el hold.
+                    _mh_info = self._executor.get_maxhold_exit_info(tick.symbol)
+                    if _mh_info.get("is_maxhold"):
+                        _mh_close_ts = float(_mh_info.get("closed_at_ts") or 0.0)
+                        _mh_open_ts = float(_mh_info.get("opened_at_ts") or 0.0)
+                        _mh_had_spike = self._d9_had_spike_during_hold(
+                            tick.symbol, _mh_open_ts, _mh_close_ts
                         )
-                        self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_cooldown_active")
-                        _d10_entry_suppressed = True
-                        # No return — pipeline continúa para scoring/panel
-                    else:
-                        _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
-                        if not _d10_ok:
-                            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+                        _last_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
+                        if _mh_had_spike and _last_spike_ts <= _mh_close_ts:
+                            _LOGGER.info(
+                                "[D10] %s max_hold cogió spike → esperar nuevo spike post-cierre (ciclo normal)",
+                                tick.symbol,
+                            )
+                            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_maxhold_spike_wait")
+                            _d10_entry_suppressed = True
+                    if not _d10_entry_suppressed:
+                        # Cooldown post-racha: bloquea creación de pending (no bloquea scoring)
+                        if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+                            _d10_cd = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol) or {}
+                            _LOGGER.info(
+                                "[D10] %s cooldown activo (spikes=%d restante=%ds) → sin pending",
+                                tick.symbol, _d10_cd.get("spike_count", 0), _d10_cd.get("remaining_seconds", 0),
+                            )
+                            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_cooldown_active")
                             _d10_entry_suppressed = True
                             # No return — pipeline continúa para scoring/panel
                         else:
-                            # D.10.1: slope gate pasa — crear pending con wait por camino
-                            _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
-                            _d10_wait = int(_d10_det.get("pending_sec", 120))
-                            _d10_qtier = f"d10_{_d10_camino}"
-                            PENDING_ENTRY_WATCHER.on_signal(
-                                tick.symbol, _d10_side, score=7.5,
-                                median_cycle_s=600.0, force_wait_s=_d10_wait,
-                            )
-                            _d6_update_state(tick.symbol, "PENDING", {
-                                "score": 7.5,
-                                "side": _d10_side,
-                                "quality_tier": _d10_qtier,
-                                "wait_s": _d10_wait,
-                                "created_at": time.time(),
-                                "expires_at": time.time() + _d10_wait,
-                                "remaining_seconds": _d10_wait,
-                                "slope_pct": _d10_det.get("slope_pct"),
-                                "cambio_pct": _d10_det.get("cambio_pct"),
-                            })
-                            _LOGGER.info(
-                                "[D10_PASSED] %s camino=%s slope_pct=%s cambio_pct=%s wait=%ds",
-                                tick.symbol, _d10_camino,
-                                _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
-                            )
-                            return
+                            _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
+                            if not _d10_ok:
+                                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+                                _d10_entry_suppressed = True
+                                # No return — pipeline continúa para scoring/panel
+                            else:
+                                # D.10.1: slope gate pasa — crear pending con wait por camino
+                                _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
+                                _d10_wait = int(_d10_det.get("pending_sec", 120))
+                                _d10_qtier = f"d10_{_d10_camino}"
+                                PENDING_ENTRY_WATCHER.on_signal(
+                                    tick.symbol, _d10_side, score=7.5,
+                                    median_cycle_s=600.0, force_wait_s=_d10_wait,
+                                )
+                                _d6_update_state(tick.symbol, "PENDING", {
+                                    "score": 7.5,
+                                    "side": _d10_side,
+                                    "quality_tier": _d10_qtier,
+                                    "wait_s": _d10_wait,
+                                    "created_at": time.time(),
+                                    "expires_at": time.time() + _d10_wait,
+                                    "remaining_seconds": _d10_wait,
+                                    "slope_pct": _d10_det.get("slope_pct"),
+                                    "cambio_pct": _d10_det.get("cambio_pct"),
+                                })
+                                _LOGGER.info(
+                                    "[D10_PASSED] %s camino=%s slope_pct=%s cambio_pct=%s wait=%ds",
+                                    tick.symbol, _d10_camino,
+                                    _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
+                                )
+                                return
                 # Pending activo → cae al ghost path sin retornar
 
         # ═══════════════════════════════════════════════════════════════════
