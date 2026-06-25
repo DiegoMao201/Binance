@@ -5774,26 +5774,42 @@ class DerivDaemon:
             "effective_min_score": snap.effective_min_score,
         }
         if not snap.allowed or snap.side is None:
-            self._log_entry_block(
-                tick.symbol,
-                "; ".join(snap.reasons) if snap.reasons else "MATH_REJECTED",
-                score=getattr(snap, "score", 0.0),
-                effective_min_score=snap.effective_min_score,
-                side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                score_breakdown=snap.score_breakdown,
+            # D.10 ghost bypass: pending D10 activo ignora snap.allowed/side.
+            # Kill switch: DERIV_D10_GHOST_FIRE_BYPASS_SNAP=false revierte.
+            _d10_snap_bypass = (
+                _d6_ghost_fire
+                and tick.symbol.upper() in _D10_PENDING_SYMS
+                and str(os.getenv("DERIV_D10_GHOST_FIRE_BYPASS_SNAP", "true")).lower() in {"1", "true", "yes", "on"}
             )
-            self._record_decision(
-                symbol=tick.symbol, allowed=False, side=snap.side,
-                score=getattr(snap, "score", 0.0),
-                reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
-                extra=decision_extra,
-            )
-            self._spike_enrich(
-                tick.symbol, bot_entered=False,
-                block_reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
-                score=getattr(snap, "score", 0.0),
-            )
-            return
+            if _d10_snap_bypass:
+                if snap.side is None:
+                    _pew_st = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}
+                    snap.side = _pew_st.get("side")
+                _LOGGER.info(
+                    "[D10_FIRE_BYPASS_SNAP] %s score=%.2f side=%s → bypass snap.allowed (d10 pending active)",
+                    tick.symbol, float(snap.score or 0.0), snap.side,
+                )
+            else:
+                self._log_entry_block(
+                    tick.symbol,
+                    "; ".join(snap.reasons) if snap.reasons else "MATH_REJECTED",
+                    score=getattr(snap, "score", 0.0),
+                    effective_min_score=snap.effective_min_score,
+                    side=snap.side, regime=snap.regime, hurst=_eval_hurst,
+                    score_breakdown=snap.score_breakdown,
+                )
+                self._record_decision(
+                    symbol=tick.symbol, allowed=False, side=snap.side,
+                    score=getattr(snap, "score", 0.0),
+                    reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
+                    extra=decision_extra,
+                )
+                self._spike_enrich(
+                    tick.symbol, bot_entered=False,
+                    block_reason="; ".join(snap.reasons) if snap.reasons else "risk_rejected",
+                    score=getattr(snap, "score", 0.0),
+                )
+                return
 
         # exhaustion_gate and anti_retrace_bounce removed 2026-06-16: both use
         # price delta which is random noise in Deriv synthetics. Score (scarcity)

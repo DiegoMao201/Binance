@@ -47,6 +47,8 @@ REQUIRED_VARS=(
   "DERIV_D10_PENDING_CAMINO1_SEC=120"
   # D.10 ghost stake: $10 fijo (bypass edge sizing)
   "DERIV_D10_GHOST_STAKE_USDT=10.0"
+  # FIX 1: bypass snap.allowed para D10 pending activo (kill switch: false revierte)
+  "DERIV_D10_GHOST_FIRE_BYPASS_SNAP=true"
   # D.9.0 — Hurst cancel: desactivado — no quiero que cancele ghost pending de D10
   "DERIV_D9_HURST_CANCEL_ENABLED=false"
   # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
