@@ -36,35 +36,26 @@ REQUIRED_VARS=(
   "DYNAMIC_AI_SYMBOL_LOCKOUT_SEC=7200"
   "DYNAMIC_AI_SYMBOL_DD_MIN_TRADES=6"
   "DYNAMIC_AI_24H_FEEDBACK_INTERVAL_SEC=21600"
-  "DERIV_SYMBOL_HOUR_VETO_MAP=CRASH500:21,BOOM600:15,BOOM500:6,BOOM500:7,BOOM500:11"
-  # Tick subscription: todos los BOOM/CRASH para medición de pendiente (D10).
-  # BOOM1000/CRASH1000 están en FORCE_DISABLED → no tradean, pero el slope_tracker
-  # los mide para calibrar umbrales. Sin esta línea Coolify excluye las 1000-variants.
-  "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000"
+  "DERIV_SYMBOL_HOUR_VETO_MAP=CRASH500:21,BOOM500:6,BOOM500:7,BOOM500:11"
+  # Tick subscription: solo BOOM500/CRASH500 (activos) + BOOM1000/CRASH1000 (medición D10).
+  # 600/900 completamente excluidos — sin ticks, sin trades, sin nada.
+  "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM1000,CRASH1000"
   # D.10.1 — Slope gate: 90s estabilización (era 180s), C1 umbral 0.005% (era 0.002%)
   "DERIV_D10_SPIKE_STABILIZE_SEC=90"
   "DERIV_D10_C1_CAMBIO_MIN_PCT=0.005"
-  # 2026-06-01: CRASH900 reactivado — debe seguir FUERA de force-disabled aunque
-  # Coolify regenere .env desde su DB. Guard self-healing enforcement.
-  "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM900,BOOM1000,CRASH1000,R_50,R_75,R_100"
+  # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
+  "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000,R_50,R_75,R_100"
   # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
-  "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS=BOOM900,CRASH900"
+  "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS="
   "DERIV_ANTI_RETRACE_RANGE_FRAC=0.65"
   "DERIV_ANTI_RETRACE_HOT_BYPASS_MIN_SCORE=7.5"
-  # 2026-06-11: TREND bloqueado POR SÍMBOLO — solo CRASH (WR=27-38%). BOOM500/600 usan 7.0.
-  # CRASH WR: CRASH500=27.1%, CRASH600=38.2%, CRASH900=28.6% → pérdidas sistemáticas.
-  # BOOM500 TREND WR=54.5% → no bloquear. BOOM600 sin historial TREND → no bloquear.
-  "DERIV_TREND_BLOCK_SYMBOLS=BOOM500,BOOM600,BOOM900,BOOM1000,CRASH500,CRASH600,CRASH900,CRASH1000"
+  # 2026-06-11: TREND bloqueado — solo símbolos activos. 600/900 inhabilitados.
+  "DERIV_TREND_BLOCK_SYMBOLS=BOOM500,BOOM1000,CRASH500,CRASH1000"
   "DERIV_TREND_SETUP_MIN_SCORE=7.0"
-  # 2026-06-11: max_hold reducido 900→480s — 110 trades timeout costaron -$160 (avg -$1.46 cada uno)
-  # 2026-06-12: CRASH900 max_hold 600→750s — P50 gap=523t, con 600s solo 55% prob spike; 750s → ~62%
+  # max_hold solo para símbolos activos (500) y medición (1000). 600/900 inhabilitados.
   "DERIV_MAX_HOLD_CRASH500=480"
-  "DERIV_MAX_HOLD_CRASH600=540"
-  "DERIV_MAX_HOLD_CRASH900=750"
   "DERIV_MAX_HOLD_CRASH1000=700"
   "DERIV_MAX_HOLD_BOOM500=480"
-  "DERIV_MAX_HOLD_BOOM600=540"
-  "DERIV_MAX_HOLD_BOOM900=600"
   "DERIV_MAX_HOLD_BOOM1000=700"
   # 2026-06-11: vision LLM model correcto (gemini-flash-1.5 no existe en OpenRouter)
   "DYNAMIC_AI_VISION_MODEL=google/gemini-2.5-flash-lite"
@@ -77,9 +68,7 @@ REQUIRED_VARS=(
   # MATURITY_GATE: revertido a 0.70 — 1.80 creaba gap imposible (FVG TTL=600s < threshold 795s)
   # El FVG ancla dura 600s. Con 0.70×P50 (244-400s), el FVG sigue activo al pasar el gate.
   "DERIV_MATURITY_GATE_FRAC=0.70"
-  # DRY_GATE por símbolo: BOOM600 en SECO puede entrar a score≥6.5 (sin FVG activo)
-  # CRASH900 ya estaba en 6.0. Ahora BOOM600 también puede entrar en sequía.
-  "DERIV_DRY_OVERRIDE_SCORE_MAP=CRASH900:6.0,BOOM600:6.5"
+  "DERIV_DRY_OVERRIDE_SCORE_MAP="
 )
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
