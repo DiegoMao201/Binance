@@ -2878,7 +2878,7 @@ class DerivDaemon:
                                     tick.symbol, _d10_camino,
                                     _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
                                 )
-                                return
+                                # No return — evaluate() corre para no pausar EVALUACION
                 # Pending activo → refrescar countdown en disco (evita EXPIRED_GHOST:
                 # _PENDING_TTL_S=90s < D10 wait=120s → sin refresh el panel marca bug)
                 if tick.symbol.upper() in _D10_PENDING_SYMS:
@@ -5172,21 +5172,26 @@ class DerivDaemon:
         # Todos los gates de timing, régimen y AI quedan anulados para D10 pending.
         if _d10_pg_exempt:
             _d10_min_s = float(os.getenv("DERIV_D10_GHOST_MIN_SCORE", "5.5") or 5.5)
-            if snap.score < _d10_min_s:
+            # Usar promedio acumulado del watcher — un tick bajo no cancela (ruido tick-a-tick)
+            _d10_pe_st = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
+            _d10_avg_s = float(_d10_pe_st.get("avg_score") or snap.score)
+            if _d10_avg_s < _d10_min_s:
                 self._log_entry_block(
                     tick.symbol, "D10_SCORE_GATE",
                     score=snap.score, effective_min_score=_d10_min_s,
                     side=snap.side, regime=snap.regime, hurst=_eval_hurst,
-                    score_breakdown=snap.score_breakdown,
+                    score_breakdown={**snap.score_breakdown, "d10_avg_score": round(_d10_avg_s, 2)},
                 )
                 PENDING_ENTRY_WATCHER.cancel(tick.symbol)
                 _D10_PENDING_SYMS.discard(tick.symbol.upper())
-                return
-            snap.score_breakdown["d10_gate_passed"] = True
-            _LOGGER.info(
-                "[D10_GATE_PASS] %s score=%.2f≥%.2f → gates bypassed (slope/delta confirmed)",
-                tick.symbol, snap.score, _d10_min_s,
-            )
+                _d10_pg_exempt = False  # pipeline continúa sin bypass para no pausar eval
+            else:
+                snap.score_breakdown["d10_gate_passed"] = True
+                snap.score_breakdown["d10_avg_score"] = round(_d10_avg_s, 2)
+                _LOGGER.info(
+                    "[D10_GATE_PASS] %s score=%.2f avg=%.2f≥%.2f → gates bypassed",
+                    tick.symbol, snap.score, _d10_avg_s, _d10_min_s,
+                )
 
         # ── Late-stage telemetry cache: imminence and scarcity are added to
         # score_breakdown AFTER risk.evaluate() (lines ~3395 and ~3468).
