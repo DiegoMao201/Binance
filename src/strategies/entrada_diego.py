@@ -174,16 +174,14 @@ class EntradaDiego:
             self._check_new_spike(sym, state, last_spike_ts, now)
 
         elif state.phase == "ENTRY_WAIT":
-            # Nuevo spike → reset timer
+            # Spike durante wait: solo actualizar last_spike_ts, NO resetear timer.
+            # Con spikes frecuentes (cada ~5min) el reset impedía abrir nunca.
             if last_spike_ts > state.last_spike_ts and last_spike_ts > 0:
                 state.last_spike_ts = last_spike_ts
-                state.entry_wait_until = last_spike_ts + ENTRY_WAIT_S
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s SPIKE durante wait → reset: abre en %.0fs",
+                    "[ENTRADA_DIEGO] %s spike durante ENTRY_WAIT (ignorado) → abre en %.0fs",
                     sym, state.entry_wait_until - now,
                 )
-                self._persist(now)
-                return
 
             if now >= state.entry_wait_until:
                 await self._open(sym, state, now)
