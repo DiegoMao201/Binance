@@ -5,11 +5,11 @@ CRASH500 siempre tiene slope POSITIVO (precio sube entre spikes → spike = reve
 Entramos en el estado NORMAL del mercado, esperando la reversión (spike).
 
 CAMINO 1 — Slope Level + tendencia sostenida:
-  BOOM500:  slope_pct <= -0.005%/min AND |cambio| <= C1_CAMBIO_MAX (tendencia estable ≥2 min)
-  CRASH500: slope_pct >= +0.005%/min AND |cambio| <= C1_CAMBIO_MAX (tendencia estable ≥2 min)
+  BOOM500:  slope_pct <= -0.005%/min AND |cambio| >= C1_CAMBIO_MIN (dinámica detectada)
+  CRASH500: slope_pct >= +0.005%/min AND |cambio| >= C1_CAMBIO_MIN (dinámica detectada)
   cambio=None bloquea: necesita 240s de historia (2 × cambio_window_sec)
   Pending: 120s (DERIV_D10_PENDING_CAMINO1_SEC)
-  Stabilize: 90s global post-spike + 240s buffer para cambio (cambio disponible ~240s post-spike)
+  Stabilize: 0s — los 2×120s de ventanas son suficiente separación post-spike
 
 CAMINO 2 — Tendencia extrema + estable (alta confianza en spike grande):
   BOOM500:  slope_pct <= -0.018%/min (bajada fuerte) AND |cambio| <= 0.010% (estable)
@@ -76,7 +76,10 @@ class SlopeTracker:
             return float(os.getenv(key, str(default)) or default)
 
         self.enabled = _bool("DERIV_D10_SLOPE_GATE_ENABLED")
-        self.stabilize_sec = _int("DERIV_D10_SPIKE_STABILIZE_SEC", 90)
+        # 0s: los 2×120s de ventanas cambio ya garantizan datos post-spike separados.
+        # El período de recuperación (primeros 0-120s) queda en "anterior"; el período
+        # más estable (120-240s) en "reciente". Sin retraso extra encima de 2×120s.
+        self.stabilize_sec = _int("DERIV_D10_SPIKE_STABILIZE_SEC", 0)
         self.window_sec = _int("DERIV_D10_SLOPE_WINDOW_SEC", 600)
         self.log_interval_sec = _int("DERIV_D10_LOG_INTERVAL_SEC", 30)
         self.log_path = os.getenv("DERIV_D10_LOG_PATH", "/data/logs/slope_history.jsonl")
@@ -100,7 +103,7 @@ class SlopeTracker:
         self.c2_boom500_max_pct = _float("DERIV_D10_PN5_BOOM500_SLOPE_MAX_PCT", -0.018)
         self.c2_crash500_min_pct = _float("DERIV_D10_PN5_CRASH500_SLOPE_MIN_PCT", 0.022)
         self.c2_cambio_max_pct = _float("DERIV_D10_PN5_CAMBIO_MAX_PCT", 0.010)
-        self.c2_stabilize_sec = _int("DERIV_D10_PN5_STABILIZE_SEC", 60)
+        self.c2_stabilize_sec = _int("DERIV_D10_PN5_STABILIZE_SEC", 0)
         self.c2_pending_sec = max(1, _int("DERIV_D10_PENDING_CAMINO2_SEC", 5))
 
         # CAMINO 3 — Breakout inminente

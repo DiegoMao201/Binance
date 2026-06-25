@@ -40,8 +40,9 @@ REQUIRED_VARS=(
   # Tick subscription: solo BOOM500/CRASH500 (activos) + BOOM1000/CRASH1000 (medición D10).
   # 600/900 completamente excluidos — sin ticks, sin trades, sin nada.
   "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM1000,CRASH1000"
-  # D.10.1 — Slope gate: 90s estabilización (era 180s), C1 umbral 0.005% (era 0.002%)
-  "DERIV_D10_SPIKE_STABILIZE_SEC=90"
+  # D.10.1 — Slope gate: 0s estabilización (2×120s de ventanas son suficiente), C1 umbral 0.005%
+  "DERIV_D10_SPIKE_STABILIZE_SEC=0"
+  "DERIV_D10_PN5_STABILIZE_SEC=0"
   "DERIV_D10_C1_CAMBIO_MIN_PCT=0.005"
   # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
   "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000,R_50,R_75,R_100"

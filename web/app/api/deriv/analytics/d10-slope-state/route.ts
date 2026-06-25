@@ -15,7 +15,7 @@ const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180
 // cambio=null bloquea C1 (necesita ~240s de historia post-spike)
 const C1_BOOM_MAX    = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MAX_PCT  || '-0.005');
 const C1_CRASH_MIN   = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MIN_PCT || '0.005');
-const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.002');
+const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.005');
 const C1_PENDING     = parseInt(process.env.DERIV_D10_PENDING_CAMINO1_SEC || '120', 10);
 
 // Camino 2 — Tendencia extrema + estable (|cambio| PEQUEÑO = tendencia confirmada)

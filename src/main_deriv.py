@@ -2788,6 +2788,18 @@ class DerivDaemon:
                 )
                 if _d10_has_open:
                     return  # posición ya abierta → no crear pending D10
+                # Deploy sync gate: no crear pending hasta primer spike post-reinicio.
+                # El bloque D10 corre antes del gate global (línea 2855) y con 1000
+                # ticks precargados puede disparar inmediatamente con datos viejos.
+                if tick.symbol.upper() in self._post_deploy_spike_gate:
+                    self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_deploy_sync_wait")
+                    _d10_entry_suppressed = True
+                    # Cancelar pending que pudo haberse creado con datos pre-reinicio
+                    if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                        _pe_q = str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "")
+                        if _pe_q.startswith("d10_"):
+                            PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                            _d6_update_state(tick.symbol, "CANCELLED", reason="d10_deploy_sync_wait")
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
                     # D.10.1 MAX_HOLD+SPIKE GATE: si el último hold capturó un spike
                     # (profit negativo pero spike ocurrió), esperar nuevo spike post-cierre.
@@ -2850,7 +2862,14 @@ class DerivDaemon:
                                     _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
                                 )
                                 return
-                # Pending activo → cae al ghost path sin retornar
+                # Pending activo → refrescar countdown en disco (evita EXPIRED_GHOST:
+                # _PENDING_TTL_S=90s < D10 wait=120s → sin refresh el panel marca bug)
+                if PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
+                    _pe_refresh = PENDING_ENTRY_WATCHER.get_state().get(tick.symbol, {})
+                    if str(_pe_refresh.get("quality_tier", "")).startswith("d10_"):
+                        _d6_update_state(tick.symbol, "PENDING", {
+                            "remaining_seconds": max(0, int(_pe_refresh.get("remaining_s") or 0)),
+                        })
 
         # ═══════════════════════════════════════════════════════════════════
         # D.deploy SYNC GATE — bloquear hasta primer spike post-deploy
