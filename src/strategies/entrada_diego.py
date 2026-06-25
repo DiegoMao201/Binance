@@ -296,17 +296,20 @@ class EntradaDiego:
 
         except Exception as exc:
             exc_str = str(exc)
-            # Deriv limita el stake por margen disponible — reintentar con el máximo permitido
-            if "LimitOrderAmountTooHigh" in exc_str and stake_override is None:
+            # Deriv (y el broker interno) pueden capear el stake en múltiples niveles.
+            # Reintentamos en cascada hasta que el stake propuesto sea menor al máximo permitido.
+            if "LimitOrderAmountTooHigh" in exc_str:
                 m = re.search(r"'code_args':\s*\['([\d.]+)'\]", exc_str)
                 if m:
                     max_allowed = float(m.group(1))
-                    if max_allowed >= 1.0:
+                    retry_stake = round(max_allowed * 0.95, 2)
+                    # Solo reintentamos si el nuevo stake es menor que el actual (evita bucle infinito)
+                    if max_allowed >= 1.0 and (stake_override is None or retry_stake < stake_override):
                         _LOGGER.warning(
-                            "[ENTRADA_DIEGO] %s stake=$%.1f rechazado (max=%.2f) → reintento",
-                            sym, stake, max_allowed,
+                            "[ENTRADA_DIEGO] %s stake=$%.2f rechazado (max=%.2f) → reintento $%.2f",
+                            sym, stake, max_allowed, retry_stake,
                         )
-                        await self._open(sym, state, now, stake_override=round(max_allowed * 0.95, 2))
+                        await self._open(sym, state, now, stake_override=retry_stake)
                         return
             _LOGGER.error("[ENTRADA_DIEGO] %s error _open: %s → IDLE", sym, exc)
             state.phase = "IDLE"
