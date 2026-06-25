@@ -144,18 +144,19 @@ export async function GET() {
   // Try reading from d10_panel_state.json (written by slope_tracker.py every 5s)
   try {
     const raw = await fs.readFile(PANEL_FILE, 'utf8');
-    const panel = JSON.parse(raw) as Record<string, PanelEntry & { updated_at?: number }>;
+    const panelRaw = JSON.parse(raw) as Record<string, unknown>;
+    const panelUpdatedAt = typeof panelRaw.updated_at === 'number' ? panelRaw.updated_at : now;
     const result: Record<string, unknown> = { updated_at: now, source: 'panel_state' };
 
     for (const sym of ALL_SYMBOLS) {
-      const e = panel[sym] as PanelEntry;
+      const e = panelRaw[sym] as PanelEntry | undefined;
       if (!e?.available) {
         result[sym] = { symbol: sym, available: false };
         continue;
       }
       result[sym] = {
         ...e,
-        age_s: Math.round(now - (panel.updated_at ?? now)),
+        age_s: Math.round(now - panelUpdatedAt),
         thresholds: buildThresholds(sym),
         // legacy compat
         estabilizado: e.delta_valid ?? true,
