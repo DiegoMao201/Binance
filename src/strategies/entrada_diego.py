@@ -265,8 +265,8 @@ class EntradaDiego:
                     side=side,
                     stake_usdt=stake,
                     multiplier=MULTIPLIER,
-                    stop_loss_pct=1.0,
-                    take_profit_pct=0.0,
+                    stop_loss_pct=0.65,    # Deriv limita SL a ≤70% del stake; 65% pasa
+                    take_profit_pct=0.65,  # TP alto para no auto-cerrar en condiciones normales
                     max_hold_seconds=float(MAX_HOLD_S),
                     score_breakdown={
                         "quality_tier": "entrada_diego",
