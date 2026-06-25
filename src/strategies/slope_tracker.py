@@ -66,6 +66,8 @@ class SlopeTracker:
             for sym in self.SYMBOLS | self.MEASURE_ONLY
         }
         self._reload_config()
+        self._last_panel_write: float = 0.0
+        self._panel_write_interval: int = 5
 
     def _reload_config(self) -> None:
         def _bool(key: str, default: str = "true") -> bool:
@@ -99,6 +101,8 @@ class SlopeTracker:
         # se considere limpio. Protege C2/C3 de datos contaminados del período de
         # recuperación. C1 usa c1_min_data_sec como guarda mínimo independiente.
         self.delta_grace_sec = _int("DERIV_D10_DELTA_GRACE_SEC", 240)
+        # FIX 6A: grace separado para 1000s — mercado más lento, necesita más historia limpia
+        self.delta_grace_1000_sec = _int("DERIV_D10_DELTA_GRACE_1000_SEC", 480)
         self.c1_min_data_sec = _int("DERIV_D10_CAMINO1_MIN_DATA_SEC", 60)
 
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
@@ -149,11 +153,13 @@ class SlopeTracker:
             st.ultimo_spike_ts = last_spike_ts
             st.precios_buffer.clear()
             st.estabilizado = False
-            st.delta_grace_until = last_spike_ts + self.delta_grace_sec
+            # FIX 6A: grace per-symbol — 1000s requieren 480s para historia limpia vs 240s de 500s
+            _grace = self.delta_grace_1000_sec if sym in {"BOOM1000", "CRASH1000"} else self.delta_grace_sec
+            st.delta_grace_until = last_spike_ts + _grace
             st.spike_count += 1
             logger.info(
                 "[D10_RESET_POST_SPIKE] %s spike_count=%d buf_prev=%d delta_valid_at=%.0f (en %.0fs)",
-                sym, st.spike_count, old_buf, st.delta_grace_until, self.delta_grace_sec,
+                sym, st.spike_count, old_buf, st.delta_grace_until, _grace,
             )
 
         if not st.estabilizado and st.ultimo_spike_ts > 0:
@@ -167,6 +173,10 @@ class SlopeTracker:
         if (now - st.ultimo_log_ts) >= self.log_interval_sec:
             st.ultimo_log_ts = now
             self._log_state(sym, now, price)
+
+        if (now - self._last_panel_write) >= self._panel_write_interval:
+            self._last_panel_write = now
+            self._write_panel_state(now)
 
     def on_position_close_tier(self, symbol: str) -> None:
         """CAMINO 4: Soft-reset post-tier — no-op con el nuevo diferencial de ventanas."""
@@ -256,9 +266,14 @@ class SlopeTracker:
         # cambio≈0 (tendencia plana) → BLOQUEA: estado estable, spike aún lejos
         # |cambio| >= MIN → PENDING: cualquier movimiento en la pendiente es señal
         #   slope 0.012→0.008 ó 0.012→0.016 = ambos marcan posible spike
-        # cambio=None → bloquea: menos de 240s de historia post-spike
+        # cambio=None → bloquea: menos de historia post-spike
+        # delta_valid (240s/480s grace) → datos limpios antes de evaluar C1
         # min_data_sec (60s) → guarda contra datos muy frescos aunque cambio != None
         # ══════════════════════════════════════════════════════════════════
+        # FIX 6A: C1 requiere delta_valid — igual que C2/C3 (bug: C1 no lo verificaba)
+        if not delta_valid:
+            return False, f"c1_bloqueado_delta_grace_{seg_hasta_delta:.0f}s_remaining", details
+
         if st.ultimo_spike_ts > 0 and elapsed < self.c1_min_data_sec:
             return False, f"c1_bloqueado_min_data_{elapsed:.0f}s_of_{self.c1_min_data_sec}s", details
 
@@ -368,6 +383,108 @@ class SlopeTracker:
         if p_avg < 1e-9:
             return None
         return (slope_pts_min / p_avg) * 100.0
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Panel state — for frontend display
+    # ──────────────────────────────────────────────────────────────────────
+
+    def get_panel_state(self, ts: Optional[float] = None) -> dict:
+        """Return full D.10.2 panel state for all 4 symbols (frontend display)."""
+        now = ts or time.time()
+        out: dict = {"updated_at": round(now, 3)}
+
+        for sym in sorted(self.SYMBOLS):
+            st = self.states.get(sym)
+            if st is None:
+                out[sym] = {"symbol": sym, "available": False}
+                continue
+
+            cutoff = now - self.window_sec
+            recent = [(t, p) for t, p in st.precios_buffer if t >= cutoff]
+            n_prices = len(recent)
+
+            slope_pct = self._calc_slope_pct(recent) if n_prices >= 10 else None
+            cambio_pct = self._calc_cambio(st, now) if slope_pct is not None else None
+            delta_valid = (st.delta_grace_until <= 0.0) or (now >= st.delta_grace_until)
+            grace_countdown = round(max(0.0, st.delta_grace_until - now), 1) if not delta_valid else 0.0
+
+            c1_ok = c2_ok = c3_ok = False
+            passing = False
+            active_camino: Optional[str] = None
+            pending_sec: Optional[int] = None
+            block_reason = "insuf_data" if n_prices < 10 else ""
+
+            if slope_pct is not None and delta_valid:
+                isBoom = sym in {"BOOM500", "BOOM1000"}
+                # C2
+                if self.c2_enabled and cambio_pct is not None:
+                    abs_c = abs(cambio_pct)
+                    if isBoom and slope_pct <= self.c2_boom500_max_pct and abs_c <= self.c2_cambio_max_pct:
+                        c2_ok = True
+                    elif not isBoom and slope_pct >= self.c2_crash500_min_pct and abs_c <= self.c2_cambio_max_pct:
+                        c2_ok = True
+                # C3
+                if self.c3_enabled and cambio_pct is not None:
+                    if isBoom and slope_pct <= self.c3_boom500_slope_max_pct and cambio_pct >= self.c3_cambio_min_pct:
+                        c3_ok = True
+                    elif not isBoom and slope_pct >= self.c3_crash500_slope_min_pct and cambio_pct <= -self.c3_cambio_min_pct:
+                        c3_ok = True
+                # C1
+                if cambio_pct is not None and abs(cambio_pct) >= self.c1_cambio_min_pct:
+                    max_pct = self.c1_boom1000_max_pct if sym == "BOOM1000" else self.c1_boom500_max_pct
+                    min_pct = self.c1_crash1000_min_pct if sym == "CRASH1000" else self.c1_crash500_min_pct
+                    if isBoom and slope_pct <= max_pct:
+                        c1_ok = True
+                    elif not isBoom and slope_pct >= min_pct:
+                        c1_ok = True
+
+                if c2_ok:
+                    passing, active_camino = True, "camino2_pn5"
+                    pending_sec = self.c2_pending_sec
+                elif c3_ok:
+                    passing, active_camino = True, "camino3_breakout"
+                    pending_sec = self.c3_pending_sec
+                elif c1_ok:
+                    passing, active_camino = True, "camino1_level"
+                    pending_sec = self.c1_pending_1000_sec if sym in {"BOOM1000", "CRASH1000"} else self.c1_pending_sec
+                else:
+                    block_reason = f"slope={slope_pct:+.6f}"
+            elif not delta_valid:
+                block_reason = f"grace_{grace_countdown:.0f}s"
+
+            out[sym] = {
+                "symbol": sym,
+                "available": True,
+                "last_spike_ts": round(st.ultimo_spike_ts, 3),
+                "spike_count": st.spike_count,
+                "grace_until": round(st.delta_grace_until, 3),
+                "grace_countdown_sec": grace_countdown,
+                "delta_valid": delta_valid,
+                "n_prices": n_prices,
+                "slope_pct": round(slope_pct, 6) if slope_pct is not None else None,
+                "cambio_pct": round(cambio_pct, 6) if cambio_pct is not None else None,
+                "c1_ok": c1_ok,
+                "c2_ok": c2_ok,
+                "c3_ok": c3_ok,
+                "passing": passing,
+                "active_camino": active_camino,
+                "pending_sec": pending_sec,
+                "block_reason": block_reason,
+            }
+        return out
+
+    def _write_panel_state(self, now: float) -> None:
+        state = self.get_panel_state(now)
+        try:
+            tmp = self.log_path.replace("slope_history.jsonl", "d10_panel_state.json")
+            import tempfile, os as _os
+            dir_ = _os.path.dirname(tmp)
+            with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as f:
+                json.dump(state, f)
+                f.flush()
+            _os.replace(f.name, tmp)
+        except Exception as exc:
+            logger.debug("[D102_PANEL] write error: %s", exc)
 
     def _log_state(self, symbol: str, ts: float, price: float) -> None:
         st = self.states[symbol]
