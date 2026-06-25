@@ -2862,6 +2862,8 @@ class DerivDaemon:
                                 _D10_PENDING_SYMS.add(tick.symbol.upper())
                                 _d6_update_state(tick.symbol, "PENDING", {
                                     "score": 7.5,
+                                    "grade": "D10",
+                                    "setup": _d10_camino,
                                     "side": _d10_side,
                                     "quality_tier": _d10_qtier,
                                     "wait_s": _d10_wait,
@@ -6046,6 +6048,8 @@ class DerivDaemon:
                 profile=_asset_profile,
                 sb=_sb_ov,
             )
+            if _d6_ghost_fire:
+                snap.suggested_stake_usdt = float(os.getenv("DERIV_D10_GHOST_STAKE_USDT", "10.0"))
             # BOOM/CRASH spike-hunter: use a wide structural SL so the position
             # survives the accumulation window before the spike hits.
             _sl_pct_ov = (
@@ -6456,6 +6460,8 @@ class DerivDaemon:
             profile=_asset_profile,
             sb=_sb_ai,
         )
+        if _d6_ghost_fire:
+            snap.suggested_stake_usdt = float(os.getenv("DERIV_D10_GHOST_STAKE_USDT", "10.0"))
         # BOOM/CRASH spike-hunter: wide structural SL (same logic as override path)
         _sl_pct = (
             _BOOM_CRASH_SL_PCT if _is_boom_crash
