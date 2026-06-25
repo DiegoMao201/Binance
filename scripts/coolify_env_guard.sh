@@ -37,6 +37,13 @@ REQUIRED_VARS=(
   "DYNAMIC_AI_SYMBOL_DD_MIN_TRADES=6"
   "DYNAMIC_AI_24H_FEEDBACK_INTERVAL_SEC=21600"
   "DERIV_SYMBOL_HOUR_VETO_MAP=CRASH500:21,BOOM600:15,BOOM500:6,BOOM500:7,BOOM500:11"
+  # Tick subscription: todos los BOOM/CRASH para medición de pendiente (D10).
+  # BOOM1000/CRASH1000 están en FORCE_DISABLED → no tradean, pero el slope_tracker
+  # los mide para calibrar umbrales. Sin esta línea Coolify excluye las 1000-variants.
+  "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000"
+  # D.10.1 — Slope gate: 90s estabilización (era 180s), C1 umbral 0.005% (era 0.002%)
+  "DERIV_D10_SPIKE_STABILIZE_SEC=90"
+  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.005"
   # 2026-06-01: CRASH900 reactivado — debe seguir FUERA de force-disabled aunque
   # Coolify regenere .env desde su DB. Guard self-healing enforcement.
   "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM900,BOOM1000,CRASH1000,R_50,R_75,R_100"

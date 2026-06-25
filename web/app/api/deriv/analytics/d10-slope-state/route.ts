@@ -9,10 +9,10 @@ const BOT_LOGS = process.env.DERIV_STATE_DIR || process.env.BOT_STATE_DIR || '/d
 const SLOPE_LOG = path.join(BOT_LOGS, 'slope_history.jsonl');
 const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180', 10);
 
-// Camino 1 — Slope Level + señal de reversión débil
-// BOOM500: slope <= max AND cambio >= +MIN (bajada frenándose → spike UP)
-// CRASH500: slope >= min AND cambio <= -MIN (subida frenándose → spike DOWN)
-// cambio=null bloquea C1 (necesita 240s de historia)
+// Camino 1 — Slope Level + dinámica detectada (|cambio| >= MIN, cualquier dirección)
+// cambio≈0 → BLOQUEA: tendencia estable, spike aún lejos
+// |cambio| >= MIN → PENDING: cualquier movimiento notable en la pendiente es señal
+// cambio=null bloquea C1 (necesita ~240s de historia post-spike)
 const C1_BOOM_MAX    = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MAX_PCT  || '-0.005');
 const C1_CRASH_MIN   = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MIN_PCT || '0.005');
 const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.002');

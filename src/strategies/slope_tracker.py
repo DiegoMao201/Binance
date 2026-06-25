@@ -9,7 +9,7 @@ CAMINO 1 — Slope Level + tendencia sostenida:
   CRASH500: slope_pct >= +0.005%/min AND |cambio| <= C1_CAMBIO_MAX (tendencia estable ≥2 min)
   cambio=None bloquea: necesita 240s de historia (2 × cambio_window_sec)
   Pending: 120s (DERIV_D10_PENDING_CAMINO1_SEC)
-  Stabilize: 180s global post-spike + 240s buffer para cambio
+  Stabilize: 90s global post-spike + 240s buffer para cambio (cambio disponible ~240s post-spike)
 
 CAMINO 2 — Tendencia extrema + estable (alta confianza en spike grande):
   BOOM500:  slope_pct <= -0.018%/min (bajada fuerte) AND |cambio| <= 0.010% (estable)
@@ -76,7 +76,7 @@ class SlopeTracker:
             return float(os.getenv(key, str(default)) or default)
 
         self.enabled = _bool("DERIV_D10_SLOPE_GATE_ENABLED")
-        self.stabilize_sec = _int("DERIV_D10_SPIKE_STABILIZE_SEC", 180)
+        self.stabilize_sec = _int("DERIV_D10_SPIKE_STABILIZE_SEC", 90)
         self.window_sec = _int("DERIV_D10_SLOPE_WINDOW_SEC", 600)
         self.log_interval_sec = _int("DERIV_D10_LOG_INTERVAL_SEC", 30)
         self.log_path = os.getenv("DERIV_D10_LOG_PATH", "/data/logs/slope_history.jsonl")
@@ -92,7 +92,7 @@ class SlopeTracker:
         # cambio=None → bloquea: menos de 240s de historia post-spike
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
-        self.c1_cambio_min_pct = _float("DERIV_D10_C1_CAMBIO_MIN_PCT", 0.002)
+        self.c1_cambio_min_pct = _float("DERIV_D10_C1_CAMBIO_MIN_PCT", 0.005)
         self.c1_pending_sec = _int("DERIV_D10_PENDING_CAMINO1_SEC", 120)
 
         # CAMINO 2 — Tendencia extrema + ESTABLE

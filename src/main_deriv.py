@@ -2777,6 +2777,9 @@ class DerivDaemon:
         # Bypass: cooldown, régimen, AI_VETO (igual que D9_MR_REENTRY).
         # Kill switch: DERIV_D10_SLOPE_GATE_ENABLED=false
         # ═══════════════════════════════════════════════════════════════════
+        # D.10.1: True cuando D10 bloquea sin pending — pipeline continúa para scoring
+        # evita "EVALUACIÓN PAUSADA" mientras el slope gate evalúa/estabiliza.
+        _d10_entry_suppressed = False
         if tick.symbol.upper() in {"BOOM500", "CRASH500"}:
             if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
                 _d10_has_open = any(
@@ -2786,35 +2789,48 @@ class DerivDaemon:
                 if _d10_has_open:
                     return  # posición ya abierta → no crear pending D10
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
-                    _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
-                    if not _d10_ok:
-                        self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
-                        return
-                    # D.10.1: slope gate pasa — crear pending con wait por camino
-                    _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
-                    _d10_wait = int(_d10_det.get("pending_sec", 120))
-                    _d10_qtier = f"d10_{_d10_camino}"
-                    PENDING_ENTRY_WATCHER.on_signal(
-                        tick.symbol, _d10_side, score=7.5,
-                        median_cycle_s=600.0, force_wait_s=_d10_wait,
-                    )
-                    _d6_update_state(tick.symbol, "PENDING", {
-                        "score": 7.5,
-                        "side": _d10_side,
-                        "quality_tier": _d10_qtier,
-                        "wait_s": _d10_wait,
-                        "created_at": time.time(),
-                        "expires_at": time.time() + _d10_wait,
-                        "remaining_seconds": _d10_wait,
-                        "slope_pct": _d10_det.get("slope_pct"),
-                        "cambio_pct": _d10_det.get("cambio_pct"),
-                    })
-                    _LOGGER.info(
-                        "[D10_PASSED] %s camino=%s slope_pct=%s cambio_pct=%s wait=%ds",
-                        tick.symbol, _d10_camino,
-                        _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
-                    )
-                    return
+                    # Cooldown post-racha: bloquea creación de pending (no bloquea scoring)
+                    if POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
+                        _d10_cd = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol) or {}
+                        _LOGGER.info(
+                            "[D10] %s cooldown activo (spikes=%d restante=%ds) → sin pending",
+                            tick.symbol, _d10_cd.get("spike_count", 0), _d10_cd.get("remaining_seconds", 0),
+                        )
+                        self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_cooldown_active")
+                        _d10_entry_suppressed = True
+                        # No return — pipeline continúa para scoring/panel
+                    else:
+                        _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
+                        if not _d10_ok:
+                            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+                            _d10_entry_suppressed = True
+                            # No return — pipeline continúa para scoring/panel
+                        else:
+                            # D.10.1: slope gate pasa — crear pending con wait por camino
+                            _d10_side = "MULTUP" if "BOOM" in tick.symbol.upper() else "MULTDOWN"
+                            _d10_wait = int(_d10_det.get("pending_sec", 120))
+                            _d10_qtier = f"d10_{_d10_camino}"
+                            PENDING_ENTRY_WATCHER.on_signal(
+                                tick.symbol, _d10_side, score=7.5,
+                                median_cycle_s=600.0, force_wait_s=_d10_wait,
+                            )
+                            _d6_update_state(tick.symbol, "PENDING", {
+                                "score": 7.5,
+                                "side": _d10_side,
+                                "quality_tier": _d10_qtier,
+                                "wait_s": _d10_wait,
+                                "created_at": time.time(),
+                                "expires_at": time.time() + _d10_wait,
+                                "remaining_seconds": _d10_wait,
+                                "slope_pct": _d10_det.get("slope_pct"),
+                                "cambio_pct": _d10_det.get("cambio_pct"),
+                            })
+                            _LOGGER.info(
+                                "[D10_PASSED] %s camino=%s slope_pct=%s cambio_pct=%s wait=%ds",
+                                tick.symbol, _d10_camino,
+                                _d10_det.get("slope_pct"), _d10_det.get("cambio_pct"), _d10_wait,
+                            )
+                            return
                 # Pending activo → cae al ghost path sin retornar
 
         # ═══════════════════════════════════════════════════════════════════
@@ -4015,6 +4031,11 @@ class DerivDaemon:
             and _d6_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
             and _d6_grade_now in {"A", "B"}
             and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
+            # D.10.1: BOOM500/CRASH500 solo entran vía D10 pending — ghost tradicional desactivado
+            and not (
+                tick.symbol.upper() in {"BOOM500", "CRASH500"}
+                and str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+            )
         )
         # D.6.5: post-racha cooldown — bloquear NEW ghost si símbolo en cooldown
         if _d6_ghost_fire_new and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
@@ -6105,6 +6126,10 @@ class DerivDaemon:
                     tick.symbol, snap.score,
                 )
                 return
+            # D.10.1: gate bloquea ejecución override cuando slope no aprobó
+            if _d10_entry_suppressed:
+                self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+                return
             self._counters["orders_sent"] += 1
             try:
                 result = await self._router.route_order(payload_override)
@@ -6730,6 +6755,11 @@ class DerivDaemon:
         )
         if _dec_id:
             self._decision_ids[tick.symbol] = _dec_id
+
+        # D.10.1: gate bloquea ejecución principal cuando slope no aprobó
+        if _d10_entry_suppressed:
+            self._spike_enrich(tick.symbol, bot_entered=False, block_reason="d10_slope_gate")
+            return
 
         self._counters["orders_sent"] += 1
         try:
