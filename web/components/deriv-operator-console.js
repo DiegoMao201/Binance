@@ -341,6 +341,96 @@ function SlopeGateSection({ symbol }) {
   );
 }
 
+/* ── ENTRADA DIEGO — Segunda línea autónoma post-spike ──────── */
+function EntradaDiegoSection({ symbol }) {
+  const [edState, setEdState] = useState(null);
+
+  useEffect(() => {
+    if (!["CRASH500", "BOOM500"].includes(symbol)) return;
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/entrada-diego-state", { cache: "no-store" });
+        if (!active) return;
+        const data = res.ok ? await res.json() : null;
+        if (!data) return;
+        if (!data.enabled) { setEdState({ enabled: false }); return; }
+        if (data[symbol]) setEdState({ ...data[symbol], enabled: true });
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 2000);
+    return () => { active = false; clearInterval(id); };
+  }, [symbol]);
+
+  if (!["CRASH500", "BOOM500"].includes(symbol)) return null;
+  if (!edState || !edState.enabled) return null;
+
+  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0 } = edState;
+
+  const PHASE_COLOR = {
+    IDLE:         "rgba(90,100,115,0.7)",
+    ENTRY_WAIT:   "#f97316",
+    OPEN:         "#22d3a3",
+    PROFIT_TIMER: "#a78bfa",
+    COOLDOWN:     "#62d4ff",
+  };
+  const color = PHASE_COLOR[phase] || "rgba(90,100,115,0.7)";
+
+  const base = {
+    marginTop: 8, padding: "6px 10px", borderRadius: 6,
+    fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+    border: `1px solid ${color}`,
+  };
+
+  if (phase === "IDLE") return (
+    <div style={{ ...base, color: "rgba(90,100,115,0.7)", background: "rgba(90,100,115,0.05)" }}>
+      <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
+      <span style={{ marginLeft: 8, opacity: 0.6 }}>esperando spike…</span>
+    </div>
+  );
+
+  const maxS = { ENTRY_WAIT: 300, OPEN: 600, PROFIT_TIMER: 180, COOLDOWN: 300 }[phase] || 1;
+  const elapsed = maxS - remaining_s;
+  const pct = Math.min(100, Math.max(0, (elapsed / maxS) * 100));
+
+  const PHASE_LABEL = {
+    ENTRY_WAIT:   `⏳ WAIT ${Math.round(remaining_s)}s — abriendo post-spike`,
+    OPEN:         `📈 OPEN — ${Math.round(remaining_s)}s restantes`,
+    PROFIT_TIMER: `⏱ PROFIT+ TIMER — cierra en ${Math.round(remaining_s)}s`,
+    COOLDOWN:     `❄️ COOLDOWN — ${Math.round(remaining_s)}s`,
+  };
+
+  const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#888";
+  const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(4)}$`;
+
+  return (
+    <div style={{ ...base, color, background: `${color}14` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
+        <span style={{
+          fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+          background: `${color}25`, color, letterSpacing: "0.05em",
+        }}>{phase}</span>
+      </div>
+      <div style={{
+        width: "100%", height: 3, background: `${color}33`,
+        borderRadius: 2, margin: "4px 0", overflow: "hidden",
+      }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, transition: "width 1s linear" }} />
+      </div>
+      <div style={{ opacity: 0.85 }}>
+        {PHASE_LABEL[phase] || phase}
+        {contract_id ? ` · #${contract_id}` : ""}
+        {phase === "OPEN" || phase === "PROFIT_TIMER" ? (
+          <span style={{ color: pnlColor, marginLeft: 5 }}>{pnlStr}</span>
+        ) : null}
+        {reopens > 0 ? ` · reopen×${reopens}` : ""}
+      </div>
+    </div>
+  );
+}
+
 /* ── D.6 Ghost Live Section ──────────────────────────────────── */
 function GhostLiveSection({ symbol }) {
   const [ghostState, setGhostState] = useState(null);
@@ -1530,6 +1620,9 @@ function SymbolCard({ s }) {
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />
+
+        {/* ENTRADA DIEGO — segunda línea autónoma */}
+        <EntradaDiegoSection symbol={s.symbol} />
 
         {/* Hurst compacto al pie (info de fondo, no decisor) */}
         {hurst != null && (

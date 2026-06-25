@@ -75,6 +75,7 @@ from src.api.d6_ghost_state import update_d6_state as _d6_update_state
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
 from src.analysis.pattern_memory_query import check_pm_filter
+from src.strategies.entrada_diego import EntradaDiego
 
 
 _LOGGER = logging.getLogger("deriv.daemon")
@@ -708,6 +709,12 @@ class DerivDaemon:
         self._ctx_state_dir = Path(
             os.environ.get("BOT_STATE_DIR",
                 os.environ.get("LOGS_DIR", str(settings.closed_contracts_file.parent)))
+        )
+        # entrada_diego: segunda línea de apertura autónoma post-spike (sin gates)
+        self._entrada_diego = EntradaDiego(
+            executor=self._executor,
+            risk=self._risk,
+            logs_dir=self._ctx_state_dir,
         )
         self._executor.set_dynamic_config_provider(self.get_dynamic_config)
 
@@ -2487,6 +2494,10 @@ class DerivDaemon:
         _ghost_spike_ts = float(self._risk.get_last_spike_ts(tick.symbol) or 0.0)
         self._ghost_logger.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
         self._slope_tracker.on_tick(tick.symbol, float(tick.price), _ghost_spike_ts)
+        asyncio.create_task(
+            self._entrada_diego.on_tick(tick),
+            name=f"entrada_diego-{tick.symbol}",
+        )
 
         # Market-context snapshot (every 60 ticks ≈ 60 s)
         self._maybe_write_market_context(tick.symbol)
@@ -2795,7 +2806,10 @@ class DerivDaemon:
         # D.10.1: True cuando D10 bloquea sin pending — pipeline continúa para scoring
         # evita "EVALUACIÓN PAUSADA" mientras el slope gate evalúa/estabiliza.
         _d10_entry_suppressed = False
-        if tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}:
+        if (
+            tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}
+            and not self._entrada_diego.is_enabled()
+        ):
             if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
                 _d10_has_open = any(
                     oc.symbol == tick.symbol
@@ -3568,9 +3582,13 @@ class DerivDaemon:
         # ── D.6 GHOST ABSOLUTE (2026-06-19) ──────────────────────────────────
         # Filosofía: ghost emite ALLOW → bot entra 60s después. Solo spike cancela.
         # Ningún gate veta cuando el ghost ha aprobado la señal.
-        _d6_enabled = str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        # Desactivado cuando entrada_diego está activo (prueba de lógica separada).
+        _d6_enabled = (
+            not self._entrada_diego.is_enabled()
+            and str(os.getenv("DERIV_D6_GHOST_ABSOLUTE_ENABLED", "false")).strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+        )
         if _d6_enabled:
             _d6_lfs = self._last_fvg_state.get(tick.symbol.upper(), {})
             _d6_g_min = float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
