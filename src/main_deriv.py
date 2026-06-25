@@ -2622,7 +2622,7 @@ class DerivDaemon:
             self._d9_state[sym]["consumed"] = True
             return
         profile = get_asset_profile(tick.symbol)
-        stake = float(self._settings.min_stake_usdt or 10.0)
+        stake = float(os.getenv("DERIV_D10_GHOST_STAKE_USDT", "10.0"))
         multiplier = int(self._settings.multiplier or 200)
         sl_pct = float(profile.get("stop_loss_pct_override") or self._settings.stop_loss_pct)
         max_hold = float(profile.get("max_hold_seconds") or 600.0)

@@ -57,9 +57,9 @@ REQUIRED_VARS=(
   "DERIV_TREND_BLOCK_SYMBOLS=BOOM500,BOOM1000,CRASH500,CRASH1000"
   "DERIV_TREND_SETUP_MIN_SCORE=7.0"
   # max_hold solo para símbolos activos (500) y medición (1000). 600/900 inhabilitados.
-  "DERIV_MAX_HOLD_CRASH500=480"
+  "DERIV_MAX_HOLD_CRASH500=600"
   "DERIV_MAX_HOLD_CRASH1000=700"
-  "DERIV_MAX_HOLD_BOOM500=480"
+  "DERIV_MAX_HOLD_BOOM500=600"
   "DERIV_MAX_HOLD_BOOM1000=700"
   # 2026-06-11: vision LLM model correcto (gemini-flash-1.5 no existe en OpenRouter)
   "DYNAMIC_AI_VISION_MODEL=google/gemini-2.5-flash-lite"
