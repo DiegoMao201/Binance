@@ -903,6 +903,9 @@ class DerivTradeExecutor:
         """Close spike position when staircase+tier floor is breached (SL-only)."""
         if not (self._spike_sl_only_mode and is_spike_market(oc.symbol)):
             return False
+        # Entrada Diego maneja su propio exit (PROFIT_TIMER 3min) — no interceptar
+        if oc.score_breakdown and oc.score_breakdown.get("entrada_diego"):
+            return False
 
         # Update peak first.
         if current_profit > oc.peak_profit:
