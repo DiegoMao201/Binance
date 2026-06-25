@@ -116,8 +116,9 @@ class EntradaDiego:
 
         self._states: dict[str, _SymState] = {sym: _SymState() for sym in SYMBOLS_ED}
         self._locks: dict[str, asyncio.Lock] = {sym: asyncio.Lock() for sym in SYMBOLS_ED}
-        # serializa aperturas entre símbolos — evita conflictos de margen simultáneo
-        self._open_lock = asyncio.Lock()
+        self._open_lock   = asyncio.Lock()
+        self._restore_lock = asyncio.Lock()
+        self._restored    = False
 
         if self._enabled:
             _LOGGER.info(
@@ -140,6 +141,12 @@ class EntradaDiego:
         sym = str(tick.symbol).upper()
         if sym not in self._states:
             return
+        # Restaurar estado persistido en el primer tick post-restart
+        if not self._restored:
+            async with self._restore_lock:
+                if not self._restored:
+                    await self._restore_from_disk()
+                    self._restored = True
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -381,6 +388,60 @@ class EntradaDiego:
         except Exception:
             pass
         return 0.0
+
+    async def _restore_from_disk(self) -> None:
+        """Re-adjunta contratos abiertos y restaura reopens tras restart del bot."""
+        try:
+            if not self._state_file.exists():
+                return
+            data = json.loads(self._state_file.read_text())
+            now  = time.time()
+            for sym in SYMBOLS_ED:
+                s = data.get(sym, {})
+                if not s:
+                    continue
+                contract_id = s.get("contract_id")
+                phase       = s.get("phase", "IDLE")
+                reopens     = int(s.get("reopens", 0))
+
+                if contract_id is not None:
+                    # Verificar si el contrato sigue abierto en Deriv
+                    live = self._query_contract(int(contract_id))
+                    if live:
+                        st = self._states[sym]
+                        st.contract_id       = int(contract_id)
+                        st.reopens           = reopens
+                        st.open_ts           = float(s.get("open_ts", now))
+                        st.last_spike_ts     = float(s.get("last_spike_ts", 0.0))
+                        st.last_close_profit = float(s.get("last_close_profit", 0.0))
+                        # Si estaba en PROFIT_TIMER y profit sigue > 0 → mantener timer
+                        if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
+                            st.phase              = "PROFIT_TIMER"
+                            st.profit_positive_ts = float(s["profit_positive_ts"])
+                        else:
+                            st.phase              = "OPEN"
+                            st.profit_positive_ts = 0.0
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s RESTAURADO: phase=%s contract=%s reopens=%d",
+                            sym, st.phase, contract_id, st.reopens,
+                        )
+                        continue
+
+                # Sin contrato — restaurar COOLDOWN si sigue vigente
+                if phase == "COOLDOWN":
+                    cooldown_until = float(s.get("cooldown_until", 0.0))
+                    if cooldown_until > now:
+                        st = self._states[sym]
+                        st.phase          = "COOLDOWN"
+                        st.cooldown_until = cooldown_until
+                        st.last_spike_ts  = float(s.get("last_spike_ts", 0.0))
+                        st.reopens        = 0
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes",
+                            sym, cooldown_until - now,
+                        )
+        except Exception as exc:
+            _LOGGER.warning("[ENTRADA_DIEGO] restore_from_disk error: %s", exc)
 
     def _persist(self, now: float) -> None:
         try:
