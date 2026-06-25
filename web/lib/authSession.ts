@@ -1,4 +1,4 @@
-import { verifyJWT, type PortalJWTPayload } from "@/lib/auth";
+import { verifyJWT, type PortalJWTPayload } from "@/lib/authEdge";
 
 export const AUTH_COOKIE_LEGACY = "auth_token";
 export const AUTH_COOKIE_ADMIN = "auth_token_admin";
