@@ -4059,13 +4059,9 @@ class DerivDaemon:
         )
         # D.6.5: cooldown bloquea también el pending existente — el conteo de 120s
         # solo empieza DESPUÉS de que termina el cooldown, no durante.
-        # D.10.1: pendings d10_* en BOOM500/CRASH500 quedan exentos del cancel.
-        _d10_ghost_exempt = (
-            str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
-            and tick.symbol.upper() in {"BOOM500", "CRASH500"}
-            and str((PENDING_ENTRY_WATCHER.get_state().get(tick.symbol) or {}).get("quality_tier") or "").startswith("d10_")
-        )
-        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol) and not _d10_ghost_exempt:
+        # D.10.1: pending d10_* aplica las mismas reglas que ghost regular —
+        # si llega un spike durante el pending, cooldown lo cancela igual.
+        if _d6_ghost_pending and POST_RACHA_COOLDOWN.is_in_cooldown(tick.symbol):
             _cd_info2 = POST_RACHA_COOLDOWN.get_cooldown_info(tick.symbol)
             PENDING_ENTRY_WATCHER.cancel(tick.symbol)
             _d6_update_state(tick.symbol, "CANCELLED", reason="post_racha_cooldown_active")
