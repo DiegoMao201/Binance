@@ -32,6 +32,7 @@ _LOGGER = logging.getLogger("entrada_diego")
 
 SYMBOLS_ED   = {"CRASH500", "BOOM500"}
 STAKE        = float(os.getenv("ENTRADA_DIEGO_STAKE",        "10.0"))
+_STAKE_LADDER = [10.0, 20.0, 40.0, 60.0]   # reopen#0, #1, #2, #3+
 MULTIPLIER   = int(os.getenv("ENTRADA_DIEGO_MULTIPLIER",     "200"))
 ENTRY_WAIT_S = int(os.getenv("ENTRADA_DIEGO_ENTRY_WAIT_S",  "300"))   # 5 min post-spike
 MAX_HOLD_S   = int(os.getenv("ENTRADA_DIEGO_MAX_HOLD_S",    "600"))   # 10 min max hold
@@ -207,13 +208,14 @@ class EntradaDiego:
             # Contrato cerrado externamente durante el timer (sl/tp automático de Deriv)
             # Estábamos en PROFIT_TIMER → ya había profit positivo → tratamos como cierre ganador
             if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-                state.last_close_profit = max(state.current_profit, 0.01)  # marcar como profitable
+                state.last_close_profit = max(state.current_profit, 0.01)
                 state.contract_id = None
                 state.profit_positive_ts = 0.0
                 state.cooldown_until = now + COOLDOWN_S
+                state.reopens = 0
                 state.phase = "COOLDOWN"
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s cerrado externo durante PROFIT_TIMER → COOLDOWN %ds",
+                    "[ENTRADA_DIEGO] %s cerrado externo durante PROFIT_TIMER → COOLDOWN %ds (reopens reset)",
                     sym, COOLDOWN_S,
                 )
                 self._persist(now)
@@ -259,7 +261,8 @@ class EntradaDiego:
     async def _open(self, sym: str, state: _SymState, now: float, stake_override: float | None = None) -> None:
         from src.execution.deriv_trader import DerivOrder  # import local para evitar circular
         side = "MULTDOWN" if "CRASH" in sym else "MULTUP"
-        stake = stake_override if stake_override is not None else STAKE
+        martingale_stake = _STAKE_LADDER[min(state.reopens, len(_STAKE_LADDER) - 1)]
+        stake = stake_override if stake_override is not None else martingale_stake
         _LOGGER.info(
             "[ENTRADA_DIEGO] %s ABRIENDO %s $%.2f mult=%dx max_hold=%ds (reopen#%d)",
             sym, side, stake, MULTIPLIER, MAX_HOLD_S, state.reopens,
@@ -339,11 +342,11 @@ class EntradaDiego:
         state.profit_positive_ts = 0.0
 
         if final_profit > 0:
-            # Cierre positivo: esperar 5 min antes de buscar nuevo spike
             state.cooldown_until = now + COOLDOWN_S
+            state.reopens = 0
             state.phase = "COOLDOWN"
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → COOLDOWN %ds",
+                "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → COOLDOWN %ds (reopens reset)",
                 sym, final_profit, COOLDOWN_S,
             )
         else:
