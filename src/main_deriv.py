@@ -2795,7 +2795,7 @@ class DerivDaemon:
         # D.10.1: True cuando D10 bloquea sin pending — pipeline continúa para scoring
         # evita "EVALUACIÓN PAUSADA" mientras el slope gate evalúa/estabiliza.
         _d10_entry_suppressed = False
-        if tick.symbol.upper() in {"BOOM500", "CRASH500"}:
+        if tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}:
             if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
                 _d10_has_open = any(
                     oc.symbol == tick.symbol
@@ -3614,10 +3614,10 @@ class DerivDaemon:
             )
             # D.6.5: si el spike activó cooldown y hay pending activo → cancelarlo ahora
             # (el ghost no puede sobrevivir al cooldown desde antes de que arrancara)
-            # D.10.1: pendings d10_* en BOOM500/CRASH500 quedan exentos del cancel.
+            # D.10.1: pendings d10_* en BOOM500/CRASH500/BOOM1000/CRASH1000 quedan exentos del cancel.
             _d10_pg_exempt = (
                 str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
-                and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+                and tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}
                 and tick.symbol.upper() in _D10_PENDING_SYMS
                 and PENDING_ENTRY_WATCHER.is_pending(tick.symbol)
             )
@@ -4085,9 +4085,9 @@ class DerivDaemon:
             and _d6_setup_now in {"SMC_FVG", "EMA200_SPIKE", "TREND"}
             and _d6_grade_now in {"A", "B"}
             and float(snap.score or 0.0) >= float(os.getenv("DERIV_GHOST_BYPASS_MIN_SCORE", "7.0") or 7.0)
-            # D.10.1: BOOM500/CRASH500 solo entran vía D10 pending — ghost tradicional desactivado
+            # D.10.1: BOOM500/CRASH500/BOOM1000/CRASH1000 solo entran vía D10 pending — ghost tradicional desactivado
             and not (
-                tick.symbol.upper() in {"BOOM500", "CRASH500"}
+                tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}
                 and str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
             )
         )

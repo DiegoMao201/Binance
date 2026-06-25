@@ -58,8 +58,13 @@ REQUIRED_VARS=(
   "DERIV_SPIKE_WAIT_TIMEOUT_SEC_MAP=BOOM500:600,CRASH500:600,BOOM1000:600,CRASH1000:600"
   # D.9.0 — Hurst cancel: desactivado — no quiero que cancele ghost pending de D10
   "DERIV_D9_HURST_CANCEL_ENABLED=false"
-  # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
-  "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM600,CRASH600,BOOM900,CRASH900,BOOM1000,CRASH1000,R_50,R_75,R_100"
+  # 600/900 inhabilitados. 1000 activos con D10 en FIX 5.
+  "DERIV_FORCE_DISABLED_SYMBOLS=BOOM300,BOOM600,CRASH600,BOOM900,CRASH900,R_50,R_75,R_100"
+  # FIX 5: D10 umbrales para BOOM1000/CRASH1000 (espejo de 500s — misma dirección de slope)
+  # BOOM1000: slope negativo ≤ -0.005%/min (precio cayendo → spike UP inminente)
+  # CRASH1000: slope positivo ≥ +0.005%/min (precio subiendo → spike DOWN inminente)
+  "DERIV_D10_BOOM1000_SLOPE_MAX_PCT=-0.005"
+  "DERIV_D10_CRASH1000_SLOPE_MIN_PCT=0.005"
   # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
   "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS="
   "DERIV_ANTI_RETRACE_RANGE_FRAC=0.65"

@@ -1,4 +1,4 @@
-"""D.10.1 — Slope Tracker con triple lógica de entrada para BOOM500/CRASH500.
+"""D.10.1 — Slope Tracker con triple lógica de entrada para BOOM500/CRASH500/BOOM1000/CRASH1000.
 
 BOOM500 siempre tiene slope NEGATIVO (precio baja entre spikes → spike = reversal UP).
 CRASH500 siempre tiene slope POSITIVO (precio sube entre spikes → spike = reversal DOWN).
@@ -57,8 +57,8 @@ class SymbolSlopeState:
 
 
 class SlopeTracker:
-    SYMBOLS = {"BOOM500", "CRASH500"}           # gate activo + medición
-    MEASURE_ONLY = {"BOOM1000", "CRASH1000"}    # solo medición, sin gate
+    SYMBOLS = {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}  # gate activo + medición
+    MEASURE_ONLY: set = set()                                   # todos activos en FIX 5
 
     def __init__(self) -> None:
         self.states: dict[str, SymbolSlopeState] = {
@@ -103,8 +103,15 @@ class SlopeTracker:
 
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
+        # FIX 5: BOOM1000/CRASH1000 — misma dirección de slope que 500s
+        # BOOM1000 slope negativo (precio cae entre spikes UP) → slope <= MAX (<0)
+        # CRASH1000 slope positivo (precio sube entre spikes DOWN) → slope >= MIN (>0)
+        self.c1_boom1000_max_pct = _float("DERIV_D10_BOOM1000_SLOPE_MAX_PCT", -0.005)
+        self.c1_crash1000_min_pct = _float("DERIV_D10_CRASH1000_SLOPE_MIN_PCT", 0.005)
         self.c1_cambio_min_pct = _float("DERIV_D10_C1_CAMBIO_MIN_PCT", 0.005)
         self.c1_pending_sec = _int("DERIV_D10_PENDING_CAMINO1_SEC", 120)
+        # FIX 5: pending separado para 1000s (en caso de querer ajuste futuro)
+        self.c1_pending_1000_sec = _int("DERIV_D10_PENDING_CAMINO1_1000_SEC", self.c1_pending_sec)
 
         # CAMINO 2 — Tendencia extrema + ESTABLE
         self.c2_enabled = _bool("DERIV_D10_PN5_ENABLED")
@@ -273,12 +280,30 @@ class SlopeTracker:
                 f"c1_bloqueado_slope={slope_pct:+.6f}_max={self.c1_boom500_max_pct:+.4f}",
                 details,
             )
-        else:  # CRASH500
+        elif sym == "CRASH500":
             if slope_pct >= self.c1_crash500_min_pct:
                 return True, "camino1_level", {**details, "pending_sec": self.c1_pending_sec}
             return (
                 False,
                 f"c1_bloqueado_slope={slope_pct:+.6f}_min={self.c1_crash500_min_pct:+.4f}",
+                details,
+            )
+        elif sym == "BOOM1000":
+            # FIX 5: mismo patrón que BOOM500 (slope negativo = precio cayendo → spike UP)
+            if slope_pct <= self.c1_boom1000_max_pct:
+                return True, "camino1_level", {**details, "pending_sec": self.c1_pending_1000_sec}
+            return (
+                False,
+                f"c1_bloqueado_slope={slope_pct:+.6f}_max={self.c1_boom1000_max_pct:+.4f}",
+                details,
+            )
+        else:  # CRASH1000
+            # FIX 5: mismo patrón que CRASH500 (slope positivo = precio subiendo → spike DOWN)
+            if slope_pct >= self.c1_crash1000_min_pct:
+                return True, "camino1_level", {**details, "pending_sec": self.c1_pending_1000_sec}
+            return (
+                False,
+                f"c1_bloqueado_slope={slope_pct:+.6f}_min={self.c1_crash1000_min_pct:+.4f}",
                 details,
             )
 
