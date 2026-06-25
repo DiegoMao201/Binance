@@ -3649,29 +3649,20 @@ class DerivDaemon:
                 _pe_created_at = float(_pe_spike_state.get("created_at") or 0.0)
                 _new_spike_during_pending = _ceg_spike_ts > _pe_created_at
                 if _new_spike_during_pending:
-                    if _d10_pg_exempt and _spike_aligns_pending:
-                        # D.10.1: spike alineado durante pending D10 → PRESERVAR (no cancelar).
-                        # Para BOOM/CRASH el spike ES el evento que buscamos — el timer sigue,
-                        # entramos en el drift post-spike y el siguiente spike da el PnL.
-                        _LOGGER.info(
-                            "[D10_SPIKE_PRESERVE] %s spike alineado durante pending d10 "
-                            "→ preservando timer (spike ts=%.0f created=%.0f side=%s)",
-                            tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
-                        )
-                    else:
-                        # D.6.2: cualquier spike durante pending → CANCEL
-                        # D.10.1 spike opuesto también cancela.
-                        _LOGGER.info(
-                            "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (anti-chase: "
-                            "spike ts=%.0f > pending_created=%.0f side=%s aligned=%s d10=%s)",
-                            tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
-                            str(_spike_aligns_pending), str(_d10_pg_exempt),
-                        )
-                        PENDING_ENTRY_WATCHER.cancel(tick.symbol)
-                        _D10_PENDING_SYMS.discard(tick.symbol.upper())
-                        if _d6_enabled:
-                            _reason_ac = "spike_opposite_d10" if _d10_pg_exempt else "spike_anti_chase"
-                            _d6_update_state(tick.symbol, "CANCELLED", reason=_reason_ac)
+                    # D.6.2 + D.10: cualquier spike durante pending → CANCEL, ciclo nuevo.
+                    # El spike resetea el slope buffer — la evaluación delta que creó el
+                    # pending ya no aplica. No existe excepción por dirección alineada.
+                    _LOGGER.info(
+                        "[PENDING_ENTRY] %s SPIKE_DURING_WAIT → CANCEL (ciclo nuevo: "
+                        "spike ts=%.0f > pending_created=%.0f side=%s aligned=%s d10=%s)",
+                        tick.symbol, _ceg_spike_ts, _pe_created_at, _pe_spike_side,
+                        str(_spike_aligns_pending), str(_d10_pg_exempt),
+                    )
+                    PENDING_ENTRY_WATCHER.cancel(tick.symbol)
+                    _D10_PENDING_SYMS.discard(tick.symbol.upper())
+                    if _d6_enabled:
+                        _reason_ac = "spike_cancel_d10" if _d10_pg_exempt else "spike_anti_chase"
+                        _d6_update_state(tick.symbol, "CANCELLED", reason=_reason_ac)
                 elif not _spike_aligns_pending:
                     _LOGGER.info(
                         "[PENDING_ENTRY] %s SPIKE_OPPOSITE → CANCEL (side=%s)",
