@@ -75,7 +75,17 @@ from src.api.d6_ghost_state import update_d6_state as _d6_update_state
 from src.utils.telegram_telemetry import TelegramTelemetry
 from src.utils.decision_logger import log_decision, update_decision_outcome
 from src.analysis.pattern_memory_query import check_pm_filter
-from src.strategies.entrada_diego import EntradaDiego
+try:
+    # Carga desde el volume de logs — permite actualizar sin rebuild de imagen
+    import importlib.util as _il_util
+    _ed_spec = _il_util.spec_from_file_location(
+        "entrada_diego", "/data/logs/entrada_diego.py"
+    )
+    _ed_mod = _il_util.module_from_spec(_ed_spec)  # type: ignore[arg-type]
+    _ed_spec.loader.exec_module(_ed_mod)  # type: ignore[union-attr]
+    EntradaDiego = _ed_mod.EntradaDiego
+except Exception:
+    from src.strategies.entrada_diego import EntradaDiego
 
 
 _LOGGER = logging.getLogger("deriv.daemon")
