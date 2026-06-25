@@ -9,12 +9,13 @@ const BOT_LOGS = process.env.DERIV_STATE_DIR || process.env.BOT_STATE_DIR || '/d
 const SLOPE_LOG = path.join(BOT_LOGS, 'slope_history.jsonl');
 const STABILIZE_SEC = parseInt(process.env.DERIV_D10_SPIKE_STABILIZE_SEC || '180', 10);
 
-// Camino 1 — Slope Level + tendencia sostenida (|cambio| ≤ C1_CAMBIO_MAX)
-// BOOM500: slope <= max (negativo = normal) | CRASH500: slope >= min (positivo = normal)
+// Camino 1 — Slope Level + señal de reversión débil
+// BOOM500: slope <= max AND cambio >= +MIN (bajada frenándose → spike UP)
+// CRASH500: slope >= min AND cambio <= -MIN (subida frenándose → spike DOWN)
 // cambio=null bloquea C1 (necesita 240s de historia)
 const C1_BOOM_MAX    = parseFloat(process.env.DERIV_D10_BOOM500_SLOPE_MAX_PCT  || '-0.005');
 const C1_CRASH_MIN   = parseFloat(process.env.DERIV_D10_CRASH500_SLOPE_MIN_PCT || '0.005');
-const C1_CAMBIO_MAX  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MAX_PCT      || '0.006');
+const C1_CAMBIO_MIN  = parseFloat(process.env.DERIV_D10_C1_CAMBIO_MIN_PCT      || '0.002');
 const C1_PENDING     = parseInt(process.env.DERIV_D10_PENDING_CAMINO1_SEC || '120', 10);
 
 // Camino 2 — Tendencia extrema + estable (|cambio| PEQUEÑO = tendencia confirmada)
@@ -85,8 +86,9 @@ function detectCamino(
       return { camino: 'camino3_breakout', pending_sec: C3_PENDING };
   }
 
-  // C1: slope en dirección correcta + cambio estable (tendencia sostenida ≥2 min)
-  if (hasCambio && abs_cambio <= C1_CAMBIO_MAX) {
+  // C1: slope en dirección correcta + dinámica detectada (|cambio| >= min, cualquier dirección)
+  // cambio≈0 = mercado plano = bloquea; cualquier movimiento notable = señal de spike
+  if (hasCambio && abs_cambio >= C1_CAMBIO_MIN) {
     if (isBoom  && slope_pct <= C1_BOOM_MAX)  return { camino: 'camino1_level', pending_sec: C1_PENDING };
     if (!isBoom && slope_pct >= C1_CRASH_MIN) return { camino: 'camino1_level', pending_sec: C1_PENDING };
   }
@@ -160,7 +162,7 @@ export async function GET() {
       age_s,
       stabilize_sec: STABILIZE_SEC,
       thresholds: {
-        c1: { boom_max: C1_BOOM_MAX, crash_min: C1_CRASH_MIN, cambio_max: C1_CAMBIO_MAX, pending: C1_PENDING },
+        c1: { boom_max: C1_BOOM_MAX, crash_min: C1_CRASH_MIN, cambio_min: C1_CAMBIO_MIN, pending: C1_PENDING },
         c2: { enabled: C2_ENABLED, boom_max: C2_BOOM_MAX, crash_min: C2_CRASH_MIN, cambio_max: C2_CAMBIO_MAX, stabilize: C2_STABILIZE, pending: C2_PENDING },
         c3: { enabled: C3_ENABLED, boom_max: C3_BOOM_MAX, crash_min: C3_CRASH_MIN, cambio_min: C3_CAMBIO_MIN, pending: C3_PENDING },
       },

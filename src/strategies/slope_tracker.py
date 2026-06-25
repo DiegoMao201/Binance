@@ -83,12 +83,14 @@ class SlopeTracker:
         # cambio_pct = slope(últimos N seg) − slope(N seg anteriores)
         self.cambio_window_sec = _int("DERIV_D10_CAMBIO_WINDOW_SEC", 120)
 
-        # CAMINO 1 — Slope Level (estado normal + tendencia sostenida)
-        # Requiere slope en dirección correcta Y cambio estable (tendencia consistente ≥ 2 min)
-        # cambio_pct None → bloquea (menos de 240s de historia post-spike)
+        # CAMINO 1 — Slope Level + dinámica detectada (|cambio| significativo)
+        # cambio≈0 → BLOQUEA: mercado en estado estable, spike aún no llega
+        # |cambio| >= MIN → PENDING: cualquier cambio en la pendiente = dinámica activa
+        #   (aceleración: slope 1.0→1.2 ó desaceleración: 1.0→0.8 ambos son señal)
+        # cambio=None → bloquea: menos de 240s de historia post-spike
         self.c1_boom500_max_pct = _float("DERIV_D10_BOOM500_SLOPE_MAX_PCT", -0.005)
         self.c1_crash500_min_pct = _float("DERIV_D10_CRASH500_SLOPE_MIN_PCT", 0.005)
-        self.c1_cambio_max_pct = _float("DERIV_D10_C1_CAMBIO_MAX_PCT", 0.006)
+        self.c1_cambio_min_pct = _float("DERIV_D10_C1_CAMBIO_MIN_PCT", 0.002)
         self.c1_pending_sec = _int("DERIV_D10_PENDING_CAMINO1_SEC", 120)
 
         # CAMINO 2 — Tendencia extrema + ESTABLE
@@ -222,17 +224,19 @@ class SlopeTracker:
                     return True, "camino3_breakout", {**details, "pending_sec": self.c3_pending_sec}
 
         # ══════════════════════════════════════════════════════════════════
-        # CAMINO 1 — Slope Level + tendencia sostenida (≥2 min estable)
-        # Requiere slope en dirección correcta Y |cambio| ≤ umbral
+        # CAMINO 1 — Slope Level + dinámica detectada
+        # cambio≈0 (tendencia plana) → BLOQUEA: estado estable, spike aún lejos
+        # |cambio| >= MIN → PENDING: cualquier movimiento en la pendiente es señal
+        #   slope 0.012→0.008 ó 0.012→0.016 = ambos marcan posible spike
         # cambio=None → bloquea: menos de 240s de historia post-spike
         # ══════════════════════════════════════════════════════════════════
         if cambio_pct is None:
             return False, "c1_bloqueado_cambio_insuf_historia", details
 
-        if abs(cambio_pct) > self.c1_cambio_max_pct:
+        if abs(cambio_pct) < self.c1_cambio_min_pct:
             return (
                 False,
-                f"c1_bloqueado_cambio={cambio_pct:+.6f}_max={self.c1_cambio_max_pct:+.4f}",
+                f"c1_bloqueado slope={slope_pct:+.6f} |cambio|={abs(cambio_pct):.6f} < min={self.c1_cambio_min_pct:.4f}",
                 details,
             )
 
