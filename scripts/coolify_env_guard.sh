@@ -40,11 +40,13 @@ REQUIRED_VARS=(
   # Tick subscription: solo BOOM500/CRASH500 (activos) + BOOM1000/CRASH1000 (medición D10).
   # 600/900 completamente excluidos — sin ticks, sin trades, sin nada.
   "DERIV_SYMBOLS=BOOM500,CRASH500,BOOM1000,CRASH1000"
-  # D.10.1 — Slope gate: 0s estabilización, C1 umbral 0.003%, pending C1=120s
+  # D.10.1 — Slope gate: 0s estabilización, C1 umbral 0.0015%, pending C1=120s
   "DERIV_D10_SPIKE_STABILIZE_SEC=0"
   "DERIV_D10_PN5_STABILIZE_SEC=0"
-  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.003"
+  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.0015"
   "DERIV_D10_PENDING_CAMINO1_SEC=120"
+  # D.10 ghost stake: $10 fijo (bypass edge sizing)
+  "DERIV_D10_GHOST_STAKE_USDT=10.0"
   # D.9.0 — Hurst cancel: desactivado — no quiero que cancele ghost pending de D10
   "DERIV_D9_HURST_CANCEL_ENABLED=false"
   # 600/900/1000 completamente inhabilitados. 1000 mide pendiente pero no tradea.
@@ -78,7 +80,7 @@ REQUIRED_VARS=(
 FRONTEND_ID="${FRONTEND_ID:-m0ks004osk4cw444gsokg8os}"
 FRONTEND_ENV="/data/coolify/applications/${FRONTEND_ID}/.env"
 FRONTEND_REQUIRED_VARS=(
-  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.003"
+  "DERIV_D10_C1_CAMBIO_MIN_PCT=0.0015"
   "DERIV_D10_PENDING_CAMINO1_SEC=120"
   "DERIV_D9_HURST_CANCEL_ENABLED=false"
 )

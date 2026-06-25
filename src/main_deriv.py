@@ -2625,7 +2625,7 @@ class DerivDaemon:
         stake = float(os.getenv("DERIV_D10_GHOST_STAKE_USDT", "10.0"))
         multiplier = int(self._settings.multiplier or 200)
         sl_pct = float(profile.get("stop_loss_pct_override") or self._settings.stop_loss_pct)
-        max_hold = float(profile.get("max_hold_seconds") or 600.0)
+        max_hold = float(adaptive_max_hold(tick.symbol, None) or 600.0)
         payload: dict[str, Any] = {
             "broker": "deriv",
             "symbol": tick.symbol,
