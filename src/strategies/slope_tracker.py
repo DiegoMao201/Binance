@@ -55,11 +55,13 @@ class SymbolSlopeState:
 
 
 class SlopeTracker:
-    SYMBOLS = {"BOOM500", "CRASH500"}
+    SYMBOLS = {"BOOM500", "CRASH500"}           # gate activo + medición
+    MEASURE_ONLY = {"BOOM1000", "CRASH1000"}    # solo medición, sin gate
 
     def __init__(self) -> None:
         self.states: dict[str, SymbolSlopeState] = {
-            sym: SymbolSlopeState(symbol=sym) for sym in self.SYMBOLS
+            sym: SymbolSlopeState(symbol=sym)
+            for sym in self.SYMBOLS | self.MEASURE_ONLY
         }
         self._reload_config()
 
@@ -119,7 +121,7 @@ class SlopeTracker:
         last_spike_ts: Optional[float] = None,
     ) -> None:
         sym = symbol.upper()
-        if sym not in self.SYMBOLS:
+        if sym not in self.SYMBOLS and sym not in self.MEASURE_ONLY:
             return
         st = self.states[sym]
         now = time.time()
@@ -165,7 +167,7 @@ class SlopeTracker:
         """
         sym = symbol.upper()
         if sym not in self.SYMBOLS:
-            return True, "not_tracked", {}
+            return True, "not_tracked", {}  # MEASURE_ONLY o no conocido → bypass gate
 
         if not self.enabled:
             return True, "disabled", {}
