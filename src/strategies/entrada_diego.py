@@ -443,6 +443,29 @@ class EntradaDiego:
         except Exception as exc:
             _LOGGER.warning("[ENTRADA_DIEGO] restore_from_disk error: %s", exc)
 
+        # Post-restore: para símbolos que quedaron en IDLE, arrancar ENTRY_WAIT
+        # inmediatamente y marcar el spike actual del risk como "ya visto" para
+        # ignorar spikes anteriores al reinicio.
+        now = time.time()
+        for sym in SYMBOLS_ED:
+            st = self._states[sym]
+            # Marcar spike actual como ya visto (evita reaccionar a spikes pre-restart)
+            try:
+                current_spike_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
+                if current_spike_ts > st.last_spike_ts:
+                    st.last_spike_ts = current_spike_ts
+            except Exception:
+                pass
+            # IDLE → ENTRY_WAIT inmediato al arrancar
+            if st.phase == "IDLE":
+                st.phase            = "ENTRY_WAIT"
+                st.entry_wait_until = now + ENTRY_WAIT_S
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s startup → ENTRY_WAIT inmediato (abre en %ds)",
+                    sym, ENTRY_WAIT_S,
+                )
+        self._persist(now)
+
     def _persist(self, now: float) -> None:
         try:
             payload = self.get_state_snapshot()
