@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -247,21 +248,22 @@ class EntradaDiego:
             )
             self._persist(now)
 
-    async def _open(self, sym: str, state: _SymState, now: float) -> None:
+    async def _open(self, sym: str, state: _SymState, now: float, stake_override: float | None = None) -> None:
+        from src.execution.deriv_trader import DerivOrder  # import local para evitar circular
         side = "MULTDOWN" if "CRASH" in sym else "MULTUP"
+        stake = stake_override if stake_override is not None else STAKE
         _LOGGER.info(
-            "[ENTRADA_DIEGO] %s ABRIENDO %s $%.1f mult=%dx max_hold=%ds (reopen#%d)",
-            sym, side, STAKE, MULTIPLIER, MAX_HOLD_S, state.reopens,
+            "[ENTRADA_DIEGO] %s ABRIENDO %s $%.2f mult=%dx max_hold=%ds (reopen#%d)",
+            sym, side, stake, MULTIPLIER, MAX_HOLD_S, state.reopens,
         )
         try:
-            from src.execution.deriv_trader import DerivOrder  # import local para evitar circular
             order = DerivOrder(
                 symbol=sym,
                 side=side,
-                stake_usdt=STAKE,
+                stake_usdt=stake,
                 multiplier=MULTIPLIER,
-                stop_loss_pct=1.0,       # 100% = Deriv default (nunca SL anticipado)
-                take_profit_pct=0.0,     # sin TP automático
+                stop_loss_pct=1.0,
+                take_profit_pct=0.0,
                 max_hold_seconds=float(MAX_HOLD_S),
                 score_breakdown={
                     "quality_tier": "entrada_diego",
@@ -282,15 +284,28 @@ class EntradaDiego:
                 state.current_profit = 0.0
                 state.phase = "OPEN"
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s OPEN OK contract=%s entry=%.5f",
-                    sym, state.contract_id, entry,
+                    "[ENTRADA_DIEGO] %s OPEN OK contract=%s entry=%.5f stake=$%.2f",
+                    sym, state.contract_id, entry, stake,
                 )
             else:
                 _LOGGER.warning("[ENTRADA_DIEGO] %s OPEN FAILED: %s → IDLE", sym, result)
                 state.phase = "IDLE"
 
         except Exception as exc:
-            _LOGGER.error("[ENTRADA_DIEGO] %s error _open: %s → IDLE", sym, exc, exc_info=True)
+            exc_str = str(exc)
+            # Deriv limita el stake por margen disponible — reintentar con el máximo permitido
+            if "LimitOrderAmountTooHigh" in exc_str and stake_override is None:
+                m = re.search(r"'code_args':\s*\['([\d.]+)'\]", exc_str)
+                if m:
+                    max_allowed = float(m.group(1))
+                    if max_allowed >= 1.0:
+                        _LOGGER.warning(
+                            "[ENTRADA_DIEGO] %s stake=$%.1f rechazado (max=%.2f) → reintento",
+                            sym, stake, max_allowed,
+                        )
+                        await self._open(sym, state, now, stake_override=round(max_allowed * 0.95, 2))
+                        return
+            _LOGGER.error("[ENTRADA_DIEGO] %s error _open: %s → IDLE", sym, exc)
             state.phase = "IDLE"
 
         self._persist(now)
