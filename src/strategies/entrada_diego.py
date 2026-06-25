@@ -204,12 +204,18 @@ class EntradaDiego:
                 self._persist(now)
 
         elif state.phase == "PROFIT_TIMER":
-            # Contrato cerrado externamente durante el timer
+            # Contrato cerrado externamente durante el timer (sl/tp automático de Deriv)
+            # Estábamos en PROFIT_TIMER → ya había profit positivo → tratamos como cierre ganador
             if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-                _LOGGER.info("[ENTRADA_DIEGO] %s cerrado externo durante PROFIT_TIMER → IDLE", sym)
-                state.phase = "IDLE"
+                state.last_close_profit = max(state.current_profit, 0.01)  # marcar como profitable
                 state.contract_id = None
                 state.profit_positive_ts = 0.0
+                state.cooldown_until = now + COOLDOWN_S
+                state.phase = "COOLDOWN"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s cerrado externo durante PROFIT_TIMER → COOLDOWN %ds",
+                    sym, COOLDOWN_S,
+                )
                 self._persist(now)
                 return
 
