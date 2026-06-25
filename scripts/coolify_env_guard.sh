@@ -65,6 +65,10 @@ REQUIRED_VARS=(
   # CRASH1000: slope positivo ≥ +0.005%/min (precio subiendo → spike DOWN inminente)
   "DERIV_D10_BOOM1000_SLOPE_MAX_PCT=-0.005"
   "DERIV_D10_CRASH1000_SLOPE_MIN_PCT=0.005"
+  # FIX 6A: grace separado para 1000s (480s vs 240s de 500s) — mercado más lento
+  "DERIV_D10_DELTA_GRACE_1000_SEC=480"
+  # FIX 6B: cuando D10 pending activo, solo score >= este valor bloquea (todo lo demás bypaseado)
+  "DERIV_D10_GHOST_MIN_SCORE=5.5"
   # 2026-06-11: gate fixes — ghost data 361 blocks WR=100%, 0 LOSS en 24h
   "DERIV_DYNAMIC_STRUCTURAL_RELAX_BLOCK_SYMBOLS="
   "DERIV_ANTI_RETRACE_RANGE_FRAC=0.65"
