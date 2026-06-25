@@ -2779,6 +2779,12 @@ class DerivDaemon:
         # ═══════════════════════════════════════════════════════════════════
         if tick.symbol.upper() in {"BOOM500", "CRASH500"}:
             if str(os.getenv("DERIV_D10_SLOPE_GATE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}:
+                _d10_has_open = any(
+                    oc.symbol == tick.symbol
+                    for oc in getattr(self._executor, "_open", {}).values()
+                )
+                if _d10_has_open:
+                    return  # posición ya abierta → no crear pending D10
                 if not PENDING_ENTRY_WATCHER.is_pending(tick.symbol):
                     _d10_ok, _d10_camino, _d10_det = self._slope_tracker.can_enter(tick.symbol)
                     if not _d10_ok:
