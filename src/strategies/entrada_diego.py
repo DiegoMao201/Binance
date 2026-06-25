@@ -115,6 +115,8 @@ class EntradaDiego:
 
         self._states: dict[str, _SymState] = {sym: _SymState() for sym in SYMBOLS_ED}
         self._locks: dict[str, asyncio.Lock] = {sym: asyncio.Lock() for sym in SYMBOLS_ED}
+        # serializa aperturas entre símbolos — evita conflictos de margen simultáneo
+        self._open_lock = asyncio.Lock()
 
         if self._enabled:
             _LOGGER.info(
@@ -257,23 +259,24 @@ class EntradaDiego:
             sym, side, stake, MULTIPLIER, MAX_HOLD_S, state.reopens,
         )
         try:
-            order = DerivOrder(
-                symbol=sym,
-                side=side,
-                stake_usdt=stake,
-                multiplier=MULTIPLIER,
-                stop_loss_pct=1.0,
-                take_profit_pct=0.0,
-                max_hold_seconds=float(MAX_HOLD_S),
-                score_breakdown={
-                    "quality_tier": "entrada_diego",
-                    "setup": "entrada_diego",
-                    "grade": "ED",
-                    "score": 0.0,
-                    "entrada_diego": True,
-                },
-            )
-            result = await self._executor.execute(order)
+            async with self._open_lock:  # serializa aperturas — evita conflicto de margen
+                order = DerivOrder(
+                    symbol=sym,
+                    side=side,
+                    stake_usdt=stake,
+                    multiplier=MULTIPLIER,
+                    stop_loss_pct=1.0,
+                    take_profit_pct=0.0,
+                    max_hold_seconds=float(MAX_HOLD_S),
+                    score_breakdown={
+                        "quality_tier": "entrada_diego",
+                        "setup": "entrada_diego",
+                        "grade": "ED",
+                        "score": 0.0,
+                        "entrada_diego": True,
+                    },
+                )
+                result = await self._executor.execute(order)
 
             if result.get("status") == "live":
                 cid = result.get("contract_id")
