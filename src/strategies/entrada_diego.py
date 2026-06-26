@@ -37,7 +37,7 @@ MULTIPLIER   = int(os.getenv("ENTRADA_DIEGO_MULTIPLIER",     "200"))
 ENTRY_WAIT_S = int(os.getenv("ENTRADA_DIEGO_ENTRY_WAIT_S",  "300"))   # 5 min post-spike
 MAX_HOLD_S   = int(os.getenv("ENTRADA_DIEGO_MAX_HOLD_S",    "600"))   # 10 min max hold
 PROFIT_WAIT_S= int(os.getenv("ENTRADA_DIEGO_PROFIT_WAIT_S", "180"))   # 3 min tras profit+
-COOLDOWN_S   = int(os.getenv("ENTRADA_DIEGO_COOLDOWN_S",    "300"))   # 5 min post profit+cierre
+COOLDOWN_S   = int(os.getenv("ENTRADA_DIEGO_COOLDOWN_S",     "90"))   # 1.5 min post profit+cierre
 
 
 # ─── State por símbolo ──────────────────────────────────────────────────────
