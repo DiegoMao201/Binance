@@ -1985,8 +1985,12 @@ class DerivTradeExecutor:
         # DERIV_MAX_STAKE_USDT (default $5.00) is unbreakable: no regime/score
         # multiplier or Hurst boost can send a larger stake. Logged as a warning
         # so calibration samples are always within the configured ceiling.
+        # Excepción: entrada_diego maneja su propio escalado martingale ($10→$60).
+        _is_entrada_diego = bool(
+            order.score_breakdown and order.score_breakdown.get("entrada_diego")
+        )
         _final_hard_cap = float(os.getenv("DERIV_MAX_STAKE_USDT", "5.00"))
-        if order.stake_usdt > _final_hard_cap:
+        if order.stake_usdt > _final_hard_cap and not _is_entrada_diego:
             _LOGGER.warning(
                 "[deriv-trader] stake capped %.2f → %.2f (DERIV_MAX_STAKE_USDT hard cap)",
                 order.stake_usdt, _final_hard_cap,
