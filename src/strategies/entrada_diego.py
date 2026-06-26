@@ -171,7 +171,11 @@ class EntradaDiego:
         last_spike_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
 
         if state.phase == "IDLE":
-            self._check_new_spike(sym, state, last_spike_ts, now)
+            # Cualquier vez que estamos IDLE → ENTRY_WAIT inmediato sin esperar spike
+            state.phase = "ENTRY_WAIT"
+            state.entry_wait_until = now + ENTRY_WAIT_S
+            _LOGGER.info("[ENTRADA_DIEGO] %s IDLE → ENTRY_WAIT inmediato (abre en %ds)", sym, ENTRY_WAIT_S)
+            self._persist(now)
 
         elif state.phase == "ENTRY_WAIT":
             # Nuevo spike → reset timer
@@ -263,12 +267,13 @@ class EntradaDiego:
 
         elif state.phase == "COOLDOWN":
             if now >= state.cooldown_until:
-                _LOGGER.info("[ENTRADA_DIEGO] %s COOLDOWN terminado → IDLE (espera nuevo spike)", sym)
-                state.phase = "IDLE"
+                state.phase = "ENTRY_WAIT"
+                state.entry_wait_until = now + ENTRY_WAIT_S
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s COOLDOWN terminado → ENTRY_WAIT inmediato (abre en %ds)",
+                    sym, ENTRY_WAIT_S,
+                )
                 self._persist(now)
-            else:
-                # Aprovechar para chequear si llega un spike nuevo durante cooldown
-                self._check_new_spike(sym, state, last_spike_ts, now)
 
     # ── Operaciones ─────────────────────────────────────────────────────────
 
