@@ -189,7 +189,26 @@ class EntradaDiego:
                 await self._open(sym, state, now)
 
         elif state.phase == "OPEN":
-            # Si el contrato cerró externamente (max_hold por DPM) → reabrir
+            # Check manual max_hold: en spike_sl_only_mode el ejecutor fuerza max_hold=0
+            # (Deriv no cierra el contrato automáticamente), así que lo cerramos nosotros.
+            if now >= state.open_ts + MAX_HOLD_S:
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s MAX_HOLD %ds expirado profit=%.4f → cerrando y reopen#%d",
+                    sym, MAX_HOLD_S, state.current_profit, state.reopens + 1,
+                )
+                try:
+                    if state.contract_id:
+                        await self._executor.close_contract(int(state.contract_id))
+                except Exception as exc:
+                    _LOGGER.error("[ENTRADA_DIEGO] %s error cerrando en max_hold: %s", sym, exc)
+                state.last_close_profit = state.current_profit
+                state.contract_id = None
+                state.profit_positive_ts = 0.0
+                state.reopens += 1
+                await self._open(sym, state, now)
+                return
+
+            # Si el contrato cerró externamente (SL/TP de Deriv) → reabrir
             if state.contract_id is not None and self._query_contract(state.contract_id) is None:
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s contrato %s cerrado (max_hold/SL) → reabrir inmediato",
