@@ -341,23 +341,22 @@ function SlopeGateSection({ symbol }) {
   );
 }
 
-/* ── ENTRADA DIEGO — Segunda línea autónoma post-spike ──────── */
-const ED_STAKE_LADDER = [10, 20, 40, 60];
+/* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
+const ED_STAKE_LADDER_500  = [10, 20, 40, 60];
+const ED_STAKE_LADDER_1000 = [5, 10, 10, 20, 20, 40, 40];
+const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
 
 function EntradaDiegoSection({ symbol }) {
-  const [edState, setEdState]     = useState(null);
-  const [now, setNow]             = useState(Date.now());
-  const spikeResets               = useRef(0);
-  const prevSpikeTs               = useRef(null);
+  const [edState, setEdState] = useState(null);
+  const [now, setNow]         = useState(Date.now());
 
-  // Ticker local cada 500ms → countdown fluido sin depender del API
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
-    if (!["CRASH500", "BOOM500"].includes(symbol)) return;
+    if (!ED_SYMBOLS.has(symbol)) return;
     let active = true;
     const doFetch = async () => {
       try {
@@ -366,20 +365,7 @@ function EntradaDiegoSection({ symbol }) {
         const data = res.ok ? await res.json() : null;
         if (!data) return;
         if (!data.enabled) { setEdState({ enabled: false }); return; }
-        if (data[symbol]) {
-          const s = data[symbol];
-          // Contar resets de ENTRY_WAIT por spikes (last_spike_ts cambia)
-          if (s.phase === "ENTRY_WAIT") {
-            if (prevSpikeTs.current !== null && s.last_spike_ts !== prevSpikeTs.current) {
-              spikeResets.current += 1;
-            }
-            prevSpikeTs.current = s.last_spike_ts;
-          } else {
-            spikeResets.current = 0;
-            prevSpikeTs.current = null;
-          }
-          setEdState({ ...s, enabled: true, _fetched_at: Date.now(), _spike_resets: spikeResets.current });
-        }
+        if (data[symbol]) setEdState({ ...data[symbol], enabled: true });
       } catch { /* noop */ }
     };
     doFetch();
@@ -387,34 +373,34 @@ function EntradaDiegoSection({ symbol }) {
     return () => { active = false; clearInterval(id); };
   }, [symbol]);
 
-  if (!["CRASH500", "BOOM500"].includes(symbol)) return null;
+  if (!ED_SYMBOLS.has(symbol)) return null;
   if (!edState || !edState.enabled) return null;
 
   const {
-    phase, contract_id, current_profit = 0, reopens = 0, _spike_resets = 0,
-    entry_wait_until = 0, open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
+    phase, contract_id, current_profit = 0, reopens = 0,
+    open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
   } = edState;
 
-  // Countdown desde timestamps absolutos del state file — inmune a remaining_s estático
   const nowSec = now / 1000;
-  const ED_MAX_HOLD_S   = 600;
+  const is1000 = symbol.includes("1000");
+  const ladder = is1000 ? ED_STAKE_LADDER_1000 : ED_STAKE_LADDER_500;
+
+  const ED_MAX_HOLD_S    = 600;
   const ED_PROFIT_WAIT_S = 180;
-  const ED_COOLDOWN_S   = 300;
+  const ED_COOLDOWN_S    = is1000 ? 600 : 90;
+
   const remaining_live = Math.max(0, (() => {
-    if (phase === "ENTRY_WAIT")   return entry_wait_until   - nowSec;
     if (phase === "OPEN")         return (open_ts + ED_MAX_HOLD_S) - nowSec;
     if (phase === "PROFIT_TIMER") return (profit_positive_ts + ED_PROFIT_WAIT_S) - nowSec;
-    if (phase === "COOLDOWN")     return cooldown_until      - nowSec;
+    if (phase === "COOLDOWN")     return cooldown_until - nowSec;
     return 0;
   })());
 
-  // Stake actual según nivel martingale
-  const stake = ED_STAKE_LADDER[Math.min(reopens, ED_STAKE_LADDER.length - 1)];
-  const martingaleLevel = reopens > 0 ? ` M${Math.min(reopens + 1, 4)}` : "";
+  const stake = ladder[Math.min(reopens, ladder.length - 1)];
+  const martingaleLevel = reopens > 0 ? ` M${reopens + 1}` : "";
 
   const PHASE_COLOR = {
     IDLE:         "rgba(90,100,115,0.7)",
-    ENTRY_WAIT:   "#f97316",
     OPEN:         "#22d3a3",
     PROFIT_TIMER: "#a78bfa",
     COOLDOWN:     "#62d4ff",
@@ -430,28 +416,25 @@ function EntradaDiegoSection({ symbol }) {
   if (phase === "IDLE") return (
     <div style={{ ...base, color: "rgba(90,100,115,0.7)", background: "rgba(90,100,115,0.05)" }}>
       <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
-      <span style={{ marginLeft: 8, opacity: 0.6 }}>esperando spike…</span>
+      <span style={{ marginLeft: 8, opacity: 0.6 }}>abriendo…</span>
     </div>
   );
 
-  const maxS = { ENTRY_WAIT: 300, OPEN: ED_MAX_HOLD_S, PROFIT_TIMER: ED_PROFIT_WAIT_S, COOLDOWN: ED_COOLDOWN_S }[phase] || 1;
+  const maxS = { OPEN: ED_MAX_HOLD_S, PROFIT_TIMER: ED_PROFIT_WAIT_S, COOLDOWN: ED_COOLDOWN_S }[phase] || 1;
   const pct  = Math.min(100, Math.max(0, ((maxS - remaining_live) / maxS) * 100));
 
-  const secs   = Math.round(remaining_live);
-  const mins   = Math.floor(secs / 60);
-  const secsR  = secs % 60;
+  const secs    = Math.round(remaining_live);
+  const mins    = Math.floor(secs / 60);
+  const secsR   = secs % 60;
   const timeStr = mins > 0 ? `${mins}m ${secsR}s` : `${secs}s`;
 
   const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
   const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`;
 
-  const resetTag = _spike_resets > 0 ? ` · ↺${_spike_resets}` : "";
-
   const PHASE_LABEL = {
-    ENTRY_WAIT:   `abriendo en ${timeStr} · $${stake}${martingaleLevel}${resetTag}`,
     OPEN:         `OPEN ${timeStr} · $${stake}${martingaleLevel}`,
     PROFIT_TIMER: `cerrando en ${timeStr}`,
-    COOLDOWN:     `próxima entrada en ${timeStr}`,
+    COOLDOWN:     `próxima entrada en ${timeStr} · $${ladder[0]}`,
   };
 
   return (

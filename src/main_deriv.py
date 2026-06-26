@@ -2547,10 +2547,10 @@ class DerivDaemon:
             )
             return
         async with lock:
-            # entrada_diego gestiona BOOM500/CRASH500 cuando está activo — pipeline principal no opera
+            # entrada_diego gestiona estos símbolos directamente — pipeline principal no opera
             if (
                 self._entrada_diego.is_enabled()
-                and tick.symbol.upper() in {"BOOM500", "CRASH500"}
+                and tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}
             ):
                 return
             try:
