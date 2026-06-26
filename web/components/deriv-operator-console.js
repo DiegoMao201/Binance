@@ -390,11 +390,23 @@ function EntradaDiegoSection({ symbol }) {
   if (!["CRASH500", "BOOM500"].includes(symbol)) return null;
   if (!edState || !edState.enabled) return null;
 
-  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0, _fetched_at, _spike_resets = 0 } = edState;
+  const {
+    phase, contract_id, current_profit = 0, reopens = 0, _spike_resets = 0,
+    entry_wait_until = 0, open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
+  } = edState;
 
-  // Countdown interpolado localmente — suave entre fetches
-  const secsSinceFetch = _fetched_at ? (now - _fetched_at) / 1000 : 0;
-  const remaining_live = Math.max(0, remaining_s - secsSinceFetch);
+  // Countdown desde timestamps absolutos del state file — inmune a remaining_s estático
+  const nowSec = now / 1000;
+  const ED_MAX_HOLD_S   = 600;
+  const ED_PROFIT_WAIT_S = 180;
+  const ED_COOLDOWN_S   = 300;
+  const remaining_live = Math.max(0, (() => {
+    if (phase === "ENTRY_WAIT")   return entry_wait_until   - nowSec;
+    if (phase === "OPEN")         return (open_ts + ED_MAX_HOLD_S) - nowSec;
+    if (phase === "PROFIT_TIMER") return (profit_positive_ts + ED_PROFIT_WAIT_S) - nowSec;
+    if (phase === "COOLDOWN")     return cooldown_until      - nowSec;
+    return 0;
+  })());
 
   // Stake actual según nivel martingale
   const stake = ED_STAKE_LADDER[Math.min(reopens, ED_STAKE_LADDER.length - 1)];
@@ -422,7 +434,7 @@ function EntradaDiegoSection({ symbol }) {
     </div>
   );
 
-  const maxS = { ENTRY_WAIT: 300, OPEN: 600, PROFIT_TIMER: 180, COOLDOWN: 300 }[phase] || 1;
+  const maxS = { ENTRY_WAIT: 300, OPEN: ED_MAX_HOLD_S, PROFIT_TIMER: ED_PROFIT_WAIT_S, COOLDOWN: ED_COOLDOWN_S }[phase] || 1;
   const pct  = Math.min(100, Math.max(0, ((maxS - remaining_live) / maxS) * 100));
 
   const secs   = Math.round(remaining_live);
