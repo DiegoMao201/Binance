@@ -4,13 +4,16 @@ entrada_diego.py — Segunda línea de apertura autónoma.
 BOOM500 / CRASH500:
   • Abre apenas arranca o después de cualquier cierre — sin ENTRY_WAIT, sin COOLDOWN
   • max_hold → cierra → reabre inmediato stake martingale ($10→$20→$40→$60)
-  • profit+ → PROFIT_TIMER 3min → cierra → reabre inmediato stake=$10 (reinicia ciclo)
+  • profit+ → PROFIT_TIMER 3min → cierra → DISCHARGE si venia de reopen≥2 ($60 próximo ciclo)
+  • DISCHARGE: capturar la descarga que sigue al spike de aviso de sequía larga
   • Spike durante PROFIT_TIMER → resetea los 3 min (rider de movimiento)
 
 BOOM1000 / CRASH1000:
   • Abre apenas arranca o post-COOLDOWN
-  • max_hold → cierra → reabre inmediato stake martingale ($5→$10→$10→$20→$20→$40→$40)
-  • profit+ → PROFIT_TIMER 3min → cierra → COOLDOWN 10min → reabre stake=$5
+  • max_hold → cierra → reabre stake martingale ($10→$20→$20→$40→$40)
+  • profit+ → PROFIT_TIMER 3min → cierra → COOLDOWN 10min → reabre
+  • Al ganar desde reopen≥3: COOLDOWN reinicia en $20 (no $10, secuencia rica)
+  • Si reopen≥8 sin win: DEEP PAUSE 15min → reinicia en $20 (corta martingale infinita)
   • Spike durante PROFIT_TIMER → resetea los 3 min
 
 Activación: env ENTRADA_DIEGO_ENABLED=true
@@ -34,13 +37,16 @@ SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
 SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000
 
 # Tablas de stake martingale por grupo
-_STAKE_LADDER_500  = [10.0, 20.0, 40.0, 60.0]              # reopen #0,1,2,3+
-_STAKE_LADDER_1000 = [5.0, 10.0, 10.0, 20.0, 20.0, 40.0, 40.0]  # reopen #0..6+
+_STAKE_LADDER_500  = [10.0, 20.0, 40.0, 60.0]         # reopen #0,1,2,3+
+_STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+ (inicia $10, $40 en reopen#3)
 
-MULTIPLIER      = int(os.getenv("ENTRADA_DIEGO_MULTIPLIER",      "200"))
-MAX_HOLD_S      = int(os.getenv("ENTRADA_DIEGO_MAX_HOLD_S",      "600"))   # 10 min
-PROFIT_WAIT_S   = int(os.getenv("ENTRADA_DIEGO_PROFIT_WAIT_S",   "180"))   # 3 min
-COOLDOWN_1000_S = int(os.getenv("ENTRADA_DIEGO_COOLDOWN_1000_S", "600"))   # 10 min cooldown 1000
+MULTIPLIER           = int(os.getenv("ENTRADA_DIEGO_MULTIPLIER",        "200"))
+MAX_HOLD_S           = int(os.getenv("ENTRADA_DIEGO_MAX_HOLD_S",        "600"))   # 10 min
+PROFIT_WAIT_S        = int(os.getenv("ENTRADA_DIEGO_PROFIT_WAIT_S",     "180"))   # 3 min rider
+COOLDOWN_1000_S      = int(os.getenv("ENTRADA_DIEGO_COOLDOWN_1000_S",   "600"))   # 10 min cooldown normal
+DEEP_PAUSE_1000_S    = int(os.getenv("ENTRADA_DIEGO_DEEP_PAUSE_1000_S", "900"))   # 15 min deep pause
+DEEP_PAUSE_AT_1000   = int(os.getenv("ENTRADA_DIEGO_DEEP_PAUSE_AT",     "8"))     # reopen# que dispara deep pause
+DISCHARGE_MIN_REOPEN = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_MIN",     "2"))     # reopen mínimo para discharge 500
 
 
 # ─── State por símbolo ──────────────────────────────────────────────────────
@@ -103,11 +109,11 @@ class EntradaDiego:
         if self._enabled:
             _LOGGER.info(
                 "[ENTRADA_DIEGO] ACTIVADO | symbols=%s | "
-                "500: ladder=%s mult=%dx max_hold=%ds profit_wait=%ds | "
-                "1000: ladder=%s cooldown=%ds",
+                "500: ladder=%s mult=%dx max_hold=%ds profit_wait=%ds discharge_min=reopen#%d | "
+                "1000: ladder=%s cooldown=%ds deep_pause=%ds@reopen#%d",
                 sorted(SYMBOLS_ED),
-                _STAKE_LADDER_500, MULTIPLIER, MAX_HOLD_S, PROFIT_WAIT_S,
-                _STAKE_LADDER_1000, COOLDOWN_1000_S,
+                _STAKE_LADDER_500, MULTIPLIER, MAX_HOLD_S, PROFIT_WAIT_S, DISCHARGE_MIN_REOPEN,
+                _STAKE_LADDER_1000, COOLDOWN_1000_S, DEEP_PAUSE_1000_S, DEEP_PAUSE_AT_1000,
             )
         else:
             _LOGGER.info("[ENTRADA_DIEGO] inactivo (ENTRADA_DIEGO_ENABLED=false)")
@@ -171,10 +177,23 @@ class EntradaDiego:
                         await self._executor.close_contract(int(state.contract_id))
                 except Exception as exc:
                     _LOGGER.error("[ENTRADA_DIEGO] %s error cerrando max_hold: %s", sym, exc)
-                state.last_close_profit = state.current_profit
-                state.contract_id       = None
+                state.last_close_profit  = state.current_profit
+                state.contract_id        = None
                 state.profit_positive_ts = 0.0
-                state.reopens += 1
+                state.reopens           += 1
+
+                # DEEP PAUSE para 1000s al agotar todos los niveles del ladder
+                if sym in SYMBOLS_1000 and state.reopens >= DEEP_PAUSE_AT_1000:
+                    state.cooldown_until = now + DEEP_PAUSE_1000_S
+                    state.phase          = "COOLDOWN"
+                    state.reopens        = 1  # reinicia en $20 después del pause
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s DEEP PAUSE %ds → reinicia en $20 (reopen#%d alcanzado)",
+                        sym, DEEP_PAUSE_1000_S, DEEP_PAUSE_AT_1000,
+                    )
+                    self._persist(now)
+                    return
+
                 await self._open(sym, state, now)
                 return
 
@@ -184,9 +203,22 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s contrato %s cerrado externamente → reopen#%d",
                     sym, state.contract_id, state.reopens + 1,
                 )
-                state.last_close_profit = state.current_profit
-                state.contract_id       = None
-                state.reopens += 1
+                state.last_close_profit  = state.current_profit
+                state.contract_id        = None
+                state.reopens           += 1
+
+                # DEEP PAUSE para 1000s también en cierre externo (ghost)
+                if sym in SYMBOLS_1000 and state.reopens >= DEEP_PAUSE_AT_1000:
+                    state.cooldown_until = now + DEEP_PAUSE_1000_S
+                    state.phase          = "COOLDOWN"
+                    state.reopens        = 1
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s DEEP PAUSE %ds (cierre externo) → reinicia en $20",
+                        sym, DEEP_PAUSE_1000_S,
+                    )
+                    self._persist(now)
+                    return
+
                 await self._open(sym, state, now)
                 return
 
@@ -212,14 +244,15 @@ class EntradaDiego:
                 state.last_close_profit  = max(state.current_profit, 0.01)
                 state.contract_id        = None
                 state.profit_positive_ts = 0.0
+                prev_reopens             = state.reopens
                 state.reopens            = 0
-                await self._post_profit_close(sym, state, now)
+                await self._post_profit_close(sym, state, now, prev_reopens=prev_reopens)
                 return
 
             # Spike mientras profit > 0 → resetea los 3 min (rider)
             if last_spike_ts > state.last_spike_ts and last_spike_ts > 0 and state.current_profit > 0:
-                state.last_spike_ts       = last_spike_ts
-                state.profit_positive_ts  = now
+                state.last_spike_ts      = last_spike_ts
+                state.profit_positive_ts = now
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s SPIKE durante PROFIT_TIMER profit=%.4f → RESET TIMER (%ds)",
                     sym, state.current_profit, PROFIT_WAIT_S,
@@ -231,33 +264,62 @@ class EntradaDiego:
             if now >= state.profit_positive_ts + PROFIT_WAIT_S:
                 await self._close_profit_timer(sym, state, now)
 
-        # ── COOLDOWN (solo 1000) ──────────────────────────────────────────────
+        # ── COOLDOWN (1000 tras profit o DEEP PAUSE) ──────────────────────────
         elif state.phase == "COOLDOWN":
             if now >= state.cooldown_until:
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s COOLDOWN terminado → abriendo inmediato stake=%s",
-                    sym, self._next_stake(sym, 0),
+                    sym, self._next_stake(sym, state.reopens),
                 )
-                state.reopens = 0
+                # state.reopens fue fijado al entrar a COOLDOWN — no resetear aquí
                 await self._open(sym, state, now)
 
     # ── Helpers de flujo ────────────────────────────────────────────────────
 
-    async def _post_profit_close(self, sym: str, state: _SymState, now: float) -> None:
-        """Lógica post-cierre con profit+: 500 reabre inmediato, 1000 entra COOLDOWN."""
+    async def _post_profit_close(
+        self, sym: str, state: _SymState, now: float, prev_reopens: int = 0
+    ) -> None:
+        """
+        Lógica post-cierre con profit+.
+        500s: DISCHARGE si venia de reopen≥DISCHARGE_MIN → próximo ciclo a $60.
+              Win temprano → ciclo fresco en $10.
+        1000s: COOLDOWN siempre. Si ganó desde profundidad ≥3 → reinicia en $20.
+        """
         if sym in SYMBOLS_500:
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → reabriendo inmediato $10",
-                sym, state.last_close_profit,
-            )
+            if prev_reopens >= DISCHARGE_MIN_REOPEN:
+                # Discharge mode: el símbolo salió de sequía larga → posicionar para la descarga
+                state.reopens = len(_STAKE_LADDER_500) - 1  # = 3 → stake $60
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DISCHARGE $60 (venia de reopen#%d)",
+                    sym, state.last_close_profit, prev_reopens,
+                )
+            else:
+                # Win temprano → ciclo fresco en $10
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → reabriendo inmediato $10",
+                    sym, state.last_close_profit,
+                )
+                # state.reopens ya es 0 (reseteado antes de llamar aquí)
             await self._open(sym, state, now)
+
         else:
+            # 1000s: siempre COOLDOWN
+            if prev_reopens >= 3:
+                # Venia de sequía larga → reinicio en $20 (secuencia de spikes ricos)
+                state.reopens = 1  # ladder_1000[1] = 20.0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → COOLDOWN %ds (reinicia $20, venia de reopen#%d)",
+                    sym, state.last_close_profit, COOLDOWN_1000_S, prev_reopens,
+                )
+            else:
+                # Win temprano → reinicio normal en $10
+                state.reopens = 0  # ladder_1000[0] = 10.0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → COOLDOWN %ds (reinicia $10)",
+                    sym, state.last_close_profit, COOLDOWN_1000_S,
+                )
             state.cooldown_until = now + COOLDOWN_1000_S
             state.phase          = "COOLDOWN"
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → COOLDOWN %ds (reabre $5)",
-                sym, state.last_close_profit, COOLDOWN_1000_S,
-            )
             self._persist(now)
 
     # ── Operaciones de contrato ──────────────────────────────────────────────
@@ -362,8 +424,9 @@ class EntradaDiego:
         state.profit_positive_ts = 0.0
 
         if final_profit > 0:
+            prev_reopens  = state.reopens
             state.reopens = 0
-            await self._post_profit_close(sym, state, now)
+            await self._post_profit_close(sym, state, now, prev_reopens=prev_reopens)
         else:
             # Estuvo positivo pero terminó negativo → reabrir con martingale
             state.reopens += 1
@@ -433,21 +496,20 @@ class EntradaDiego:
                         )
                         continue
 
-                # Sin contrato — restaurar COOLDOWN si sigue vigente (solo 1000)
-                if phase == "COOLDOWN" and sym in SYMBOLS_1000:
-                    cooldown_until = float(s.get("cooldown_until", 0.0))
-                    if cooldown_until > now:
-                        st = self._states[sym]
-                        st.phase          = "COOLDOWN"
-                        st.cooldown_until = cooldown_until
-                        st.reopens        = 0
-                        _LOGGER.info(
-                            "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes",
-                            sym, cooldown_until - now,
-                        )
-                        continue
+                # Sin contrato — restaurar COOLDOWN/DEEP PAUSE si sigue vigente
+                if phase == "COOLDOWN" and float(s.get("cooldown_until", 0.0)) > now:
+                    cooldown_until = float(s["cooldown_until"])
+                    st = self._states[sym]
+                    st.phase          = "COOLDOWN"
+                    st.cooldown_until = cooldown_until
+                    st.reopens        = reopens  # preservar nivel de restart
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes (reinicia stake=%s)",
+                        sym, cooldown_until - now, self._next_stake(sym, reopens),
+                    )
+                    continue
 
-                # Todo lo demás → IDLE (abre en el siguiente tick)
+                # Todo lo demás → IDLE
                 _LOGGER.info("[ENTRADA_DIEGO] %s startup → IDLE → abre inmediato", sym)
 
         except Exception as exc:
