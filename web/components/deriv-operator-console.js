@@ -345,8 +345,10 @@ function SlopeGateSection({ symbol }) {
 const ED_STAKE_LADDER = [10, 20, 40, 60];
 
 function EntradaDiegoSection({ symbol }) {
-  const [edState, setEdState] = useState(null);
-  const [now, setNow]         = useState(Date.now());
+  const [edState, setEdState]     = useState(null);
+  const [now, setNow]             = useState(Date.now());
+  const spikeResets               = useRef(0);
+  const prevSpikeTs               = useRef(null);
 
   // Ticker local cada 500ms → countdown fluido sin depender del API
   useEffect(() => {
@@ -364,8 +366,20 @@ function EntradaDiegoSection({ symbol }) {
         const data = res.ok ? await res.json() : null;
         if (!data) return;
         if (!data.enabled) { setEdState({ enabled: false }); return; }
-        // Guardamos _fetched_at para interpolar remaining_s localmente
-        if (data[symbol]) setEdState({ ...data[symbol], enabled: true, _fetched_at: Date.now() });
+        if (data[symbol]) {
+          const s = data[symbol];
+          // Contar resets de ENTRY_WAIT por spikes (last_spike_ts cambia)
+          if (s.phase === "ENTRY_WAIT") {
+            if (prevSpikeTs.current !== null && s.last_spike_ts !== prevSpikeTs.current) {
+              spikeResets.current += 1;
+            }
+            prevSpikeTs.current = s.last_spike_ts;
+          } else {
+            spikeResets.current = 0;
+            prevSpikeTs.current = null;
+          }
+          setEdState({ ...s, enabled: true, _fetched_at: Date.now(), _spike_resets: spikeResets.current });
+        }
       } catch { /* noop */ }
     };
     doFetch();
@@ -376,7 +390,7 @@ function EntradaDiegoSection({ symbol }) {
   if (!["CRASH500", "BOOM500"].includes(symbol)) return null;
   if (!edState || !edState.enabled) return null;
 
-  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0, _fetched_at } = edState;
+  const { phase, remaining_s = 0, contract_id, current_profit = 0, reopens = 0, _fetched_at, _spike_resets = 0 } = edState;
 
   // Countdown interpolado localmente — suave entre fetches
   const secsSinceFetch = _fetched_at ? (now - _fetched_at) / 1000 : 0;
@@ -419,8 +433,10 @@ function EntradaDiegoSection({ symbol }) {
   const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
   const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`;
 
+  const resetTag = _spike_resets > 0 ? ` · ↺${_spike_resets}` : "";
+
   const PHASE_LABEL = {
-    ENTRY_WAIT:   `abriendo en ${timeStr} · $${stake}${martingaleLevel}`,
+    ENTRY_WAIT:   `abriendo en ${timeStr} · $${stake}${martingaleLevel}${resetTag}`,
     OPEN:         `OPEN ${timeStr} · $${stake}${martingaleLevel}`,
     PROFIT_TIMER: `cerrando en ${timeStr}`,
     COOLDOWN:     `próxima entrada en ${timeStr}`,
