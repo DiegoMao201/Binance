@@ -193,7 +193,7 @@ _INTER_TRADE_RACE_GUARD_SEC: float = float(
 _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
     "DERIV_FORCE_DISABLED_SYMBOLS",
     "BOOM1000,CRASH1000",
-)
+) | {"BOOM1000", "CRASH1000"}  # operador: 1000s nunca operan
 
 # Symbols the bot monitors (full score/Hurst/pipeline) but NEVER trades.
 # Useful for manual-trading consoles where the human executes the entry.
