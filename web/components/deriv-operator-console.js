@@ -344,7 +344,7 @@ function SlopeGateSection({ symbol }) {
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
 const ED_STAKE_LADDER_500  = [10, 20, 40, 60];
 const ED_STAKE_LADDER_1000 = [5, 10, 10, 20, 20, 40, 40];
-const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
+const ED_SYMBOLS = new Set(["CRASH500", "BOOM500"]);
 
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
@@ -1700,7 +1700,7 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH500", "CRASH1000", "BOOM500", "BOOM1000"];
+  const SYMBOL_ORDER = ["CRASH500", "BOOM500"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
