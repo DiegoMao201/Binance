@@ -94,6 +94,7 @@ class _SymState:
     consec_wins_active: int = 0     # wins consecutivos mientras ACTIVE — solo 500s
     profit_timer_spikes: int = 0    # spikes capturados durante el PROFIT_TIMER actual — solo 500s
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
+    is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -262,6 +263,7 @@ class EntradaDiego:
                 )
                 state.last_close_profit = state.current_profit
                 state.contract_id       = None
+                state.is_readjusted     = False
                 state.reopens          += 1
 
                 if sym in SYMBOLS_1000:
@@ -279,15 +281,20 @@ class EntradaDiego:
                 return
 
             # 3) Profit positivo por primera vez → PROFIT_TIMER
+            # Excepción: si es un re-adjuntado en ACTIVE, no iniciar PROFIT_TIMER —
+            # el contrato viejo cierra vía "cerrado externamente → reopen" y abre el $40 real.
             if state.current_profit > 0 and state.profit_positive_ts == 0.0:
-                state.profit_positive_ts   = now
-                state.profit_timer_spikes  = 0   # contador limpio al iniciar
-                state.phase = "PROFIT_TIMER"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s PROFIT POSITIVO %.4f → PROFIT_TIMER %ds",
-                    sym, state.current_profit, PROFIT_WAIT_S,
-                )
-                self._persist(now)
+                if state.is_readjusted and sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
+                    pass  # esperar cierre externo del re-adjuntado → reopen real $40
+                else:
+                    state.profit_positive_ts   = now
+                    state.profit_timer_spikes  = 0   # contador limpio al iniciar
+                    state.phase = "PROFIT_TIMER"
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s PROFIT POSITIVO %.4f → PROFIT_TIMER %ds",
+                        sym, state.current_profit, PROFIT_WAIT_S,
+                    )
+                    self._persist(now)
 
         # ── PROFIT_TIMER ──────────────────────────────────────────────────────
         elif state.phase == "PROFIT_TIMER":
@@ -509,6 +516,7 @@ class EntradaDiego:
                 state.profit_positive_ts    = 0.0
                 state.current_profit        = 0.0
                 state.profit_timer_spikes   = 0
+                state.is_readjusted         = False
                 state.phase                 = "OPEN"
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s OPEN OK contract=%s entry=%.5f stake=$%.2f",
@@ -522,6 +530,7 @@ class EntradaDiego:
                     state.open_ts            = now
                     state.profit_positive_ts = 0.0
                     state.current_profit     = 0.0
+                    state.is_readjusted      = True
                     state.phase              = "OPEN"
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s re-adjuntado a contrato existente %s",
