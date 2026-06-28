@@ -392,11 +392,22 @@ class EntradaDiego:
                     sym, profit, spikes, QUIET_STAKE_500, prev_mode,
                 )
             elif profit < MIN_WIN_ACTIVE_500:
-                # Ghost close ($0.01) — no cambia modo ni contadores
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → GHOST (< $%.2f) → modo sin cambio [%s]",
-                    sym, profit, MIN_WIN_ACTIVE_500, state.sym_mode,
-                )
+                # Ghost close ($0.01) — si estamos en ACTIVE, vuelve a QUIET:
+                # el cerrado externo desperdicia el momentum del spike y el segundo
+                # $40 abre en frío → max_hold garantizado. Cortar el ciclo aquí.
+                if state.sym_mode == "ACTIVE":
+                    state.sym_mode           = "QUIET"
+                    state.consec_wins_active = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → GHOST en ACTIVE → QUIET $%.0f "
+                        "(cerrado externo mata momentum, corta ciclo)",
+                        sym, profit, QUIET_STAKE_500,
+                    )
+                else:
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → GHOST (< $%.2f) → modo sin cambio [%s]",
+                        sym, profit, MIN_WIN_ACTIVE_500, state.sym_mode,
+                    )
             elif state.sym_mode == "QUIET":
                 # Win real desde QUIET → símbolo despertó → ACTIVE (contador de wins parte en 0)
                 state.sym_mode           = "ACTIVE"
