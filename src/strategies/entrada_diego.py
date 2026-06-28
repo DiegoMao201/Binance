@@ -64,7 +64,13 @@ MIN_WIN_ACTIVE_500    = float(os.getenv("ENTRADA_DIEGO_MIN_WIN_ACTIVE",      "0.
 # Si ratio < umbral (spike pequeño) O gap > 5min (símbolo quieto) → CIERRE INMEDIATO → ACTIVE $40
 # Si ninguna se cumple (spike grande Y spikes recientes) → 3-min timer → queda en QUIET
 CRASH500_RATIO_THRESHOLD = float(os.getenv("ENTRADA_DIEGO_CRASH500_RATIO",  "90.0"))  # spike < 90x = pequeño → CIERRE INMEDIATO
-CRASH500_QUIET_PERIOD_S  = int(os.getenv("ENTRADA_DIEGO_CRASH500_QUIET_S",  "1800"))   # 5min sin spike = símbolo quieto → CIERRE INMEDIATO
+CRASH500_QUIET_PERIOD_S  = int(os.getenv("ENTRADA_DIEGO_CRASH500_QUIET_S",  "1800"))   # 30min sin spike = símbolo quieto → CIERRE INMEDIATO
+
+# Wins consecutivos en ACTIVE antes de volver a QUIET (proteger capital)
+# CRASH500: 1 win → QUIET (mercado agotado, ciclo corto)
+# BOOM500:  3 wins → QUIET (mercado aguanta más, aprovechar racha)
+CRASH500_MAX_WINS_ACTIVE = int(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_WINS", "1"))
+BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "3"))
 
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
@@ -85,6 +91,7 @@ class _SymState:
     current_profit: float = 0.0
     sym_mode: str = "QUIET"         # "QUIET" | "ACTIVE" — solo 500s
     consec_max_holds: int = 0       # max_holds consecutivos mientras ACTIVE — solo 500s
+    consec_wins_active: int = 0     # wins consecutivos mientras ACTIVE — solo 500s
     profit_timer_spikes: int = 0    # spikes capturados durante el PROFIT_TIMER actual — solo 500s
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
 
@@ -111,6 +118,7 @@ class _SymState:
             "remaining_s": round(self.remaining_s(now), 1),
             "sym_mode": self.sym_mode,
             "consec_max_holds": self.consec_max_holds,
+            "consec_wins_active": self.consec_wins_active,
             "profit_timer_spikes": self.profit_timer_spikes,
             "rest_mode": self.rest_mode,
         }
@@ -217,8 +225,9 @@ class EntradaDiego:
                 if sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
                     state.consec_max_holds += 1
                     if state.consec_max_holds >= ACTIVE_MAX_HOLDS:
-                        state.sym_mode = "QUIET"
-                        state.consec_max_holds = 0
+                        state.sym_mode           = "QUIET"
+                        state.consec_max_holds   = 0
+                        state.consec_wins_active = 0
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s ACTIVE → QUIET $%.0f (%d max_holds consecutivos)",
                             sym, QUIET_STAKE_500, ACTIVE_MAX_HOLDS,
@@ -372,36 +381,52 @@ class EntradaDiego:
             is_discharge = sym == "CRASH500" and spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
 
             if is_discharge:
-                # CRASH500: spike en PROFIT_TIMER = mercado descargó → QUIET $5
+                # CRASH500: spike en PROFIT_TIMER desde ACTIVE = mercado descargó → QUIET $5
                 prev_mode = state.sym_mode
-                state.sym_mode         = "QUIET"
-                state.consec_max_holds = 0
+                state.sym_mode           = "QUIET"
+                state.consec_max_holds   = 0
+                state.consec_wins_active = 0
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA (%d spike) → QUIET $%.0f "
                     "(era %s, mercado agotado)",
                     sym, profit, spikes, QUIET_STAKE_500, prev_mode,
                 )
             elif profit < MIN_WIN_ACTIVE_500:
-                # Ghost close ($0.01) — no cambia modo ni resetea consec_max_holds
+                # Ghost close ($0.01) — no cambia modo ni contadores
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → GHOST (< $%.2f) → modo sin cambio [%s]",
                     sym, profit, MIN_WIN_ACTIVE_500, state.sym_mode,
                 )
             elif state.sym_mode == "QUIET":
-                # Win real sin spike desde QUIET → símbolo despertó → ACTIVE
-                state.sym_mode         = "ACTIVE"
-                state.consec_max_holds = 0
+                # Win real desde QUIET → símbolo despertó → ACTIVE (contador de wins parte en 0)
+                state.sym_mode           = "ACTIVE"
+                state.consec_max_holds   = 0
+                state.consec_wins_active = 0
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → QUIET→ACTIVE $%.0f (símbolo despertó)",
                     sym, profit, ACTIVE_STAKE_500,
                 )
             else:
-                # Win real durante ACTIVE → reset consec_max_holds
-                state.consec_max_holds = 0
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → ACTIVE sigue $%.0f (max_holds reset)",
-                    sym, profit, ACTIVE_STAKE_500,
-                )
+                # Win real en ACTIVE → contar wins consecutivos
+                state.consec_wins_active += 1
+                state.consec_max_holds    = 0
+                max_wins = CRASH500_MAX_WINS_ACTIVE if sym == "CRASH500" else BOOM500_MAX_WINS_ACTIVE
+                if state.consec_wins_active >= max_wins:
+                    # Umbral de wins alcanzado → QUIET $5 (proteger capital)
+                    state.sym_mode           = "QUIET"
+                    state.consec_wins_active = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → %d WIN(s) ACTIVE → QUIET $%.0f "
+                        "(capital protegido)",
+                        sym, profit, max_wins, QUIET_STAKE_500,
+                    )
+                else:
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → ACTIVE sigue $%.0f "
+                        "(win#%d/%d)",
+                        sym, profit, ACTIVE_STAKE_500,
+                        state.consec_wins_active, max_wins,
+                    )
             await self._open(sym, state, now)
 
         else:
@@ -594,8 +619,9 @@ class EntradaDiego:
                         st.last_spike_ts     = float(s.get("last_spike_ts", 0.0))
                         st.last_close_profit = float(s.get("last_close_profit", 0.0))
                         if sym in SYMBOLS_500:
-                            st.sym_mode         = s.get("sym_mode", "QUIET")
-                            st.consec_max_holds = int(s.get("consec_max_holds", 0))
+                            st.sym_mode           = s.get("sym_mode", "QUIET")
+                            st.consec_max_holds   = int(s.get("consec_max_holds", 0))
+                            st.consec_wins_active = int(s.get("consec_wins_active", 0))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
@@ -604,7 +630,7 @@ class EntradaDiego:
                         else:
                             st.phase              = "OPEN"
                             st.profit_positive_ts = 0.0
-                        mode_tag = f" [{st.sym_mode} max_holds={st.consec_max_holds}]" if sym in SYMBOLS_500 else ""
+                        mode_tag = f" [{st.sym_mode} max_holds={st.consec_max_holds} wins={st.consec_wins_active}]" if sym in SYMBOLS_500 else ""
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s RESTAURADO: phase=%s contract=%s reopens=%d%s",
                             sym, st.phase, contract_id, st.reopens, mode_tag,
