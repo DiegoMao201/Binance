@@ -68,9 +68,9 @@ CRASH500_QUIET_PERIOD_S  = int(os.getenv("ENTRADA_DIEGO_CRASH500_QUIET_S",  "180
 
 # Wins consecutivos en ACTIVE antes de volver a QUIET (proteger capital)
 # CRASH500: 1 win → QUIET (mercado agotado, ciclo corto)
-# BOOM500:  3 wins → QUIET (mercado aguanta más, aprovechar racha)
+# BOOM500:  2 wins → QUIET (proteger profit, 3er win consecutivo es poco probable)
 CRASH500_MAX_WINS_ACTIVE = int(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_WINS", "1"))
-BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "3"))
+BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2"))
 
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
