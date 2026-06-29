@@ -74,6 +74,11 @@ BOOM500_QUIET_PERIOD_S   = int(os.getenv("ENTRADA_DIEGO_BOOM500_QUIET_S",   "180
 CRASH500_MAX_WINS_ACTIVE = int(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_WINS", "1"))
 BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2"))
 
+# PnL global acumulado: cuando alcanza GLOBAL_PNL_TARGET → pausa GLOBAL_PAUSE_HOURS horas
+# PnL suma todos los cierres de BOOM500+CRASH500 (positivos y negativos)
+GLOBAL_PNL_TARGET  = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PNL_TARGET",  "60.0"))
+GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
+
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
@@ -146,6 +151,8 @@ class EntradaDiego:
         self._open_lock    = asyncio.Lock()
         self._restore_lock = asyncio.Lock()
         self._restored     = False
+        self._global_pnl:         float = 0.0   # PnL acumulado sesión (BOOM500+CRASH500)
+        self._global_pause_until: float = 0.0   # epoch hasta cuando están pausados
 
         if self._enabled:
             active = sorted(SYMBOLS_ED - SYMBOLS_ED_DISABLED)
@@ -183,7 +190,12 @@ class EntradaDiego:
 
     def get_state_snapshot(self) -> dict[str, Any]:
         now = time.time()
-        result: dict[str, Any] = {"updated_at": now, "enabled": self._enabled}
+        result: dict[str, Any] = {
+            "updated_at": now,
+            "enabled": self._enabled,
+            "global_pnl": round(self._global_pnl, 4),
+            "global_pause_until": round(self._global_pause_until, 3),
+        }
         for sym, st in self._states.items():
             if sym in SYMBOLS_ED_DISABLED:
                 result[sym] = {"phase": "DISABLED", "reopens": 0, "current_profit": 0.0, "remaining_s": 0.0}
@@ -223,6 +235,8 @@ class EntradaDiego:
                 state.contract_id        = None
                 state.profit_positive_ts = 0.0
                 state.reopens           += 1
+
+                self._add_global_pnl(sym, state.last_close_profit, now)
 
                 # 500s: actualizar modo QUIET/ACTIVE antes de calcular stake del log
                 if sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
@@ -485,6 +499,22 @@ class EntradaDiego:
         return ladder[min(reopens, len(ladder) - 1)]
 
     async def _open(self, sym: str, state: _SymState, now: float, stake_override: float | None = None) -> None:
+        # Pausa global por PnL: no abrir hasta que venza el timer
+        if self._global_pause_until > 0 and now < self._global_pause_until:
+            remaining_h = (self._global_pause_until - now) / 3600
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s GLOBAL_PNL_PAUSE — %.1fh restantes → COOLDOWN",
+                sym, remaining_h,
+            )
+            state.phase         = "COOLDOWN"
+            state.cooldown_until = self._global_pause_until
+            self._persist(now)
+            return
+        # Pausa expiró → limpiar
+        if self._global_pause_until > 0 and now >= self._global_pause_until:
+            _LOGGER.info("[ENTRADA_DIEGO] GLOBAL_PNL_PAUSE expiró → reanudando operación")
+            self._global_pause_until = 0.0
+
         from src.execution.deriv_trader import DerivOrder
         side  = "MULTDOWN" if "CRASH" in sym else "MULTUP"
         stake = stake_override if stake_override is not None else self._next_stake(sym, state.reopens, now)
@@ -583,6 +613,8 @@ class EntradaDiego:
         state.contract_id        = None
         state.profit_positive_ts = 0.0
 
+        self._add_global_pnl(sym, final_profit, now)
+
         if final_profit > 0:
             prev_reopens  = state.reopens
             state.reopens = 0
@@ -625,6 +657,18 @@ class EntradaDiego:
                 return
             data = json.loads(self._state_file.read_text())
             now  = time.time()
+
+            # Restaurar estado global PnL
+            self._global_pnl = float(data.get("global_pnl", 0.0))
+            raw_pause = float(data.get("global_pause_until", 0.0))
+            if raw_pause > now:
+                self._global_pause_until = raw_pause
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] GLOBAL_PNL_PAUSE restaurado — %.1fh restantes",
+                    (raw_pause - now) / 3600,
+                )
+            else:
+                self._global_pause_until = 0.0  # expiró mientras el container estaba apagado
 
             for sym in SYMBOLS_ED:
                 s = data.get(sym, {})
@@ -697,6 +741,22 @@ class EntradaDiego:
             _LOGGER.warning("[ENTRADA_DIEGO] restore_from_disk error: %s", exc)
 
         self._persist(time.time())
+
+    def _add_global_pnl(self, sym: str, profit: float, now: float) -> None:
+        if sym not in SYMBOLS_500:
+            return
+        self._global_pnl += profit
+        if self._global_pnl >= GLOBAL_PNL_TARGET and self._global_pause_until == 0.0:
+            self._global_pause_until = now + GLOBAL_PAUSE_HOURS * 3600
+            self._global_pnl = 0.0   # resetear para el próximo ciclo post-pausa
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] GLOBAL_PNL_TARGET $%.2f alcanzado → PAUSA %.0fh "
+                "(reanuda %s UTC)",
+                GLOBAL_PNL_TARGET, GLOBAL_PAUSE_HOURS,
+                __import__("datetime").datetime.utcfromtimestamp(
+                    self._global_pause_until
+                ).strftime("%Y-%m-%d %H:%M"),
+            )
 
     def _persist(self, now: float) -> None:
         try:
