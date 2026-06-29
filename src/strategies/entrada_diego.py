@@ -151,8 +151,9 @@ class EntradaDiego:
         self._open_lock    = asyncio.Lock()
         self._restore_lock = asyncio.Lock()
         self._restored     = False
-        self._global_pnl:         float = 0.0   # PnL acumulado sesión (BOOM500+CRASH500)
-        self._global_pause_until: float = 0.0   # epoch hasta cuando están pausados
+        self._global_pnl:              float = 0.0                # PnL acumulado total
+        self._global_pause_until:     float = 0.0                # epoch hasta cuando pausados
+        self._global_pnl_next_target: float = GLOBAL_PNL_TARGET  # próximo umbral: 60→120→180
 
         if self._enabled:
             active = sorted(SYMBOLS_ED - SYMBOLS_ED_DISABLED)
@@ -195,6 +196,7 @@ class EntradaDiego:
             "enabled": self._enabled,
             "global_pnl": round(self._global_pnl, 4),
             "global_pause_until": round(self._global_pause_until, 3),
+            "global_pnl_next_target": round(self._global_pnl_next_target, 2),
         }
         for sym, st in self._states.items():
             if sym in SYMBOLS_ED_DISABLED:
@@ -332,6 +334,7 @@ class EntradaDiego:
 
             # Spike durante PROFIT_TIMER
             if last_spike_ts > state.last_spike_ts and last_spike_ts > 0 and state.current_profit > 0:
+                prev_spike_ts       = state.last_spike_ts   # guardar ANTES de actualizar
                 state.last_spike_ts = last_spike_ts
 
                 # BOOM500 y CRASH500 en QUIET: misma lógica de CIERRE INMEDIATO
@@ -339,12 +342,27 @@ class EntradaDiego:
                 # spike grande + reciente → 3-min timer, queda en QUIET
                 if sym in SYMBOLS_500 and state.sym_mode == "QUIET":
                     spike_ratio     = self._risk.get_last_spike_ratio(sym)
-                    time_since_prev = (last_spike_ts - state.last_spike_ts
-                                       if state.last_spike_ts > 0 else float("inf"))
+                    time_since_prev = (last_spike_ts - prev_spike_ts
+                                       if prev_spike_ts > 0 else float("inf"))
                     ratio_thresh    = CRASH500_RATIO_THRESHOLD if sym == "CRASH500" else BOOM500_RATIO_THRESHOLD
                     quiet_thresh    = CRASH500_QUIET_PERIOD_S  if sym == "CRASH500" else BOOM500_QUIET_PERIOD_S
                     is_small_spike  = 0 < spike_ratio < ratio_thresh
                     is_quiet_period = time_since_prev > quiet_thresh
+
+                    # Si ya hubo spike(s) grande(s) en esta sesión de PROFIT_TIMER →
+                    # cualquier spike siguiente (grande o pequeño) es descarga continuada.
+                    # No hacer CIERRE INMEDIATO — sumar al contador y resetear timer.
+                    if state.profit_timer_spikes >= DISCHARGE_SPIKES_500:
+                        state.profit_positive_ts   = now
+                        state.profit_timer_spikes += 1
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
+                            "descarga continuada (ya=%d spikes) — timer reset, NO cierre inmediato",
+                            sym, spike_ratio, time_since_prev, state.profit_timer_spikes,
+                        )
+                        self._persist(now)
+                        return
+
                     if is_small_spike or is_quiet_period:
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
@@ -356,7 +374,7 @@ class EntradaDiego:
                         return
                     else:
                         # Spike grande + reciente → 3-min timer (posible descarga)
-                        state.profit_positive_ts = now
+                        state.profit_positive_ts   = now
                         state.profit_timer_spikes += 1
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
@@ -402,20 +420,27 @@ class EntradaDiego:
 
             profit = state.last_close_profit
 
-            # DESCARGA aplica a BOOM500 y CRASH500 desde ACTIVE ($40) — spike = mercado agotó la energía
-            # Si ya éramos QUIET ($5), el spike fue capturado barato; al vencer el timer → ACTIVE
-            is_discharge = sym in SYMBOLS_500 and spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
+            # DESCARGA: spikes en PROFIT_TIMER = mercado agotó la energía → no escalar
+            # Aplica en ACTIVE (obvia) y en QUIET (si hubo spikes grandes, no ir a ACTIVE)
+            is_discharge       = spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
+            is_discharge_quiet = spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "QUIET"
 
             if is_discharge:
-                # spike(s) en PROFIT_TIMER desde ACTIVE = mercado descargó → QUIET $5
-                prev_mode = state.sym_mode
+                # Desde ACTIVE con spikes → QUIET $5
                 state.sym_mode           = "QUIET"
                 state.consec_max_holds   = 0
                 state.consec_wins_active = 0
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA (%d spike) → QUIET $%.0f "
-                    "(era %s, mercado agotado)",
-                    sym, profit, spikes, QUIET_STAKE_500, prev_mode,
+                    "(ACTIVE, mercado agotado)",
+                    sym, profit, spikes, QUIET_STAKE_500,
+                )
+            elif is_discharge_quiet:
+                # Desde QUIET con spikes grandes → sigue QUIET $5 (mercado descargó, no es señal)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA en QUIET (%d spike) → "
+                    "sigue QUIET $%.0f (no ir a ACTIVE, mercado ya descargó)",
+                    sym, profit, spikes, QUIET_STAKE_500,
                 )
             elif profit < MIN_WIN_ACTIVE_500:
                 # Ghost close ($0.01) — si estamos en ACTIVE, vuelve a QUIET:
@@ -660,12 +685,16 @@ class EntradaDiego:
 
             # Restaurar estado global PnL
             self._global_pnl = float(data.get("global_pnl", 0.0))
+            self._global_pnl_next_target = float(
+                data.get("global_pnl_next_target", GLOBAL_PNL_TARGET)
+            )
             raw_pause = float(data.get("global_pause_until", 0.0))
             if raw_pause > now:
                 self._global_pause_until = raw_pause
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] GLOBAL_PNL_PAUSE restaurado — %.1fh restantes",
-                    (raw_pause - now) / 3600,
+                    "[ENTRADA_DIEGO] GLOBAL_PNL_PAUSE restaurado — %.1fh restantes "
+                    "(acumulado=$%.2f, próximo target=$%.0f)",
+                    (raw_pause - now) / 3600, self._global_pnl, self._global_pnl_next_target,
                 )
             else:
                 self._global_pause_until = 0.0  # expiró mientras el container estaba apagado
@@ -746,13 +775,15 @@ class EntradaDiego:
         if sym not in SYMBOLS_500:
             return
         self._global_pnl += profit
-        if self._global_pnl >= GLOBAL_PNL_TARGET and self._global_pause_until == 0.0:
-            self._global_pause_until = now + GLOBAL_PAUSE_HOURS * 3600
-            self._global_pnl = 0.0   # resetear para el próximo ciclo post-pausa
+        if self._global_pnl >= self._global_pnl_next_target and self._global_pause_until == 0.0:
+            self._global_pause_until      = now + GLOBAL_PAUSE_HOURS * 3600
+            prev_target                   = self._global_pnl_next_target
+            self._global_pnl_next_target += GLOBAL_PNL_TARGET   # 60→120→180→...
             _LOGGER.info(
-                "[ENTRADA_DIEGO] GLOBAL_PNL_TARGET $%.2f alcanzado → PAUSA %.0fh "
-                "(reanuda %s UTC)",
-                GLOBAL_PNL_TARGET, GLOBAL_PAUSE_HOURS,
+                "[ENTRADA_DIEGO] GLOBAL_PNL $%.2f >= target $%.0f → PAUSA %.0fh "
+                "(próximo target=$%.0f, reanuda %s UTC)",
+                self._global_pnl, prev_target, GLOBAL_PAUSE_HOURS,
+                self._global_pnl_next_target,
                 __import__("datetime").datetime.utcfromtimestamp(
                     self._global_pause_until
                 ).strftime("%Y-%m-%d %H:%M"),
