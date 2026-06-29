@@ -388,12 +388,12 @@ class EntradaDiego:
 
             profit = state.last_close_profit
 
-            # DESCARGA solo aplica a CRASH500 desde ACTIVE ($40) — spike = mercado agotó la energía
+            # DESCARGA aplica a BOOM500 y CRASH500 desde ACTIVE ($40) — spike = mercado agotó la energía
             # Si ya éramos QUIET ($5), el spike fue capturado barato; al vencer el timer → ACTIVE
-            is_discharge = sym == "CRASH500" and spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
+            is_discharge = sym in SYMBOLS_500 and spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
 
             if is_discharge:
-                # CRASH500: spike en PROFIT_TIMER desde ACTIVE = mercado descargó → QUIET $5
+                # spike(s) en PROFIT_TIMER desde ACTIVE = mercado descargó → QUIET $5
                 prev_mode = state.sym_mode
                 state.sym_mode           = "QUIET"
                 state.consec_max_holds   = 0
