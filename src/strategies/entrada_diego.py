@@ -101,6 +101,7 @@ class _SymState:
     consec_max_holds: int = 0       # max_holds consecutivos mientras ACTIVE — solo 500s
     consec_wins_active: int = 0     # wins consecutivos mientras ACTIVE — solo 500s
     profit_timer_spikes: int = 0    # spikes capturados durante el PROFIT_TIMER actual — solo 500s
+    prev_discharge: bool = False    # True si el ACTIVE anterior terminó en descarga; exige timer limpio antes de $40
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
 
@@ -129,6 +130,7 @@ class _SymState:
             "consec_max_holds": self.consec_max_holds,
             "consec_wins_active": self.consec_wins_active,
             "profit_timer_spikes": self.profit_timer_spikes,
+            "prev_discharge": self.prev_discharge,
             "rest_mode": self.rest_mode,
         }
         return d
@@ -396,26 +398,35 @@ class EntradaDiego:
 
             # DESCARGA: spikes en PROFIT_TIMER = mercado agotó la energía → no escalar
             # Aplica en ACTIVE (obvia) y en QUIET (si hubo spikes grandes, no ir a ACTIVE)
-            quiet_discharge_thresh = BOOM500_DISCHARGE_QUIET_SPIKES  # ambos 500s: ≥2 spikes en QUIET = no escalar
+            # Post-descarga: si el ACTIVE anterior terminó en descarga, threshold baja a 1 para
+            # el siguiente ciclo QUIET — cualquier spike grande = sigue QUIET (protege el $40).
+            quiet_discharge_thresh = (
+                DISCHARGE_SPIKES_500          # =1: post-descarga → 1 spike basta para bloquear $40
+                if state.prev_discharge
+                else BOOM500_DISCHARGE_QUIET_SPIKES  # normal: ≥2 spikes bloquean
+            )
             is_discharge       = spikes >= DISCHARGE_SPIKES_500 and state.sym_mode == "ACTIVE"
             is_discharge_quiet = spikes >= quiet_discharge_thresh and state.sym_mode == "QUIET"
 
             if is_discharge:
-                # Desde ACTIVE con spikes → QUIET $5
+                # Desde ACTIVE con spikes → QUIET $5; marcar: siguiente ciclo QUIET exige timer limpio
                 state.sym_mode           = "QUIET"
                 state.consec_max_holds   = 0
                 state.consec_wins_active = 0
+                state.prev_discharge     = True
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA (%d spike) → QUIET $%.0f "
-                    "(ACTIVE, mercado agotado)",
+                    "(ACTIVE, mercado agotado — próximo ciclo QUIET exige timer limpio)",
                     sym, profit, spikes, QUIET_STAKE_500,
                 )
             elif is_discharge_quiet:
-                # Desde QUIET con ≥2 spikes → sigue QUIET $5 (mercado descargó, no es señal)
+                # Desde QUIET con spikes (thresh=%d) → sigue QUIET $5; resetear flag (ciclo QUIET consumido)
+                state.prev_discharge = False
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA en QUIET (%d spikes) → "
-                    "sigue QUIET $%.0f (mercado ya descargó)",
-                    sym, profit, spikes, QUIET_STAKE_500,
+                    "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA en QUIET (%d spikes, thresh=%d) → "
+                    "sigue QUIET $%.0f%s",
+                    sym, profit, spikes, quiet_discharge_thresh, QUIET_STAKE_500,
+                    " [post-descarga]" if quiet_discharge_thresh == DISCHARGE_SPIKES_500 else "",
                 )
             elif profit < MIN_WIN_ACTIVE_500:
                 # Ghost close ($0.01) — si estamos en ACTIVE, vuelve a QUIET:
@@ -435,10 +446,11 @@ class EntradaDiego:
                         sym, profit, MIN_WIN_ACTIVE_500, state.sym_mode,
                     )
             elif state.sym_mode == "QUIET":
-                # Win real desde QUIET → símbolo despertó → ACTIVE (contador de wins parte en 0)
+                # Win real desde QUIET con timer limpio → símbolo despertó → ACTIVE
                 state.sym_mode           = "ACTIVE"
                 state.consec_max_holds   = 0
                 state.consec_wins_active = 0
+                state.prev_discharge     = False  # ciclo limpio completado
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → QUIET→ACTIVE $%.0f (símbolo despertó)",
                     sym, profit, ACTIVE_STAKE_500,
@@ -695,6 +707,7 @@ class EntradaDiego:
                             st.sym_mode           = s.get("sym_mode", "QUIET")
                             st.consec_max_holds   = int(s.get("consec_max_holds", 0))
                             st.consec_wins_active = int(s.get("consec_wins_active", 0))
+                            st.prev_discharge     = bool(s.get("prev_discharge", False))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
