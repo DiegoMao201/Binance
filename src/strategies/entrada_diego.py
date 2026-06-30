@@ -338,80 +338,25 @@ class EntradaDiego:
                 prev_spike_ts       = state.last_spike_ts   # guardar ANTES de actualizar
                 state.last_spike_ts = last_spike_ts
 
-                # BOOM500 y CRASH500 en QUIET: misma lógica de CIERRE INMEDIATO
-                # spike pequeño (ratio < umbral) → CIERRE INMEDIATO → ACTIVE $40
-                # spike grande + reciente → 3-min timer, queda en QUIET
+                # BOOM500 y CRASH500 en QUIET: sin CIERRE INMEDIATO
+                # Siempre esperar el cooldown completo de 3 minutos.
+                # Solo contar spikes grandes para discharge; al vencer el timer:
+                #   → si ganó (profit real) = ACTIVE $40 | si no = sigue QUIET $5
                 if sym in SYMBOLS_500 and state.sym_mode == "QUIET":
-                    spike_ratio     = self._risk.get_last_spike_ratio(sym)
-                    time_since_prev = (last_spike_ts - prev_spike_ts
-                                       if prev_spike_ts > 0 else float("inf"))
-                    ratio_thresh    = CRASH500_RATIO_THRESHOLD if sym == "CRASH500" else BOOM500_RATIO_THRESHOLD
-                    quiet_thresh    = CRASH500_QUIET_PERIOD_S  if sym == "CRASH500" else BOOM500_QUIET_PERIOD_S
-                    is_small_spike  = 0 < spike_ratio < ratio_thresh
-                    is_quiet_period = time_since_prev > quiet_thresh
+                    spike_ratio  = self._risk.get_last_spike_ratio(sym)
+                    ratio_thresh = CRASH500_RATIO_THRESHOLD if sym == "CRASH500" else BOOM500_RATIO_THRESHOLD
+                    is_large_spike = spike_ratio >= ratio_thresh
 
-                    # Si ya hubo spike(s) grande(s) en esta sesión de PROFIT_TIMER →
-                    # cualquier spike siguiente (grande o pequeño) es descarga continuada.
-                    # No hacer CIERRE INMEDIATO — sumar al contador y resetear timer.
-                    if state.profit_timer_spikes >= DISCHARGE_SPIKES_500:
-                        state.profit_positive_ts   = now
+                    state.profit_positive_ts = now  # extender timer
+                    if is_large_spike:
                         state.profit_timer_spikes += 1
-                        _LOGGER.info(
-                            "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
-                            "descarga continuada (ya=%d spikes) — timer reset, NO cierre inmediato",
-                            sym, spike_ratio, time_since_prev, state.profit_timer_spikes,
-                        )
-                        self._persist(now)
-                        return
-
-                    if sym == "CRASH500":
-                        # CRASH500: escala SOLO en spike GRANDE (señal real de momentum)
-                        # Spike pequeño o mercado quieto = señal débil → reset timer, sigue en QUIET $5
-                        if not is_small_spike and not is_quiet_period:
-                            # Spike grande + reciente = SEÑAL → CIERRE INMEDIATO → ACTIVE $40
-                            # Incrementar ANTES del cierre: _post_profit_close ve spikes=1 → va ACTIVE
-                            state.profit_timer_spikes += 1
-                            _LOGGER.info(
-                                "[ENTRADA_DIEGO] %s SPIKE GRANDE en QUIET ratio=%.1fx gap=%.0fs → "
-                                "CIERRE INMEDIATO → ACTIVE $%.0f (señal real de momentum)",
-                                sym, spike_ratio, time_since_prev, ACTIVE_STAKE_500,
-                            )
-                            await self._close_profit_timer(sym, state, now)
-                            return
-                        else:
-                            # Spike pequeño o mercado quieto → reset timer sin escalar
-                            state.profit_positive_ts = now
-                            _LOGGER.info(
-                                "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
-                                "reset timer sin escalar (%s — señal débil, sigue QUIET $%.0f)",
-                                sym, spike_ratio, time_since_prev,
-                                "ratio<%.0f" % ratio_thresh if is_small_spike else "quieto>%.0fs" % quiet_thresh,
-                                QUIET_STAKE_500,
-                            )
-                            self._persist(now)
-                            return
-                    else:
-                        # BOOM500: lógica original — spike pequeño/quieto → CIERRE INMEDIATO → ACTIVE
-                        if is_small_spike or is_quiet_period:
-                            _LOGGER.info(
-                                "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
-                                "CIERRE INMEDIATO → ACTIVE $%.0f (%s)",
-                                sym, spike_ratio, time_since_prev, ACTIVE_STAKE_500,
-                                "ratio<%.0f" % ratio_thresh if is_small_spike else "quieto>%.0fs" % quiet_thresh,
-                            )
-                            await self._close_profit_timer(sym, state, now)
-                            return
-                        else:
-                            # Spike grande + reciente → 3-min timer (posible descarga)
-                            state.profit_positive_ts   = now
-                            state.profit_timer_spikes += 1
-                            _LOGGER.info(
-                                "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx gap=%.0fs → "
-                                "3-min timer (spike grande+reciente, descarga spike#%d)",
-                                sym, spike_ratio, time_since_prev, state.profit_timer_spikes,
-                            )
-                            self._persist(now)
-                            return
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s SPIKE en QUIET ratio=%.1fx → timer reset%s (cooldown 3min)",
+                        sym, spike_ratio,
+                        f" descarga#{state.profit_timer_spikes}" if is_large_spike else "",
+                    )
+                    self._persist(now)
+                    return
 
                 # ACTIVE ($40): resetear timer y seguir rideando + contar descarga (CRASH500)
                 state.profit_positive_ts = now
@@ -471,13 +416,6 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s CIERRE PROFIT+ %.4f → DESCARGA en QUIET (%d spikes) → "
                     "sigue QUIET $%.0f (mercado ya descargó)",
                     sym, profit, spikes, QUIET_STAKE_500,
-                )
-            elif sym == "CRASH500" and state.sym_mode == "QUIET" and spikes == 0:
-                # Timer vencio sin spike grande (solo spikes pequeños o nada) → sin señal real → sigue QUIET
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s timer QUIET sin spike grande (spikes=0) → "
-                    "sigue QUIET $%.0f (sin señal real de momentum)",
-                    sym, QUIET_STAKE_500,
                 )
             elif profit < MIN_WIN_ACTIVE_500:
                 # Ghost close ($0.01) — si estamos en ACTIVE, vuelve a QUIET:
