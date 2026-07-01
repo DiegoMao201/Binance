@@ -409,8 +409,14 @@ class EntradaDiego:
         state = self._states[sym]
         now   = time.time()
 
+        # Actualizar profit solo si el contrato sigue vivo; si ya cerró, preservar
+        # el último valor conocido (evita que _query_profit devuelva 0.0 cuando el
+        # broker ya liquidó el contrato justo antes de que detectemos el cierre).
+        _live_oc = None
         if state.contract_id is not None:
-            state.current_profit = self._query_profit(state.contract_id)
+            _live_oc = self._query_contract(state.contract_id)
+            if _live_oc is not None:
+                state.current_profit = float(_live_oc.get("floating_pnl") or 0.0)
 
         if state.phase == "IDLE":
             _LOGGER.info("[ENTRADA_DIEGO] %s IDLE → abriendo $%.0f", sym, R75_STAKE)
@@ -418,8 +424,8 @@ class EntradaDiego:
 
         elif state.phase == "OPEN":
             # Broker cerró (TP o SL alcanzado)
-            if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-                close_profit = state.current_profit
+            if state.contract_id is not None and _live_oc is None:
+                close_profit = state.current_profit  # último valor conocido (no 0)
                 # Flip de dirección: si perdió → invierte, si ganó → mantiene
                 if close_profit <= 0:
                     state.r75_direction = "MULTDOWN" if state.r75_direction == "MULTUP" else "MULTUP"
