@@ -85,7 +85,7 @@ _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRAS
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
 # R_75 (Volatility 75 Index) — bucle simple TP/SL
-R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "20.0"))
+R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
 R75_TP_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_TP_PCT",     "0.075"))  # $1.50 on $20
 R75_SL_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_SL_PCT",     "0.10"))   # $2.00 on $20
 R75_MULTIPLIER = int(os.getenv("ENTRADA_DIEGO_R75_MULTIPLIER",   "100"))
