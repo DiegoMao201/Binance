@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger("entrada_diego")
 
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
-SYMBOLS_R    = {"R_75"}
+SYMBOLS_R    = {"R_75", "JD75"}
 SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000 | SYMBOLS_R
 
 _STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+
@@ -84,13 +84,18 @@ GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
-# R_75 (Volatility 75 Index) — bucle simple TP/SL
+# R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
 R75_TP_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_TP_PCT",     "0.30"))   # $1.50 on $5 stake
 R75_SL_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_SL_PCT",     "0.40"))   # $2.00 on $5 stake
-R75_MULTIPLIER = int(os.getenv("ENTRADA_DIEGO_R75_MULTIPLIER",   "100"))
-R75_MAX_HOLD_S = int(os.getenv("ENTRADA_DIEGO_R75_MAX_HOLD_S",   "300"))    # 5min tope de seguridad
-R75_COOLDOWN_S = int(os.getenv("ENTRADA_DIEGO_R75_COOLDOWN_S",   "30"))     # pausa entre trades
+R75_MAX_HOLD_S = int(os.getenv("ENTRADA_DIEGO_R75_MAX_HOLD_S",   "300"))
+R75_COOLDOWN_S = int(os.getenv("ENTRADA_DIEGO_R75_COOLDOWN_S",   "30"))
+
+# Multiplicador por símbolo: R_75 soporta 100x, JD75 soporta {15,30,50,75,150}
+_R_MULTIPLIER: dict[str, int] = {
+    "R_75":  int(os.getenv("ENTRADA_DIEGO_R75_MULTIPLIER",  "100")),
+    "JD75":  int(os.getenv("ENTRADA_DIEGO_JD75_MULTIPLIER", "75")),
+}
 
 
 # ─── State por símbolo ──────────────────────────────────────────────────────
@@ -613,7 +618,8 @@ class EntradaDiego:
         stake = stake_override if stake_override is not None else self._next_stake(sym, state.reopens, now)
         mode_tag = state.sym_mode if sym in SYMBOLS_500 else ("REST" if state.rest_mode else "normal")
         if sym in SYMBOLS_R:
-            _mult, _sl, _tp, _mh = R75_MULTIPLIER, R75_SL_PCT, R75_TP_PCT, float(R75_MAX_HOLD_S)
+            _mult = _R_MULTIPLIER.get(sym, 100)
+            _mult, _sl, _tp, _mh = _mult, R75_SL_PCT, R75_TP_PCT, float(R75_MAX_HOLD_S)
         else:
             _mult, _sl, _tp, _mh = MULTIPLIER, 0.65, 0.65, float(MAX_HOLD_S)
         _LOGGER.info(
