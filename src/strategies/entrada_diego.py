@@ -272,13 +272,13 @@ class EntradaDiego:
             if sym in SYMBOLS_500:
                 _stake_now = ACTIVE_STAKE_500 if state.sym_mode == "ACTIVE" else QUIET_STAKE_500
                 _sl_dollar = _stake_now * ED_SL_PCT
-                if state.current_profit < -_sl_dollar:
+                if state.current_profit < -_sl_dollar and state.contract_id is not None:
                     try:
-                        if state.contract_id:
-                            await self._executor.close_contract(int(state.contract_id))
+                        await self._executor.close_contract(int(state.contract_id))
                     except Exception as exc:
                         _LOGGER.error("[ENTRADA_DIEGO] %s SL_HARD error: %s", sym, exc)
                     state.last_close_profit  = state.current_profit
+                    state.current_profit     = 0.0   # evita re-disparo si _open falla
                     state.contract_id        = None
                     state.profit_positive_ts = 0.0
                     state.reopens           += 1
