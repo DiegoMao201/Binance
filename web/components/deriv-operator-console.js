@@ -463,6 +463,139 @@ function EntradaDiegoSection({ symbol }) {
   );
 }
 
+/* ── R_75 Volatility Card ────────────────────────────────────── */
+function R75Card() {
+  const [edState, setEdState] = useState(null);
+  const [now, setNow]         = useState(Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/entrada-diego-state", { cache: "no-store" });
+        if (!active) return;
+        const data = res.ok ? await res.json() : null;
+        if (!data) return;
+        if (!data.enabled) { setEdState({ enabled: false }); return; }
+        if (data["R_75"]) setEdState({ ...data["R_75"], enabled: true });
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 2000);
+    return () => { active = false; clearInterval(id); };
+  }, []);
+
+  const R75_MAX_HOLD_S = 300;
+  const R75_COOLDOWN_S = 30;
+  const R75_STAKE      = 20;
+  const R75_TP         = 1.50;
+  const R75_SL         = 2.00;
+
+  const PHASE_COLOR = {
+    IDLE:     "rgba(90,100,115,0.7)",
+    OPEN:     "#62d4ff",
+    COOLDOWN: "#a78bfa",
+  };
+
+  const outer = {
+    background: T.panel, border: `1px solid ${T.border}`, borderRadius: 10,
+    padding: "14px 16px", fontFamily: FONT_MONO, fontSize: 11,
+  };
+
+  if (!edState || !edState.enabled) {
+    return (
+      <div style={outer}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: T.cyan }}>R_75</span>
+          <span style={{ fontSize: 9, color: T.mute, padding: "1px 5px", borderRadius: 3, background: T.bg2 }}>VOLATILITY 75</span>
+        </div>
+        <div style={{ color: T.mute, fontSize: 10 }}>Esperando estado…</div>
+      </div>
+    );
+  }
+
+  const {
+    phase, contract_id, current_profit = 0,
+    open_ts = 0, cooldown_until = 0, last_close_profit = 0,
+  } = edState;
+
+  const nowSec = now / 1000;
+  const color  = PHASE_COLOR[phase] || T.mute;
+
+  const remaining = Math.max(0, (() => {
+    if (phase === "OPEN")     return (open_ts + R75_MAX_HOLD_S) - nowSec;
+    if (phase === "COOLDOWN") return cooldown_until - nowSec;
+    return 0;
+  })());
+
+  const maxS = phase === "OPEN" ? R75_MAX_HOLD_S : phase === "COOLDOWN" ? R75_COOLDOWN_S : 1;
+  const progress = Math.min(100, Math.max(0, ((maxS - remaining) / maxS) * 100));
+
+  const secs    = Math.round(remaining);
+  const timeStr = secs >= 60 ? `${Math.floor(secs/60)}m ${secs%60}s` : `${secs}s`;
+  const pnlColor = current_profit > 0 ? T.green : current_profit < 0 ? T.red : T.textD;
+  const lastColor = last_close_profit > 0 ? T.green : last_close_profit < 0 ? T.red : T.mute;
+
+  return (
+    <div style={outer}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: T.cyan }}>R_75</span>
+        <span style={{ fontSize: 9, color: T.mute, padding: "1px 5px", borderRadius: 3, background: T.bg2 }}>VOLATILITY 75</span>
+        <span style={{
+          marginLeft: "auto", fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+          background: `${color}22`, color, letterSpacing: "0.05em",
+        }}>{phase}</span>
+      </div>
+
+      {/* Params */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 8, color: T.textD, fontSize: 10 }}>
+        <span>Stake <b style={{ color: T.text }}>${R75_STAKE}</b></span>
+        <span>TP <b style={{ color: T.green }}>${R75_TP.toFixed(2)}</b></span>
+        <span>SL <b style={{ color: T.red }}>${R75_SL.toFixed(2)}</b></span>
+        {contract_id && phase === "OPEN" && (
+          <span style={{ marginLeft: "auto", color: T.mute }}>#{contract_id}</span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      {phase !== "IDLE" && (
+        <div style={{ width: "100%", height: 3, background: `${color}33`, borderRadius: 2, marginBottom: 6, overflow: "hidden" }}>
+          <div style={{ width: `${progress}%`, height: "100%", background: color, transition: "width 0.5s linear" }} />
+        </div>
+      )}
+
+      {/* Status line */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {phase === "IDLE" && (
+          <span style={{ color: T.mute }}>abriendo…</span>
+        )}
+        {phase === "OPEN" && (
+          <>
+            <span style={{ color: T.textD }}>cierra en <b style={{ color }}>{timeStr}</b></span>
+            <span style={{ marginLeft: "auto", fontWeight: 700, fontSize: 12, color: pnlColor }}>
+              {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
+            </span>
+          </>
+        )}
+        {phase === "COOLDOWN" && (
+          <>
+            <span style={{ color: T.textD }}>próxima en <b style={{ color }}>{timeStr}</b></span>
+            <span style={{ marginLeft: "auto", fontSize: 10, color: lastColor }}>
+              último: {last_close_profit >= 0 ? "+" : ""}{Number(last_close_profit).toFixed(2)}$
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ── D.6 Ghost Live Section ──────────────────────────────────── */
 function GhostLiveSection({ symbol }) {
   const [ghostState, setGhostState] = useState(null);
@@ -1781,6 +1914,7 @@ export default function DerivOperatorConsole() {
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
+        <R75Card />
       </div>
 
       {/* CONFIRMATION FEED */}

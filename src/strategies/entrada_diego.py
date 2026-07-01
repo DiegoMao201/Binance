@@ -41,7 +41,8 @@ _LOGGER = logging.getLogger("entrada_diego")
 
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
-SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000
+SYMBOLS_R    = {"R_75"}
+SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000 | SYMBOLS_R
 
 _STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+
 
@@ -82,6 +83,14 @@ GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
 
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
+
+# R_75 (Volatility 75 Index) — bucle simple TP/SL
+R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "20.0"))
+R75_TP_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_TP_PCT",     "0.075"))  # $1.50 on $20
+R75_SL_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_SL_PCT",     "0.10"))   # $2.00 on $20
+R75_MULTIPLIER = int(os.getenv("ENTRADA_DIEGO_R75_MULTIPLIER",   "100"))
+R75_MAX_HOLD_S = int(os.getenv("ENTRADA_DIEGO_R75_MAX_HOLD_S",   "300"))    # 5min tope de seguridad
+R75_COOLDOWN_S = int(os.getenv("ENTRADA_DIEGO_R75_COOLDOWN_S",   "30"))     # pausa entre trades
 
 
 # ─── State por símbolo ──────────────────────────────────────────────────────
@@ -212,6 +221,9 @@ class EntradaDiego:
 
     async def _process(self, sym: str, tick: Any) -> None:
         if sym in SYMBOLS_ED_DISABLED:
+            return
+        if sym in SYMBOLS_R:
+            await self._process_r75(sym, tick)
             return
         state = self._states[sym]
         now   = time.time()
@@ -385,6 +397,56 @@ class EntradaDiego:
                 )
                 await self._open(sym, state, now)
 
+    # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
+
+    async def _process_r75(self, sym: str, tick: Any) -> None:
+        state = self._states[sym]
+        now   = time.time()
+
+        if state.contract_id is not None:
+            state.current_profit = self._query_profit(state.contract_id)
+
+        if state.phase == "IDLE":
+            _LOGGER.info("[ENTRADA_DIEGO] %s IDLE → abriendo $%.0f", sym, R75_STAKE)
+            await self._open(sym, state, now)
+
+        elif state.phase == "OPEN":
+            # Broker cerró (TP o SL alcanzado)
+            if state.contract_id is not None and self._query_contract(state.contract_id) is None:
+                state.last_close_profit = state.current_profit
+                state.contract_id       = None
+                state.phase             = "COOLDOWN"
+                state.cooldown_until    = now + R75_COOLDOWN_S
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s cerrado profit=%.4f → COOLDOWN %ds",
+                    sym, state.last_close_profit, R75_COOLDOWN_S,
+                )
+                self._persist(now)
+                return
+
+            # Tope de seguridad: max_hold
+            if now >= state.open_ts + R75_MAX_HOLD_S:
+                try:
+                    if state.contract_id:
+                        await self._executor.close_contract(int(state.contract_id))
+                except Exception as exc:
+                    _LOGGER.error("[ENTRADA_DIEGO] %s max_hold close error: %s", sym, exc)
+                state.last_close_profit = state.current_profit
+                state.contract_id       = None
+                state.phase             = "COOLDOWN"
+                state.cooldown_until    = now + R75_COOLDOWN_S
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s MAX_HOLD %ds profit=%.4f → COOLDOWN %ds",
+                    sym, R75_MAX_HOLD_S, state.last_close_profit, R75_COOLDOWN_S,
+                )
+                self._persist(now)
+
+        elif state.phase == "COOLDOWN":
+            if now >= state.cooldown_until:
+                state.phase = "IDLE"
+                _LOGGER.info("[ENTRADA_DIEGO] %s COOLDOWN terminado → IDLE", sym)
+                await self._open(sym, state, now)
+
     # ── Helpers de flujo ─────────────────────────────────────────────────────
 
     async def _post_profit_close(
@@ -504,6 +566,8 @@ class EntradaDiego:
         if sym in SYMBOLS_500:
             state = self._states[sym]
             return ACTIVE_STAKE_500 if state.sym_mode == "ACTIVE" else QUIET_STAKE_500
+        if sym in SYMBOLS_R:
+            return R75_STAKE
         state = self._states[sym]
         if state.rest_mode:
             return REST_STAKE_1000
@@ -531,9 +595,13 @@ class EntradaDiego:
         side  = "MULTDOWN" if "CRASH" in sym else "MULTUP"
         stake = stake_override if stake_override is not None else self._next_stake(sym, state.reopens, now)
         mode_tag = state.sym_mode if sym in SYMBOLS_500 else ("REST" if state.rest_mode else "normal")
+        if sym in SYMBOLS_R:
+            _mult, _sl, _tp, _mh = R75_MULTIPLIER, R75_SL_PCT, R75_TP_PCT, float(R75_MAX_HOLD_S)
+        else:
+            _mult, _sl, _tp, _mh = MULTIPLIER, 0.65, 0.65, float(MAX_HOLD_S)
         _LOGGER.info(
             "[ENTRADA_DIEGO] %s ABRIENDO %s $%.2f mult=%dx max_hold=%ds (reopen#%d mode=%s)",
-            sym, side, stake, MULTIPLIER, MAX_HOLD_S, state.reopens, mode_tag,
+            sym, side, stake, _mult, int(_mh), state.reopens, mode_tag,
         )
         try:
             async with self._open_lock:
@@ -541,10 +609,10 @@ class EntradaDiego:
                     symbol=sym,
                     side=side,
                     stake_usdt=stake,
-                    multiplier=MULTIPLIER,
-                    stop_loss_pct=0.65,
-                    take_profit_pct=0.65,
-                    max_hold_seconds=float(MAX_HOLD_S),
+                    multiplier=_mult,
+                    stop_loss_pct=_sl,
+                    take_profit_pct=_tp,
+                    max_hold_seconds=_mh,
                     score_breakdown={
                         "quality_tier": "entrada_diego",
                         "setup":        "entrada_diego",
@@ -731,10 +799,10 @@ class EntradaDiego:
                     st.phase          = "COOLDOWN"
                     st.cooldown_until = cooldown_until
                     st.reopens        = reopens
+                    _next = REST_STAKE_1000 if sym in SYMBOLS_1000 else (R75_STAKE if sym in SYMBOLS_R else QUIET_STAKE_500)
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN legacy %.0fs restantes → abrirá en $%.0f",
-                        sym, cooldown_until - now,
-                        REST_STAKE_1000 if sym in SYMBOLS_1000 else QUIET_STAKE_500,
+                        "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes → abrirá en $%.0f",
+                        sym, cooldown_until - now, _next,
                     )
                     # Convertir COOLDOWN legacy a rest_mode en cuanto termine el timer
                     if sym in SYMBOLS_1000:

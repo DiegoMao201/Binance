@@ -21,6 +21,7 @@ export async function GET() {
       BOOM500:   { phase: 'IDLE', remaining_s: 0, current_profit: 0, reopens: 0 },
       CRASH1000: { phase: 'IDLE', remaining_s: 0, current_profit: 0, reopens: 0 },
       BOOM1000:  { phase: 'IDLE', remaining_s: 0, current_profit: 0, reopens: 0 },
+      R_75:      { phase: 'IDLE', remaining_s: 0, current_profit: 0, reopens: 0 },
     });
   }
 }
