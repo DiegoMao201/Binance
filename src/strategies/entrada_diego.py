@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger("entrada_diego")
 
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
-SYMBOLS_R    = {"R_75", "JD75"}
+SYMBOLS_R    = set()   # R_75 y JD75 suspendidos — no estudiados aún
 SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000 | SYMBOLS_R
 
 _STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+
@@ -83,6 +83,10 @@ GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
 
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
+
+# 500s: SL duro — cierra si pierde más de X% del stake (evita pérdidas de max_hold)
+# $5 stake → -$0.75 SL | $40 stake → -$6.00 SL
+ED_SL_PCT = float(os.getenv("ENTRADA_DIEGO_SL_PCT", "0.15"))
 
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
@@ -251,6 +255,34 @@ class EntradaDiego:
 
         # ── OPEN ──────────────────────────────────────────────────────────────
         elif state.phase == "OPEN":
+
+            # 0) SL duro: cortar pérdida antes de max_hold (solo 500s)
+            if sym in SYMBOLS_500:
+                _stake_now = ACTIVE_STAKE_500 if state.sym_mode == "ACTIVE" else QUIET_STAKE_500
+                _sl_dollar = _stake_now * ED_SL_PCT
+                if state.current_profit < -_sl_dollar:
+                    try:
+                        if state.contract_id:
+                            await self._executor.close_contract(int(state.contract_id))
+                    except Exception as exc:
+                        _LOGGER.error("[ENTRADA_DIEGO] %s SL_HARD error: %s", sym, exc)
+                    state.last_close_profit  = state.current_profit
+                    state.contract_id        = None
+                    state.profit_positive_ts = 0.0
+                    state.reopens           += 1
+                    self._add_global_pnl(sym, state.last_close_profit, now)
+                    if state.sym_mode == "ACTIVE":
+                        state.sym_mode           = "QUIET"
+                        state.consec_max_holds   = 0
+                        state.consec_wins_active = 0
+                    next_stake = self._next_stake(sym, state.reopens)
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f < -%.2f → %s $%.0f reopen#%d",
+                        sym, state.last_close_profit, _sl_dollar,
+                        state.sym_mode, next_stake, state.reopens,
+                    )
+                    await self._open(sym, state, now)
+                    return
 
             # 1) max_hold expirado
             if now >= state.open_ts + MAX_HOLD_S:
