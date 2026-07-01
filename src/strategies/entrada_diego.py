@@ -34,6 +34,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -87,6 +88,17 @@ SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if
 # 500s: SL duro — cierra si pierde más de X% del stake (evita pérdidas de max_hold)
 # $5 stake → -$0.75 SL | $40 stake → -$6.00 SL
 ED_SL_PCT = float(os.getenv("ENTRADA_DIEGO_SL_PCT", "0.15"))
+
+# 500s: Gate de hora UTC para abrir a $40 — análisis de 1354 trades
+# Horas con WR ≤ 33% en trades $40 (históricamente malas para cada símbolo)
+CRASH500_BAD_HOURS_UTC = frozenset(
+    int(h) for h in os.getenv("ENTRADA_DIEGO_CRASH500_BAD_HOURS", "1,2,5,6,8,9,13,22").split(",") if h.strip()
+)
+BOOM500_BAD_HOURS_UTC = frozenset(
+    int(h) for h in os.getenv("ENTRADA_DIEGO_BOOM500_BAD_HOURS", "9,13,15,21,23").split(",") if h.strip()
+)
+# CRASH500: si el $5 que activó ACTIVE ganó más de este umbral → spike consumido → esperar 1 trade más
+CRASH500_MAX_PREV_WIN = float(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_PREV_WIN", "2.0"))
 
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
@@ -613,10 +625,31 @@ class EntradaDiego:
 
     # ── Operaciones de contrato ───────────────────────────────────────────────
 
+    def _gate_active(self, sym: str, state: "_SymState") -> bool:
+        """True = puede abrir $40. False = abrir $5 aunque esté en ACTIVE."""
+        hour = datetime.now(timezone.utc).hour
+        # Gate 1: hora mala según análisis histórico de 1354 trades
+        if sym == "CRASH500" and hour in CRASH500_BAD_HOURS_UTC:
+            _LOGGER.info("[ENTRADA_DIEGO] %s HORA_BLOQUEADA %dh UTC → $5 (WR hist. ≤33%%)", sym, hour)
+            return False
+        if sym == "BOOM500" and hour in BOOM500_BAD_HOURS_UTC:
+            _LOGGER.info("[ENTRADA_DIEGO] %s HORA_BLOQUEADA %dh UTC → $5 (WR hist. ≤33%%)", sym, hour)
+            return False
+        # Gate 2 (CRASH500): spike previo muy grande → energía consumida, esperar
+        if sym == "CRASH500" and state.last_close_profit > CRASH500_MAX_PREV_WIN:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s SPIKE_CONSUMIDO prev_profit=%.2f > %.1f → $5 (WR hist. 27%%)",
+                sym, state.last_close_profit, CRASH500_MAX_PREV_WIN,
+            )
+            return False
+        return True
+
     def _next_stake(self, sym: str, reopens: int = 0, now: float = 0.0) -> float:
         if sym in SYMBOLS_500:
             state = self._states[sym]
-            return ACTIVE_STAKE_500 if state.sym_mode == "ACTIVE" else QUIET_STAKE_500
+            if state.sym_mode == "ACTIVE" and self._gate_active(sym, state):
+                return ACTIVE_STAKE_500
+            return QUIET_STAKE_500
         if sym in SYMBOLS_R:
             return R75_STAKE
         state = self._states[sym]
