@@ -34,7 +34,6 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -89,16 +88,10 @@ SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if
 # $5 stake → -$0.75 SL | $40 stake → -$6.00 SL
 ED_SL_PCT = float(os.getenv("ENTRADA_DIEGO_SL_PCT", "0.15"))
 
-# 500s: Gate de hora UTC para abrir a $40 — análisis de 1354 trades
-# Horas con WR ≤ 33% en trades $40 (históricamente malas para cada símbolo)
-CRASH500_BAD_HOURS_UTC = frozenset(
-    int(h) for h in os.getenv("ENTRADA_DIEGO_CRASH500_BAD_HOURS", "1,2,5,6,8,9,13,22").split(",") if h.strip()
-)
-BOOM500_BAD_HOURS_UTC = frozenset(
-    int(h) for h in os.getenv("ENTRADA_DIEGO_BOOM500_BAD_HOURS", "9,13,15,21,23").split(",") if h.strip()
-)
-# CRASH500: si el $5 que activó ACTIVE ganó más de este umbral → spike consumido → esperar 1 trade más
-CRASH500_MAX_PREV_WIN = float(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_PREV_WIN", "2.0"))
+# 500s: gate de spike consumido — si el $5 QUIET ganó más de este umbral,
+# el spike fue muy grande y la energía ya se consumió → no abrir $40 todavía.
+# Aplica a CRASH500 y BOOM500.
+SPIKE_CONSUMED_THRESHOLD = float(os.getenv("ENTRADA_DIEGO_SPIKE_CONSUMED", "2.0"))
 
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
@@ -124,6 +117,8 @@ class _SymState:
     profit_positive_ts: float = 0.0
     cooldown_until: float = 0.0
     last_spike_ts: float = 0.0
+    prev_spike_ts: float = 0.0   # timestamp del spike ANTERIOR al último — para medir intervalo
+    spike_interval_s: float = 0.0  # intervalo entre los últimos 2 spikes (cuando ocurrió el activador)
     reopens: int = 0
     last_close_profit: float = 0.0
     current_profit: float = 0.0
@@ -153,6 +148,7 @@ class _SymState:
             "profit_positive_ts": round(self.profit_positive_ts, 3),
             "cooldown_until": round(self.cooldown_until, 3),
             "last_spike_ts": round(self.last_spike_ts, 3),
+            "spike_interval_s": round(self.spike_interval_s, 1),
             "reopens": self.reopens,
             "last_close_profit": round(self.last_close_profit, 4),
             "current_profit": round(self.current_profit, 4),
@@ -375,6 +371,9 @@ class EntradaDiego:
                 if state.is_readjusted and sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
                     pass  # esperar cierre externo del re-adjuntado → reopen real $40
                 else:
+                    # Capturar intervalo del spike activador (para _gate_active)
+                    if sym in SYMBOLS_500 and last_spike_ts > state.last_spike_ts > 0:
+                        state.spike_interval_s = last_spike_ts - state.last_spike_ts
                     state.profit_positive_ts   = now
                     state.profit_timer_spikes  = 0   # contador limpio al iniciar
                     state.phase = "PROFIT_TIMER"
@@ -627,21 +626,34 @@ class EntradaDiego:
 
     def _gate_active(self, sym: str, state: "_SymState") -> bool:
         """True = puede abrir $40. False = abrir $5 aunque esté en ACTIVE."""
-        hour = datetime.now(timezone.utc).hour
-        # Gate 1: hora mala según análisis histórico de 1354 trades
-        if sym == "CRASH500" and hour in CRASH500_BAD_HOURS_UTC:
-            _LOGGER.info("[ENTRADA_DIEGO] %s HORA_BLOQUEADA %dh UTC → $5 (WR hist. ≤33%%)", sym, hour)
-            return False
-        if sym == "BOOM500" and hour in BOOM500_BAD_HOURS_UTC:
-            _LOGGER.info("[ENTRADA_DIEGO] %s HORA_BLOQUEADA %dh UTC → $5 (WR hist. ≤33%%)", sym, hour)
-            return False
-        # Gate 2 (CRASH500): spike previo muy grande → energía consumida, esperar
-        if sym == "CRASH500" and state.last_close_profit > CRASH500_MAX_PREV_WIN:
+        ivl = state.spike_interval_s
+
+        # Gate 1: spike consumido — el $5 previo ganó demasiado → energía liberada
+        if state.last_close_profit > SPIKE_CONSUMED_THRESHOLD:
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SPIKE_CONSUMIDO prev_profit=%.2f > %.1f → $5 (WR hist. 27%%)",
-                sym, state.last_close_profit, CRASH500_MAX_PREV_WIN,
+                "[ENTRADA_DIEGO] %s SPIKE_CONSUMIDO prev=+%.2f > %.1f → $5",
+                sym, state.last_close_profit, SPIKE_CONSUMED_THRESHOLD,
             )
             return False
+
+        # Gate 2 (CRASH500): spike era cluster (<60s desde el anterior) → WR=29%
+        # Un cluster indica que la energía ya estaba disipándose, no acumulándose
+        if sym == "CRASH500" and 0 < ivl < 60:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s CLUSTER_SPIKE ivl=%.0fs < 60s → $5 (WR hist. 29%%)",
+                sym, ivl,
+            )
+            return False
+
+        # Gate 3 (BOOM500): intervalo medio (100-300s) es el peor escenario → WR=36%
+        # BOOM500 ideal: ivl 300-600s (WR=66%) — pero no bloqueamos el resto, solo el malo
+        if sym == "BOOM500" and 100 < ivl < 300:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s SPIKE_MEDIO ivl=%.0fs (100-300s) → $5 (WR hist. 36%%)",
+                sym, ivl,
+            )
+            return False
+
         return True
 
     def _next_stake(self, sym: str, reopens: int = 0, now: float = 0.0) -> float:
