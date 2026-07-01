@@ -293,6 +293,10 @@ class EntradaDiego:
                         sym, _sl_pnl, _sl_dollar,
                         state.sym_mode, next_stake, state.reopens,
                     )
+                    # Esperar que Deriv registre el cierre antes de abrir nuevo contrato.
+                    # Sin este delay, _open() recibe "symbol_already_open" y re-engancha
+                    # al contrato que acaba de cerrar → SL_HARD vuelve a disparar.
+                    await asyncio.sleep(3.0)
                     await self._open(sym, state, now)
                     return
 
