@@ -33,7 +33,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,6 +61,10 @@ ACTIVE_MAX_HOLDS      = int(os.getenv("ENTRADA_DIEGO_ACTIVE_MAX_HOLDS",     "1")
 DISCHARGE_SPIKES_500        = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_SPIKES",              "1"))  # spikes en PROFIT_TIMER = descarga → fuerza QUIET
 BOOM500_DISCHARGE_QUIET_SPIKES = int(os.getenv("ENTRADA_DIEGO_BOOM500_DISCHARGE_QUIET_SPIKES", "2"))  # BOOM500 QUIET: ≥2 spikes = no ir a ACTIVE (1 spike sí va)
 MIN_WIN_ACTIVE_500    = float(os.getenv("ENTRADA_DIEGO_MIN_WIN_ACTIVE",      "0.10"))  # profit mínimo real para QUIET→ACTIVE (filtra ghosts $0.01)
+
+# Gate MERCADO_DESCARGADO: si en la ventana hubo demasiados spikes, el mercado ya soltó energía → bloquear $40
+DISCHARGE_WINDOW_S    = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_WINDOW_S",   "900"))   # ventana 15 min
+DISCHARGE_MAX_SPIKES  = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_MAX_SPIKES", "4"))     # ≥N spikes en ventana → bloquear $40
 
 # CRASH500 en QUIET: cuándo hacer CIERRE INMEDIATO vs esperar 3-min timer
 # Si ratio < umbral (spike pequeño) O gap > quiet_period (símbolo quieto) → CIERRE INMEDIATO → ACTIVE $40
@@ -119,6 +123,7 @@ class _SymState:
     last_spike_ts: float = 0.0
     prev_spike_ts: float = 0.0   # timestamp del spike ANTERIOR al último — para medir intervalo
     spike_interval_s: float = 0.0  # intervalo entre los últimos 2 spikes (cuando ocurrió el activador)
+    recent_spike_ts: list = field(default_factory=list)  # historial rolling de spikes (gate MERCADO_DESCARGADO)
     reopens: int = 0
     last_close_profit: float = 0.0
     current_profit: float = 0.0
@@ -255,6 +260,12 @@ class EntradaDiego:
             state.current_profit = self._query_profit(state.contract_id)
 
         last_spike_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
+
+        # Tracking de spikes recientes (ventana deslizante para gate MERCADO_DESCARGADO)
+        if sym in SYMBOLS_500 and last_spike_ts > (state.recent_spike_ts[-1] if state.recent_spike_ts else 0.0):
+            state.recent_spike_ts.append(last_spike_ts)
+            cutoff = now - DISCHARGE_WINDOW_S
+            state.recent_spike_ts = [t for t in state.recent_spike_ts if t > cutoff]
 
         # ── IDLE ──────────────────────────────────────────────────────────────
         if state.phase == "IDLE":
@@ -659,6 +670,17 @@ class EntradaDiego:
             _LOGGER.info(
                 "[ENTRADA_DIEGO] %s SPIKE_MEDIO ivl=%.0fs (100-300s) → $5 (WR hist. 36%%)",
                 sym, ivl,
+            )
+            return False
+
+        # Gate 4 (500s): MERCADO_DESCARGADO — demasiados spikes recientes → energía agotada
+        # El $40 sirve para ATRAPAR spikes, no para abrirse después de que ya pasaron
+        cutoff = time.time() - DISCHARGE_WINDOW_S
+        recent_count = sum(1 for t in state.recent_spike_ts if t > cutoff)
+        if recent_count >= DISCHARGE_MAX_SPIKES:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s MERCADO_DESCARGADO %d spikes en %dmin → $5 (esperar recarga)",
+                sym, recent_count, DISCHARGE_WINDOW_S // 60,
             )
             return False
 
