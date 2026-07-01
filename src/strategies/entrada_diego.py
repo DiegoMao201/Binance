@@ -436,29 +436,7 @@ class EntradaDiego:
                 )
                 self._persist(now)
                 return
-
-            # Tope de seguridad: max_hold
-            if now >= state.open_ts + R75_MAX_HOLD_S:
-                try:
-                    if state.contract_id:
-                        await self._executor.close_contract(int(state.contract_id))
-                except Exception as exc:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s max_hold close error: %s", sym, exc)
-                close_profit = state.current_profit
-                if close_profit <= 0:
-                    state.r75_direction = "MULTDOWN" if state.r75_direction == "MULTUP" else "MULTUP"
-                    _LOGGER.info("[ENTRADA_DIEGO] %s MAX_HOLD PÉRDIDA %.4f → próxima: %s", sym, close_profit, state.r75_direction)
-                else:
-                    _LOGGER.info("[ENTRADA_DIEGO] %s MAX_HOLD GANANCIA %.4f → mantiene: %s", sym, close_profit, state.r75_direction)
-                state.last_close_profit = close_profit
-                state.contract_id       = None
-                state.phase             = "COOLDOWN"
-                state.cooldown_until    = now + R75_COOLDOWN_S
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s MAX_HOLD %ds profit=%.4f → COOLDOWN %ds",
-                    sym, R75_MAX_HOLD_S, state.last_close_profit, R75_COOLDOWN_S,
-                )
-                self._persist(now)
+            # Solo SL/TP del broker cierran R_75 — no max_hold ni reglas extra
 
         elif state.phase == "COOLDOWN":
             if now >= state.cooldown_until:
