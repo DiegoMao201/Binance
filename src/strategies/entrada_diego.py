@@ -113,6 +113,7 @@ class _SymState:
     prev_discharge: bool = False    # True si el ACTIVE anterior terminó en descarga; exige timer limpio antes de $40
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
+    r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -141,6 +142,7 @@ class _SymState:
             "profit_timer_spikes": self.profit_timer_spikes,
             "prev_discharge": self.prev_discharge,
             "rest_mode": self.rest_mode,
+            "r75_direction": self.r75_direction,
         }
         return d
 
@@ -417,7 +419,14 @@ class EntradaDiego:
         elif state.phase == "OPEN":
             # Broker cerró (TP o SL alcanzado)
             if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-                state.last_close_profit = state.current_profit
+                close_profit = state.current_profit
+                # Flip de dirección: si perdió → invierte, si ganó → mantiene
+                if close_profit <= 0:
+                    state.r75_direction = "MULTDOWN" if state.r75_direction == "MULTUP" else "MULTUP"
+                    _LOGGER.info("[ENTRADA_DIEGO] %s PÉRDIDA %.4f → próxima: %s", sym, close_profit, state.r75_direction)
+                else:
+                    _LOGGER.info("[ENTRADA_DIEGO] %s GANANCIA %.4f → mantiene: %s", sym, close_profit, state.r75_direction)
+                state.last_close_profit = close_profit
                 state.contract_id       = None
                 state.phase             = "COOLDOWN"
                 state.cooldown_until    = now + R75_COOLDOWN_S
@@ -435,7 +444,13 @@ class EntradaDiego:
                         await self._executor.close_contract(int(state.contract_id))
                 except Exception as exc:
                     _LOGGER.error("[ENTRADA_DIEGO] %s max_hold close error: %s", sym, exc)
-                state.last_close_profit = state.current_profit
+                close_profit = state.current_profit
+                if close_profit <= 0:
+                    state.r75_direction = "MULTDOWN" if state.r75_direction == "MULTUP" else "MULTUP"
+                    _LOGGER.info("[ENTRADA_DIEGO] %s MAX_HOLD PÉRDIDA %.4f → próxima: %s", sym, close_profit, state.r75_direction)
+                else:
+                    _LOGGER.info("[ENTRADA_DIEGO] %s MAX_HOLD GANANCIA %.4f → mantiene: %s", sym, close_profit, state.r75_direction)
+                state.last_close_profit = close_profit
                 state.contract_id       = None
                 state.phase             = "COOLDOWN"
                 state.cooldown_until    = now + R75_COOLDOWN_S
@@ -607,7 +622,10 @@ class EntradaDiego:
             self._global_pause_until = 0.0
 
         from src.execution.deriv_trader import DerivOrder
-        side  = "MULTDOWN" if "CRASH" in sym else "MULTUP"
+        if sym in SYMBOLS_R:
+            side = state.r75_direction
+        else:
+            side = "MULTDOWN" if "CRASH" in sym else "MULTUP"
         stake = stake_override if stake_override is not None else self._next_stake(sym, state.reopens, now)
         mode_tag = state.sym_mode if sym in SYMBOLS_500 else ("REST" if state.rest_mode else "normal")
         if sym in SYMBOLS_R:
@@ -799,6 +817,8 @@ class EntradaDiego:
                         else:
                             st.phase              = "OPEN"
                             st.profit_positive_ts = 0.0
+                        if sym in SYMBOLS_R:
+                            st.r75_direction = s.get("r75_direction", "MULTUP")
                         mode_tag = f" [{st.sym_mode} max_holds={st.consec_max_holds} wins={st.consec_wins_active}]" if sym in SYMBOLS_500 else ""
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s RESTAURADO: phase=%s contract=%s reopens=%d%s",
@@ -814,6 +834,8 @@ class EntradaDiego:
                     st.phase          = "COOLDOWN"
                     st.cooldown_until = cooldown_until
                     st.reopens        = reopens
+                    if sym in SYMBOLS_R:
+                        st.r75_direction = s.get("r75_direction", "MULTUP")
                     _next = REST_STAKE_1000 if sym in SYMBOLS_1000 else (R75_STAKE if sym in SYMBOLS_R else QUIET_STAKE_500)
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes → abrirá en $%.0f",
