@@ -173,9 +173,9 @@ class EntradaDiego:
         self._risk     = risk
         self._logs_dir = logs_dir
         self._state_file = logs_dir / "entrada_diego_state.json"
-        self._enabled: bool = str(
-            os.getenv("ENTRADA_DIEGO_ENABLED", "false")
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        # Tolerante a env vars mal pegadas (ej: "trueDERIV_D10_SPIKE_STABILIZE_SEC=0")
+        _ed_raw = str(os.getenv("ENTRADA_DIEGO_ENABLED", "false")).strip().lower()
+        self._enabled: bool = _ed_raw.startswith("true") or _ed_raw in {"1", "yes", "on"}
 
         self._states: dict[str, _SymState] = {sym: _SymState() for sym in SYMBOLS_ED}
         self._locks:  dict[str, asyncio.Lock] = {sym: asyncio.Lock() for sym in SYMBOLS_ED}
@@ -269,13 +269,17 @@ class EntradaDiego:
                 _stake_now = ACTIVE_STAKE_500 if state.sym_mode == "ACTIVE" else QUIET_STAKE_500
                 _sl_dollar = _stake_now * ED_SL_PCT
                 if state.current_profit < -_sl_dollar and state.contract_id is not None:
+                    # Guardar localmente y limpiar estado ANTES del await para evitar
+                    # race condition: un tick puede llegar durante el await y re-disparar SL_HARD
+                    _sl_contract_id = int(state.contract_id)
+                    _sl_pnl        = state.current_profit
+                    state.contract_id    = None
+                    state.current_profit = 0.0
                     try:
-                        await self._executor.close_contract(int(state.contract_id))
+                        await self._executor.close_contract(_sl_contract_id)
                     except Exception as exc:
                         _LOGGER.error("[ENTRADA_DIEGO] %s SL_HARD error: %s", sym, exc)
-                    state.last_close_profit  = state.current_profit
-                    state.current_profit     = 0.0   # evita re-disparo si _open falla
-                    state.contract_id        = None
+                    state.last_close_profit  = _sl_pnl
                     state.profit_positive_ts = 0.0
                     state.reopens           += 1
                     self._add_global_pnl(sym, state.last_close_profit, now)
@@ -286,7 +290,7 @@ class EntradaDiego:
                     next_stake = self._next_stake(sym, state.reopens)
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f < -%.2f → %s $%.0f reopen#%d",
-                        sym, state.last_close_profit, _sl_dollar,
+                        sym, _sl_pnl, _sl_dollar,
                         state.sym_mode, next_stake, state.reopens,
                     )
                     await self._open(sym, state, now)
