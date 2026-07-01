@@ -198,6 +198,10 @@ class EntradaDiego:
                 if not self._restored:
                     await self._restore_from_disk()
                     self._restored = True
+                    # R_75 no recibe ticks del daemon → loop independiente
+                    for _r in SYMBOLS_R:
+                        if _r not in SYMBOLS_ED_DISABLED:
+                            asyncio.create_task(self._r75_independent_loop(_r))
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -446,6 +450,17 @@ class EntradaDiego:
                 state.phase = "IDLE"
                 _LOGGER.info("[ENTRADA_DIEGO] %s COOLDOWN terminado → IDLE", sym)
                 await self._open(sym, state, now)
+
+    async def _r75_independent_loop(self, sym: str) -> None:
+        _LOGGER.info("[ENTRADA_DIEGO] %s loop independiente iniciado (tick interval 5s)", sym)
+        while self._enabled and sym not in SYMBOLS_ED_DISABLED:
+            try:
+                async with self._locks[sym]:
+                    await self._process_r75(sym, None)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s loop error: %s", sym, exc)
+            await asyncio.sleep(5)
+        _LOGGER.info("[ENTRADA_DIEGO] %s loop independiente terminado", sym)
 
     # ── Helpers de flujo ─────────────────────────────────────────────────────
 
