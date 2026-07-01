@@ -630,6 +630,7 @@ class EntradaDiego:
                         "grade":        "ED",
                         "score":        0.0,
                         "entrada_diego": True,
+                        "skip_dpm":     sym in SYMBOLS_R,
                     },
                 )
                 result = await self._executor.execute(order)

@@ -2103,16 +2103,21 @@ class DerivTradeExecutor:
 
         # Register with DynamicPositionManager for ratchet SL + momentum tracking.
         # Grade C setups carry aggressive_trailing=True from risk engine → tighter ratchet.
+        # skip_dpm=True bypasses DPM entirely — contract closes only via broker SL/TP.
         _aggressive_trail = bool((order.score_breakdown or {}).get("aggressive_trailing", False))
-        self._dpm.register(
-            contract_id=contract_id,
-            symbol=order.symbol,
-            stake=actual_stake,
-            entry_price=entry_price,
-            entry_ts=oc.opened_at_ts,
-            aggressive_trailing=_aggressive_trail,
-            max_duration_override_sec=(order.max_hold_seconds + self._dpm_timeout_buffer_sec()),
-        )
+        _skip_dpm = bool((order.score_breakdown or {}).get("skip_dpm", False))
+        if not _skip_dpm:
+            self._dpm.register(
+                contract_id=contract_id,
+                symbol=order.symbol,
+                stake=actual_stake,
+                entry_price=entry_price,
+                entry_ts=oc.opened_at_ts,
+                aggressive_trailing=_aggressive_trail,
+                max_duration_override_sec=(order.max_hold_seconds + self._dpm_timeout_buffer_sec()),
+            )
+        else:
+            _LOGGER.info("[deriv-trader] skip_dpm=True para %s contract=%s — solo broker SL/TP", order.symbol, contract_id)
 
         # Subscribe to live broker stream for this contract so we settle
         # immediately on is_sold=1 without waiting for the next reap_closed cycle.
