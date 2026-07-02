@@ -106,12 +106,20 @@ ED_SL_PCT = float(os.getenv("ENTRADA_DIEGO_SL_PCT", "0.15"))
 # Aplica a CRASH500 y BOOM500.
 SPIKE_CONSUMED_THRESHOLD = float(os.getenv("ENTRADA_DIEGO_SPIKE_CONSUMED", "2.0"))
 
-# Gate BOOM_RATIO: spike activador BOOM500 debe superar mínimo ratio para justificar $40
-# Dato 578 $40 trades: ratio≥200x + n15<=2 → WIN=71.4%, avg=+$6.37 (n=14)
-#                      ratio<200x           → WIN=29.4%, avg=-$1.94 (n=34)
-#                      cluster n=3 avg 179x → WIN=30.2%, avg=-$2.51 (n=43)
-# Spikes pequeños (<200x) = mercado sin momentum → $40 desperdiciado en max_hold
-BOOM_MIN_RATIO = float(os.getenv("ENTRADA_DIEGO_BOOM_MIN_RATIO", "200.0"))
+# Gate ZONA_PELIGROSA (BOOM500): gap 2-10min + ratio≥p75(≈120x) → WIN=29%, avg=-$3.82 ← EVITAR
+# Dato 580 $40 contratos:  gap2-10min + ratio≥p75: WIN=29%, avg=-$3.82  → BLOQUEAR
+#                          gap2-10min + ratio<p75:  WIN=49%, avg=+$0.70  → PERMITIR
+#                          gap>10min  + ratio≥p75:  WIN=50-67%           → PERMITIR (cambio tendencia)
+# Spike grande en zona media = pico local, el mercado libera energía a trozos → retracción inmediata
+BOOM_DANGER_GAP_MAX_S = int(os.getenv("ENTRADA_DIEGO_BOOM_DANGER_GAP_MAX",  "600"))   # 10min límite zona peligrosa
+BOOM_DANGER_RATIO_MIN = float(os.getenv("ENTRADA_DIEGO_BOOM_DANGER_RATIO",  "120.0")) # ≈p75 BOOM500
+
+# FAST_OPEN (BOOM500): burst fuerte (gap<2min + ratio≥p75) → cierre $5 inmediato → $40 sin timer
+# Solución al timing lag: con PROFIT_TIMER=180s el $40 pierde el pico del burst
+# (57%+ spikes llegan en los primeros 180s). Abriendo ya: P(spike en 600s) ≈ 87%.
+# Rango [0, 120s) — NO se solapa con ZONA_PELIGROSA [120s, 600s) — cero conflicto.
+FAST_OPEN_GAP_MAX_S  = int(os.getenv("ENTRADA_DIEGO_FAST_OPEN_GAP_MAX",    "120"))   # <2min = burst
+FAST_OPEN_RATIO_MIN  = float(os.getenv("ENTRADA_DIEGO_FAST_OPEN_RATIO",    "120.0")) # ≈p75 BOOM500
 
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
@@ -408,12 +416,43 @@ class EntradaDiego:
                 if state.is_readjusted and sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
                     pass  # esperar cierre externo del re-adjuntado → reopen real $40
                 else:
-                    # Capturar intervalo y ratio del spike activador (para _gate_active)
+                    # Capturar intervalo y ratio del spike activador (para _gate_active y FAST_OPEN)
                     if sym in SYMBOLS_500 and last_spike_ts > state.last_spike_ts > 0:
                         state.spike_interval_s    = last_spike_ts - state.last_spike_ts
                         state.trigger_spike_ratio = self._risk.get_last_spike_ratio(sym)
-                    state.profit_positive_ts   = now
-                    state.profit_timer_spikes  = 0   # contador limpio al iniciar
+                    state.profit_timer_spikes = 0  # contador limpio al iniciar
+
+                    # ── FAST_OPEN (solo QUIET 500s) ────────────────────────────
+                    # Burst fuerte detectado → cerrar $5 ya y abrir $40 sin esperar 180s.
+                    # Condiciones:
+                    #   · gap<2min + ratio≥p75 → rango [0,120s) NO se solapa con ZONA_PELIGROSA [120,600s)
+                    #   · profit real (≥$0.10) para evitar que _post_profit_close lo trate como ghost
+                    #   · profit<$2 para que no active SPIKE_CONSUMED en el siguiente _gate_active
+                    #   · _gate_active pasa (DISCHARGE, SPIKE_FRESCO, etc. no bloquean)
+                    # Después de abrir $40: last_spike_ts se marca como consumido para que el $40
+                    # no cuente el mismo spike como descarga en su propio PROFIT_TIMER.
+                    if (
+                        sym in SYMBOLS_500
+                        and state.sym_mode == "QUIET"
+                        and MIN_WIN_ACTIVE_500 <= state.current_profit < SPIKE_CONSUMED_THRESHOLD
+                        and 0 < state.spike_interval_s <= FAST_OPEN_GAP_MAX_S
+                        and state.trigger_spike_ratio >= FAST_OPEN_RATIO_MIN
+                        and self._gate_active(sym, state)
+                    ):
+                        state.last_spike_ts      = last_spike_ts  # consumir spike → no double-count en $40
+                        state.profit_positive_ts = now            # requerido por _close_profit_timer
+                        state.phase = "PROFIT_TIMER"
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s FAST_OPEN burst ivl=%.0fs ratio=%.0fx profit=%.2f"
+                            " → cierre $5 ya → $40 sin timer",
+                            sym, state.spike_interval_s, state.trigger_spike_ratio,
+                            state.current_profit,
+                        )
+                        await self._close_profit_timer(sym, state, now)
+                        return
+
+                    # Normal: esperar PROFIT_TIMER completo (180s)
+                    state.profit_positive_ts = now
                     state.phase = "PROFIT_TIMER"
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s PROFIT POSITIVO %.4f → PROFIT_TIMER %ds",
@@ -674,14 +713,18 @@ class EntradaDiego:
             )
             return False
 
-        # Gate 1b (BOOM500): BOOM_RATIO — el spike activador debe tener suficiente momentum
-        # Dato 578 trades: ratio≥200x+n<=2 → WIN=71.4% avg=+$6.37 (n=14)
-        #                  ratio<200x       → WIN=29.4% avg=-$1.94 (n=34)
-        # Spike pequeño = sin momentum → $40 expira en max_hold
-        if sym == "BOOM500" and 0 < state.trigger_spike_ratio < BOOM_MIN_RATIO:
+        # Gate 1b (BOOM500): ZONA_PELIGROSA — gap 2-10min + ratio≥p75 → WIN=29%, avg=-$3.82
+        # Spike grande en zona media = pico local, retracción inmediata → $40 expira en max_hold.
+        # gap<2min (burst): fuera de rango → FAST_OPEN lo maneja directo.
+        # gap>10min (seco+grande): fuera de rango → WIN=50-67% → PERMITIR.
+        if (sym == "BOOM500"
+                and 0 < state.spike_interval_s
+                and 120 < state.spike_interval_s < BOOM_DANGER_GAP_MAX_S
+                and state.trigger_spike_ratio >= BOOM_DANGER_RATIO_MIN):
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s BOOM_RATIO_BAJO ratio=%.0fx < %.0fx → $5 (spike sin momentum)",
-                sym, state.trigger_spike_ratio, BOOM_MIN_RATIO,
+                "[ENTRADA_DIEGO] %s ZONA_PELIGROSA ivl=%.0fs ratio=%.0fx → $5 "
+                "(gap2-10min+grande WIN=29%%, evitar)",
+                sym, state.spike_interval_s, state.trigger_spike_ratio,
             )
             return False
 
@@ -694,14 +737,8 @@ class EntradaDiego:
             )
             return False
 
-        # Gate 3 (BOOM500): intervalo medio (100-300s) es el peor escenario → WR=36%
-        # BOOM500 ideal: ivl 300-600s (WR=66%) — pero no bloqueamos el resto, solo el malo
-        if sym == "BOOM500" and 100 < ivl < 300:
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SPIKE_MEDIO ivl=%.0fs (100-300s) → $5 (WR hist. 36%%)",
-                sym, ivl,
-            )
-            return False
+        # Gate 3 eliminado: SPIKE_MEDIO (ivl 100-300s BOOM) era proxy sin ratio.
+        # Reemplazado por Gate 1b ZONA_PELIGROSA (gap 2-10min + ratio≥p75) con datos reales.
 
         # Gate 4 (500s): MERCADO_DESCARGADO — demasiados spikes recientes → energía agotada
         # Umbral por símbolo: BOOM≥3 bloquea (n=3 WR=38%), CRASH≥4 bloquea (n=3 WR=57% es bueno)
