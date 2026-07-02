@@ -63,8 +63,17 @@ BOOM500_DISCHARGE_QUIET_SPIKES = int(os.getenv("ENTRADA_DIEGO_BOOM500_DISCHARGE_
 MIN_WIN_ACTIVE_500    = float(os.getenv("ENTRADA_DIEGO_MIN_WIN_ACTIVE",      "0.10"))  # profit mínimo real para QUIET→ACTIVE (filtra ghosts $0.01)
 
 # Gate MERCADO_DESCARGADO: si en la ventana hubo demasiados spikes, el mercado ya soltó energía → bloquear $40
-DISCHARGE_WINDOW_S    = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_WINDOW_S",   "900"))   # ventana 15 min
-DISCHARGE_MAX_SPIKES  = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_MAX_SPIKES", "4"))     # ≥N spikes en ventana → bloquear $40
+# Umbrales por símbolo (datos: 219+177 trades BOOM+CRASH históricos):
+#   BOOM500 n=3 WR=38% → bloquear; n=1-2 WR=57-59% → dejar pasar
+#   CRASH500 n=3 WR=57% → dejar pasar; n>=4 WR=31% → bloquear
+DISCHARGE_WINDOW_S         = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_WINDOW_S",        "900"))  # ventana 15 min
+DISCHARGE_MAX_SPIKES_BOOM  = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_BOOM_MAX_SPIKES", "3"))    # BOOM: ≥3 bloquea
+DISCHARGE_MAX_SPIKES_CRASH = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_CRASH_MAX_SPIKES","4"))    # CRASH: ≥4 bloquea
+
+# Gate SPIKE_FRESCO (CRASH500): después de un spike CRASH el mercado rebota hacia arriba
+# Abrir MULTDOWN inmediatamente después del spike → WR=40% (datos: 40 trades)
+# Esperar ≥45s → WR=48% en zona normal 180-360s
+CRASH_FRESH_SPIKE_S = int(os.getenv("ENTRADA_DIEGO_CRASH_FRESH_SPIKE_S", "45"))  # segundos de espera post-spike
 
 # CRASH500 en QUIET: cuándo hacer CIERRE INMEDIATO vs esperar 3-min timer
 # Si ratio < umbral (spike pequeño) O gap > quiet_period (símbolo quieto) → CIERRE INMEDIATO → ACTIVE $40
@@ -674,15 +683,29 @@ class EntradaDiego:
             return False
 
         # Gate 4 (500s): MERCADO_DESCARGADO — demasiados spikes recientes → energía agotada
-        # El $40 sirve para ATRAPAR spikes, no para abrirse después de que ya pasaron
-        cutoff = time.time() - DISCHARGE_WINDOW_S
+        # Umbral por símbolo: BOOM≥3 bloquea (n=3 WR=38%), CRASH≥4 bloquea (n=3 WR=57% es bueno)
+        now_ts = time.time()
+        cutoff = now_ts - DISCHARGE_WINDOW_S
         recent_count = sum(1 for t in state.recent_spike_ts if t > cutoff)
-        if recent_count >= DISCHARGE_MAX_SPIKES:
+        discharge_thresh = DISCHARGE_MAX_SPIKES_BOOM if sym == "BOOM500" else DISCHARGE_MAX_SPIKES_CRASH
+        if recent_count >= discharge_thresh:
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s MERCADO_DESCARGADO %d spikes en %dmin → $5 (esperar recarga)",
-                sym, recent_count, DISCHARGE_WINDOW_S // 60,
+                "[ENTRADA_DIEGO] %s MERCADO_DESCARGADO %d spikes en %dmin → $5 (thresh=%d, esperar recarga)",
+                sym, recent_count, DISCHARGE_WINDOW_S // 60, discharge_thresh,
             )
             return False
+
+        # Gate 5 (CRASH500): SPIKE_FRESCO — rebote post-crash bloquea MULTDOWN
+        # Después de un spike CRASH (<45s), el precio rebota hacia arriba → WR=40% (malo)
+        # Esperar la zona 45s+ donde WR regresa a 48%
+        if sym == "CRASH500" and state.recent_spike_ts:
+            sec_since_last = now_ts - max(state.recent_spike_ts)
+            if 0 < sec_since_last < CRASH_FRESH_SPIKE_S:
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s SPIKE_FRESCO %.0fs < %ds → $5 (rebote post-crash esperado)",
+                    sym, sec_since_last, CRASH_FRESH_SPIKE_S,
+                )
+                return False
 
         return True
 
