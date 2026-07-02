@@ -106,6 +106,13 @@ ED_SL_PCT = float(os.getenv("ENTRADA_DIEGO_SL_PCT", "0.15"))
 # Aplica a CRASH500 y BOOM500.
 SPIKE_CONSUMED_THRESHOLD = float(os.getenv("ENTRADA_DIEGO_SPIKE_CONSUMED", "2.0"))
 
+# Gate BOOM_RATIO: spike activador BOOM500 debe superar mínimo ratio para justificar $40
+# Dato 578 $40 trades: ratio≥200x + n15<=2 → WIN=71.4%, avg=+$6.37 (n=14)
+#                      ratio<200x           → WIN=29.4%, avg=-$1.94 (n=34)
+#                      cluster n=3 avg 179x → WIN=30.2%, avg=-$2.51 (n=43)
+# Spikes pequeños (<200x) = mercado sin momentum → $40 desperdiciado en max_hold
+BOOM_MIN_RATIO = float(os.getenv("ENTRADA_DIEGO_BOOM_MIN_RATIO", "200.0"))
+
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
 R75_TP_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_TP_PCT",     "0.30"))   # $1.50 on $5 stake
@@ -132,6 +139,7 @@ class _SymState:
     last_spike_ts: float = 0.0
     prev_spike_ts: float = 0.0   # timestamp del spike ANTERIOR al último — para medir intervalo
     spike_interval_s: float = 0.0  # intervalo entre los últimos 2 spikes (cuando ocurrió el activador)
+    trigger_spike_ratio: float = 0.0  # ratio del spike que activó el PROFIT_TIMER (gate BOOM_RATIO)
     recent_spike_ts: list = field(default_factory=list)  # historial rolling de spikes (gate MERCADO_DESCARGADO)
     reopens: int = 0
     last_close_profit: float = 0.0
@@ -163,6 +171,7 @@ class _SymState:
             "cooldown_until": round(self.cooldown_until, 3),
             "last_spike_ts": round(self.last_spike_ts, 3),
             "spike_interval_s": round(self.spike_interval_s, 1),
+            "trigger_spike_ratio": round(self.trigger_spike_ratio, 1),
             "reopens": self.reopens,
             "last_close_profit": round(self.last_close_profit, 4),
             "current_profit": round(self.current_profit, 4),
@@ -399,9 +408,10 @@ class EntradaDiego:
                 if state.is_readjusted and sym in SYMBOLS_500 and state.sym_mode == "ACTIVE":
                     pass  # esperar cierre externo del re-adjuntado → reopen real $40
                 else:
-                    # Capturar intervalo del spike activador (para _gate_active)
+                    # Capturar intervalo y ratio del spike activador (para _gate_active)
                     if sym in SYMBOLS_500 and last_spike_ts > state.last_spike_ts > 0:
-                        state.spike_interval_s = last_spike_ts - state.last_spike_ts
+                        state.spike_interval_s    = last_spike_ts - state.last_spike_ts
+                        state.trigger_spike_ratio = self._risk.get_last_spike_ratio(sym)
                     state.profit_positive_ts   = now
                     state.profit_timer_spikes  = 0   # contador limpio al iniciar
                     state.phase = "PROFIT_TIMER"
@@ -661,6 +671,17 @@ class EntradaDiego:
             _LOGGER.info(
                 "[ENTRADA_DIEGO] %s SPIKE_CONSUMIDO prev=+%.2f > %.1f → $5",
                 sym, state.last_close_profit, SPIKE_CONSUMED_THRESHOLD,
+            )
+            return False
+
+        # Gate 1b (BOOM500): BOOM_RATIO — el spike activador debe tener suficiente momentum
+        # Dato 578 trades: ratio≥200x+n<=2 → WIN=71.4% avg=+$6.37 (n=14)
+        #                  ratio<200x       → WIN=29.4% avg=-$1.94 (n=34)
+        # Spike pequeño = sin momentum → $40 expira en max_hold
+        if sym == "BOOM500" and 0 < state.trigger_spike_ratio < BOOM_MIN_RATIO:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s BOOM_RATIO_BAJO ratio=%.0fx < %.0fx → $5 (spike sin momentum)",
+                sym, state.trigger_spike_ratio, BOOM_MIN_RATIO,
             )
             return False
 
@@ -926,10 +947,11 @@ class EntradaDiego:
                         st.last_spike_ts     = float(s.get("last_spike_ts", 0.0))
                         st.last_close_profit = float(s.get("last_close_profit", 0.0))
                         if sym in SYMBOLS_500:
-                            st.sym_mode           = s.get("sym_mode", "QUIET")
-                            st.consec_max_holds   = int(s.get("consec_max_holds", 0))
-                            st.consec_wins_active = int(s.get("consec_wins_active", 0))
-                            st.prev_discharge     = bool(s.get("prev_discharge", False))
+                            st.sym_mode              = s.get("sym_mode", "QUIET")
+                            st.consec_max_holds      = int(s.get("consec_max_holds", 0))
+                            st.consec_wins_active    = int(s.get("consec_wins_active", 0))
+                            st.prev_discharge        = bool(s.get("prev_discharge", False))
+                            st.trigger_spike_ratio   = float(s.get("trigger_spike_ratio", 0.0))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
