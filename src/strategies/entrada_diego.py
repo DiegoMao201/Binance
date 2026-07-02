@@ -62,13 +62,16 @@ DISCHARGE_SPIKES_500        = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_SPIKES",   
 BOOM500_DISCHARGE_QUIET_SPIKES = int(os.getenv("ENTRADA_DIEGO_BOOM500_DISCHARGE_QUIET_SPIKES", "2"))  # BOOM500 QUIET: ≥2 spikes = no ir a ACTIVE (1 spike sí va)
 MIN_WIN_ACTIVE_500    = float(os.getenv("ENTRADA_DIEGO_MIN_WIN_ACTIVE",      "0.10"))  # profit mínimo real para QUIET→ACTIVE (filtra ghosts $0.01)
 
-# Gate MERCADO_DESCARGADO: si en la ventana hubo demasiados spikes, el mercado ya soltó energía → bloquear $40
-# Umbrales por símbolo (datos: 219+177 trades BOOM+CRASH históricos):
-#   BOOM500 n=3 WR=38% → bloquear; n=1-2 WR=57-59% → dejar pasar
-#   CRASH500 n=3 WR=57% → dejar pasar; n>=4 WR=31% → bloquear
-DISCHARGE_WINDOW_S         = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_WINDOW_S",        "900"))  # ventana 15 min
-DISCHARGE_MAX_SPIKES_BOOM  = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_BOOM_MAX_SPIKES", "3"))    # BOOM: ≥3 bloquea
-DISCHARGE_MAX_SPIKES_CRASH = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_CRASH_MAX_SPIKES","4"))    # CRASH: ≥4 bloquea
+# Gate CLUSTER_ACTIVO: $40 SOLO si hay cluster activo de spikes (gate positivo, no bloqueador)
+# Datos 7714 spikes únicos: sin cluster P≈49% → no justifica $40 vs max_hold loss
+# Cluster activo (3+ en 5min) → BOOM P=71.3% (+22%), CRASH P=59.5% (+11%)
+# Cluster fuerte (4+ en 10min) → BOOM P=58.9% (+10%), CRASH P=60.7% (+12%)
+# Burst (6+ en 10min) → BOOM P=79.0% (+30%), CRASH P=73.1% (+24%)
+DISCHARGE_WINDOW_S       = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_WINDOW_S",   "600"))  # ventana 10min para recent_spike_ts
+CLUSTER_WINDOW_SHORT_S   = int(os.getenv("ENTRADA_DIEGO_CLUSTER_WINDOW_SHORT", "300"))  # 5min
+CLUSTER_WINDOW_LONG_S    = int(os.getenv("ENTRADA_DIEGO_CLUSTER_WINDOW_LONG",  "600"))  # 10min
+CLUSTER_MIN_SPIKES_SHORT = int(os.getenv("ENTRADA_DIEGO_CLUSTER_MIN_SHORT",    "3"))    # 3+ en 5min → allow $40
+CLUSTER_MIN_SPIKES_LONG  = int(os.getenv("ENTRADA_DIEGO_CLUSTER_MIN_LONG",     "4"))    # 4+ en 10min → allow $40
 
 # Gate SPIKE_FRESCO (CRASH500): después de un spike CRASH el mercado rebota hacia arriba
 # Abrir MULTDOWN inmediatamente después del spike → WR=40% (datos: 40 trades)
@@ -654,8 +657,6 @@ class EntradaDiego:
 
     def _gate_active(self, sym: str, state: "_SymState") -> bool:
         """True = puede abrir $40. False = abrir $5 aunque esté en ACTIVE."""
-        ivl = state.spike_interval_s
-
         # Gate 1: spike consumido — el $5 previo ganó demasiado → energía liberada
         if state.last_close_profit > SPIKE_CONSUMED_THRESHOLD:
             _LOGGER.info(
@@ -664,34 +665,20 @@ class EntradaDiego:
             )
             return False
 
-        # Gate 2 (CRASH500): spike era cluster (<60s desde el anterior) → WR=29%
-        # Un cluster indica que la energía ya estaba disipándose, no acumulándose
-        if sym == "CRASH500" and 0 < ivl < 60:
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s CLUSTER_SPIKE ivl=%.0fs < 60s → $5 (WR hist. 29%%)",
-                sym, ivl,
-            )
-            return False
-
-        # Gate 3 (BOOM500): intervalo medio (100-300s) es el peor escenario → WR=36%
-        # BOOM500 ideal: ivl 300-600s (WR=66%) — pero no bloqueamos el resto, solo el malo
-        if sym == "BOOM500" and 100 < ivl < 300:
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SPIKE_MEDIO ivl=%.0fs (100-300s) → $5 (WR hist. 36%%)",
-                sym, ivl,
-            )
-            return False
-
-        # Gate 4 (500s): MERCADO_DESCARGADO — demasiados spikes recientes → energía agotada
-        # Umbral por símbolo: BOOM≥3 bloquea (n=3 WR=38%), CRASH≥4 bloquea (n=3 WR=57% es bueno)
+        # Gate 4 (500s): CLUSTER_ACTIVO — $40 solo si hay cluster de spikes activo
+        # Gate positivo: REQUIERE cluster, no solo bloquea exceso
+        # 3+ en 5min → BOOM P=71.3%, CRASH P=59.5% vs baseline 49%
+        # 4+ en 10min → BOOM P=58.9%, CRASH P=60.7%
+        # Sin cluster (0-2 en 5min, 0-3 en 10min) → P≈46-49% → no justifica $40
         now_ts = time.time()
-        cutoff = now_ts - DISCHARGE_WINDOW_S
-        recent_count = sum(1 for t in state.recent_spike_ts if t > cutoff)
-        discharge_thresh = DISCHARGE_MAX_SPIKES_BOOM if sym == "BOOM500" else DISCHARGE_MAX_SPIKES_CRASH
-        if recent_count >= discharge_thresh:
+        n_short = sum(1 for t in state.recent_spike_ts if t > now_ts - CLUSTER_WINDOW_SHORT_S)
+        n_long  = sum(1 for t in state.recent_spike_ts if t > now_ts - CLUSTER_WINDOW_LONG_S)
+        if n_short < CLUSTER_MIN_SPIKES_SHORT and n_long < CLUSTER_MIN_SPIKES_LONG:
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s MERCADO_DESCARGADO %d spikes en %dmin → $5 (thresh=%d, esperar recarga)",
-                sym, recent_count, DISCHARGE_WINDOW_S // 60, discharge_thresh,
+                "[ENTRADA_DIEGO] %s NO_CLUSTER %d/%dmin %d/%dmin (min %d/%d) → $5",
+                sym, n_short, CLUSTER_WINDOW_SHORT_S // 60,
+                n_long, CLUSTER_WINDOW_LONG_S // 60,
+                CLUSTER_MIN_SPIKES_SHORT, CLUSTER_MIN_SPIKES_LONG,
             )
             return False
 
