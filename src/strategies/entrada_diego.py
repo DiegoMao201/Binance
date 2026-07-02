@@ -121,6 +121,12 @@ BOOM_DANGER_RATIO_MIN = float(os.getenv("ENTRADA_DIEGO_BOOM_DANGER_RATIO",  "120
 FAST_OPEN_GAP_MAX_S  = int(os.getenv("ENTRADA_DIEGO_FAST_OPEN_GAP_MAX",    "120"))   # <2min = burst
 FAST_OPEN_RATIO_MIN  = float(os.getenv("ENTRADA_DIEGO_FAST_OPEN_RATIO",    "120.0")) # ≈p75 BOOM500
 
+# SPIKE_DETECTOR: ratio mínimo para que BOOM500 inicie el timer 180s vía SPIKE_DETECTOR
+# Datos 7714 spikes: spike≥200x + n15≤2 → WIN=71.4%, avg=+$6.37 (n=14) ← GOLDEN
+#                   spike<200x            → WIN=29.4%, avg=-$1.94 (n=34) ← EVITAR en SPIKE_TIMER
+# Spikes<200x caen al path normal profit_timer (requieren profit+ como filtro natural)
+SPIKE_DETECTOR_BOOM_MIN_RATIO = float(os.getenv("ENTRADA_DIEGO_SPIKE_DET_BOOM_MIN_RATIO", "200.0"))
+
 # R_75 / JD75 — bucle simple TP/SL, flip dirección en pérdida
 R75_STAKE      = float(os.getenv("ENTRADA_DIEGO_R75_STAKE",      "5.0"))
 R75_TP_PCT     = float(os.getenv("ENTRADA_DIEGO_R75_TP_PCT",     "0.30"))   # $1.50 on $5 stake
@@ -431,7 +437,18 @@ class EntradaDiego:
                 state.trigger_spike_ratio = _det_ratio
                 state.profit_timer_spikes = 0
 
-                if self._gate_active(sym, state):
+                # Filtro de ratio BOOM500: solo spikes≥200x activan el SPIKE_TIMER
+                # <200x → WIN=29.4% (análisis 7714 spikes) → cae a path normal profit_timer
+                if sym == "BOOM500" and _det_ratio < SPIKE_DETECTOR_BOOM_MIN_RATIO:
+                    state.last_spike_ts = last_spike_ts  # consumir para no re-disparar
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx"
+                        " < %.0fx → ratio débil (WIN=29%%), $1 sigue path normal",
+                        sym, _det_ivl, _det_ratio, SPIKE_DETECTOR_BOOM_MIN_RATIO,
+                    )
+                    # NO return: si $1 está en profit+ sección 3 arranca profit_timer normal
+
+                elif self._gate_active(sym, state):
                     state.last_spike_ts = last_spike_ts  # consumir spike siempre
                     _is_burst = (
                         0 < _det_ivl <= FAST_OPEN_GAP_MAX_S
