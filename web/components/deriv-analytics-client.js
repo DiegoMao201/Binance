@@ -407,6 +407,19 @@ function Stat({ lbl, val, color = T.text }) {
   );
 }
 
+function MicroStat({ lbl, val, color = T.text }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+      <span style={{ fontSize: 8, color: T.mute, letterSpacing: "0.12em", fontWeight: 700 }}>{lbl}</span>
+      <span style={{ fontSize: 11, color, fontWeight: 700 }}>{val}</span>
+    </div>
+  );
+}
+
+function Label({ children }) {
+  return <span style={{ fontSize: 9, color: T.mute, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 700 }}>{children}</span>;
+}
+
 function LoadingShell() {
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: FONT_MONO, display: "flex", alignItems: "center", justifyContent: "center" }}>
