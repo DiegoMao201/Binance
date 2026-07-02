@@ -157,6 +157,7 @@ class _SymState:
     consec_wins_active: int = 0     # wins consecutivos mientras ACTIVE — solo 500s
     profit_timer_spikes: int = 0    # spikes capturados durante el PROFIT_TIMER actual — solo 500s
     prev_discharge: bool = False    # True si el ACTIVE anterior terminó en descarga; exige timer limpio antes de $40
+    spike_timer_active: bool = False  # True cuando SPIKE_DETECTOR (no-burst) inició el PROFIT_TIMER desde el spike
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
@@ -431,34 +432,33 @@ class EntradaDiego:
                 state.profit_timer_spikes = 0
 
                 if self._gate_active(sym, state):
-                    # Patrón correcto → cerrar $1 y abrir $40 directamente
-                    _det_cid    = int(state.contract_id)
-                    _det_profit = state.current_profit
-                    state.contract_id    = None   # limpiar ANTES del await (evita race)
-                    state.current_profit = 0.0
-                    try:
-                        await self._executor.close_contract(_det_cid)
-                    except Exception as _exc:
-                        _LOGGER.error(
-                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR error cerrando $1: %s", sym, _exc
-                        )
-                    state.last_close_profit  = _det_profit
-                    state.profit_positive_ts = 0.0
-                    state.last_spike_ts      = last_spike_ts  # consumir spike
-                    state.reopens            = 0              # ciclo $40 fresco
-                    self._add_global_pnl(sym, _det_profit, now)
-                    # Transición directa QUIET→ACTIVE sin pasar por _post_profit_close
-                    state.sym_mode           = "ACTIVE"
-                    state.consec_max_holds   = 0
-                    state.consec_wins_active = 0
-                    state.prev_discharge     = False
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx profit_$1=%.4f"
-                        " → cierre $1 → $40 directo",
-                        sym, _det_ivl, _det_ratio, _det_profit,
+                    state.last_spike_ts = last_spike_ts  # consumir spike siempre
+                    _is_burst = (
+                        0 < _det_ivl <= FAST_OPEN_GAP_MAX_S
+                        and _det_ratio >= FAST_OPEN_RATIO_MIN
                     )
-                    await asyncio.sleep(3.0)  # mismo delay que SL_HARD (evita symbol_already_open)
-                    await self._open(sym, state, now)
+                    if _is_burst:
+                        # Burst confirmado: spike_interval_s y trigger_spike_ratio ya están
+                        # precargados arriba. FAST_OPEN (sección 3) disparará cuando $1 sea
+                        # profit+ — apertura inmediata respaldada por patrón burst.
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR burst ivl=%.0fs ratio=%.0fx"
+                            " → datos capturados, FAST_OPEN esperará profit+",
+                            sym, _det_ivl, _det_ratio,
+                        )
+                    else:
+                        # No-burst: iniciar timer 180s desde detección del spike.
+                        # El $1 sigue abierto durante el cooldown (positivo o negativo).
+                        # Al vencer: _close_profit_timer revisa gates → si pasan → $40.
+                        state.spike_timer_active  = True
+                        state.profit_positive_ts  = now
+                        state.phase               = "PROFIT_TIMER"
+                        state.profit_timer_spikes = 0
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR no-burst ivl=%.0fs ratio=%.0fx"
+                            " → timer 180s desde spike ($1 sigue, +/- → $40 si gates pasan)",
+                            sym, _det_ivl, _det_ratio,
+                        )
                     return
                 else:
                     # Patrón incorrecto → anotar spike, $1 continúa
@@ -950,10 +950,14 @@ class EntradaDiego:
         self._persist(now)
 
     async def _close_profit_timer(self, sym: str, state: _SymState, now: float) -> None:
-        final_profit = state.current_profit
+        final_profit     = state.current_profit
+        _spike_det_timer = state.spike_timer_active
+        state.spike_timer_active = False  # siempre resetear antes de cualquier await
+
+        _tag = " [SPIKE_TIMER]" if _spike_det_timer else ""
         _LOGGER.info(
-            "[ENTRADA_DIEGO] %s PROFIT_TIMER cumplido → cerrando contract=%s profit=%.4f",
-            sym, state.contract_id, final_profit,
+            "[ENTRADA_DIEGO] %s PROFIT_TIMER cumplido%s → cerrando contract=%s profit=%.4f",
+            sym, _tag, state.contract_id, final_profit,
         )
         try:
             if state.contract_id:
@@ -967,7 +971,29 @@ class EntradaDiego:
 
         self._add_global_pnl(sym, final_profit, now)
 
-        if final_profit > 0:
+        if _spike_det_timer and state.sym_mode == "QUIET":
+            # SPIKE_DETECTOR no-burst: abrir $40 si los gates siguen pasando,
+            # independiente del profit del $1 (positivo O negativo tras el cooldown).
+            if self._gate_active(sym, state):
+                state.sym_mode           = "ACTIVE"
+                state.consec_max_holds   = 0
+                state.consec_wins_active = 0
+                state.prev_discharge     = False
+                state.reopens            = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s SPIKE_TIMER 180s cumplido profit_$1=%.4f"
+                    " → gates pasan → QUIET→ACTIVE $40",
+                    sym, final_profit,
+                )
+            else:
+                state.reopens += 1
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s SPIKE_TIMER 180s cumplido profit_$1=%.4f"
+                    " → gates bloquean → sigue QUIET $1 reopen#%d",
+                    sym, final_profit, state.reopens,
+                )
+            await self._open(sym, state, now)
+        elif final_profit > 0:
             prev_reopens  = state.reopens
             state.reopens = 0
             await self._post_profit_close(sym, state, now, prev_reopens=prev_reopens)
