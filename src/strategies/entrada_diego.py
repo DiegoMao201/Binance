@@ -55,7 +55,7 @@ DEEP_PAUSE_AT_1000 = int(os.getenv("ENTRADA_DIEGO_DEEP_PAUSE_AT",     "8"))
 REST_STAKE_1000    = float(os.getenv("ENTRADA_DIEGO_REST_STAKE_1000", "2.0"))
 
 # 500s: QUIET/ACTIVE
-QUIET_STAKE_500       = float(os.getenv("ENTRADA_DIEGO_QUIET_STAKE",        "5.0"))   # símbolo quieto
+QUIET_STAKE_500       = float(os.getenv("ENTRADA_DIEGO_QUIET_STAKE",        "1.0"))   # sensor: stake mínimo, detecta spikes directamente
 ACTIVE_STAKE_500      = float(os.getenv("ENTRADA_DIEGO_ACTIVE_STAKE",       "40.0"))  # símbolo activo
 ACTIVE_MAX_HOLDS      = int(os.getenv("ENTRADA_DIEGO_ACTIVE_MAX_HOLDS",     "1"))     # max_holds para → QUIET (1 = cualquier pérdida vuelve a $5)
 DISCHARGE_SPIKES_500        = int(os.getenv("ENTRADA_DIEGO_DISCHARGE_SPIKES",              "1"))  # spikes en PROFIT_TIMER = descarga → fuerza QUIET
@@ -408,6 +408,66 @@ class EntradaDiego:
 
                 await self._open(sym, state, now)
                 return
+
+            # 2.5) SPIKE_DETECTOR (QUIET 500s) — nueva arquitectura
+            # El $1 no espera profit positivo: detecta el spike directamente.
+            # Si el spike llega Y el patrón (gates) es correcto → cierra $1 ya → $40 abre.
+            # Si el patrón no coincide → anota el spike, el $1 sigue corriendo.
+            # CRASH500: Gate 5 (SPIKE_FRESCO sec<45s) bloquea en el momento exacto del spike
+            #   → cae al path de profit positivo (sección 3) — mismo comportamiento que antes.
+            # BOOM500: abre $40 sin ningún delay de profit ni timer.
+            if (
+                sym in SYMBOLS_500
+                and state.sym_mode == "QUIET"
+                and state.contract_id is not None
+                and not state.prev_discharge          # post-discharge: esperar ciclo limpio
+                and last_spike_ts > state.last_spike_ts > 0
+            ):
+                _det_ivl   = last_spike_ts - state.last_spike_ts
+                _det_ratio = self._risk.get_last_spike_ratio(sym)
+                # Precargar para que _gate_active use los datos de este spike
+                state.spike_interval_s    = _det_ivl
+                state.trigger_spike_ratio = _det_ratio
+                state.profit_timer_spikes = 0
+
+                if self._gate_active(sym, state):
+                    # Patrón correcto → cerrar $1 y abrir $40 directamente
+                    _det_cid    = int(state.contract_id)
+                    _det_profit = state.current_profit
+                    state.contract_id    = None   # limpiar ANTES del await (evita race)
+                    state.current_profit = 0.0
+                    try:
+                        await self._executor.close_contract(_det_cid)
+                    except Exception as _exc:
+                        _LOGGER.error(
+                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR error cerrando $1: %s", sym, _exc
+                        )
+                    state.last_close_profit  = _det_profit
+                    state.profit_positive_ts = 0.0
+                    state.last_spike_ts      = last_spike_ts  # consumir spike
+                    state.reopens            = 0              # ciclo $40 fresco
+                    self._add_global_pnl(sym, _det_profit, now)
+                    # Transición directa QUIET→ACTIVE sin pasar por _post_profit_close
+                    state.sym_mode           = "ACTIVE"
+                    state.consec_max_holds   = 0
+                    state.consec_wins_active = 0
+                    state.prev_discharge     = False
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx profit_$1=%.4f"
+                        " → cierre $1 → $40 directo",
+                        sym, _det_ivl, _det_ratio, _det_profit,
+                    )
+                    await asyncio.sleep(3.0)  # mismo delay que SL_HARD (evita symbol_already_open)
+                    await self._open(sym, state, now)
+                    return
+                else:
+                    # Patrón incorrecto → anotar spike, $1 continúa
+                    state.last_spike_ts = last_spike_ts
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx"
+                        " → gates bloquean → $1 continua",
+                        sym, _det_ivl, _det_ratio,
+                    )
 
             # 3) Profit positivo por primera vez → PROFIT_TIMER
             # Excepción: si es un re-adjuntado en ACTIVE, no iniciar PROFIT_TIMER —
