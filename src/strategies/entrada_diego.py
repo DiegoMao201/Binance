@@ -28,6 +28,7 @@ Estado:     {BOT_STATE_DIR}/entrada_diego_state.json
 """
 
 import asyncio
+import bisect
 import json
 import logging
 import os
@@ -102,6 +103,10 @@ BOOM500_QUIET_PERIOD_S   = int(os.getenv("ENTRADA_DIEGO_BOOM500_QUIET_S",   "180
 CRASH500_MAX_WINS_ACTIVE = int(os.getenv("ENTRADA_DIEGO_CRASH500_MAX_WINS", "2"))
 BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2"))
 
+# Protección $1: si durante los 10min se capturan ≥N spikes → resetear timer (otro round $1)
+# Solo cuando los 10min pasan con <N spikes → volver a $20
+PROT_RESET_MIN_SPIKES = int(os.getenv("ENTRADA_DIEGO_PROT_RESET_SPIKES", "2"))
+
 # PnL global acumulado: cuando alcanza GLOBAL_PNL_TARGET → pausa GLOBAL_PAUSE_HOURS horas
 # PnL suma todos los cierres de BOOM500+CRASH500 (positivos y negativos)
 GLOBAL_PNL_TARGET  = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PNL_TARGET",  "60.0"))
@@ -146,6 +151,17 @@ SPIKE_DETECTOR_BOOM_MIN_RATIO = float(os.getenv("ENTRADA_DIEGO_SPIKE_DET_BOOM_MI
 STAKE_500_FIXED        = float(os.getenv("ENTRADA_DIEGO_500_STAKE",   "20.0"))
 SL_USD_500_SIMPLE      = float(os.getenv("ENTRADA_DIEGO_500_SL_USD",  "14.0"))
 HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   # 30 min
+
+# Gate DISPLACEMENT: cuando el índice se movió demasiado en dirección favorable en las
+# últimas DISP_WINDOW_H horas → el mercado está "construyendo estructura" → abrir $1 (no $20).
+# BOOM500: desplazamiento = (precio_ahora - precio_Xh_atrás) / precio_Xh_atrás > +THRESH% → $1
+# CRASH500: desplazamiento < -THRESH% (precio bajó más de X%) → $1
+# Datos históricos 3119 contratos Jun22-Jul6:
+#   >+1.0%: WR=38.4% vs 45.5% normal (diff=-7.1%)   EV=-$76/h vs -$2/h zona NEUTRO_NEG
+#   >+1.5%: WR=27.7% vs 45.2% normal (diff=-17.5%)
+DISP_WINDOW_H    = float(os.getenv("ENTRADA_DIEGO_DISP_WINDOW_H",   "6.0"))   # ventana en horas
+DISP_THRESH_PCT  = float(os.getenv("ENTRADA_DIEGO_DISP_THRESH_PCT", "1.0"))   # threshold %
+_SLOPE_CACHE_TTL = 300.0   # refrescar caché de slope cada 5 min
 # Pisos de profit: 3, 5, 7, 9, 11... (de $2 en $2)
 # Cuando el peak cruza un piso, ese piso se activa. Si el profit cae por debajo → cierra.
 _PROFIT_TIERS_500 = [float(x) for x in range(3, 200, 1)]  # [3, 4, 5, 6, 7, ...]
@@ -196,6 +212,7 @@ class _SymState:
     protecting_500:         bool  = False # True: estamos en modo protección $1/10min (post-2 wins seguidos)
     consec_wins_500:        int   = 0    # wins consecutivos con PnL>0 en $20 — al llegar a 2 activa protección
     protection_started_at:  float = 0.0  # epoch de cuando activó la protección; NO se resetea en reopens del $1
+    protection_spikes:      int   = 0    # spikes capturados mientras protecting_500=True en este window de 10min
     broker_blocked_until_500: float = 0.0  # hasta cuándo esperar si broker cap < $1 (precio post-spike muy alto)
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
@@ -260,6 +277,10 @@ class EntradaDiego:
         self._global_pnl:              float = 0.0                # PnL acumulado total
         self._global_pause_until:     float = 0.0                # epoch hasta cuando pausados
         self._global_pnl_next_target: float = GLOBAL_PNL_TARGET  # próximo umbral: 60→120→180
+
+        # Displacement gate cache — precarga y TTL
+        self._slope_cache:    dict[str, list[tuple[float, float]]] = {}
+        self._slope_cache_ts: float = 0.0
 
         if self._enabled:
             active = sorted(SYMBOLS_ED - SYMBOLS_ED_DISABLED)
@@ -490,86 +511,6 @@ class EntradaDiego:
                 await self._open(sym, state, now)
                 return
 
-            # 2.5) SPIKE_DETECTOR (QUIET 500s) — CRASH500 y BOOM500 idénticos
-            # Ambos símbolos: $1 es sensor, no vehículo de profit.
-            # Spike detectado → CIERRE INMEDIATO del $1 → abrir stake ladder.
-            # Solo se bloquea si DISCHARGE activo (demasiados spikes en ventana 15min).
-            if (
-                sym in SYMBOLS_500
-                and state.sym_mode == "QUIET"
-                and state.contract_id is not None
-                and last_spike_ts > state.last_spike_ts
-            ):
-                _det_ivl   = (last_spike_ts - state.last_spike_ts) if state.last_spike_ts > 0 else 9999.0
-                _det_ratio = self._risk.get_last_spike_ratio(sym)
-                _det_jump  = self._risk.get_last_spike_jump(sym)
-                state.spike_interval_s    = _det_ivl
-                state.trigger_spike_ratio = _det_ratio
-                state.trigger_spike_jump  = _det_jump
-                state.profit_timer_spikes = 0
-                state.last_spike_ts       = last_spike_ts  # consumir siempre
-
-                _cutoff_d  = now - DISCHARGE_WINDOW_S
-                _recent_d  = sum(1 for t in state.recent_spike_ts if t > _cutoff_d)
-                _discharged_now = _recent_d >= DISCHARGE_MAX_SPIKES_CRASH  # mismo umbral para ambos
-
-                if _discharged_now:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx"
-                        " → DISCHARGE (%d/%d spikes) → $1 continua",
-                        sym, _det_ivl, _det_ratio, _recent_d, DISCHARGE_MAX_SPIKES_CRASH,
-                    )
-                elif state.is_readjusted:
-                    # Contrato re-adjuntado: no es el sensor $1 real — puede ser un $40/$60 viejo.
-                    # Hacer CIERRE INMEDIATO aquí cerraría el contrato anterior a pérdida y
-                    # abriría otro stake alto inmediatamente — doble pérdida.
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s SPIKE en re-adjuntado → esperar cierre natural (no CIERRE INMEDIATO)",
-                        sym,
-                    )
-                else:
-                    # Ratio mínimo requerido según el stake actual:
-                    # $5→30x  $20→60x  $40→80x  $60→100x
-                    # Un spike ratio=7x en $60 es ruido — evitar martingala sobre señal débil.
-                    _idx       = state.crash_stake_idx if sym == "CRASH500" else state.boom_stake_idx
-                    _stake_target = _CRASH500_STAKE_LADDER[min(_idx, len(_CRASH500_STAKE_LADDER) - 1)]
-                    _min_ratio = [30, 60, 80, 100][min(_idx, 3)]
-
-                    if _det_ratio < _min_ratio:
-                        _LOGGER.info(
-                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx < %dx"
-                            " para $%.0f → señal débil, sigue QUIET $1",
-                            sym, _det_ivl, _det_ratio, _min_ratio, _stake_target,
-                        )
-                    else:
-                        # CIERRE INMEDIATO — igual para CRASH500 y BOOM500
-                        _cid  = int(state.contract_id)
-                        _pnl  = state.current_profit
-                        _LOGGER.info(
-                            "[ENTRADA_DIEGO] %s SPIKE_DETECTOR ivl=%.0fs ratio=%.0fx jump=%.2f"
-                            " profit_$1=%.4f → CIERRE INMEDIATO → ACTIVE $%.0f",
-                            sym, _det_ivl, _det_ratio, _det_jump, _pnl, _stake_target,
-                        )
-                        state.contract_id        = None
-                        state.current_profit     = 0.0
-                        try:
-                            await self._executor.close_contract(_cid)
-                        except Exception as _exc:
-                            _LOGGER.error("[ENTRADA_DIEGO] %s SPIKE close error: %s", sym, _exc)
-                        state.last_close_profit  = _pnl
-                        state.profit_positive_ts = 0.0
-                        state.reopens            = 0
-                        state.spike_timer_active = False
-                        self._add_global_pnl(sym, _pnl, now)
-                        state.sym_mode           = "ACTIVE"
-                        state.consec_max_holds   = 0
-                        state.consec_wins_active = 0
-                        state.prev_discharge     = False
-                        await asyncio.sleep(3.0)  # Deriv requiere ~3s entre cierre y apertura
-                        await self._open(sym, state, now)
-                        return
-                return
-
             # 3) Profit positivo por primera vez → PROFIT_TIMER
             # Excepción: si es un re-adjuntado en ACTIVE, no iniciar PROFIT_TIMER —
             # el contrato viejo cierra vía "cerrado externamente → reopen" y abre el $40 real.
@@ -671,6 +612,18 @@ class EntradaDiego:
         if state.contract_id is not None:
             state.current_profit = self._query_profit(state.contract_id)
 
+        # Contar spikes durante la protección $1 para decidir si resetear el timer
+        if state.protecting_500:
+            _prot_spike_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
+            if _prot_spike_ts > state.last_spike_ts_500 and _prot_spike_ts > 0:
+                state.last_spike_ts_500 = _prot_spike_ts
+                state.protection_spikes += 1
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s PROT spike#%d (ratio=%.0fx) detectado durante $1",
+                    sym, state.protection_spikes,
+                    self._risk.get_last_spike_ratio(sym),
+                )
+
         # Sin contrato → abrir ($1 si estamos en protección, $20 si no)
         if state.phase == "IDLE" or state.contract_id is None:
             if now < state.broker_blocked_until_500:
@@ -709,6 +662,7 @@ class EntradaDiego:
             state.protecting_500        = False  # SL cancela protección
             state.consec_wins_500       = 0      # racha rota
             state.protection_started_at = 0.0
+            state.protection_spikes     = 0
             try:
                 await self._executor.close_contract(_cid)
             except Exception as exc:
@@ -748,6 +702,7 @@ class EntradaDiego:
                     state.protecting_500         = True
                     state.consec_wins_500        = 0
                     state.protection_started_at  = now
+                    state.protection_spikes      = 0
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s PROFIT_FLOOR peak=%.2f floor=$%.0f profit=%.4f wins=2 → PROTECCIÓN $1/10min",
                         sym, _peak, _profit_floor, _pnl,
@@ -777,26 +732,41 @@ class EntradaDiego:
         if state.protecting_500 and state.protection_started_at > 0 and now >= state.protection_started_at + 600:
             _cid = state.contract_id
             _pnl = state.current_profit
+            _spikes_in_prot = state.protection_spikes
             if _cid is not None:
                 try:
                     await self._executor.close_contract(int(_cid))
                 except Exception as exc:
                     _LOGGER.error("[ENTRADA_DIEGO] %s 10min PROT close error: %s", sym, exc)
             state.last_close_profit  = _pnl
-            state.contract_id           = None
-            state.current_profit        = 0.0
-            state.peak_profit_500       = 0.0
-            state.reopens               = 0
-            state.protecting_500        = False
-            state.consec_wins_500       = 0
-            state.protection_started_at = 0.0
+            state.contract_id        = None
+            state.current_profit     = 0.0
+            state.peak_profit_500    = 0.0
             self._add_global_pnl(sym, _pnl, now)
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s 10min PROT expirado profit=%.4f → protección OK, reopen $%.0f",
-                sym, _pnl, STAKE_500_FIXED,
-            )
-            await asyncio.sleep(1.0)
-            await self._open(sym, state, now)
+            if _spikes_in_prot >= PROT_RESET_MIN_SPIKES:
+                # Hubo ≥2 spikes en los 10min → mercado activo, otro round de $1
+                state.protection_started_at = now
+                state.protection_spikes     = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s 10min PROT expirado con %d spikes → otro round $1 (reset timer)",
+                    sym, _spikes_in_prot,
+                )
+                await asyncio.sleep(1.0)
+                await self._open(sym, state, now, stake_override=1.0)
+            else:
+                # Pasó limpio (<2 spikes) → salir a $20
+                # consec_wins_500=1: el siguiente win en $20 (consec=2) activa protección de nuevo
+                state.reopens               = 0
+                state.protecting_500        = False
+                state.consec_wins_500       = 1
+                state.protection_started_at = 0.0
+                state.protection_spikes     = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s 10min PROT expirado spikes=%d → protección OK, reopen $%.0f",
+                    sym, _spikes_in_prot, STAKE_500_FIXED,
+                )
+                await asyncio.sleep(1.0)
+                await self._open(sym, state, now)
             return
 
         # ── Cerrado externamente por broker (SL/TP del broker) ───────────────
@@ -825,6 +795,7 @@ class EntradaDiego:
                         state.protecting_500        = True
                         state.consec_wins_500       = 0
                         state.protection_started_at = now
+                        state.protection_spikes     = 0
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s cerrado externamente profit=%.4f wins=2 → PROTECCIÓN $1/10min",
                             sym, _pnl,
@@ -1104,6 +1075,77 @@ class EntradaDiego:
                 return False
 
         return True
+
+    @staticmethod
+    def _load_slope_tail(sym: str, logs_dir: Path) -> list[tuple[float, float]]:
+        """Lee los últimos ~1.5 MB de slope_history.jsonl para el símbolo dado.
+        Con 4 símbolos × ~236B/línea ≈ 6350 líneas ≈ ~16h de historia por símbolo.
+        """
+        path = logs_dir / "slope_history.jsonl"
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                chunk = min(size, 1_500_000)
+                f.seek(max(0, size - chunk))
+                raw = f.read()
+        except Exception:
+            return []
+        result: list[tuple[float, float]] = []
+        for line in raw.decode("utf-8", errors="replace").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                if d.get("symbol") == sym:
+                    result.append((float(d["ts"]), float(d["price"])))
+            except Exception:
+                pass
+        result.sort()
+        return result
+
+    def _get_displacement_stake(self, sym: str, now: float) -> float | None:
+        """
+        Devuelve 1.0 si el desplazamiento en DISP_WINDOW_H horas supera el umbral.
+        BOOM500: precio subió > +DISP_THRESH_PCT% → spikes agotados → stake $1.
+        CRASH500: precio bajó > DISP_THRESH_PCT% (desplazamiento negativo) → stake $1.
+        Devuelve None si condiciones normales (usar stake por defecto).
+        """
+        if sym not in SYMBOLS_500:
+            return None
+        if now - self._slope_cache_ts > _SLOPE_CACHE_TTL:
+            self._slope_cache_ts = now
+            for s in ("BOOM500", "CRASH500"):
+                loaded = self._load_slope_tail(s, self._logs_dir)
+                if loaded:
+                    self._slope_cache[s] = loaded
+        entries = self._slope_cache.get(sym, [])
+        if len(entries) < 2:
+            return None
+        p_now = entries[-1][1]
+        target_ts = now - DISP_WINDOW_H * 3600
+        tss = [e[0] for e in entries]
+        idx = bisect.bisect_left(tss, target_ts)
+        if idx == 0:
+            return None
+        idx = min(idx, len(entries) - 1)
+        if abs(tss[idx] - target_ts) > abs(tss[idx - 1] - target_ts):
+            idx -= 1
+        p_past = entries[idx][1]
+        if p_past == 0:
+            return None
+        disp_pct = (p_now - p_past) / p_past * 100
+        # Para BOOM500 el peligro es que el precio suba (spikes hacia arriba se agotan)
+        # Para CRASH500 el peligro es que el precio baje (spikes hacia abajo se agotan)
+        in_danger = disp_pct > DISP_THRESH_PCT if sym == "BOOM500" else disp_pct < -DISP_THRESH_PCT
+        if in_danger:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s DISP_GATE disp=%.2f%% (ventana=%.0fH umbral=±%.1f%%) → stake=$1",
+                sym, disp_pct, DISP_WINDOW_H, DISP_THRESH_PCT,
+            )
+            return 1.0
+        return None
 
     def _next_stake(self, sym: str, reopens: int = 0, now: float = 0.0) -> float:
         if sym in SYMBOLS_500:

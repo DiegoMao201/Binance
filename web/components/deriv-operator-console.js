@@ -1968,8 +1968,6 @@ function SymbolCard({ s }) {
         {/* D.10.0 Slope Gate — solo BOOM500/CRASH500 */}
         <SlopeGateSection symbol={s.symbol} />
 
-        {/* Displacement Gate 6H — BOOM500/CRASH500 */}
-        <DisplacementGateSection symbol={s.symbol} />
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />
