@@ -13,9 +13,19 @@ const DISP_WINDOW_H  = parseFloat(process.env.ENTRADA_DIEGO_DISP_WINDOW_H   || '
 const DISP_THRESH    = parseFloat(process.env.ENTRADA_DIEGO_DISP_THRESH_PCT  || '1.0');
 const SYMBOLS        = ['BOOM500', 'CRASH500'];
 
-function loadTail(): Map<string, Array<[number, number]>> {
-  const result = new Map<string, Array<[number, number]>>();
-  for (const s of SYMBOLS) result.set(s, []);
+// spikes/h sweet spot encontrado en análisis histórico (3,502 contratos)
+const SPIKE_1H_MIN = 2;   // <2 → mercado quieto
+const SPIKE_1H_MAX = 9;   // ≥10 → mercado sobreactivo (BOOM WR=33.5% en s1=9)
+
+interface TailData {
+  history:    Map<string, Array<[number, number]>>;
+  spikeSets:  Map<string, Set<number>>;   // unique spike_ts seen in tail per symbol
+}
+
+function loadTail(): TailData {
+  const history   = new Map<string, Array<[number, number]>>();
+  const spikeSets = new Map<string, Set<number>>();
+  for (const s of SYMBOLS) { history.set(s, []); spikeSets.set(s, new Set()); }
 
   let raw: Buffer;
   try {
@@ -26,7 +36,7 @@ function loadTail(): Map<string, Array<[number, number]>> {
     fs.readSync(fd, raw, 0, chunk, size - chunk);
     fs.closeSync(fd);
   } catch {
-    return result;
+    return { history, spikeSets };
   }
 
   for (const line of raw.toString('utf8').split('\n')) {
@@ -35,14 +45,17 @@ function loadTail(): Map<string, Array<[number, number]>> {
     try {
       const d = JSON.parse(t);
       const sym: string = d.symbol;
-      if (SYMBOLS.includes(sym)) {
-        result.get(sym)!.push([d.ts as number, d.price as number]);
+      if (!SYMBOLS.includes(sym)) continue;
+      history.get(sym)!.push([d.ts as number, d.price as number]);
+      if (d.spike_ts != null) {
+        // round to centisecond to collapse float precision noise
+        spikeSets.get(sym)!.add(Math.round((d.spike_ts as number) * 100));
       }
     } catch { /* skip malformed */ }
   }
 
-  for (const arr of result.values()) arr.sort((a, b) => a[0] - b[0]);
-  return result;
+  for (const arr of history.values()) arr.sort((a, b) => a[0] - b[0]);
+  return { history, spikeSets };
 }
 
 function priceAt(arr: Array<[number, number]>, ts: number): number | null {
@@ -52,14 +65,13 @@ function priceAt(arr: Array<[number, number]>, ts: number): number | null {
     const mid = (lo + hi) >> 1;
     if (arr[mid][0] < ts) lo = mid + 1; else hi = mid;
   }
-  // nearest neighbor
   if (lo > 0 && Math.abs(arr[lo - 1][0] - ts) < Math.abs(arr[lo][0] - ts)) lo--;
   return arr[lo][1];
 }
 
 export async function GET() {
   const now = Date.now() / 1000;
-  const history = loadTail();
+  const { history, spikeSets } = loadTail();
   const out: Record<string, unknown> = { updated_at: now, threshold: DISP_THRESH, window_h: DISP_WINDOW_H };
 
   for (const sym of SYMBOLS) {
@@ -72,13 +84,12 @@ export async function GET() {
     const p_now = arr[arr.length - 1][1];
     const data_age_s = now - arr[arr.length - 1][0];
 
-    // Compute displacement for multiple windows
+    // Displacement for multiple windows
     const windows: Record<string, number | null> = {};
     for (const h of [1, 3, 6, 12]) {
       const p_past = priceAt(arr, now - h * 3600);
       if (p_past == null || p_past === 0) { windows[`h${h}`] = null; continue; }
       const d_raw = (p_now - p_past) / p_past * 100;
-      // For CRASH500, danger = price went DOWN (d_raw negative), flip for display
       windows[`h${h}`] = sym === 'BOOM500' ? d_raw : -d_raw;
     }
 
@@ -100,14 +111,43 @@ export async function GET() {
     const gate_active = d6h_now != null && d6h_now > DISP_THRESH;
     const alert       = d6h_now != null && d6h_now > DISP_THRESH * 0.5;
 
+    // Count unique spikes in last 1H using centisecond-rounded spike_ts
+    const cutoff1h = (now - 3600) * 100;
+    const cutoffNow = now * 100;
+    let spikes_1h = 0;
+    for (const ts100 of spikeSets.get(sym)!) {
+      if (ts100 >= cutoff1h && ts100 <= cutoffNow) spikes_1h++;
+    }
+
+    // Trade signal: ABRE / NO_ABRE
+    let trade_signal: 'ABRE' | 'NO_ABRE';
+    let signal_reason: string;
+
+    if (gate_active) {
+      trade_signal  = 'NO_ABRE';
+      signal_reason = `desplaz. 6H ${d6h_now != null ? (d6h_now >= 0 ? '+' : '') + d6h_now.toFixed(2) : '?'}% > ${DISP_THRESH}%`;
+    } else if (spikes_1h < SPIKE_1H_MIN) {
+      trade_signal  = 'NO_ABRE';
+      signal_reason = `solo ${spikes_1h} spike(s)/h — mercado quieto`;
+    } else if (spikes_1h >= SPIKE_1H_MAX + 1) {
+      trade_signal  = 'NO_ABRE';
+      signal_reason = `${spikes_1h} spikes/h — mercado sobreactivo`;
+    } else {
+      trade_signal  = 'ABRE';
+      signal_reason = `${spikes_1h} spikes/h · desplaz. OK`;
+    }
+
     out[sym] = {
       p_now,
-      data_age_s: Math.round(data_age_s),
-      windows,         // { h1, h3, h6, h12 } en % desplazamiento favorable
-      d6h: d6h_now,   // alias principal
-      gate_active,     // true → bot abre en $1
-      alert,           // true → >0.5 × umbral, acercándose al peligro
-      trend,           // 'up' | 'down' | 'flat' — ¿el desplazamiento está creciendo?
+      data_age_s:    Math.round(data_age_s),
+      windows,
+      d6h:           d6h_now,
+      gate_active,
+      alert,
+      trend,
+      spikes_1h,
+      trade_signal,
+      signal_reason,
     };
   }
 

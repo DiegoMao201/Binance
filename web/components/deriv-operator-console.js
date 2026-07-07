@@ -157,6 +157,72 @@ function CooldownBar({ cooldown }) {
 /* ── Displacement Gate (6H price displacement) ───────────────── */
 const DISP_SYMBOLS = new Set(["BOOM500", "CRASH500"]);
 
+/* ── ABRE / NO ABRE — señal maestra para operación manual ────── */
+function TradeSignalBadge({ symbol }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    if (!DISP_SYMBOLS.has(symbol)) return;
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/displacement-gate", { cache: "no-store" });
+        if (!active) return;
+        const json = res.ok ? await res.json() : null;
+        if (json?.[symbol]) setData({ ...json[symbol], threshold: json.threshold ?? 1.0 });
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [symbol]);
+
+  if (!DISP_SYMBOLS.has(symbol) || !data || data.error) return null;
+  const { trade_signal, signal_reason, spikes_1h } = data;
+  if (!trade_signal) return null;
+
+  const isAbre = trade_signal === "ABRE";
+  const color  = isAbre ? T.green : T.red;
+
+  return (
+    <div style={{
+      margin: "8px 10px 4px",
+      padding: "10px 14px",
+      borderRadius: 8,
+      background: color + "15",
+      border: `2px solid ${color}99`,
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      boxShadow: `0 0 18px ${color}20`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          width: 11, height: 11, borderRadius: "50%",
+          background: color, boxShadow: `0 0 8px ${color}`, flexShrink: 0,
+          animation: isAbre ? "none" : "pulse 1.1s infinite",
+        }} />
+        <span style={{
+          fontFamily: FONT_MONO, fontSize: 22, fontWeight: 900,
+          color, letterSpacing: "0.07em",
+        }}>
+          {isAbre ? "ABRE" : "NO ABRE"}
+        </span>
+      </div>
+      <div style={{ textAlign: "right", display: "flex", flexDirection: "column", gap: 2 }}>
+        {spikes_1h != null && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: T.textD, fontWeight: 700 }}>
+            {spikes_1h} spikes/h
+          </span>
+        )}
+        {signal_reason && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>
+            {signal_reason}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DisplacementGateSection({ symbol }) {
   const [data, setData] = useState(null);
 
@@ -1247,6 +1313,9 @@ function SymbolCard({ s }) {
           borderRadius: 20, padding: "3px 9px", letterSpacing: "0.04em",
         }}>{S.label}</span>
       </div>
+
+      {/* ABRE / NO ABRE — señal manual para BOOM500/CRASH500 */}
+      <TradeSignalBadge symbol={s.symbol} />
 
       {/* compact message — solo para estados críticos (no decorativos) */}
       {(isInactive || (isManualOnly && scoreGap0 != null && scoreGap0 <= 0)) && (
