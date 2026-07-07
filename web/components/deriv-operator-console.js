@@ -154,6 +154,121 @@ function CooldownBar({ cooldown }) {
 }
 
 /* ── D.10.2 Slope Gate Section — 4 símbolos, grace countdown, triple lógica ── */
+/* ── Displacement Gate (6H price displacement) ───────────────── */
+const DISP_SYMBOLS = new Set(["BOOM500", "CRASH500"]);
+
+function DisplacementGateSection({ symbol }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    if (!DISP_SYMBOLS.has(symbol)) return;
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/displacement-gate", { cache: "no-store" });
+        if (!active) return;
+        const json = res.ok ? await res.json() : null;
+        if (json?.[symbol]) setData({ ...json[symbol], threshold: json.threshold ?? 1.0, window_h: json.window_h ?? 6 });
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [symbol]);
+
+  if (!DISP_SYMBOLS.has(symbol) || !data || data.error) return null;
+
+  const { d6h, gate_active, alert, trend, windows = {}, threshold = 1.0, window_h = 6 } = data;
+  if (d6h == null) return null;
+
+  const isBoom = symbol.startsWith("BOOM");
+
+  // Color scale
+  const gateColor = gate_active ? T.red : alert ? T.amber : T.green;
+
+  // Bar: map d6h from [-2, +3] → 0..100%
+  const BAR_MIN = -2, BAR_MAX = 3;
+  const barPct   = Math.min(100, Math.max(0, (d6h - BAR_MIN) / (BAR_MAX - BAR_MIN) * 100));
+  const threshPct = Math.min(100, Math.max(0, (threshold - BAR_MIN) / (BAR_MAX - BAR_MIN) * 100));
+
+  // Trend arrow
+  const trendSymbol = trend === "up" ? "↑" : trend === "down" ? "↓" : "→";
+  const trendColor  = trend === "up" ? T.red : trend === "down" ? T.green : T.mute;
+
+  // Danger label
+  const label = gate_active
+    ? `DISP GATE → $1`
+    : alert
+    ? `ALERTA ${d6h.toFixed(2)}% (umbral ${threshold}%)`
+    : `OK ${d6h.toFixed(2)}%`;
+
+  // Direction explanation
+  const dirNote = isBoom
+    ? "precio subió (spikes agotados)"
+    : "precio bajó (spikes agotados)";
+
+  return (
+    <div style={{
+      marginTop: 6, padding: "5px 10px", borderRadius: 6,
+      fontFamily: FONT_MONO, fontSize: 10,
+      border: `1px solid ${gateColor}55`,
+      background: `${gateColor}0a`,
+      color: gateColor,
+    }}>
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ fontWeight: 700, fontSize: 9, letterSpacing: "0.06em" }}>
+            {gate_active ? "✗" : "✓"} DISP {window_h}H
+          </span>
+          {gate_active && (
+            <span style={{
+              fontSize: 8, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+              background: `${T.red}22`, color: T.red, letterSpacing: "0.05em",
+            }}>$1 GATE ACTIVO</span>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700 }}>
+          <span style={{ color: trendColor, fontSize: 10 }}>{trendSymbol}</span>
+          <span>{d6h >= 0 ? "+" : ""}{d6h.toFixed(2)}%</span>
+        </div>
+      </div>
+
+      {/* Bar */}
+      <div style={{ position: "relative", width: "100%", height: 5, background: "rgba(255,255,255,0.07)", borderRadius: 3, marginBottom: 4 }}>
+        {/* Threshold marker */}
+        <div style={{
+          position: "absolute", left: `${threshPct}%`, top: -1, width: 2, height: 7,
+          background: T.red, borderRadius: 1, opacity: 0.7, zIndex: 2,
+        }} />
+        {/* Fill */}
+        <div style={{
+          width: `${barPct}%`, height: "100%",
+          background: gateColor, borderRadius: 3,
+          transition: "width 0.4s ease",
+        }} />
+      </div>
+
+      {/* Sub-row: windows */}
+      <div style={{ display: "flex", gap: 8, fontSize: 9, color: T.textD, flexWrap: "wrap" }}>
+        {[1, 3, 6, 12].map(h => {
+          const v = windows[`h${h}`];
+          if (v == null) return null;
+          const c = v > threshold ? T.red : v > threshold * 0.5 ? T.amber : T.mute;
+          return (
+            <span key={h} style={{ color: c }}>
+              {h}H:{v >= 0 ? "+" : ""}{v.toFixed(2)}%
+            </span>
+          );
+        })}
+        {gate_active && (
+          <span style={{ color: T.mute, fontSize: 8, marginLeft: "auto" }}>{dirNote}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SlopeGateSection({ symbol }) {
   const [data, setData] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -342,9 +457,13 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_STAKE_LADDER_500  = [10, 20, 40, 60];
 const ED_STAKE_LADDER_1000 = [5, 10, 10, 20, 20, 40, 40];
 const ED_SYMBOLS = new Set(["CRASH500", "BOOM500"]);
+
+// 500s: estrategia simple — $20 fijo, 30min, SL=$12
+const ED_500_STAKE   = 20;
+const ED_500_HOLD_S  = 1800;  // 30 min
+const ED_500_SL_USD  = 12;
 
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
@@ -383,27 +502,24 @@ function EntradaDiegoSection({ symbol }) {
 
   const nowSec = now / 1000;
   const is1000 = symbol.includes("1000");
-  const ladder = is1000 ? ED_STAKE_LADDER_1000 : ED_STAKE_LADDER_500;
 
-  const ED_MAX_HOLD_S    = 600;
-  const ED_PROFIT_WAIT_S = 180;
-  const ED_COOLDOWN_S    = is1000 ? 600 : 90;
+  // 500s: parámetros del modo simple
+  const ED_MAX_HOLD_S = is1000 ? 600 : ED_500_HOLD_S;
+  const ED_COOLDOWN_S = is1000 ? 600 : 90;
+  const stakeDisplay  = is1000
+    ? ED_STAKE_LADDER_1000[Math.min(reopens, ED_STAKE_LADDER_1000.length - 1)]
+    : ED_500_STAKE;
 
   const remaining_live = Math.max(0, (() => {
-    if (phase === "OPEN")         return (open_ts + ED_MAX_HOLD_S) - nowSec;
-    if (phase === "PROFIT_TIMER") return (profit_positive_ts + ED_PROFIT_WAIT_S) - nowSec;
-    if (phase === "COOLDOWN")     return cooldown_until - nowSec;
+    if (phase === "OPEN")     return (open_ts + ED_MAX_HOLD_S) - nowSec;
+    if (phase === "COOLDOWN") return cooldown_until - nowSec;
     return 0;
   })());
 
-  const stake = ladder[Math.min(reopens, ladder.length - 1)];
-  const martingaleLevel = reopens > 0 ? ` M${reopens + 1}` : "";
-
   const PHASE_COLOR = {
-    IDLE:         "rgba(90,100,115,0.7)",
-    OPEN:         "#22d3a3",
-    PROFIT_TIMER: "#a78bfa",
-    COOLDOWN:     "#62d4ff",
+    IDLE:    "rgba(90,100,115,0.7)",
+    OPEN:    "#22d3a3",
+    COOLDOWN:"#62d4ff",
   };
   const color = PHASE_COLOR[phase] || "rgba(90,100,115,0.7)";
 
@@ -420,7 +536,7 @@ function EntradaDiegoSection({ symbol }) {
     </div>
   );
 
-  const maxS = { OPEN: ED_MAX_HOLD_S, PROFIT_TIMER: ED_PROFIT_WAIT_S, COOLDOWN: ED_COOLDOWN_S }[phase] || 1;
+  const maxS = phase === "OPEN" ? ED_MAX_HOLD_S : (phase === "COOLDOWN" ? ED_COOLDOWN_S : 1);
   const pct  = Math.min(100, Math.max(0, ((maxS - remaining_live) / maxS) * 100));
 
   const secs    = Math.round(remaining_live);
@@ -431,10 +547,10 @@ function EntradaDiegoSection({ symbol }) {
   const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
   const pnlStr   = `${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`;
 
+  const slLabel  = !is1000 ? ` | SL $${ED_500_SL_USD}` : "";
   const PHASE_LABEL = {
-    OPEN:         `OPEN ${timeStr} · $${stake}${martingaleLevel}`,
-    PROFIT_TIMER: `cerrando en ${timeStr}`,
-    COOLDOWN:     `próxima entrada en ${timeStr} · $${ladder[0]}`,
+    OPEN:    `OPEN ${timeStr} · $${stakeDisplay}${slLabel}`,
+    COOLDOWN:`próxima entrada en ${timeStr}`,
   };
 
   return (
@@ -1782,6 +1898,9 @@ function SymbolCard({ s }) {
 
         {/* D.10.0 Slope Gate — solo BOOM500/CRASH500 */}
         <SlopeGateSection symbol={s.symbol} />
+
+        {/* Displacement Gate 6H — BOOM500/CRASH500 */}
+        <DisplacementGateSection symbol={s.symbol} />
 
         {/* D.6 Ghost Live */}
         <GhostLiveSection symbol={s.symbol} />
