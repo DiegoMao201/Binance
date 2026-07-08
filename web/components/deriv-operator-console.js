@@ -564,6 +564,9 @@ function EntradaDiegoSection({ symbol }) {
   const {
     phase, contract_id, current_profit = 0, reopens = 0,
     open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
+    protecting_500 = false, protection_spikes = 0,
+    burst_spikes_total = 0, burst_max_spikes = 6, burst_min_spikes = 3,
+    burst_started_at = 0, burst_window_s = 3600,
   } = edState;
 
   const nowSec = now / 1000;
@@ -619,6 +622,28 @@ function EntradaDiegoSection({ symbol }) {
     COOLDOWN:`próxima entrada en ${timeStr}`,
   };
 
+  // ── Burst display ───────────────────────────────────────────────────────
+  const burstExhausted = burst_spikes_total >= burst_max_spikes;
+  const burstConfirmed = burst_spikes_total >= burst_min_spikes;
+  const burstPct       = Math.min(100, (burst_spikes_total / burst_max_spikes) * 100);
+  const nowSec2        = now / 1000;
+  const burstAgeMin    = burst_started_at > 0 ? ((nowSec2 - burst_started_at) / 60).toFixed(0) : null;
+  const burstRemMin    = burst_started_at > 0
+    ? Math.max(0, ((burst_started_at + burst_window_s) - nowSec2) / 60).toFixed(0)
+    : null;
+
+  const burstBarColor = burstExhausted ? "#ff5d6c"
+    : burstConfirmed  ? "#22d3a3"
+    : "#f59e0b";
+
+  const burstStatus = burstExhausted
+    ? `AGOTADO · nueva hora en ${burstRemMin}m`
+    : protecting_500
+      ? `SENSOR · spike ${protection_spikes}/${burst_min_spikes} → $20`
+      : burstConfirmed
+        ? `$20 activo · burst ${burst_spikes_total}/${burst_max_spikes}`
+        : `cargando burst · ${burst_spikes_total}/${burst_min_spikes} confirmados`;
+
   return (
     <div style={{ ...base, color, background: `${color}14` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -640,6 +665,46 @@ function EntradaDiegoSection({ symbol }) {
       <div style={{ opacity: 0.85 }}>
         {PHASE_LABEL[phase] || phase}
         {contract_id && phase === "OPEN" ? ` · #${contract_id}` : ""}
+      </div>
+
+      {/* ── Burst window status ── */}
+      <div style={{ marginTop: 5, padding: "4px 6px", borderRadius: 4,
+        background: `${burstBarColor}14`, border: `1px solid ${burstBarColor}40` }}>
+        {/* Barra de burst */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+          <span style={{ fontSize: 9, color: burstBarColor, fontWeight: 700, letterSpacing: "0.05em" }}>
+            BURST
+          </span>
+          <div style={{ flex: 1, height: 5, background: "rgba(255,255,255,0.08)", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ width: `${burstPct}%`, height: "100%", background: burstBarColor,
+              transition: "width 0.4s ease" }} />
+          </div>
+          <span style={{ fontSize: 10, color: burstBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
+            {burst_spikes_total}/{burst_max_spikes}
+          </span>
+        </div>
+        {/* Estado del burst */}
+        <div style={{ fontSize: 9, color: burstBarColor, opacity: 0.9 }}>
+          {burstStatus}
+          {burstAgeMin != null && !burstExhausted && (
+            <span style={{ opacity: 0.6, marginLeft: 6 }}>· ventana {burstAgeMin}m/{Math.round(burst_window_s/60)}m</span>
+          )}
+        </div>
+        {/* Indicadores spikes */}
+        <div style={{ display: "flex", gap: 4, marginTop: 3 }}>
+          {Array.from({ length: burst_max_spikes }, (_, i) => (
+            <div key={i} style={{
+              width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
+              background: i < burst_spikes_total
+                ? (i < burst_min_spikes ? "#f59e0b" : "#22d3a3")
+                : "rgba(255,255,255,0.1)",
+              border: `1px solid ${i < burst_spikes_total ? burstBarColor : "rgba(255,255,255,0.15)"}`,
+            }} />
+          ))}
+          <span style={{ fontSize: 9, color: "rgba(255,255,255,0.4)", marginLeft: 4, lineHeight: "10px" }}>
+            {protecting_500 ? `sensor +${protection_spikes}` : "$20"}
+          </span>
+        </div>
       </div>
     </div>
   );
