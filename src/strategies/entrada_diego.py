@@ -105,14 +105,14 @@ BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2")
 
 # Protección $1: si durante los 10min se capturan ≥N spikes → resetear timer (otro round $1)
 # Solo cuando los 10min pasan con <N spikes → volver a $20
-PROT_RESET_MIN_SPIKES = int(os.getenv("ENTRADA_DIEGO_PROT_RESET_SPIKES", "2"))
+PROT_RESET_MIN_SPIKES = int(os.getenv("ENTRADA_DIEGO_PROT_RESET_SPIKES", "3"))
 
 # PnL global acumulado: cuando alcanza GLOBAL_PNL_TARGET → pausa GLOBAL_PAUSE_HOURS horas
 # PnL suma todos los cierres de BOOM500+CRASH500 (positivos y negativos)
 GLOBAL_PNL_TARGET  = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PNL_TARGET",  "60.0"))
 GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
 
-_ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM500,BOOM1000,CRASH1000")
+_ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
 # 500s: SL duro — separado por modo para dar espacio al $40
@@ -642,8 +642,8 @@ class EntradaDiego:
                     self._risk.get_last_spike_ratio(sym),
                     _spk_1h_now, DISCHARGE_SPKS_1H,
                 )
-                # ACTIVO_SWITCH: si el rolling 1h llegó al umbral ACTIVO → salir de $1 YA
-                if _spk_1h_now >= DISCHARGE_SPKS_1H and state.contract_id is not None:
+                # ACTIVO_SWITCH: spike 3 del burst → entrar a $20 ahora (minuto ~24, WR 68% de 3+ más)
+                if state.protection_spikes >= PROT_RESET_MIN_SPIKES and state.contract_id is not None:
                     _cid = int(state.contract_id)
                     _pnl = state.current_profit
                     state.contract_id             = None
@@ -660,8 +660,8 @@ class EntradaDiego:
                     self._add_global_pnl(sym, _pnl, now)
                     state.last_close_profit = _pnl
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s ACTIVO_SWITCH %d/h → cerrar $1 → $20 ahora",
-                        sym, _spk_1h_now,
+                        "[ENTRADA_DIEGO] %s ACTIVO_SWITCH spike#%d >= %d → cerrar $1 → $20 ahora",
+                        sym, state.protection_spikes, PROT_RESET_MIN_SPIKES,
                     )
                     await asyncio.sleep(2.0)
                     await self._open(sym, state, now)  # protecting=False → $20 directo
@@ -685,28 +685,18 @@ class EntradaDiego:
                 )
                 return
             state.phase = "OPEN"
-            if state.protecting_500:
-                # Ya en modo sensor → continuar $1
-                await self._open(sym, state, now, stake_override=1.0)
-            else:
-                _spk_1h = self._risk.get_spike_count_last_hour(sym)
-                if _spk_1h >= DISCHARGE_SPKS_1H:
-                    # ACTIVO → $20
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s ACTIVO %d/h >= %d → $20",
-                        sym, _spk_1h, DISCHARGE_SPKS_1H,
-                    )
-                    await self._open(sym, state, now)
-                else:
-                    # NORMAL/SECO → $1 sensor, esperar fase ACTIVO
-                    state.protecting_500        = True
-                    state.protection_started_at = now
-                    state.protection_spikes     = 0
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s NORMAL %d/h < %d → $1 sensor esperando ACTIVO",
-                        sym, _spk_1h, DISCHARGE_SPKS_1H,
-                    )
-                    await self._open(sym, state, now, stake_override=1.0)
+            # Siempre arrancar en $1 sensor: contamos spikes del burst en curso.
+            # ACTIVO_SWITCH se encarga de saltar a $20 en el spike 3.
+            if not state.protecting_500:
+                state.protecting_500        = True
+                state.protection_started_at = now
+                state.protection_spikes     = 0
+            _spk_1h = self._risk.get_spike_count_last_hour(sym)
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s SENSOR $1 (spk_1h=%d) esperando spike#%d",
+                sym, _spk_1h, PROT_RESET_MIN_SPIKES,
+            )
+            await self._open(sym, state, now, stake_override=1.0)
             return
 
         if state.phase != "OPEN":
@@ -746,17 +736,14 @@ class EntradaDiego:
             self._add_global_pnl(sym, _pnl, now)
             _spk_1h = self._risk.get_spike_count_last_hour(sym)
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f spk_1h=%d → reopen#%d",
+                "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f spk_1h=%d → reopen#%d → $1 sensor",
                 sym, _pnl, _spk_1h, state.reopens,
             )
             await asyncio.sleep(3.0)
-            if _spk_1h >= DISCHARGE_SPKS_1H:
-                await self._open(sym, state, now)           # ACTIVO → $20
-            else:
-                state.protecting_500        = True
-                state.protection_started_at = now
-                state.protection_spikes     = 0
-                await self._open(sym, state, now, stake_override=1.0)  # NORMAL → $1
+            state.protecting_500        = True
+            state.protection_started_at = now
+            state.protection_spikes     = 0
+            await self._open(sym, state, now, stake_override=1.0)
             return
 
         # ── PHASE_END_TIMEOUT: $20 negativo ≥20min Y fase ACTIVO terminó ─────
@@ -816,44 +803,22 @@ class EntradaDiego:
             if _pnl > 0:
                 state.consec_wins_500 += 1
                 if state.consec_wins_500 >= 2:
-                    # 2 wins seguidos → $1 sensor/protección, ACTIVO_SWITCH lo sacará cuando llegue
-                    state.protecting_500        = True
-                    state.consec_wins_500       = 0
-                    state.protection_started_at = now
-                    state.protection_spikes     = 0
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s FLOOR wins=2 → $1 sensor/protección (spk_1h=%d)",
-                        sym, _spk_1h,
-                    )
-                    await asyncio.sleep(1.0)
-                    await self._open(sym, state, now, stake_override=1.0)
-                else:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s FLOOR peak=%.2f pnl=%.4f wins=%d spk_1h=%d",
-                        sym, _peak, _pnl, state.consec_wins_500, _spk_1h,
-                    )
-                    await asyncio.sleep(1.0)
-                    if _spk_1h >= DISCHARGE_SPKS_1H:
-                        await self._open(sym, state, now)
-                    else:
-                        state.protecting_500        = True
-                        state.protection_started_at = now
-                        state.protection_spikes     = 0
-                        await self._open(sym, state, now, stake_override=1.0)
+                    state.consec_wins_500 = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s FLOOR peak=%.2f pnl=%.4f wins=%d spk_1h=%d → $1 sensor",
+                    sym, _peak, _pnl, state.consec_wins_500, _spk_1h,
+                )
             else:
                 state.consec_wins_500 = 0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s FLOOR peak=%.2f pnl=%.4f (neg) spk_1h=%d",
+                    "[ENTRADA_DIEGO] %s FLOOR peak=%.2f pnl=%.4f (neg) spk_1h=%d → $1 sensor",
                     sym, _peak, _pnl, _spk_1h,
                 )
-                await asyncio.sleep(1.0)
-                if _spk_1h >= DISCHARGE_SPKS_1H:
-                    await self._open(sym, state, now)
-                else:
-                    state.protecting_500        = True
-                    state.protection_started_at = now
-                    state.protection_spikes     = 0
-                    await self._open(sym, state, now, stake_override=1.0)
+            await asyncio.sleep(1.0)
+            state.protecting_500        = True
+            state.protection_started_at = now
+            state.protection_spikes     = 0
+            await self._open(sym, state, now, stake_override=1.0)
             return
 
         # ── Timer $1: 10 minutos ──────────────────────────────────────────────
@@ -939,17 +904,14 @@ class EntradaDiego:
                     state.consec_wins_500 = 0
                 _spk_1h = self._risk.get_spike_count_last_hour(sym)
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s broker close profit=%.4f reopen#%d spk_1h=%d",
+                    "[ENTRADA_DIEGO] %s broker close profit=%.4f reopen#%d spk_1h=%d → $1 sensor",
                     sym, _pnl, state.reopens, _spk_1h,
                 )
                 await asyncio.sleep(1.0)
-                if _spk_1h >= DISCHARGE_SPKS_1H:
-                    await self._open(sym, state, now)           # ACTIVO → $20
-                else:
-                    state.protecting_500        = True
-                    state.protection_started_at = now
-                    state.protection_spikes     = 0
-                    await self._open(sym, state, now, stake_override=1.0)  # NORMAL → $1
+                state.protecting_500        = True
+                state.protection_started_at = now
+                state.protection_spikes     = 0
+                await self._open(sym, state, now, stake_override=1.0)
             return
 
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
