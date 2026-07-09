@@ -654,7 +654,7 @@ class EntradaDiego:
                 state.burst_started_at   = 0.0
                 state.protection_spikes  = 0
 
-        # ── Tracking spikes + ACTIVO_SWITCH ───────────────────────────────────
+        # ── Tracking spikes en sensor $1 ─────────────────────────────────────
         _last_spk_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
 
         if state.protecting_500:
@@ -676,32 +676,13 @@ class EntradaDiego:
                     sym, state.protection_spikes, state.burst_spikes_total, BURST_MAX_SPIKES,
                     self._risk.get_last_spike_ratio(sym),
                 )
-                # ACTIVO_SWITCH: burst confirmado (≥3) y NO agotado (<MAX) → $20 ahora
-                if (state.burst_spikes_total >= PROT_RESET_MIN_SPIKES
-                        and state.burst_spikes_total < BURST_MAX_SPIKES
-                        and state.contract_id is not None):
-                    _cid = int(state.contract_id)
-                    _pnl = state.current_profit
-                    state.contract_id           = None
-                    state.current_profit        = 0.0
-                    state.peak_profit_500       = 0.0
-                    state.protecting_500        = False
-                    state.protection_started_at = 0.0
-                    state.protection_spikes     = 0
-                    state.consec_wins_500       = 0
-                    try:
-                        await self._executor.close_contract(_cid)
-                    except Exception as exc:
-                        _LOGGER.error("[ENTRADA_DIEGO] %s ACTIVO_SWITCH close error: %s", sym, exc)
-                    self._add_global_pnl(sym, _pnl, now)
-                    state.last_close_profit = _pnl
+                # Burst confirmado: el $1 sensor completa sus 10min antes de abrir $20
+                # El timer de 10min (más abajo) maneja la transición al finalizar el sensor
+                if state.burst_spikes_total >= PROT_RESET_MIN_SPIKES and state.burst_spikes_total < BURST_MAX_SPIKES:
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s ACTIVO_SWITCH burst=%d/%d → cerrar $1 → $20",
+                        "[ENTRADA_DIEGO] %s BURST_CONFIRMADO %d/%d → $1 completa sus 10min → $20 al finalizar",
                         sym, state.burst_spikes_total, BURST_MAX_SPIKES,
                     )
-                    await asyncio.sleep(2.0)
-                    await self._open(sym, state, now)
-                    return
                 elif state.burst_spikes_total >= BURST_MAX_SPIKES:
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s BURST_AGOTADO %d/%d → esperar nueva hora",
@@ -928,11 +909,13 @@ class EntradaDiego:
                 await self._open(sym, state, now, stake_override=1.0)
             elif _burst >= PROT_RESET_MIN_SPIKES:
                 # Burst confirmado y no agotado → $20
-                state.reopens               = 0
-                state.protecting_500        = False
-                state.consec_wins_500       = 0
-                state.protection_started_at = 0.0
-                state.protection_spikes     = 0
+                state.reopens                = 0
+                state.protecting_500         = False
+                state.consec_wins_500        = 0
+                state.protection_started_at  = 0.0
+                state.protection_spikes      = 0
+                state.spikes_in_contract_500 = 0   # DEAD_BURST_KILL empieza limpio
+                state.last_spike_ts_500      = 0.0
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s 10min burst=%d/%d confirmado → $20",
                     sym, _burst, BURST_MAX_SPIKES,
