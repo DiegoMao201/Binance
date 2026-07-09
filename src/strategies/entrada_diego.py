@@ -670,7 +670,9 @@ class EntradaDiego:
                 state.protection_spikes  += 1
                 state.burst_spikes_total += 1
                 if state.burst_started_at == 0:
-                    state.burst_started_at = _last_spk_ts
+                    # Anclar al inicio de la hora UTC actual (no al spike individual)
+                    # → BOOM500 y CRASH500 comparten la misma frontera de hora
+                    state.burst_started_at = _last_spk_ts - (_last_spk_ts % BURST_WINDOW_S)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s SENSOR spike#%d burst=%d/%d (ratio=%.0fx)",
                     sym, state.protection_spikes, state.burst_spikes_total, BURST_MAX_SPIKES,
