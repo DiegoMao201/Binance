@@ -567,6 +567,7 @@ function EntradaDiegoSection({ symbol }) {
     protecting_500 = false, protection_spikes = 0,
     burst_spikes_total = 0, burst_max_spikes = 6, burst_min_spikes = 3,
     burst_started_at = 0, burst_window_s = 3600,
+    spikes_in_contract = 0, dead_burst_kill_s = 600,
   } = edState;
 
   const nowSec = now / 1000;
@@ -632,7 +633,13 @@ function EntradaDiegoSection({ symbol }) {
     ? Math.max(0, ((burst_started_at + burst_window_s) - nowSec2) / 60).toFixed(0)
     : null;
 
-  const burstBarColor = burstExhausted ? "#ff5d6c"
+  // Dead burst kill countdown: $20 abierto, 0 spikes en el contrato, tiempo corriendo
+  const deadBurstElapsed = (!protecting_500 && open_ts > 0) ? (nowSec2 - open_ts) : 0;
+  const deadBurstRemS    = Math.max(0, dead_burst_kill_s - deadBurstElapsed);
+  const inDeadBurstZone  = !protecting_500 && spikes_in_contract === 0 && deadBurstElapsed > 300;
+
+  const burstBarColor = burstExhausted   ? "#ff5d6c"
+    : inDeadBurstZone ? "#ff5d6c"
     : burstConfirmed  ? "#22d3a3"
     : "#f59e0b";
 
@@ -640,9 +647,11 @@ function EntradaDiegoSection({ symbol }) {
     ? `AGOTADO · nueva hora en ${burstRemMin}m`
     : protecting_500
       ? `SENSOR · spike ${protection_spikes}/${burst_min_spikes} → $20`
-      : burstConfirmed
-        ? `$20 activo · burst ${burst_spikes_total}/${burst_max_spikes}`
-        : `cargando burst · ${burst_spikes_total}/${burst_min_spikes} confirmados`;
+      : burstConfirmed && inDeadBurstZone
+        ? `⚠ $20 MUERTO · 0 spikes · kill en ${Math.ceil(deadBurstRemS)}s`
+        : burstConfirmed
+          ? `$20 activo · ${spikes_in_contract} spikes · burst ${burst_spikes_total}/${burst_max_spikes}`
+          : `cargando burst · ${burst_spikes_total}/${burst_min_spikes} confirmados`;
 
   return (
     <div style={{ ...base, color, background: `${color}14` }}>

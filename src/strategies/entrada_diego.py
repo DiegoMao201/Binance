@@ -158,6 +158,9 @@ HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   
 # Dato 12h: contratos con SL duran 28-66min en negativo sin spikes = mercado seco
 TIMEOUT_DRY_S        = int(os.getenv("ENTRADA_DIEGO_500_TIMEOUT_DRY_S",     "1200"))  # 20 min
 TIMEOUT_DRY_MAX_SPKS = int(os.getenv("ENTRADA_DIEGO_500_TIMEOUT_DRY_SPKS",  "2"))     # ≤2 spikes durante el contrato = seco
+# Dead burst kill: si $20 lleva >N segundos SIN UN SOLO spike durante el contrato → burst muerto
+# Dato: 100% de losses tienen 0 spikes en el contrato. 100% de wins tienen ≥1 spike.
+DEAD_BURST_KILL_S    = int(os.getenv("ENTRADA_DIEGO_500_DEAD_BURST_S",      "600"))   # 10 min sin spike → salir
 
 # Gate descarga: si el símbolo tuvo MUCHOS spikes en la última hora = descargando energía
 # → próxima apertura en $1 (proteger). Si POCOS spikes = acumulando tensión → abrir $20.
@@ -265,13 +268,15 @@ class _SymState:
             "boom_stake_idx": self.boom_stake_idx,
             "rest_mode": self.rest_mode,
             "r75_direction": self.r75_direction,
-            "protecting_500":     self.protecting_500,
-            "protection_spikes":  self.protection_spikes,
-            "burst_spikes_total": self.burst_spikes_total,
-            "burst_max_spikes":   BURST_MAX_SPIKES,
-            "burst_min_spikes":   PROT_RESET_MIN_SPIKES,
-            "burst_started_at":   round(self.burst_started_at, 3),
-            "burst_window_s":     BURST_WINDOW_S,
+            "protecting_500":        self.protecting_500,
+            "protection_spikes":     self.protection_spikes,
+            "burst_spikes_total":    self.burst_spikes_total,
+            "burst_max_spikes":      BURST_MAX_SPIKES,
+            "burst_min_spikes":      PROT_RESET_MIN_SPIKES,
+            "burst_started_at":      round(self.burst_started_at, 3),
+            "burst_window_s":        BURST_WINDOW_S,
+            "spikes_in_contract":    self.spikes_in_contract_500,
+            "dead_burst_kill_s":     DEAD_BURST_KILL_S,
         }
         return d
 
@@ -779,6 +784,44 @@ class EntradaDiego:
             )
             await asyncio.sleep(3.0)
             # Volver a $1 conservando burst_spikes_total (no resetear)
+            state.protecting_500        = True
+            state.protection_started_at = now
+            state.protection_spikes     = 0
+            await self._open(sym, state, now, stake_override=1.0)
+            return
+
+        # ── DEAD_BURST_KILL: $20 sin ningún spike en 10min → burst muerto ────────
+        # Dato empírico: 100% de wins tienen ≥1 spike durante el contrato (el spike
+        # los empuja a profit en <9min). 100% de losses tienen 0 spikes: la comisión
+        # drena el contrato hasta -$8/$12 en 20min. Salir a los 10min si 0 spikes.
+        if (
+            not state.protecting_500
+            and state.contract_id is not None
+            and (now - state.open_ts) >= DEAD_BURST_KILL_S
+            and state.spikes_in_contract_500 == 0
+            and state.current_profit < -0.5
+        ):
+            _cid     = int(state.contract_id)
+            _pnl     = state.current_profit
+            _dur_min = (now - state.open_ts) / 60
+            state.contract_id            = None
+            state.current_profit         = 0.0
+            state.peak_profit_500        = 0.0
+            state.spikes_in_contract_500 = 0
+            state.last_spike_ts_500      = 0.0
+            try:
+                await self._executor.close_contract(_cid)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s DEAD_BURST_KILL close error: %s", sym, exc)
+            state.last_close_profit = _pnl
+            state.reopens += 1
+            self._add_global_pnl(sym, _pnl, now)
+            _check_burst_window()
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s DEAD_BURST_KILL %.0fmin 0 spikes burst=%d/%d profit=%.4f → $1",
+                sym, _dur_min, state.burst_spikes_total, BURST_MAX_SPIKES, _pnl,
+            )
+            await asyncio.sleep(3.0)
             state.protecting_500        = True
             state.protection_started_at = now
             state.protection_spikes     = 0
