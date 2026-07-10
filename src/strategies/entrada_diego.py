@@ -699,6 +699,10 @@ class EntradaDiego:
 
         state.phase = "OPEN"
 
+        # Actualizar peak profit del contrato actual
+        if state.current_profit > state.peak_profit_500:
+            state.peak_profit_500 = state.current_profit
+
         # ── SL duro: 90% del stake → STAKE_1 ─────────────────────────────────
         _sl_limit = (-(BURST_STAKE40_AMOUNT * 0.90) if state.burst_phase == "STAKE_40"
             else    -(BURST_STAKE20_AMOUNT * 0.90)  if state.burst_phase == "STAKE_20"
@@ -744,6 +748,32 @@ class EntradaDiego:
             state.burst_phase_started_at = time.time()
             state.spikes_in_contract_500 = 0
             await self._open(sym, state, time.time(), stake_override=next_stake)
+
+        # ── Piso de profit al 80% del peak (activa desde $0.10/$2/$4) ──────────
+        _peak_trigger = (0.10 if state.burst_phase == "STAKE_1"
+                    else 2.00 if state.burst_phase == "STAKE_20"
+                    else 4.00)
+        if (state.peak_profit_500 >= _peak_trigger
+                and state.current_profit < state.peak_profit_500 * 0.80
+                and state.contract_id is not None):
+            _cid   = int(state.contract_id)
+            _pnl   = state.current_profit
+            _spk   = state.spikes_in_contract_500
+            _peak  = state.peak_profit_500
+            _phase = state.burst_phase
+            if _phase == "STAKE_1":
+                _np = "STAKE_1"  if _spk >= 2 else "STAKE_20"
+                _ns = BURST_STAKE1_AMOUNT  if _spk >= 2 else BURST_STAKE20_AMOUNT
+            elif _phase == "STAKE_20":
+                _np = "STAKE_1"  if _spk >= 2 else "STAKE_40"
+                _ns = BURST_STAKE1_AMOUNT  if _spk >= 2 else BURST_STAKE40_AMOUNT
+            else:
+                _np = "STAKE_40" if _spk == 0  else "STAKE_1"
+                _ns = BURST_STAKE40_AMOUNT if _spk == 0 else BURST_STAKE1_AMOUNT
+            await _transition(_np, _ns,
+                f"PROFIT_FLOOR peak={_peak:.2f} floor={_peak*0.80:.2f} spk={_spk}",
+                _cid, _pnl, _spk)
+            return
 
         # ── Timer STAKE_1: 10min ──────────────────────────────────────────────
         if (state.burst_phase == "STAKE_1"
