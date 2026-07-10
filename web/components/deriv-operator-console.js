@@ -564,13 +564,10 @@ function EntradaDiegoSection({ symbol }) {
   const {
     phase, contract_id, current_profit = 0, reopens = 0,
     open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
-    protecting_500 = false, protection_spikes = 0,
-    burst_spikes_total = 0, burst_max_spikes = 6, burst_min_spikes = 2,
-    burst_started_at = 0, burst_window_s = 3600,
     spikes_in_contract = 0,
-    burst_phase = "IDLE", burst_phase_started_at = 0,
-    burst_min_trigger = 2, burst_cooldown_s = 600,
-    burst_stake20_s = 1200, burst_stake40_s = 600, burst_stake40_amount = 40,
+    burst_phase = "STAKE_1", burst_phase_started_at = 0,
+    burst_stake1_s = 600, burst_stake20_s = 900, burst_stake40_s = 900,
+    burst_stake1_amount = 1, burst_stake20_amount = 20, burst_stake40_amount = 40,
   } = edState;
 
   const nowSec = now / 1000;
@@ -626,45 +623,36 @@ function EntradaDiegoSection({ symbol }) {
     COOLDOWN:`próxima entrada en ${timeStr}`,
   };
 
-  // ── Burst display ───────────────────────────────────────────────────────
-  const burstExhausted = burst_spikes_total >= burst_max_spikes;
-  const burstPct       = Math.min(100, (burst_spikes_total / burst_max_spikes) * 100);
-  const nowSec2        = now / 1000;
-  const burstAgeMin    = burst_started_at > 0 ? ((nowSec2 - burst_started_at) / 60).toFixed(0) : null;
-  const burstRemMin    = burst_started_at > 0
-    ? Math.max(0, ((burst_started_at + burst_window_s) - nowSec2) / 60).toFixed(0)
-    : null;
+  // ── 500s: display máquina 3 niveles ────────────────────────────────────────
+  const nowSec2   = now / 1000;
+  const _fmtS     = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
+  const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec2 - burst_phase_started_at) : 0;
 
-  // Tiempo restante en la fase actual
-  const phaseElapsed = burst_phase_started_at > 0 ? (nowSec2 - burst_phase_started_at) : 0;
-  const cooldownRemS = burst_phase === "COOLDOWN" ? Math.max(0, burst_cooldown_s - phaseElapsed) : 0;
-  const stake20RemS  = burst_phase === "STAKE_20" ? Math.max(0, burst_stake20_s  - phaseElapsed) : 0;
-  const stake40RemS  = burst_phase === "STAKE_40" ? Math.max(0, burst_stake40_s  - phaseElapsed) : 0;
+  const phaseTotal = burst_phase === "STAKE_1"  ? burst_stake1_s
+    : burst_phase === "STAKE_20" ? burst_stake20_s
+    : burst_phase === "STAKE_40" ? burst_stake40_s
+    : 1;
+  const phaseRem   = Math.max(0, phaseTotal - phaseElapsed);
+  const phasePct   = Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
-  const burstBarColor = burstExhausted            ? "#ff5d6c"
-    : burst_phase === "STAKE_40"                  ? "#a78bfa"
-    : burst_phase === "STAKE_20"                  ? "#22d3a3"
-    : burst_phase === "COOLDOWN"                  ? "#f59e0b"
-    : burst_spikes_total >= burst_min_trigger     ? "#22d3a3"
+  const phaseColor = burst_phase === "STAKE_40" ? "#a78bfa"
+    : burst_phase === "STAKE_20"                ? "#22d3a3"
+    : burst_phase === "STAKE_1"                 ? "#f59e0b"
     : "#64748b";
 
-  const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
+  // Predicción al cierre del timer
+  const nextHint = burst_phase === "STAKE_1"
+    ? spikes_in_contract >= 2 ? `→ $1 otra vez (${spikes_in_contract} spk)` : `→ $20 si sigue <2 spk`
+    : burst_phase === "STAKE_20"
+      ? spikes_in_contract >= 2 ? `→ $1 reiniciar (${spikes_in_contract} spk)` : `→ $40 si sigue <2 spk`
+      : burst_phase === "STAKE_40"
+        ? spikes_in_contract === 0 ? `→ $40 otra vez (0 spk)` : `→ $1 reiniciar (${spikes_in_contract} spk)`
+        : "iniciando…";
 
-  const burstStatus = burstExhausted
-    ? `AGOTADO · nueva hora en ${burstRemMin}m`
-    : burst_phase === "IDLE" && burst_spikes_total < burst_min_trigger
-      ? `IDLE · esperando spike #${burst_min_trigger} · van ${burst_spikes_total}/${burst_max_spikes}`
-      : burst_phase === "IDLE"
-        ? `IDLE · ${burst_spikes_total}/${burst_max_spikes} spikes · abrirá $20 al llegar #${burst_min_trigger}`
-        : burst_phase === "COOLDOWN"
-          ? `COOLDOWN · abre $20 en ${_fmtS(cooldownRemS)} · burst ${burst_spikes_total}/${burst_max_spikes}`
-          : burst_phase === "STAKE_20"
-            ? `$20 ACTIVO · ${spikes_in_contract} spikes · cierra en ${_fmtS(stake20RemS)}`
-            : burst_phase === "STAKE_40"
-              ? `$40 ACTIVO · ${spikes_in_contract} spikes · cierra en ${_fmtS(stake40RemS)}`
-              : `burst ${burst_spikes_total}/${burst_max_spikes}`;
+  const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
+  const minLabel   = burst_phase === "STAKE_1" ? "10min" : "15min";
 
-  const _displayColor = !is1000 ? burstBarColor : color;
+  const _displayColor = !is1000 ? phaseColor : color;
   return (
     <div style={{ ...base, color: _displayColor, background: `${_displayColor}14`, borderColor: _displayColor }}>
       {is1000 ? (<>
@@ -692,82 +680,36 @@ function EntradaDiegoSection({ symbol }) {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-            background: `${burstBarColor}25`, color: burstBarColor, letterSpacing: "0.05em",
-          }}>BURST</span>
-          {burst_phase !== "IDLE" && contract_id && (
+            background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.05em",
+          }}>{stakeLabel} · {minLabel}</span>
+          {contract_id && (
             <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{pnlStr}</span>
           )}
         </div>
       )}
 
-      {/* ── Burst window status ── */}
-      <div style={{ marginTop: 5, padding: "4px 6px", borderRadius: 4,
-        background: `${burstBarColor}14`, border: `1px solid ${burstBarColor}40` }}>
-        {/* Barra de burst + contador */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-          <span style={{ fontSize: 9, color: burstBarColor, fontWeight: 700, letterSpacing: "0.05em" }}>
-            BURST
-          </span>
-          <div style={{ flex: 1, height: 5, background: "rgba(255,255,255,0.08)", borderRadius: 3, overflow: "hidden" }}>
-            <div style={{ width: `${burstPct}%`, height: "100%", background: burstBarColor,
-              transition: "width 0.4s ease" }} />
-          </div>
-          <span style={{ fontSize: 10, color: burstBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
-            {burst_spikes_total}/{burst_max_spikes}
-          </span>
-        </div>
-        {/* Estado de la fase */}
-        <div style={{ fontSize: 9, color: burstBarColor, opacity: 0.9 }}>
-          {burstStatus}
-          {burstAgeMin != null && burst_phase === "IDLE" && !burstExhausted && (
-            <span style={{ opacity: 0.5, marginLeft: 6 }}>· hora {burstAgeMin}/{Math.round(burst_window_s/60)}m</span>
-          )}
-        </div>
-        {/* Círculos de spikes (el #2 marcado como trigger) */}
-        <div style={{ display: "flex", gap: 4, marginTop: 4, alignItems: "center" }}>
-          {Array.from({ length: burst_max_spikes }, (_, i) => {
-            const filled = i < burst_spikes_total;
-            const isTrigger = i === burst_min_trigger - 1;
-            return (
-              <div key={i} style={{
-                width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
-                background: filled ? burstBarColor : "rgba(255,255,255,0.08)",
-                border: `1px solid ${filled ? burstBarColor : isTrigger ? "#f59e0b88" : "rgba(255,255,255,0.15)"}`,
-                boxShadow: isTrigger && !filled ? "0 0 4px #f59e0b44" : "none",
-              }} />
-            );
-          })}
-          <span style={{ fontSize: 9, color: "rgba(255,255,255,0.4)", marginLeft: 2, lineHeight: "10px" }}>
-            {burst_phase === "STAKE_20" ? `$20 · ${spikes_in_contract} spk`
-              : burst_phase === "STAKE_40" ? `$40 · ${spikes_in_contract} spk`
-              : burst_phase === "COOLDOWN" ? "→ $20"
-              : burst_spikes_total >= burst_min_trigger && !burstExhausted ? "→ cooldown"
-              : `spike #${burst_min_trigger} → $20`}
-          </span>
-        </div>
-        {/* Barra de progreso de fase activa */}
-        {(burst_phase === "COOLDOWN" || burst_phase === "STAKE_20" || burst_phase === "STAKE_40") && (() => {
-          const total = burst_phase === "COOLDOWN" ? burst_cooldown_s
-            : burst_phase === "STAKE_20" ? burst_stake20_s : burst_stake40_s;
-          const rem   = burst_phase === "COOLDOWN" ? cooldownRemS
-            : burst_phase === "STAKE_20" ? stake20RemS : stake40RemS;
-          const pct2  = Math.min(100, ((total - rem) / total) * 100);
-          const label = burst_phase === "COOLDOWN" ? "cooldown"
-            : burst_phase === "STAKE_20" ? `$20 · ${Math.round(total/60)}min`
-            : `$40 · ${Math.round(total/60)}min`;
-          return (
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.35)", minWidth: 52 }}>{label}</span>
-              <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-                <div style={{ width: `${pct2}%`, height: "100%", background: burstBarColor, transition: "width 1s linear" }} />
-              </div>
-              <span style={{ fontSize: 8, color: burstBarColor, minWidth: 32, textAlign: "right" }}>
-                {_fmtS(rem)}
-              </span>
+      {/* ── Panel de fase 500s ── */}
+      {!is1000 && (
+        <div style={{ padding: "4px 6px", borderRadius: 4,
+          background: `${phaseColor}12`, border: `1px solid ${phaseColor}35` }}>
+          {/* Timer bar */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+            <div style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
             </div>
-          );
-        })()}
-      </div>
+            <span style={{ fontSize: 9, color: phaseColor, fontWeight: 700, minWidth: 42, textAlign: "right" }}>
+              {_fmtS(phaseRem)}
+            </span>
+          </div>
+          {/* Spikes + siguiente acción */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
+              {spikes_in_contract} spike{spikes_in_contract !== 1 ? "s" : ""} en contrato
+            </span>
+            <span style={{ fontSize: 9, color: phaseColor, opacity: 0.85 }}>{nextHint}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
