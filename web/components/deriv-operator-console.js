@@ -602,7 +602,7 @@ function EntradaDiegoSection({ symbol }) {
     border: `1px solid ${color}`,
   };
 
-  if (phase === "IDLE") return (
+  if (is1000 && phase === "IDLE") return (
     <div style={{ ...base, color: "rgba(90,100,115,0.7)", background: "rgba(90,100,115,0.05)" }}>
       <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
       <span style={{ marginLeft: 8, opacity: 0.6 }}>abriendo…</span>
@@ -664,28 +664,41 @@ function EntradaDiegoSection({ symbol }) {
               ? `$40 ACTIVO · ${spikes_in_contract} spikes · cierra en ${_fmtS(stake40RemS)}`
               : `burst ${burst_spikes_total}/${burst_max_spikes}`;
 
+  const _displayColor = !is1000 ? burstBarColor : color;
   return (
-    <div style={{ ...base, color, background: `${color}14` }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
-        <span style={{
-          fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-          background: `${color}25`, color, letterSpacing: "0.05em",
-        }}>{phase}</span>
-        {(phase === "OPEN" || phase === "PROFIT_TIMER") && (
-          <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{pnlStr}</span>
-        )}
-      </div>
-      <div style={{
-        width: "100%", height: 3, background: `${color}33`,
-        borderRadius: 2, margin: "4px 0", overflow: "hidden",
-      }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: color }} />
-      </div>
-      <div style={{ opacity: 0.85 }}>
-        {PHASE_LABEL[phase] || phase}
-        {contract_id && phase === "OPEN" ? ` · #${contract_id}` : ""}
-      </div>
+    <div style={{ ...base, color: _displayColor, background: `${_displayColor}14`, borderColor: _displayColor }}>
+      {is1000 ? (<>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
+          <span style={{
+            fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: `${color}25`, color, letterSpacing: "0.05em",
+          }}>{phase}</span>
+          {(phase === "OPEN" || phase === "PROFIT_TIMER") && (
+            <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{pnlStr}</span>
+          )}
+        </div>
+        <div style={{
+          width: "100%", height: 3, background: `${color}33`,
+          borderRadius: 2, margin: "4px 0", overflow: "hidden",
+        }}>
+          <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+        </div>
+        <div style={{ opacity: 0.85 }}>
+          {PHASE_LABEL[phase] || phase}
+          {contract_id && phase === "OPEN" ? ` · #${contract_id}` : ""}
+        </div>
+      </>) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: `${burstBarColor}25`, color: burstBarColor, letterSpacing: "0.05em",
+          }}>BURST</span>
+          {burst_phase !== "IDLE" && contract_id && (
+            <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{pnlStr}</span>
+          )}
+        </div>
+      )}
 
       {/* ── Burst window status ── */}
       <div style={{ marginTop: 5, padding: "4px 6px", borderRadius: 4,
