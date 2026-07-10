@@ -105,9 +105,17 @@ BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2")
 
 # Protección $1: si durante los 10min se capturan ≥N spikes → resetear timer (otro round $1)
 # Solo cuando los 10min pasan con <N spikes → volver a $20
-PROT_RESET_MIN_SPIKES = int(os.getenv("ENTRADA_DIEGO_PROT_RESET_SPIKES", "3"))  # spikes para confirmar burst → $20
-BURST_MAX_SPIKES      = int(os.getenv("ENTRADA_DIEGO_BURST_MAX_SPIKES",  "6"))  # burst agotado: no más $20 hasta nueva hora
-BURST_WINDOW_S        = int(os.getenv("ENTRADA_DIEGO_BURST_WINDOW_S",    "3600")) # ventana burst = 1h desde primer spike
+PROT_RESET_MIN_SPIKES = int(os.getenv("ENTRADA_DIEGO_PROT_RESET_SPIKES", "3"))  # (legacy) spikes para confirmar burst
+BURST_MAX_SPIKES      = int(os.getenv("ENTRADA_DIEGO_BURST_MAX_SPIKES",  "6"))  # burst agotado: no más aperturas hasta nueva hora
+BURST_WINDOW_S        = int(os.getenv("ENTRADA_DIEGO_BURST_WINDOW_S",    "3600")) # ventana burst = 1h (hora UTC)
+
+# 500s: nuevo flujo burst (sin sensor $1)
+BURST_MIN_TRIGGER        = int(os.getenv("ENTRADA_DIEGO_BURST_MIN_TRIGGER",  "2"))     # spike #2 en la hora → COOLDOWN
+BURST_COOLDOWN_S         = int(os.getenv("ENTRADA_DIEGO_BURST_COOLDOWN_S",   "600"))   # 10min cooldown sin posición
+BURST_STAKE20_AMOUNT     = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE20",    "20.0"))  # stake primera ventana
+BURST_STAKE20_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_S",    "1200"))  # 20min fijo
+BURST_STAKE40_AMOUNT     = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE40",    "40.0"))  # escalado si burst no agotado
+BURST_STAKE40_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE40_S",    "600"))   # 10min fijo
 
 # PnL global acumulado: cuando alcanza GLOBAL_PNL_TARGET → pausa GLOBAL_PAUSE_HOURS horas
 # PnL suma todos los cierres de BOOM500+CRASH500 (positivos y negativos)
@@ -227,9 +235,11 @@ class _SymState:
     consec_wins_500:        int   = 0    # wins consecutivos con PnL>0 en $20
     protection_started_at:  float = 0.0  # epoch inicio del $1 sensor actual
     protection_spikes:      int   = 0    # spikes desde que entró a este $1 sensor (se resetea al volver de $20)
-    burst_spikes_total:     int   = 0    # acumulado global del burst ($1 + $20); NO se resetea al volver de $20
-    burst_started_at:       float = 0.0  # ts del primer spike del burst actual; 0 = sin burst activo
-    broker_blocked_until_500: float = 0.0  # hasta cuándo esperar si broker cap < $1 (precio post-spike muy alto)
+    burst_spikes_total:     int   = 0    # acumulado global del burst en la hora UTC actual
+    burst_started_at:       float = 0.0  # inicio de la hora UTC anclada; 0 = sin burst activo
+    burst_phase:            str   = "IDLE"   # IDLE | COOLDOWN | STAKE_20 | STAKE_40
+    burst_phase_started_at: float = 0.0     # epoch inicio de la fase actual
+    broker_blocked_until_500: float = 0.0  # hasta cuándo esperar si broker cap (precio post-spike muy alto)
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
@@ -268,15 +278,22 @@ class _SymState:
             "boom_stake_idx": self.boom_stake_idx,
             "rest_mode": self.rest_mode,
             "r75_direction": self.r75_direction,
-            "protecting_500":        self.protecting_500,
-            "protection_spikes":     self.protection_spikes,
-            "burst_spikes_total":    self.burst_spikes_total,
-            "burst_max_spikes":      BURST_MAX_SPIKES,
-            "burst_min_spikes":      PROT_RESET_MIN_SPIKES,
-            "burst_started_at":      round(self.burst_started_at, 3),
-            "burst_window_s":        BURST_WINDOW_S,
-            "spikes_in_contract":    self.spikes_in_contract_500,
-            "dead_burst_kill_s":     DEAD_BURST_KILL_S,
+            "protecting_500":         self.protecting_500,
+            "protection_spikes":      self.protection_spikes,
+            "burst_spikes_total":     self.burst_spikes_total,
+            "burst_max_spikes":       BURST_MAX_SPIKES,
+            "burst_min_spikes":       BURST_MIN_TRIGGER,
+            "burst_started_at":       round(self.burst_started_at, 3),
+            "burst_window_s":         BURST_WINDOW_S,
+            "spikes_in_contract":     self.spikes_in_contract_500,
+            "dead_burst_kill_s":      BURST_COOLDOWN_S,
+            "burst_phase":            self.burst_phase,
+            "burst_phase_started_at": round(self.burst_phase_started_at, 3),
+            "burst_min_trigger":      BURST_MIN_TRIGGER,
+            "burst_cooldown_s":       BURST_COOLDOWN_S,
+            "burst_stake20_s":        BURST_STAKE20_DURATION_S,
+            "burst_stake40_s":        BURST_STAKE40_DURATION_S,
+            "burst_stake40_amount":   BURST_STAKE40_AMOUNT,
         }
         return d
 
@@ -628,14 +645,17 @@ class EntradaDiego:
                 )
                 await self._open(sym, state, now)
 
-    # ── 500s: $20 fijo, SL=$15, sin timer (solo SL o floor cierran), protección $1/10min post-2-wins ──
+    # ── 500s: burst state machine (IDLE→COOLDOWN→STAKE_20→STAKE_40) ─────────
 
     async def _process_500_simple(self, sym: str) -> None:
         """
-        Ciclo CRASH500/BOOM500 basado en burst window (análisis 337h):
-          - Spike 3 del burst (minuto ~24): 68% prob de 3+ más → abrir $20
-          - burst_spikes_total acumula spikes en $1 Y $20 (no se resetea al volver de $20)
-          - Burst agotado (≥BURST_MAX_SPIKES): esperar nueva hora sin abrir $20
+        BOOM500/CRASH500 — máquina de estados burst sin sensor $1:
+          IDLE     → esperar spike #2 en la hora UTC actual
+          COOLDOWN → 10min sin posición (deja estabilizar el burst)
+          STAKE_20 → $20 fijo 20min
+          STAKE_40 → $40 fijo 10min (si burst no agotado tras STAKE_20)
+        Después de STAKE_40: si ≥2 spikes en hora actual → COOLDOWN; si no → IDLE
+        Si burst ≥6 en cualquier transición → IDLE (esperar nueva hora)
         """
         state = self._states[sym]
         now   = time.time()
@@ -643,334 +663,250 @@ class EntradaDiego:
         if state.contract_id is not None:
             state.current_profit = self._query_profit(state.contract_id)
 
-        # ── Helper: verificar expiración del burst window ──────────────────────
+        # ── Helper: verificar expiración del burst window (nueva hora UTC) ─────
+        _burst_was_reset = False
         def _check_burst_window():
+            nonlocal _burst_was_reset
             if state.burst_started_at > 0 and now > state.burst_started_at + BURST_WINDOW_S:
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s BURST_RESET window %ds expiró (burst=%d spikes) → nueva hora",
-                    sym, BURST_WINDOW_S, state.burst_spikes_total,
+                    "[ENTRADA_DIEGO] %s BURST_RESET hora expiró (burst=%d spikes) → nueva hora",
+                    sym, state.burst_spikes_total,
                 )
-                state.burst_spikes_total = 0
-                state.burst_started_at   = 0.0
-                state.protection_spikes  = 0
+                state.burst_spikes_total     = 0
+                state.burst_started_at       = 0.0
+                state.spikes_in_contract_500 = 0
+                _burst_was_reset = True
 
-        # ── Tracking spikes en sensor $1 ─────────────────────────────────────
+        # ── Tracking de spikes (todas las fases) ──────────────────────────────
         _last_spk_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
 
-        if state.protecting_500:
-            if _last_spk_ts > state.last_spike_ts_500 and _last_spk_ts > 0:
-                state.last_spike_ts_500 = _last_spk_ts
-                # Reset burst si window expiró
-                if state.burst_started_at > 0 and _last_spk_ts > state.burst_started_at + BURST_WINDOW_S:
-                    _LOGGER.info("[ENTRADA_DIEGO] %s BURST_RESET (window expiró) → conteo desde 0", sym)
-                    state.burst_spikes_total = 0
-                    state.burst_started_at   = 0.0
-                    state.protection_spikes  = 0
-                # Registrar spike
-                state.protection_spikes  += 1
-                state.burst_spikes_total += 1
-                if state.burst_started_at == 0:
-                    # Anclar al inicio de la hora UTC actual (no al spike individual)
-                    # → BOOM500 y CRASH500 comparten la misma frontera de hora
-                    state.burst_started_at = _last_spk_ts - (_last_spk_ts % BURST_WINDOW_S)
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s SENSOR spike#%d burst=%d/%d (ratio=%.0fx)",
-                    sym, state.protection_spikes, state.burst_spikes_total, BURST_MAX_SPIKES,
-                    self._risk.get_last_spike_ratio(sym),
-                )
-                # Burst confirmado: el $1 sensor completa sus 10min antes de abrir $20
-                # El timer de 10min (más abajo) maneja la transición al finalizar el sensor
-                if state.burst_spikes_total >= PROT_RESET_MIN_SPIKES and state.burst_spikes_total < BURST_MAX_SPIKES:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s BURST_CONFIRMADO %d/%d → $1 completa sus 10min → $20 al finalizar",
-                        sym, state.burst_spikes_total, BURST_MAX_SPIKES,
-                    )
-                elif state.burst_spikes_total >= BURST_MAX_SPIKES:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s BURST_AGOTADO %d/%d → esperar nueva hora",
-                        sym, state.burst_spikes_total, BURST_MAX_SPIKES,
-                    )
-        else:
-            # En $20: acumular spikes en burst total
-            if state.contract_id is not None:
-                if _last_spk_ts > state.last_spike_ts_500 and _last_spk_ts > 0:
-                    state.last_spike_ts_500      = _last_spk_ts
-                    state.spikes_in_contract_500 += 1
-                    state.burst_spikes_total     += 1
-                    _LOGGER.debug(
-                        "[ENTRADA_DIEGO] %s $20 spike#%d burst=%d/%d",
-                        sym, state.spikes_in_contract_500,
-                        state.burst_spikes_total, BURST_MAX_SPIKES,
-                    )
-            else:
+        if _last_spk_ts > state.last_spike_ts_500 and _last_spk_ts > 0:
+            state.last_spike_ts_500 = _last_spk_ts
+            # Reset si se cruzó la hora UTC
+            if state.burst_started_at > 0 and _last_spk_ts > state.burst_started_at + BURST_WINDOW_S:
+                _LOGGER.info("[ENTRADA_DIEGO] %s BURST_RESET en spike → nueva hora", sym)
+                state.burst_spikes_total     = 0
+                state.burst_started_at       = 0.0
                 state.spikes_in_contract_500 = 0
-                state.last_spike_ts_500      = 0.0
-
-        # ── Sin contrato → $1 sensor ───────────────────────────────────────────
-        if state.phase == "IDLE" or state.contract_id is None:
-            if now < state.broker_blocked_until_500:
-                _LOGGER.debug("[ENTRADA_DIEGO] %s broker bloqueado %ds",
-                    sym, int(state.broker_blocked_until_500 - now))
-                return
-            _check_burst_window()
-            state.phase = "OPEN"
-            if not state.protecting_500:
-                state.protecting_500        = True
-                state.protection_started_at = now
-                state.protection_spikes     = 0
-            _exhausted = state.burst_spikes_total >= BURST_MAX_SPIKES
+                # Si el reset ocurre durante COOLDOWN → volver a IDLE
+                if state.burst_phase == "COOLDOWN":
+                    state.burst_phase            = "IDLE"
+                    state.burst_phase_started_at = 0.0
+            # Anclar al inicio de la hora UTC si es el primer spike
+            if state.burst_started_at == 0:
+                state.burst_started_at = _last_spk_ts - (_last_spk_ts % BURST_WINDOW_S)
+            state.burst_spikes_total += 1
+            # Contar spikes dentro del contrato activo
+            if state.burst_phase in ("STAKE_20", "STAKE_40") and state.contract_id is not None:
+                state.spikes_in_contract_500 += 1
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SENSOR $1 burst=%d/%d sensor=%d/%d%s",
+                "[ENTRADA_DIEGO] %s spike burst=%d/%d fase=%s spk_contrato=%d",
                 sym, state.burst_spikes_total, BURST_MAX_SPIKES,
-                state.protection_spikes, PROT_RESET_MIN_SPIKES,
-                " [AGOTADO]" if _exhausted else "",
+                state.burst_phase, state.spikes_in_contract_500,
             )
-            await self._open(sym, state, now, stake_override=1.0)
+            # IDLE: trigger en spike #BURST_MIN_TRIGGER de la hora
+            if (
+                state.burst_phase == "IDLE"
+                and state.burst_spikes_total >= BURST_MIN_TRIGGER
+                and state.burst_spikes_total < BURST_MAX_SPIKES
+            ):
+                state.burst_phase            = "COOLDOWN"
+                state.burst_phase_started_at = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s spike#%d → COOLDOWN %ds burst=%d/%d",
+                    sym, state.burst_spikes_total, BURST_COOLDOWN_S,
+                    state.burst_spikes_total, BURST_MAX_SPIKES,
+                )
+            elif state.burst_phase == "IDLE" and state.burst_spikes_total >= BURST_MAX_SPIKES:
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s BURST_AGOTADO %d/%d en IDLE → seguir esperando nueva hora",
+                    sym, state.burst_spikes_total, BURST_MAX_SPIKES,
+                )
+
+        # ── Sin contrato abierto ───────────────────────────────────────────────
+        if state.contract_id is None:
+            if now < state.broker_blocked_until_500:
+                return
+            # Seguridad: fase activa sin contrato → IDLE
+            if state.burst_phase in ("STAKE_20", "STAKE_40"):
+                _LOGGER.warning(
+                    "[ENTRADA_DIEGO] %s fase=%s sin contrato → IDLE",
+                    sym, state.burst_phase,
+                )
+                state.burst_phase            = "IDLE"
+                state.burst_phase_started_at = 0.0
+                return
+            # COOLDOWN → STAKE_20 cuando expira el timer
+            if state.burst_phase == "COOLDOWN" and now >= state.burst_phase_started_at + BURST_COOLDOWN_S:
+                _check_burst_window()
+                if _burst_was_reset or state.burst_spikes_total >= BURST_MAX_SPIKES:
+                    state.burst_phase            = "IDLE"
+                    state.burst_phase_started_at = 0.0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s COOLDOWN done pero burst agotado/reset → IDLE",
+                        sym,
+                    )
+                    return
+                state.burst_phase            = "STAKE_20"
+                state.burst_phase_started_at = now
+                state.spikes_in_contract_500 = 0
+                state.phase = "OPEN"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s COOLDOWN done → $20 %dmin burst=%d/%d",
+                    sym, BURST_STAKE20_DURATION_S // 60,
+                    state.burst_spikes_total, BURST_MAX_SPIKES,
+                )
+                await asyncio.sleep(0.5)
+                await self._open(sym, state, now, stake_override=BURST_STAKE20_AMOUNT)
             return
 
-        if state.phase != "OPEN":
-            state.phase = "OPEN"
+        state.phase = "OPEN"
 
-        # Peak profit y profit floor (solo $20)
-        if not state.protecting_500 and state.current_profit > state.peak_profit_500:
-            state.peak_profit_500 = state.current_profit
-
-        _profit_floor = 0.0
-        if not state.protecting_500:
-            for _t in _PROFIT_TIERS_500:
-                if state.peak_profit_500 >= _t:
-                    _profit_floor = _t
-                else:
-                    break
-
-        # ── SL=$14 ────────────────────────────────────────────────────────────
-        if state.current_profit < -SL_USD_500_SIMPLE and state.contract_id is not None:
+        # ── Contrato huérfano (estado anterior al nuevo flujo) → cerrar y IDLE ─
+        if state.burst_phase == "IDLE" and state.contract_id is not None:
             _cid = int(state.contract_id)
             _pnl = state.current_profit
-            state.contract_id            = None
-            state.current_profit         = 0.0
-            state.peak_profit_500        = 0.0
-            state.consec_wins_500        = 0
-            state.spikes_in_contract_500 = 0
-            state.last_spike_ts_500      = 0.0
-            try:
-                await self._executor.close_contract(_cid)
-            except Exception as exc:
-                _LOGGER.error("[ENTRADA_DIEGO] %s SL close error: %s", sym, exc)
-            state.last_close_profit = _pnl
-            state.reopens += 1
-            self._add_global_pnl(sym, _pnl, now)
-            _check_burst_window()
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f burst=%d/%d → reopen#%d → $1 sensor",
-                sym, _pnl, state.burst_spikes_total, BURST_MAX_SPIKES, state.reopens,
-            )
-            await asyncio.sleep(3.0)
-            # Volver a $1 conservando burst_spikes_total (no resetear)
-            state.protecting_500        = True
-            state.protection_started_at = now
-            state.protection_spikes     = 0
-            await self._open(sym, state, now, stake_override=1.0)
-            return
-
-        # ── DEAD_BURST_KILL: $20 sin ningún spike en 10min → burst muerto ────────
-        # Dato empírico: 100% de wins tienen ≥1 spike durante el contrato (el spike
-        # los empuja a profit en <9min). 100% de losses tienen 0 spikes: la comisión
-        # drena el contrato hasta -$8/$12 en 20min. Salir a los 10min si 0 spikes.
-        if (
-            not state.protecting_500
-            and state.contract_id is not None
-            and (now - state.open_ts) >= DEAD_BURST_KILL_S
-            and state.spikes_in_contract_500 == 0
-            and state.current_profit < -0.5
-        ):
-            _cid     = int(state.contract_id)
-            _pnl     = state.current_profit
-            _dur_min = (now - state.open_ts) / 60
-            state.contract_id            = None
-            state.current_profit         = 0.0
-            state.peak_profit_500        = 0.0
-            state.spikes_in_contract_500 = 0
-            state.last_spike_ts_500      = 0.0
-            try:
-                await self._executor.close_contract(_cid)
-            except Exception as exc:
-                _LOGGER.error("[ENTRADA_DIEGO] %s DEAD_BURST_KILL close error: %s", sym, exc)
-            state.last_close_profit = _pnl
-            state.reopens += 1
-            self._add_global_pnl(sym, _pnl, now)
-            _check_burst_window()
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s DEAD_BURST_KILL %.0fmin 0 spikes burst=%d/%d profit=%.4f → $1",
-                sym, _dur_min, state.burst_spikes_total, BURST_MAX_SPIKES, _pnl,
-            )
-            await asyncio.sleep(3.0)
-            state.protecting_500        = True
-            state.protection_started_at = now
-            state.protection_spikes     = 0
-            await self._open(sym, state, now, stake_override=1.0)
-            return
-
-        # ── PHASE_END_TIMEOUT: $20 negativo ≥20min y burst acabó ──────────────
-        _spk_1h_now = self._risk.get_spike_count_last_hour(sym)
-        if (
-            not state.protecting_500
-            and state.contract_id is not None
-            and (now - state.open_ts) >= TIMEOUT_DRY_S
-            and state.current_profit < 0
-            and _spk_1h_now < DISCHARGE_SPKS_1H
-        ):
-            _cid     = int(state.contract_id)
-            _pnl     = state.current_profit
-            _dur_min = (now - state.open_ts) / 60
-            _spk_c   = state.spikes_in_contract_500
-            state.contract_id            = None
-            state.current_profit         = 0.0
-            state.peak_profit_500        = 0.0
-            state.spikes_in_contract_500 = 0
-            state.last_spike_ts_500      = 0.0
-            try:
-                await self._executor.close_contract(_cid)
-            except Exception as exc:
-                _LOGGER.error("[ENTRADA_DIEGO] %s PHASE_END_TIMEOUT close error: %s", sym, exc)
-            state.last_close_profit = _pnl
-            state.reopens += 1
-            self._add_global_pnl(sym, _pnl, now)
-            _check_burst_window()
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s PHASE_END_TIMEOUT %.0fmin spk_c=%d burst=%d/%d profit=%.4f → $1",
-                sym, _dur_min, _spk_c, state.burst_spikes_total, BURST_MAX_SPIKES, _pnl,
-            )
-            await asyncio.sleep(3.0)
-            state.protecting_500        = True
-            state.protection_started_at = now
-            state.protection_spikes     = 0
-            await self._open(sym, state, now, stake_override=1.0)
-            return
-
-        # ── Trailing profit floor ──────────────────────────────────────────────
-        if _profit_floor > 0.0 and state.current_profit < _profit_floor and state.contract_id is not None:
-            _cid  = int(state.contract_id)
-            _pnl  = state.current_profit
-            _peak = state.peak_profit_500
             state.contract_id     = None
             state.current_profit  = 0.0
             state.peak_profit_500 = 0.0
             try:
                 await self._executor.close_contract(_cid)
             except Exception as exc:
-                _LOGGER.error("[ENTRADA_DIEGO] %s FLOOR close error: %s", sym, exc)
+                _LOGGER.error("[ENTRADA_DIEGO] %s ORPHAN close error: %s", sym, exc)
             state.last_close_profit = _pnl
-            state.reopens = 0
             self._add_global_pnl(sym, _pnl, now)
-            if _pnl > 0:
-                state.consec_wins_500 += 1
-                if state.consec_wins_500 >= 2:
-                    state.consec_wins_500 = 0
-            else:
-                state.consec_wins_500 = 0
-            _check_burst_window()
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s FLOOR peak=%.2f pnl=%.4f wins=%d burst=%d/%d → $1",
-                sym, _peak, _pnl, state.consec_wins_500,
-                state.burst_spikes_total, BURST_MAX_SPIKES,
+                "[ENTRADA_DIEGO] %s ORPHAN contrato %d cerrado (burst_phase=IDLE) pnl=%.4f → IDLE",
+                sym, _cid, _pnl,
             )
-            await asyncio.sleep(1.0)
-            state.protecting_500        = True
-            state.protection_started_at = now
-            state.protection_spikes     = 0
-            await self._open(sym, state, now, stake_override=1.0)
             return
 
-        # ── Timer $1: 10 minutos ──────────────────────────────────────────────
-        if state.protecting_500 and state.protection_started_at > 0 and now >= state.protection_started_at + 600:
-            _cid            = state.contract_id
-            _pnl            = state.current_profit
-            _spikes_in_prot = state.protection_spikes
-            if _cid is not None:
-                try:
-                    await self._executor.close_contract(int(_cid))
-                except Exception as exc:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s 10min SENSOR close error: %s", sym, exc)
+        # ── SL duro de seguridad (no debería activarse en operación normal) ───
+        _sl_limit = -(BURST_STAKE40_AMOUNT * 0.90) if state.burst_phase == "STAKE_40" \
+                    else -(BURST_STAKE20_AMOUNT * 0.90)
+        if state.current_profit < _sl_limit and state.contract_id is not None:
+            _cid = int(state.contract_id)
+            _pnl = state.current_profit
+            state.contract_id            = None
+            state.current_profit         = 0.0
+            state.peak_profit_500        = 0.0
+            state.spikes_in_contract_500 = 0
+            try:
+                await self._executor.close_contract(_cid)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s SL close error: %s", sym, exc)
             state.last_close_profit = _pnl
-            state.contract_id       = None
-            state.current_profit    = 0.0
-            state.peak_profit_500   = 0.0
             self._add_global_pnl(sym, _pnl, now)
             _check_burst_window()
-            _burst = state.burst_spikes_total
-            if _burst >= BURST_MAX_SPIKES:
-                # Burst agotado → seguir en $1 esperando nueva hora
-                state.protection_started_at = now
-                state.protection_spikes     = 0
+            _LOGGER.warning(
+                "[ENTRADA_DIEGO] %s SL_HARD profit=%.4f burst=%d/%d fase=%s → IDLE",
+                sym, _pnl, state.burst_spikes_total, BURST_MAX_SPIKES, state.burst_phase,
+            )
+            state.burst_phase            = "IDLE"
+            state.burst_phase_started_at = 0.0
+            return
+
+        # ── Timer STAKE_20: 20min fijo ─────────────────────────────────────────
+        if (
+            state.burst_phase == "STAKE_20"
+            and now >= state.burst_phase_started_at + BURST_STAKE20_DURATION_S
+            and state.contract_id is not None
+        ):
+            _cid = int(state.contract_id)
+            _pnl = state.current_profit
+            _spk = state.spikes_in_contract_500
+            state.contract_id            = None
+            state.current_profit         = 0.0
+            state.peak_profit_500        = 0.0
+            state.spikes_in_contract_500 = 0
+            try:
+                await self._executor.close_contract(_cid)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s STAKE_20 timer close error: %s", sym, exc)
+            state.last_close_profit = _pnl
+            self._add_global_pnl(sym, _pnl, now)
+            _check_burst_window()
+
+            if _burst_was_reset or state.burst_spikes_total >= BURST_MAX_SPIKES:
+                state.burst_phase            = "IDLE"
+                state.burst_phase_started_at = 0.0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s 10min BURST_AGOTADO %d/%d → $1 esperando nueva hora",
-                    sym, _burst, BURST_MAX_SPIKES,
+                    "[ENTRADA_DIEGO] %s STAKE_20 20min pnl=%.4f spk=%d burst=%d/%d → IDLE (agotado/nueva hora)",
+                    sym, _pnl, _spk, state.burst_spikes_total, BURST_MAX_SPIKES,
                 )
-                await asyncio.sleep(1.0)
-                await self._open(sym, state, now, stake_override=1.0)
-            elif _burst >= PROT_RESET_MIN_SPIKES:
-                # Burst confirmado y no agotado → $20
-                state.reopens                = 0
-                state.protecting_500         = False
-                state.consec_wins_500        = 0
-                state.protection_started_at  = 0.0
-                state.protection_spikes      = 0
-                state.spikes_in_contract_500 = 0   # DEAD_BURST_KILL empieza limpio
-                state.last_spike_ts_500      = 0.0
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s 10min burst=%d/%d confirmado → $20",
-                    sym, _burst, BURST_MAX_SPIKES,
-                )
-                await asyncio.sleep(1.0)
-                await self._open(sym, state, now)
             else:
-                # Burst aún no confirmado → otro round $1
-                state.protection_started_at = now
-                state.protection_spikes     = 0
+                state.burst_phase            = "STAKE_40"
+                state.burst_phase_started_at = now
+                state.spikes_in_contract_500 = 0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s 10min burst=%d/%d sin confirmar → otro round $1",
-                    sym, _burst, BURST_MAX_SPIKES,
+                    "[ENTRADA_DIEGO] %s STAKE_20 20min pnl=%.4f spk=%d burst=%d/%d → $40 10min",
+                    sym, _pnl, _spk, state.burst_spikes_total, BURST_MAX_SPIKES,
                 )
-                await asyncio.sleep(1.0)
-                await self._open(sym, state, now, stake_override=1.0)
+                # Poll hasta que el executor confirme el cierre (evita symbol_already_open)
+                _t0 = time.time()
+                while time.time() - _t0 < 5.0:
+                    if self._query_contract(_cid) is None:
+                        break
+                    await asyncio.sleep(0.3)
+                await self._open(sym, state, now, stake_override=BURST_STAKE40_AMOUNT)
+            return
+
+        # ── Timer STAKE_40: 10min fijo ─────────────────────────────────────────
+        if (
+            state.burst_phase == "STAKE_40"
+            and now >= state.burst_phase_started_at + BURST_STAKE40_DURATION_S
+            and state.contract_id is not None
+        ):
+            _cid = int(state.contract_id)
+            _pnl = state.current_profit
+            _spk = state.spikes_in_contract_500
+            state.contract_id            = None
+            state.current_profit         = 0.0
+            state.peak_profit_500        = 0.0
+            state.spikes_in_contract_500 = 0
+            try:
+                await self._executor.close_contract(_cid)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s STAKE_40 timer close error: %s", sym, exc)
+            state.last_close_profit = _pnl
+            self._add_global_pnl(sym, _pnl, now)
+            _check_burst_window()
+
+            if not _burst_was_reset and state.burst_spikes_total >= BURST_MIN_TRIGGER \
+                    and state.burst_spikes_total < BURST_MAX_SPIKES:
+                state.burst_phase            = "COOLDOWN"
+                state.burst_phase_started_at = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s STAKE_40 10min pnl=%.4f spk=%d burst=%d/%d → COOLDOWN (%d spikes en hora)",
+                    sym, _pnl, _spk, state.burst_spikes_total, BURST_MAX_SPIKES,
+                    state.burst_spikes_total,
+                )
+            else:
+                state.burst_phase            = "IDLE"
+                state.burst_phase_started_at = 0.0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s STAKE_40 10min pnl=%.4f spk=%d burst=%d/%d → IDLE",
+                    sym, _pnl, _spk, state.burst_spikes_total, BURST_MAX_SPIKES,
+                )
             return
 
         # ── Cerrado externamente por broker ────────────────────────────────────
         if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-            _pnl      = state.current_profit
-            _was_prot = state.protecting_500
+            _pnl   = state.current_profit
+            _phase = state.burst_phase
             state.last_close_profit      = _pnl
             state.contract_id            = None
             state.current_profit         = 0.0
             state.peak_profit_500        = 0.0
             state.spikes_in_contract_500 = 0
-            state.last_spike_ts_500      = 0.0
             self._add_global_pnl(sym, _pnl, now)
             _check_burst_window()
-            if _was_prot:
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s SENSOR $1 cerrado broker → reopen $1 (burst=%d/%d)",
-                    sym, state.burst_spikes_total, BURST_MAX_SPIKES,
-                )
-                await asyncio.sleep(1.0)
-                await self._open(sym, state, now, stake_override=1.0)
-            else:
-                state.reopens += 1
-                if _pnl > 0:
-                    state.consec_wins_500 += 1
-                else:
-                    state.consec_wins_500 = 0
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s broker close pnl=%.4f reopen#%d burst=%d/%d → $1",
-                    sym, _pnl, state.reopens,
-                    state.burst_spikes_total, BURST_MAX_SPIKES,
-                )
-                await asyncio.sleep(1.0)
-                state.protecting_500        = True
-                state.protection_started_at = now
-                state.protection_spikes     = 0
-                await self._open(sym, state, now, stake_override=1.0)
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f burst=%d/%d → IDLE",
+                sym, _phase, _pnl, state.burst_spikes_total, BURST_MAX_SPIKES,
+            )
+            state.burst_phase            = "IDLE"
+            state.burst_phase_started_at = 0.0
             return
 
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
