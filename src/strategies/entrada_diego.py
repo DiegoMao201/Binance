@@ -778,18 +778,28 @@ class EntradaDiego:
                 await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_40 15min ≥1spk", _cid, _pnl, _spk)
             return
 
-        # ── Cerrado externamente por broker → STAKE_1 ─────────────────────────
+        # ── Cerrado externamente por broker → aplica misma regla de spikes ──────
         if state.contract_id is not None and self._query_contract(state.contract_id) is None:
             _pnl   = state.current_profit
             _phase = state.burst_phase
+            _spk   = state.spikes_in_contract_500
             state.last_close_profit      = _pnl
             state.contract_id            = None
             state.current_profit         = 0.0
             state.peak_profit_500        = 0.0
             state.spikes_in_contract_500 = 0
             self._add_global_pnl(sym, _pnl, now)
-            _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f → STAKE_1", sym, _phase, _pnl)
-            state.burst_phase            = "STAKE_1"
+            if _phase == "STAKE_1":
+                next_phase = "STAKE_1"  if _spk >= 2 else "STAKE_20"
+            elif _phase == "STAKE_20":
+                next_phase = "STAKE_1"  if _spk >= 2 else "STAKE_40"
+            elif _phase == "STAKE_40":
+                next_phase = "STAKE_40" if _spk == 0  else "STAKE_1"
+            else:
+                next_phase = "STAKE_1"
+            _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f spk=%d → %s",
+                         sym, _phase, _pnl, _spk, next_phase)
+            state.burst_phase            = next_phase
             state.burst_phase_started_at = 0.0
             return
 
