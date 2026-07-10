@@ -160,7 +160,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     "CRASH500": {
         "sl_inicial_pct":        1.00,   # was 0.30 — corrected to match spike profile
         "ratchet_step_pct":      0.30,
-        "ratchet_ratio":         0.55,
+        "ratchet_ratio":         0.80,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      480,    # Muestra02-fix: profile max_hold=450 + 30s buffer (was 720)
@@ -174,7 +174,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     "BOOM500": {
         "sl_inicial_pct":        1.00,   # was 0.25 — corrected to match spike profile
         "ratchet_step_pct":      0.30,
-        "ratchet_ratio":         0.55,
+        "ratchet_ratio":         0.80,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
         "max_duration_seg":      480,    # profile max_hold=450 + 30s buffer
