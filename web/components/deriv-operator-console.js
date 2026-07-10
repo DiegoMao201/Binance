@@ -646,7 +646,7 @@ function EntradaDiegoSection({ symbol }) {
     : burst_phase === "STAKE_20"
       ? spikes_in_contract >= 2 ? `→ $1 reiniciar (${spikes_in_contract} spk)` : `→ $40 si sigue <2 spk`
       : burst_phase === "STAKE_40"
-        ? spikes_in_contract === 0 ? `→ $40 otra vez (0 spk)` : `→ $1 reiniciar (${spikes_in_contract} spk)`
+        ? `→ $1 si profit+ / $40 si pierde`
         : "iniciando…";
 
   const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
