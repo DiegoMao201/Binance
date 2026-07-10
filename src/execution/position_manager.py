@@ -159,7 +159,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "CRASH500": {
         "sl_inicial_pct":        1.00,   # was 0.30 — corrected to match spike profile
-        "ratchet_step_pct":      0.30,
+        "ratchet_step_pct":      0.10,   # activa desde $2 en $20 stake, $4 en $40 stake
         "ratchet_ratio":         0.80,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
@@ -173,7 +173,7 @@ SYMBOL_RATCHET_PARAMS: dict[str, dict[str, Any]] = {
     },
     "BOOM500": {
         "sl_inicial_pct":        1.00,   # was 0.25 — corrected to match spike profile
-        "ratchet_step_pct":      0.30,
+        "ratchet_step_pct":      0.10,   # activa desde $2 en $20 stake, $4 en $40 stake
         "ratchet_ratio":         0.80,
         "momentum_window":       30,
         "agotamiento_threshold": 0.35,
