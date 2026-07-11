@@ -653,7 +653,7 @@ function EntradaDiegoSection({ symbol }) {
       ? spikes_in_contract >= 2
         ? `→ $1 reiniciar (${spikes_in_contract} spk)`
         : spikes_in_contract === 1
-          ? `→ $20 reintentar (1 spk)`
+          ? current_profit > 0 ? `→ $1 win (1spk profit+)` : `→ $20 reintentar (1spk loss)`
           : hourGateOpen
             ? `→ $40 ✓ hora: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR} spk`
             : `→ $1 ✗ hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR} spk`

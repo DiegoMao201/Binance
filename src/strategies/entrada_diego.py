@@ -795,7 +795,11 @@ class EntradaDiego:
                 if _spk >= 2:
                     _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
                 elif _spk == 1:
-                    _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
+                    # 1 spike win → ciclo completo; 1 spike loss → reintentar $20
+                    if _pnl > 0:
+                        _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
+                    else:
+                        _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
                 else:
                     _hour_spk = _get_hour_spike_count()
                     if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
@@ -827,10 +831,12 @@ class EntradaDiego:
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
             if _spk >= 2:
-                await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_20 15min ≥2spk", _cid, _pnl, _spk)
+                await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_20 15min ≥2spk→S1", _cid, _pnl, _spk)
             elif _spk == 1:
-                # 1 spike: mercado aún tiene potencial — reintentar $20
-                await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_20 15min 1spk→retry", _cid, _pnl, _spk)
+                if _pnl > 0:
+                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_20 15min 1spk+win→S1", _cid, _pnl, _spk)
+                else:
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_20 15min 1spk+loss→retry", _cid, _pnl, _spk)
             else:  # _spk == 0
                 _hour_spk = _get_hour_spike_count()
                 if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
@@ -875,7 +881,7 @@ class EntradaDiego:
                 if _spk >= 2:
                     next_phase = "STAKE_1"
                 elif _spk == 1:
-                    next_phase = "STAKE_20"
+                    next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
                 else:
                     _hour_spk = _get_hour_spike_count()
                     next_phase = "STAKE_40" if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_1"
