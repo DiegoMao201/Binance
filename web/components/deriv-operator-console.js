@@ -568,7 +568,10 @@ function EntradaDiegoSection({ symbol }) {
     burst_phase = "STAKE_1", burst_phase_started_at = 0,
     burst_stake1_s = 600, burst_stake20_s = 900, burst_stake40_s = 900,
     burst_stake1_amount = 1, burst_stake20_amount = 20, burst_stake40_amount = 40,
+    hour_spike_count_500 = 0,
   } = edState;
+
+  const BURST_S40_MAX_HOUR = 3; // debe coincidir con BURST_STAKE40_MAX_HOUR_SPIKES en el bot
 
   const nowSec = now / 1000;
   const is1000 = symbol.includes("1000");
@@ -640,11 +643,20 @@ function EntradaDiegoSection({ symbol }) {
     : burst_phase === "STAKE_1"                 ? "#f59e0b"
     : "#64748b";
 
-  // Predicción al cierre del timer
+  // Predicción al cierre del timer — refleja reglas reales del bot
+  const hourGateOpen = hour_spike_count_500 <= BURST_S40_MAX_HOUR;
   const nextHint = burst_phase === "STAKE_1"
-    ? spikes_in_contract >= 2 ? `→ $1 otra vez (${spikes_in_contract} spk)` : `→ $20 si sigue <2 spk`
+    ? spikes_in_contract >= 2
+      ? `→ $1 otra vez (${spikes_in_contract} spk)`
+      : `→ $20 si <2 spk`
     : burst_phase === "STAKE_20"
-      ? spikes_in_contract >= 2 ? `→ $1 reiniciar (${spikes_in_contract} spk)` : `→ $40 si sigue <2 spk`
+      ? spikes_in_contract >= 2
+        ? `→ $1 reiniciar (${spikes_in_contract} spk)`
+        : spikes_in_contract === 1
+          ? `→ $20 reintentar (1 spk)`
+          : hourGateOpen
+            ? `→ $40 ✓ hora: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR} spk`
+            : `→ $1 ✗ hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR} spk`
       : burst_phase === "STAKE_40"
         ? `→ $1 si profit+ / $40 si pierde`
         : "iniciando…";
@@ -704,9 +716,15 @@ function EntradaDiegoSection({ symbol }) {
           {/* Spikes + siguiente acción */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
-              {spikes_in_contract} spike{spikes_in_contract !== 1 ? "s" : ""} en contrato
+              {spikes_in_contract} spk contrato
+              {" · "}
+              <span style={{ color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                hora: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}
+              </span>
             </span>
-            <span style={{ fontSize: 9, color: phaseColor, opacity: 0.85 }}>{nextHint}</span>
+            <span style={{ fontSize: 9, color: burst_phase === "STAKE_20" && spikes_in_contract === 0
+              ? (hourGateOpen ? "#22d3a3" : "#ff5d6c")
+              : phaseColor, opacity: 0.9, fontWeight: 600 }}>{nextHint}</span>
           </div>
         </div>
       )}
