@@ -714,18 +714,25 @@ function EntradaDiegoSection({ symbol }) {
             </span>
           </div>
           {/* Spikes + siguiente acción */}
+          {(() => {
+            const _utcH = new Date(now).getUTCHours();
+            const _utcHNext = (_utcH + 1) % 24;
+            const _hLabel = `${String(_utcH).padStart(2,'0')}:00-${String(_utcHNext).padStart(2,'0')}:00`;
+            return (
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
               {spikes_in_contract} spk contrato
               {" · "}
               <span style={{ color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-                hora: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}
+                {_hLabel}: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}
               </span>
             </span>
             <span style={{ fontSize: 9, color: burst_phase === "STAKE_20" && spikes_in_contract === 0
               ? (hourGateOpen ? "#22d3a3" : "#ff5d6c")
               : phaseColor, opacity: 0.9, fontWeight: 600 }}>{nextHint}</span>
           </div>
+            );
+          })()}
         </div>
       )}
     </div>
