@@ -396,7 +396,9 @@ class EntradaDiego:
         now   = time.time()
 
         if state.contract_id is not None:
-            state.current_profit = self._query_profit(state.contract_id)
+            _queried_profit = self._query_profit(state.contract_id)
+            if _queried_profit is not None:
+                state.current_profit = _queried_profit
 
         last_spike_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
 
@@ -662,7 +664,14 @@ class EntradaDiego:
         now   = time.time()
 
         if state.contract_id is not None:
-            state.current_profit = self._query_profit(state.contract_id)
+            _queried_profit = self._query_profit(state.contract_id)
+            if _queried_profit is not None:
+                state.current_profit = _queried_profit
+            else:
+                _LOGGER.debug(
+                    "[ENTRADA_DIEGO] %s contrato %s ya cerrado por broker — conservando profit=%.4f",
+                    sym, state.contract_id, state.current_profit,
+                )
 
         # ── Spike tracking ────────────────────────────────────────────────────
         _last_spk_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
@@ -853,7 +862,11 @@ class EntradaDiego:
             if _pnl > 0:
                 await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_40 15min profit+", _cid, _pnl, _spk)
             else:
-                await _transition("STAKE_40", BURST_STAKE40_AMOUNT, "STAKE_40 15min profit-", _cid, _pnl, _spk)
+                _hour_spk = _get_hour_spike_count()
+                if _hour_spk > BURST_STAKE40_MAX_HOUR_SPIKES:
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_40 15min profit-+hora_agotada({_hour_spk}>{BURST_STAKE40_MAX_HOUR_SPIKES})→S20", _cid, _pnl, _spk)
+                else:
+                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_40 15min profit-+hora_ok({_hour_spk}≤{BURST_STAKE40_MAX_HOUR_SPIKES})→retry", _cid, _pnl, _spk)
             return
 
         # ── Cerrado externamente por broker → aplica misma regla de spikes ──────
@@ -886,7 +899,11 @@ class EntradaDiego:
                     _hour_spk = _get_hour_spike_count()
                     next_phase = "STAKE_40" if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_20"
             elif _phase == "STAKE_40":
-                next_phase = "STAKE_1" if _pnl > 0 else "STAKE_40"
+                if _pnl > 0:
+                    next_phase = "STAKE_1"
+                else:
+                    _hour_spk = _get_hour_spike_count()
+                    next_phase = "STAKE_20" if _hour_spk > BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_40"
             else:
                 next_phase = "STAKE_1"
             _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f spk=%d → %s",
@@ -1425,14 +1442,16 @@ class EntradaDiego:
             pass
         return None
 
-    def _query_profit(self, contract_id: int) -> float:
+    def _query_profit(self, contract_id: int) -> Optional[float]:
+        """Retorna el P&L flotante, o None si el contrato ya no existe (cerrado por broker)."""
         try:
             oc = self._query_contract(contract_id)
             if oc:
                 return float(oc.get("floating_pnl") or 0.0)
+            return None  # Contrato no encontrado → broker ya lo cerró
         except Exception:
             pass
-        return 0.0
+        return None
 
     # ── Restaurar estado post-restart ─────────────────────────────────────────
 
