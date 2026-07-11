@@ -800,12 +800,12 @@ class EntradaDiego:
                         _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
                     else:
                         _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
-                else:
+                else:  # 0 spikes: nunca bajar a $1 — o escalar a $40 o reintentar $20
                     _hour_spk = _get_hour_spike_count()
                     if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
                         _np, _ns = "STAKE_40", BURST_STAKE40_AMOUNT
                     else:
-                        _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
+                        _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
             else:  # STAKE_40 → vuelve a STAKE_1 solo si cerró en positivo
                 _np = "STAKE_1"  if _pnl > 0 else "STAKE_40"
                 _ns = BURST_STAKE1_AMOUNT if _pnl > 0 else BURST_STAKE40_AMOUNT
@@ -837,12 +837,12 @@ class EntradaDiego:
                     await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_20 15min 1spk+win→S1", _cid, _pnl, _spk)
                 else:
                     await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_20 15min 1spk+loss→retry", _cid, _pnl, _spk)
-            else:  # _spk == 0
+            else:  # _spk == 0: nunca bajar a $1 — o escalar a $40 o reintentar $20
                 _hour_spk = _get_hour_spike_count()
                 if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
                     await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 0spk+budget({_hour_spk}≤{BURST_STAKE40_MAX_HOUR_SPIKES})→S40", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  f"STAKE_20 15min 0spk+agotado({_hour_spk}>{BURST_STAKE40_MAX_HOUR_SPIKES})→S1", _cid, _pnl, _spk)
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min 0spk+agotado({_hour_spk}>{BURST_STAKE40_MAX_HOUR_SPIKES})→retry", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_40: 15min ─────────────────────────────────────────────
@@ -882,9 +882,9 @@ class EntradaDiego:
                     next_phase = "STAKE_1"
                 elif _spk == 1:
                     next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
-                else:
+                else:  # 0 spikes: nunca bajar a $1
                     _hour_spk = _get_hour_spike_count()
-                    next_phase = "STAKE_40" if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_1"
+                    next_phase = "STAKE_40" if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_20"
             elif _phase == "STAKE_40":
                 next_phase = "STAKE_1" if _pnl > 0 else "STAKE_40"
             else:
