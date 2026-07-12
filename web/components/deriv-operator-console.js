@@ -566,12 +566,13 @@ function EntradaDiegoSection({ symbol }) {
     open_ts = 0, profit_positive_ts = 0, cooldown_until = 0,
     spikes_in_contract = 0,
     burst_phase = "STAKE_1", burst_phase_started_at = 0,
-    burst_stake1_s = 600, burst_stake20_s = 900, burst_stake40_s = 900,
-    burst_stake1_amount = 1, burst_stake20_amount = 20, burst_stake40_amount = 40,
+    burst_stake1_s = 600, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
+    burst_stake1_amount = 1, burst_stake10_amount = 10, burst_stake20_amount = 20, burst_stake40_amount = 40,
     hour_spike_count_500 = 0,
+    contract_start_hour_ts_500 = 0,
   } = edState;
 
-  const BURST_S40_MAX_HOUR = 3; // debe coincidir con BURST_STAKE40_MAX_HOUR_SPIKES en el bot
+  const BURST_S40_MAX_HOUR = 5; // gate: máx spk/hora UTC para abrir $40 (≤5)
 
   const nowSec = now / 1000;
   const is1000 = symbol.includes("1000");
@@ -632,6 +633,7 @@ function EntradaDiegoSection({ symbol }) {
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec2 - burst_phase_started_at) : 0;
 
   const phaseTotal = burst_phase === "STAKE_1"  ? burst_stake1_s
+    : burst_phase === "STAKE_10" ? burst_stake10_s
     : burst_phase === "STAKE_20" ? burst_stake20_s
     : burst_phase === "STAKE_40" ? burst_stake40_s
     : 1;
@@ -639,29 +641,66 @@ function EntradaDiegoSection({ symbol }) {
   const phasePct   = Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
   const phaseColor = burst_phase === "STAKE_40" ? "#a78bfa"
-    : burst_phase === "STAKE_20"                ? "#22d3a3"
-    : burst_phase === "STAKE_1"                 ? "#f59e0b"
+    : burst_phase === "STAKE_20"               ? "#22d3a3"
+    : burst_phase === "STAKE_10"               ? "#fb923c"
+    : burst_phase === "STAKE_1"                ? "#f59e0b"
     : "#64748b";
+
+  // ── Detección cambio de hora y drought gate ────────────────────────────────
+  const _nowSec    = now / 1000;
+  const _nowHourTs = Math.floor(_nowSec / 3600) * 3600;
+  const _conHourTs = contract_start_hour_ts_500;
+  const hourChanged = _conHourTs > 0 && Math.floor(_conHourTs / 3600) !== Math.floor(_nowSec / 3600);
+  const _minInHour  = (_nowSec % 3600) / 60.0;
+  // drought gate (se aplica cuando STAKE_1 termina con <2 spk)
+  const _droughtLevel = hour_spike_count_500 === 0 && _minInHour >= 30 ? "S1_STOP"
+    : (hour_spike_count_500 === 0 && _minInHour >= 25) || (hour_spike_count_500 <= 1 && _minInHour >= 30) ? "S10"
+    : "S20";
 
   // Predicción al cierre del timer — refleja reglas reales del bot
   const hourGateOpen = hour_spike_count_500 <= BURST_S40_MAX_HOUR;
+  const _hrChangeNext = hourChanged
+    ? (hour_spike_count_500 === 0 ? "→ $1 (nueva hora 0spk)" : hour_spike_count_500 === 1 ? "→ $10 (nueva hora 1spk)" : `→ $20 (nueva hora ${hour_spike_count_500}spk)`)
+    : null;
   const nextHint = burst_phase === "STAKE_1"
     ? spikes_in_contract >= 2
       ? `→ $1 otra vez (${spikes_in_contract} spk)`
-      : `→ $20 si <2 spk`
+      : _hrChangeNext
+      ? _hrChangeNext
+      : _droughtLevel === "S1_STOP"
+      ? `→ $1 sequía (0spk min${Math.floor(_minInHour)}≥30)`
+      : _droughtLevel === "S10"
+      ? `→ $10 defensivo (min${Math.floor(_minInHour)}≥25)`
+      : `→ $20 normal`
+    : burst_phase === "STAKE_10"
+      ? _hrChangeNext
+        ? _hrChangeNext
+        : spikes_in_contract >= 2
+          ? (current_profit > 0 ? "→ $1 (2+spk win)" : "→ $20 (2+spk loss)")
+          : spikes_in_contract === 1
+          ? (current_profit > 0 ? "→ $20 (1spk win)" : "→ $10 retry (1spk loss)")
+          : "→ $20 (0spk, escala)"
     : burst_phase === "STAKE_20"
-      ? spikes_in_contract >= 2
-        ? `→ $1 reiniciar (${spikes_in_contract} spk)`
-        : spikes_in_contract === 1
-          ? current_profit > 0 ? `→ $1 win (1spk profit+)` : `→ $20 reintentar (1spk loss)`
+      ? _hrChangeNext
+        ? _hrChangeNext
+        : spikes_in_contract >= 3
+          ? `→ $1 reiniciar (${spikes_in_contract} spk)`
+          : spikes_in_contract >= 1
+          ? (current_profit > 0 ? `→ $1 win (${spikes_in_contract}spk)` : `→ $20 retry (${spikes_in_contract}spk+loss)`)
           : hourGateOpen
-            ? `→ $40 ✓ hora: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR} spk`
-            : `→ $20 ✗ hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR} spk`
+          ? `→ $40 ✓ hora: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR} spk`
+          : `→ $20 ✗ hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR} spk`
       : burst_phase === "STAKE_40"
-        ? `→ $1 si profit+ / $40 si pierde`
+        ? _hrChangeNext
+          ? _hrChangeNext
+          : current_profit > 0
+            ? "→ $1 profit+"
+            : hourGateOpen
+            ? `→ $40 retry (hora ok: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR})`
+            : `→ $20 (hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR})`
         : "iniciando…";
 
-  const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
+  const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
   const minLabel   = burst_phase === "STAKE_1" ? "10min" : "15min";
 
   const _displayColor = !is1000 ? phaseColor : color;
@@ -701,7 +740,23 @@ function EntradaDiegoSection({ symbol }) {
       )}
 
       {/* ── Panel de fase 500s ── */}
-      {!is1000 && (
+      {!is1000 && (() => {
+        const _utcH = new Date(now).getUTCHours();
+        const _utcHNext = (_utcH + 1) % 24;
+        const _hLabel = `${String(_utcH).padStart(2,'0')}:00-${String(_utcHNext).padStart(2,'0')}:00`;
+        const _nextColor = nextHint.startsWith("→ $40") && hourGateOpen ? "#a78bfa"
+          : nextHint.includes("agotada") || nextHint.includes("sequía") || nextHint.includes("S1_STOP") ? "#ff5d6c"
+          : nextHint.includes("$10") ? "#fb923c"
+          : nextHint.includes("cambio hora") ? "#62d4ff"
+          : phaseColor;
+        // Diagrama de máquina: S1 → S10 → S20 → S40
+        const _phases = [
+          { id:"STAKE_1",  label:"$1",  dur:"10m", color:"#f59e0b" },
+          { id:"STAKE_10", label:"$10", dur:"15m", color:"#fb923c" },
+          { id:"STAKE_20", label:"$20", dur:"15m", color:"#22d3a3" },
+          { id:"STAKE_40", label:"$40", dur:"15m", color:"#a78bfa" },
+        ];
+        return (
         <div style={{ padding: "4px 6px", borderRadius: 4,
           background: `${phaseColor}12`, border: `1px solid ${phaseColor}35` }}>
           {/* Timer bar */}
@@ -713,28 +768,86 @@ function EntradaDiegoSection({ symbol }) {
               {_fmtS(phaseRem)}
             </span>
           </div>
+
+          {/* Diagrama de máquina: S1 → S10 → S20 → S40 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4 }}>
+            {_phases.map((p, i) => (
+              <React.Fragment key={p.id}>
+                <div style={{
+                  padding: "1px 5px", borderRadius: 3, fontSize: 9, fontWeight: 700,
+                  background: burst_phase === p.id ? `${p.color}35` : "rgba(255,255,255,0.05)",
+                  border: `1px solid ${burst_phase === p.id ? p.color : "rgba(255,255,255,0.12)"}`,
+                  color: burst_phase === p.id ? p.color : "rgba(255,255,255,0.35)",
+                  lineHeight: "14px",
+                }}>
+                  {p.label}<span style={{ fontWeight: 400, fontSize: 8, opacity: 0.7 }}> {p.dur}</span>
+                </div>
+                {i < _phases.length - 1 && (
+                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 9 }}>→</span>
+                )}
+              </React.Fragment>
+            ))}
+            <span style={{ marginLeft: "auto", fontSize: 8, color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+              S40 gate: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}spk/h {hourGateOpen ? "✓" : "✗"}
+            </span>
+          </div>
+
           {/* Spikes + siguiente acción */}
-          {(() => {
-            const _utcH = new Date(now).getUTCHours();
-            const _utcHNext = (_utcH + 1) % 24;
-            const _hLabel = `${String(_utcH).padStart(2,'0')}:00-${String(_utcHNext).padStart(2,'0')}:00`;
-            return (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
             <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
               {spikes_in_contract} spk contrato
               {" · "}
               <span style={{ color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
                 {_hLabel}: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}
               </span>
+              {hourChanged && (
+                <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
+              )}
             </span>
-            <span style={{ fontSize: 9, color: burst_phase === "STAKE_20" && spikes_in_contract === 0
-              ? (hourGateOpen ? "#22d3a3" : "#ff5d6c")
-              : phaseColor, opacity: 0.9, fontWeight: 600 }}>{nextHint}</span>
+            <span style={{ fontSize: 9, color: _nextColor, fontWeight: 600 }}>{nextHint}</span>
           </div>
-            );
-          })()}
+
+          {/* Reglas compactas */}
+          <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 3, paddingTop: 3 }}>
+            {/* Fila 1: reglas por fase activa */}
+            {burst_phase === "STAKE_1" && (
+              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
+                <span style={{ color: "#f59e0b", fontWeight: 700 }}>S1 10m:</span>
+                {" ≥2spk→S1 · "}
+                <span style={{ color: _droughtLevel==="S1_STOP" ? "#ff5d6c" : _droughtLevel==="S10" ? "#fb923c" : "rgba(255,255,255,0.4)" }}>
+                  {_droughtLevel==="S1_STOP" ? `0spk min${Math.floor(_minInHour)}≥30→S1(SEQUÍA)` : _droughtLevel==="S10" ? `min${Math.floor(_minInHour)}≥25 0spk→S10` : "0-1spk min<25→S20"}
+                </span>
+                {" · "}
+                <span style={{ color: "#62d4ff" }}>cambio hora: 0→S1 1→S10 2+→S20</span>
+              </div>
+            )}
+            {burst_phase === "STAKE_10" && (
+              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
+                <span style={{ color: "#fb923c", fontWeight: 700 }}>S10 15m:</span>
+                {" 0spk→S20 · 1spk+win→S20 · 1spk+loss→retry · 2+spk+win→S1 · 2+spk+loss→S20"}
+              </div>
+            )}
+            {burst_phase === "STAKE_20" && (
+              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
+                <span style={{ color: "#22d3a3", fontWeight: 700 }}>S20 15m:</span>
+                {" ≥3spk→S1 · 1-2spk+win→S1 · 1-2spk+loss→retry · "}
+                <span style={{ color: hourGateOpen ? "#a78bfa" : "#ff5d6c", fontWeight: 700 }}>
+                  0spk→S40 (≤{BURST_S40_MAX_HOUR}spk/h)
+                </span>
+              </div>
+            )}
+            {burst_phase === "STAKE_40" && (
+              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
+                <span style={{ color: "#a78bfa", fontWeight: 700 }}>S40 15m:</span>
+                {" profit+→S1 · profit-+gate_ok→retry · profit-+agotada→S20"}
+                <br />
+                <span style={{ color: "#62d4ff" }}>S40 abre: desde S1&lt;min35 · o cambio hora con 2+spk→S20→0spk→S40</span>
+              </div>
+            )}
+          </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

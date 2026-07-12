@@ -726,6 +726,8 @@ class DerivRiskManager:
         self._last_spike_tick: dict[str, int] = {}
         # D.7.4: ratio (abs_jump/atr) of the most recent spike per symbol.
         self._last_spike_ratio: dict[str, float] = {}
+        # Raw jump magnitude (absolute price change at spike, no ATR division).
+        self._last_spike_jump: dict[str, float] = {}
         # Rolling inter-spike intervals in tick domain (noise-filtered).
         # Used by main_deriv spike_pre_filter to adapt min_post window per symbol.
         self._spike_intervals: dict[str, list[int]] = {}
@@ -1188,6 +1190,7 @@ class DerivRiskManager:
                         self._last_spike_ts[symbol]    = _spike_ts
                         self._last_spike_tick[symbol]  = _cur_tick_n
                         self._last_spike_ratio[symbol] = round(abs(_jump) / _recent_atr, 2)  # D.7.4
+                        self._last_spike_jump[symbol]  = round(abs(_jump), 5)
                         _recent = self._spike_recent_ts.setdefault(symbol, [])
                         _recent.append(_spike_ts)
                         _cutoff = _spike_ts - self._spike_count_window_sec
@@ -1373,6 +1376,14 @@ class DerivRiskManager:
         Returns 0.0 if no spike has been observed yet.
         """
         return self._last_spike_ratio.get(symbol, 0.0)
+
+    def get_last_spike_jump(self, symbol: str) -> float:
+        """Raw absolute price jump of the most recent spike (not divided by ATR).
+
+        Stable across deploys — unaffected by post-deploy ATR contamination.
+        Returns 0.0 if no spike has been observed yet.
+        """
+        return self._last_spike_jump.get(symbol, 0.0)
 
     # ── 2026-06-02 LIVE SCARCITY ("seco/lento") — operator directive ────────
     # Mirrors EXACTLY the manual-operator card (web/app/api/deriv/operator):
