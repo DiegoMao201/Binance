@@ -826,6 +826,29 @@ class EntradaDiego:
                 return "STAKE_10", BURST_STAKE10_AMOUNT
             return "STAKE_20", BURST_STAKE20_AMOUNT
 
+        # ── Helper: gate BUENO para STAKE_40 ─────────────────────────────────
+        # True solo si la hora proyecta hacia BUENO (≥6 spk/hora).
+        # Calibrado en 682-709 horas válidas (54+ días), P(BUENO)≥60% en cada umbral.
+        # La lógica es INCLUSIVA (mínimo requerido), no exclusiva (máximo permitido).
+        #   QA [0-15 min]  → ≥1 spk  (60-65% BUENO)
+        #   QB [15-30 min] → ≥3 spk  (65-66% BUENO)
+        #   QC [30-45 min] → ≥5 spk  (85-88% BUENO)
+        #   QD [45-60 min] → ≥6 spk  (100% BUENO)
+        def _s40_bueno_gate() -> bool:
+            _min = (now % 3600.0) / 60.0
+            _spk = _get_hour_spike_count()
+            if _min < 15:  return _spk >= 1
+            if _min < 30:  return _spk >= 3
+            if _min < 45:  return _spk >= 5
+            return             _spk >= 6
+
+        def _s40_gate_label() -> str:
+            _min = (now % 3600.0) / 60.0
+            _spk = _get_hour_spike_count()
+            _q   = ('A','B','C','D')[min(3, int(_min // 15))]
+            _req = (1, 3, 5, 6)[min(3, int(_min // 15))]
+            return f"Q{_q}:{_spk}/{'≥'+str(_req)}"
+
         # ── Piso de profit al 80% del peak (STAKE_10/20/40 — STAKE_1 siempre corre 10min) ──
         _peak_trigger = (4.00 if state.burst_phase == "STAKE_40"
                     else 2.00 if state.burst_phase == "STAKE_20"
@@ -851,9 +874,8 @@ class EntradaDiego:
                     _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
                 elif _spk == 1:
                     _np, _ns = ("STAKE_1", BURST_STAKE1_AMOUNT) if _pnl > 0 else ("STAKE_20", BURST_STAKE20_AMOUNT)
-                else:  # 0 spikes: único camino a S40
-                    _hour_spk = _get_hour_spike_count()
-                    if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
+                else:  # 0 spikes: único camino a S40 — solo si hora proyecta BUENO
+                    if _s40_bueno_gate():
                         _np, _ns = "STAKE_40", BURST_STAKE40_AMOUNT
                     else:
                         _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
@@ -935,12 +957,11 @@ class EntradaDiego:
                 else:
                     await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min {_spk}spk+loss→retry", _cid, _pnl, _spk)
             else:
-                # 0 spikes: único camino a STAKE_40 (si gate lo permite)
-                _hour_spk = _get_hour_spike_count()
-                if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES:
-                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 0spk+gate({_hour_spk}≤{BURST_STAKE40_MAX_HOUR_SPIKES})→S40", _cid, _pnl, _spk)
+                # 0 spikes: único camino a STAKE_40 — solo si la hora proyecta BUENO
+                if _s40_bueno_gate():
+                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 0spk+BUENO({_s40_gate_label()})→S40", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min 0spk+agotado({_hour_spk}>{BURST_STAKE40_MAX_HOUR_SPIKES})→retry", _cid, _pnl, _spk)
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min 0spk+noBUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_40: 15min ─────────────────────────────────────────────
@@ -957,11 +978,10 @@ class EntradaDiego:
             if _pnl > 0:
                 await _transition("STAKE_1", BURST_STAKE1_AMOUNT, "STAKE_40 15min profit+→S1", _cid, _pnl, _spk)
             else:
-                _hour_spk = _get_hour_spike_count()
-                if _hour_spk > BURST_STAKE40_MAX_HOUR_SPIKES:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_40 15min profit-+hora_agotada({_hour_spk}>{BURST_STAKE40_MAX_HOUR_SPIKES})→S20", _cid, _pnl, _spk)
+                if _s40_bueno_gate():
+                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_40 15min profit-+BUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_40 15min profit-+gate_ok({_hour_spk}≤{BURST_STAKE40_MAX_HOUR_SPIKES})→retry", _cid, _pnl, _spk)
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_40 15min profit-+noBUENO({_s40_gate_label()})→S20", _cid, _pnl, _spk)
             return
 
         # ── Cerrado externamente por broker → aplica misma regla de spikes ──────
@@ -1024,15 +1044,13 @@ class EntradaDiego:
                     next_phase = "STAKE_1"
                 elif _spk >= 1:
                     next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
-                else:  # 0 spikes: único camino a S40
-                    _hour_spk = _get_hour_spike_count()
-                    next_phase = "STAKE_40" if _hour_spk <= BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_20"
+                else:  # 0 spikes: único camino a S40 — solo si hora proyecta BUENO
+                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_20"
             elif _phase == "STAKE_40":
                 if _pnl > 0:
                     next_phase = "STAKE_1"
                 else:
-                    _hour_spk = _get_hour_spike_count()
-                    next_phase = "STAKE_20" if _hour_spk > BURST_STAKE40_MAX_HOUR_SPIKES else "STAKE_40"
+                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_20"
             else:
                 next_phase = "STAKE_1"
             _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f spk=%d → %s",
