@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSOLA DE OPERACIÓN MANUAL — Deriv CRASH
