@@ -1016,15 +1016,7 @@ class EntradaDiego:
                 if _spk >= 2:
                     next_phase = "STAKE_1"
                 else:
-                    # drought gate: misma lógica que el timer STAKE_1
-                    _min_in_hour = (now % 3600.0) / 60.0
-                    _acum_spk    = _get_hour_spike_count()
-                    if _acum_spk == 0 and _min_in_hour >= 30:
-                        next_phase = "STAKE_1"
-                    elif (_acum_spk == 0 and _min_in_hour >= 25) or (_acum_spk <= 1 and _min_in_hour >= 30):
-                        next_phase = "STAKE_10"
-                    else:
-                        next_phase = "STAKE_20"
+                    next_phase, _ = _drought_gate_s1()
             elif _phase == "STAKE_10":
                 _elapsed = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
                 if _elapsed < BURST_STAKE10_DURATION_S:

@@ -572,8 +572,6 @@ function EntradaDiegoSection({ symbol }) {
     contract_start_hour_ts_500 = 0,
   } = edState;
 
-  const BURST_S40_MAX_HOUR = 5; // gate: máx spk/hora UTC para abrir $40 (≤5)
-
   const nowSec = now / 1000;
   const is1000 = symbol.includes("1000");
 
@@ -658,7 +656,13 @@ function EntradaDiegoSection({ symbol }) {
     : "S20";
 
   // Predicción al cierre del timer — refleja reglas reales del bot
-  const hourGateOpen = hour_spike_count_500 <= BURST_S40_MAX_HOUR;
+  // S40 gate: cuartos de hora — umbral acumulado calibrado 682-709h
+  const _qIndex = Math.min(3, Math.floor(_minInHour / 15));
+  const _qName  = ['A','B','C','D'][_qIndex];
+  const _qReq   = [1, 3, 5, 6][_qIndex];
+  const s40BuenoGate = hour_spike_count_500 >= _qReq;
+  const s40GateLabel = `Q${_qName}:${hour_spike_count_500}/≥${_qReq}`;
+  const hourGateOpen = s40BuenoGate;
   const _hrChangeNext = hourChanged
     ? (hour_spike_count_500 === 0 ? "→ $1 (nueva hora 0spk)" : hour_spike_count_500 === 1 ? "→ $10 (nueva hora 1spk)" : `→ $20 (nueva hora ${hour_spike_count_500}spk)`)
     : null;
@@ -687,17 +691,17 @@ function EntradaDiegoSection({ symbol }) {
           ? `→ $1 reiniciar (${spikes_in_contract} spk)`
           : spikes_in_contract >= 1
           ? (current_profit > 0 ? `→ $1 win (${spikes_in_contract}spk)` : `→ $20 retry (${spikes_in_contract}spk+loss)`)
-          : hourGateOpen
-          ? `→ $40 ✓ hora: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR} spk`
-          : `→ $20 ✗ hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR} spk`
+          : s40BuenoGate
+          ? `0spk → BUENO (${s40GateLabel}) → S40 en timer`
+          : `0spk → noBUENO (${s40GateLabel}) → retry S20`
       : burst_phase === "STAKE_40"
         ? _hrChangeNext
           ? _hrChangeNext
           : current_profit > 0
             ? "→ $1 profit+"
-            : hourGateOpen
-            ? `→ $40 retry (hora ok: ${hour_spike_count_500}/${BURST_S40_MAX_HOUR})`
-            : `→ $20 (hora agotada: ${hour_spike_count_500}>${BURST_S40_MAX_HOUR})`
+            : s40BuenoGate
+            ? `profit- → BUENO (${s40GateLabel}) → retry S40`
+            : `profit- → noBUENO (${s40GateLabel}) → S20`
         : "iniciando…";
 
   const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
@@ -744,8 +748,8 @@ function EntradaDiegoSection({ symbol }) {
         const _utcH = new Date(now).getUTCHours();
         const _utcHNext = (_utcH + 1) % 24;
         const _hLabel = `${String(_utcH).padStart(2,'0')}:00-${String(_utcHNext).padStart(2,'0')}:00`;
-        const _nextColor = nextHint.startsWith("→ $40") && hourGateOpen ? "#a78bfa"
-          : nextHint.includes("agotada") || nextHint.includes("sequía") || nextHint.includes("S1_STOP") ? "#ff5d6c"
+        const _nextColor = (nextHint.includes("BUENO") && !nextHint.includes("noBUENO")) ? "#a78bfa"
+          : nextHint.includes("noBUENO") || nextHint.includes("sequía") || nextHint.includes("S1_STOP") ? "#ff5d6c"
           : nextHint.includes("$10") ? "#fb923c"
           : nextHint.includes("cambio hora") ? "#62d4ff"
           : phaseColor;
@@ -787,8 +791,8 @@ function EntradaDiegoSection({ symbol }) {
                 )}
               </React.Fragment>
             ))}
-            <span style={{ marginLeft: "auto", fontSize: 8, color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-              S40 gate: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}spk/h {hourGateOpen ? "✓" : "✗"}
+            <span style={{ marginLeft: "auto", fontSize: 8, color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+              Gate S40: {s40GateLabel} — {s40BuenoGate ? "BUENO ✓" : "NO BUENO ✗"}
             </span>
           </div>
 
@@ -797,8 +801,8 @@ function EntradaDiegoSection({ symbol }) {
             <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
               {spikes_in_contract} spk contrato
               {" · "}
-              <span style={{ color: hourGateOpen ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-                {_hLabel}: {hour_spike_count_500}/{BURST_S40_MAX_HOUR}
+              <span style={{ color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                {_hLabel}: {s40GateLabel}
               </span>
               {hourChanged && (
                 <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
@@ -831,15 +835,15 @@ function EntradaDiegoSection({ symbol }) {
               <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
                 <span style={{ color: "#22d3a3", fontWeight: 700 }}>S20 15m:</span>
                 {" ≥3spk→S1 · 1-2spk+win→S1 · 1-2spk+loss→retry · "}
-                <span style={{ color: hourGateOpen ? "#a78bfa" : "#ff5d6c", fontWeight: 700 }}>
-                  0spk→S40 (≤{BURST_S40_MAX_HOUR}spk/h)
+                <span style={{ color: s40BuenoGate ? "#a78bfa" : "#ff5d6c", fontWeight: 700 }}>
+                  0spk→BUENO gate (cuarto de hora)→S40 o retry
                 </span>
               </div>
             )}
             {burst_phase === "STAKE_40" && (
               <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "12px" }}>
                 <span style={{ color: "#a78bfa", fontWeight: 700 }}>S40 15m:</span>
-                {" profit+→S1 · profit-+gate_ok→retry · profit-+agotada→S20"}
+                {" profit+→S1 · profit-+BUENO→retry S40 · profit-+noBUENO→S20"}
                 <br />
                 <span style={{ color: "#62d4ff" }}>S40 abre: desde S1&lt;min35 · o cambio hora con 2+spk→S20→0spk→S40</span>
               </div>
