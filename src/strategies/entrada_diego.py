@@ -961,7 +961,7 @@ class EntradaDiego:
                 if _s40_bueno_gate():
                     await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 0spk+BUENO({_s40_gate_label()})→S40", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min 0spk+noBUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min 0spk+noBUENO({_s40_gate_label()})→S1", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_40: 15min ─────────────────────────────────────────────
@@ -1037,7 +1037,7 @@ class EntradaDiego:
                 elif _spk >= 1:
                     next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
                 else:  # 0 spikes: único camino a S40 — solo si hora proyecta BUENO
-                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_20"
+                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_1"
             elif _phase == "STAKE_40":
                 if _pnl > 0:
                     next_phase = "STAKE_1"

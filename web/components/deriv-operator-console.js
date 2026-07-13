@@ -693,7 +693,7 @@ function EntradaDiegoSection({ symbol }) {
           ? (current_profit > 0 ? `→ $1 win (${spikes_in_contract}spk)` : `→ $20 retry (${spikes_in_contract}spk+loss)`)
           : s40BuenoGate
           ? `0spk → BUENO (${s40GateLabel}) → S40 en timer`
-          : `0spk → noBUENO (${s40GateLabel}) → retry S20`
+          : `0spk → noBUENO (${s40GateLabel}) → S1 (hora mala)`
       : burst_phase === "STAKE_40"
         ? _hrChangeNext
           ? _hrChangeNext
@@ -836,7 +836,7 @@ function EntradaDiegoSection({ symbol }) {
                 <span style={{ color: "#22d3a3", fontWeight: 700 }}>S20 15m:</span>
                 {" ≥3spk→S1 · 1-2spk+win→S1 · 1-2spk+loss→retry · "}
                 <span style={{ color: s40BuenoGate ? "#a78bfa" : "#ff5d6c", fontWeight: 700 }}>
-                  0spk→BUENO gate (cuarto de hora)→S40 o retry
+                  0spk+BUENO→S40 · 0spk+noBUENO→S1 (hora mala)
                 </span>
               </div>
             )}
