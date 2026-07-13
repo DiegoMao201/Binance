@@ -955,7 +955,10 @@ class EntradaDiego:
                 if _pnl > 0:
                     await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  f"STAKE_20 15min {_spk}spk+win→S1",    _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min {_spk}spk+loss→retry", _cid, _pnl, _spk)
+                    if _s40_bueno_gate():
+                        await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min {_spk}spk+loss+BUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
+                    else:
+                        await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min {_spk}spk+loss+noBUENO({_s40_gate_label()})→S1", _cid, _pnl, _spk)
             else:
                 # 0 spikes: único camino a STAKE_40 — solo si la hora proyecta BUENO
                 if _s40_bueno_gate():
