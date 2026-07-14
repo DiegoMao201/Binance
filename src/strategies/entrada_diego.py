@@ -109,7 +109,8 @@ BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2")
 #   STAKE_40 $40 15min:   0 spk → STAKE_40 | ≥1 spk → STAKE_1
 #   SL duro: 90% del stake activo → STAKE_1
 BURST_STAKE1_AMOUNT      = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE1",     "1.0"))
-BURST_STAKE1_DURATION_S  = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_S",     "600"))   # 10min
+BURST_STAKE1_DURATION_S  = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_S",     "360"))   # 6min
+BURST_STAKE1_DROUGHT_S   = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_DROUGHT_S", "1200")) # 20min sequia
 BURST_STAKE10_AMOUNT     = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE10",    "10.0"))
 BURST_STAKE10_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_S",    "900"))   # 15min defensivo
 BURST_STAKE20_AMOUNT     = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE20",    "20.0"))
@@ -240,6 +241,7 @@ class _SymState:
     burst_started_at:       float = 0.0  # inicio de la hora UTC anclada; 0 = sin burst activo
     burst_phase:            str   = "IDLE"   # IDLE | COOLDOWN | STAKE_20 | STAKE_40
     burst_phase_started_at: float = 0.0     # epoch inicio de la fase actual
+    s1_drought_mode:        bool  = False   # True = S1 extendido 20min post-S20 sin spike
     hour_spike_count_500:  int   = 0        # spikes en la hora UTC actual (gate STAKE_40)
     hour_start_ts_500:     float = 0.0      # inicio de la hora UTC vigente (epoch redondeado a hora)
     contract_start_hour_ts_500: float = 0.0  # hora UTC (epoch) cuando se abrió el contrato actual
@@ -289,7 +291,9 @@ class _SymState:
             "contract_start_hour_ts_500":  round(self.contract_start_hour_ts_500, 3),
             "burst_phase":                 self.burst_phase,
             "burst_phase_started_at": round(self.burst_phase_started_at, 3),
+            "s1_drought_mode":        self.s1_drought_mode,
             "burst_stake1_s":         BURST_STAKE1_DURATION_S,
+            "burst_stake1_drought_s": BURST_STAKE1_DROUGHT_S,
             "burst_stake20_s":        BURST_STAKE20_DURATION_S,
             "burst_stake40_s":        BURST_STAKE40_DURATION_S,
             "burst_stake1_amount":    BURST_STAKE1_AMOUNT,
@@ -811,6 +815,42 @@ class EntradaDiego:
             else:
                 return "STAKE_20", BURST_STAKE20_AMOUNT
 
+        # ── Helper: gap gate — bloquea S20 si el mercado lleva >30min sin spikes ──
+        # Datos 54+ días: gap 0-30min → 15-22% cuartos vacíos (activo)
+        #                 gap 30-60min → 61% vacíos BOOM / 32% CRASH (sequía)
+        #                 gap >60min   → 67-100% vacíos (sequía profunda)
+        def _gap_gate_s20() -> bool:
+            if state.last_spike_ts_500 <= 0:
+                return True
+            return (now - state.last_spike_ts_500) < 30.0 * 60
+
+        def _gap_gate_s40() -> bool:
+            """S40 solo abre si el mercado está muy activo: último spike <15min."""
+            if state.last_spike_ts_500 <= 0:
+                return True
+            return (now - state.last_spike_ts_500) < 15.0 * 60
+
+        def _crash500_mid_hour_s20() -> bool:
+            """CRASH500 mid-hora: Q1 fue activo (≥3spk acum) + quedan cuartos (min<45) + mercado vivo.
+            Datos 54d: si Q1≥3spk → 97% prob de ≥1 spike en Q3+Q4 restantes (avg 4.4 spikes).
+            Permite escalar a S20 aunque S1 tuviera 0 spikes — la hora ya demostró actividad."""
+            _acum = _get_hour_spike_count()
+            _min  = (now % 3600.0) / 60.0
+            return _acum >= 3 and _min < 45 and _gap_gate_s20()
+
+        def _discharge_s20_gate() -> bool:
+            """Bloquea S1→S20 cuando la hora ya está descargada (aplica BOOM+CRASH).
+            Q1+Q2 (<30min): si >7 spikes acumulados → hora quemada, esperar siguiente.
+            Q4   (≥45min): si >10 spikes acumulados → hora agotada, esperar siguiente.
+            """
+            _acum = _get_hour_spike_count()
+            _min  = (now % 3600.0) / 60.0
+            if _min < 30 and _acum > 7:
+                return False   # Q1+Q2 quemado
+            if _min >= 45 and _acum > 10:
+                return False   # Q4 agotado
+            return True
+
         # ── Helper: drought gate para STAKE_1 — decide S1/S10/S20 ────────────
         # Se llama cuando STAKE_1 termina con <2 spikes en el contrato.
         # Usa el minuto actual de la hora y los spikes acumulados.
@@ -824,6 +864,8 @@ class EntradaDiego:
                 return "STAKE_1",  BURST_STAKE1_AMOUNT
             if (_acum_spk == 0 and _min_in_hour >= 25) or (_acum_spk <= 1 and _min_in_hour >= 30):
                 return "STAKE_10", BURST_STAKE10_AMOUNT
+            if not _gap_gate_s20():
+                return "STAKE_1",  BURST_STAKE1_AMOUNT
             return "STAKE_20", BURST_STAKE20_AMOUNT
 
         # ── Helper: gate BUENO para STAKE_40 ─────────────────────────────────
@@ -889,23 +931,56 @@ class EntradaDiego:
                 _cid, _pnl, _spk)
             return
 
-        # ── Timer STAKE_1: 10min ──────────────────────────────────────────────
+        # ── Timer STAKE_1: 6min (normal) o 20min (sequia post-S20 sin spike) ─
+        _s1_dur   = BURST_STAKE1_DROUGHT_S if state.s1_drought_mode else BURST_STAKE1_DURATION_S
+        _s1_label = "20min(sequia)" if state.s1_drought_mode else "6min"
         if (state.burst_phase == "STAKE_1"
-                and now >= state.burst_phase_started_at + BURST_STAKE1_DURATION_S
+                and now >= state.burst_phase_started_at + _s1_dur
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
+            state.s1_drought_mode = False  # salir de S1 siempre limpia el modo sequia
             # 1. Cambio de hora: la siguiente apertura se calibra con la hora nueva
             if _hour_changed_since_open():
                 _np, _ns = _next_on_hour_change()
-                await _transition(_np, _ns, f"STAKE_1 10min cambio_hora→{_np}", _cid, _pnl, _spk)
+                await _transition(_np, _ns, f"STAKE_1 {_s1_label} cambio_hora→{_np}", _cid, _pnl, _spk)
                 return
-            # 2. ≥2 spikes → hora activa, ciclo normal
+            # 2. CRASH500: lógica de descarga
+            #    0 spikes → S1 (sin actividad) o S20 si mid-hora fue activa
+            #    1 spike  → S20 (mercado arrancando, hay más por venir)
+            #    2+ spikes → S1 (mercado ya descargó, perseguir = perder)
+            #    + _discharge_s20_gate(): bloquea S20 si Q1+Q2 >7spk o Q4 >10spk
+            if sym == "CRASH500":
+                if _spk >= 2:
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
+                                      f"STAKE_1 {_s1_label} {_spk}spk→S1(descargado)", _cid, _pnl, _spk)
+                elif _spk == 1:
+                    if _discharge_s20_gate():
+                        await _transition("STAKE_20", BURST_STAKE20_AMOUNT,
+                                          f"STAKE_1 {_s1_label} 1spk→S20(arrancando)", _cid, _pnl, _spk)
+                    else:
+                        _h = _get_hour_spike_count(); _m = int((now % 3600.0) / 60.0)
+                        await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
+                                          f"STAKE_1 {_s1_label} 1spk→S1(hora_desc:{_h}spkh,min{_m})", _cid, _pnl, _spk)
+                else:  # 0 spikes
+                    if _crash500_mid_hour_s20() and _discharge_s20_gate():
+                        _h = _get_hour_spike_count(); _m = int((now % 3600.0) / 60.0)
+                        await _transition("STAKE_20", BURST_STAKE20_AMOUNT,
+                                          f"STAKE_1 {_s1_label} 0spk+mid_hora({_h}spkh,min{_m})→S20", _cid, _pnl, _spk)
+                    else:
+                        await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
+                                          f"STAKE_1 {_s1_label} 0spk→S1(seco)", _cid, _pnl, _spk)
+                return
+            # BOOM500: ≥2 spikes → S1; <2 → drought gate + discharge gate
             if _spk >= 2:
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, "STAKE_1 10min ≥2spk→S1", _cid, _pnl, _spk)
-                return
-            # 3. <2 spikes → drought gate decide S1/S10/S20
-            _np, _ns = _drought_gate_s1()
-            await _transition(_np, _ns, f"STAKE_1 10min <2spk→{_np}", _cid, _pnl, _spk)
+                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_1 {_s1_label} ≥2spk→S1", _cid, _pnl, _spk)
+            else:
+                _np, _ns = _drought_gate_s1()
+                if _np == "STAKE_20" and not _discharge_s20_gate():
+                    _h = _get_hour_spike_count(); _m = int((now % 3600.0) / 60.0)
+                    _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+                    await _transition(_np, _ns, f"STAKE_1 {_s1_label} <2spk→S1(hora_desc:{_h}spkh,min{_m})", _cid, _pnl, _spk)
+                else:
+                    await _transition(_np, _ns, f"STAKE_1 {_s1_label} <2spk→{_np}", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_10: 15min (defensivo) ────────────────────────────────
@@ -932,8 +1007,11 @@ class EntradaDiego:
                 else:
                     await _transition("STAKE_10", BURST_STAKE10_AMOUNT, "STAKE_10 15min 1spk+loss→retry", _cid, _pnl, _spk)
             else:
-                # 0 spikes: hora seca, escalar para recuperar
-                await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min 0spk→S20", _cid, _pnl, _spk)
+                # 0 spikes: escalar solo si el mercado está activo (último spike <30min)
+                if _gap_gate_s20():
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min 0spk→S20",           _cid, _pnl, _spk)
+                else:
+                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_10 15min 0spk+gap>30min→S1", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_20: 15min ─────────────────────────────────────────────
@@ -948,23 +1026,34 @@ class EntradaDiego:
                 return
             # 2. Reglas por spikes y resultado
             if _spk >= 3:
-                # 3+ spikes: hora muy activa → ciclo S1
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min ≥3spk→S1", _cid, _pnl, _spk)
-            elif _spk >= 1:
-                # 1-2 spikes: win → S1 (ciclo), loss → retry S20
+                # 3+ spikes: win → S1(20min) para recargar; loss → S1 normal
                 if _pnl > 0:
-                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  f"STAKE_20 15min {_spk}spk+win→S1",    _cid, _pnl, _spk)
+                    state.s1_drought_mode = True
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min ≥3spk+win→S1(20min)", _cid, _pnl, _spk)
                 else:
-                    if _s40_bueno_gate():
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min ≥3spk+loss→S1", _cid, _pnl, _spk)
+            elif _spk >= 1:
+                # Win: seguir el cluster — 1spk→S40, 2spk→S20(retry)
+                # Loss: retry S20 si BUENO (BOOM), S1 si CRASH (invertido)
+                if _pnl > 0:
+                    if _spk == 1:
+                        await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 1spk+win→S40", _cid, _pnl, _spk)
+                    else:
+                        await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min {_spk}spk+win→S20(cluster)", _cid, _pnl, _spk)
+                else:
+                    if _s40_bueno_gate() and sym != "CRASH500":
                         await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_20 15min {_spk}spk+loss+BUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
                     else:
-                        await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min {_spk}spk+loss+noBUENO({_s40_gate_label()})→S1", _cid, _pnl, _spk)
+                        _tag = "CRASH_inv" if sym == "CRASH500" else f"noBUENO({_s40_gate_label()})"
+                        await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min {_spk}spk+loss+{_tag}→S1", _cid, _pnl, _spk)
             else:
-                # 0 spikes: único camino a STAKE_40 — solo si la hora proyecta BUENO
-                if _s40_bueno_gate():
+                # 0 spikes: único camino a STAKE_40 — solo si hora BUENO y mercado activo
+                if _s40_bueno_gate() and _gap_gate_s40():
                     await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 15min 0spk+BUENO({_s40_gate_label()})→S40", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min 0spk+noBUENO({_s40_gate_label()})→S1", _cid, _pnl, _spk)
+                    _why = "noBUENO" if not _s40_bueno_gate() else f"gap>15min"
+                    state.s1_drought_mode = True  # S20 sin spike → S1 extendido 20min
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 15min 0spk+{_why}({_s40_gate_label()})→S1(sequia)", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_40: 15min ─────────────────────────────────────────────
@@ -981,10 +1070,11 @@ class EntradaDiego:
             if _pnl > 0:
                 await _transition("STAKE_1", BURST_STAKE1_AMOUNT, "STAKE_40 15min profit+→S1", _cid, _pnl, _spk)
             else:
-                if _s40_bueno_gate():
+                if _s40_bueno_gate() and _gap_gate_s40():
                     await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_40 15min profit-+BUENO({_s40_gate_label()})→retry", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_40 15min profit-+noBUENO({_s40_gate_label()})→S20", _cid, _pnl, _spk)
+                    _why = "noBUENO" if not _s40_bueno_gate() else "gap>15min"
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_40 15min profit-+{_why}({_s40_gate_label()})→S1", _cid, _pnl, _spk)
             return
 
         # ── Cerrado externamente por broker → aplica misma regla de spikes ──────
@@ -1009,17 +1099,29 @@ class EntradaDiego:
 
             # 2. Reglas por fase
             if _phase == "STAKE_1":
-                _elapsed = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
-                if _elapsed < BURST_STAKE1_DURATION_S:
-                    # DPM cerró antes de los 10min → reabre STAKE_1, preserva el timer original
+                _elapsed   = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
+                _s1_dur_bc = BURST_STAKE1_DROUGHT_S if state.s1_drought_mode else BURST_STAKE1_DURATION_S
+                if _elapsed < _s1_dur_bc:
+                    # DPM cerró antes del timer → reabre STAKE_1, preserva el timer original
                     _LOGGER.info("[ENTRADA_DIEGO] %s broker close STAKE_1 prematuro %.0fs/<%.0fs → reabre sin resetear timer",
-                                 sym, _elapsed, BURST_STAKE1_DURATION_S)
+                                 sym, _elapsed, _s1_dur_bc)
                     state.burst_phase = "STAKE_1"
                     return  # burst_phase_started_at NO se toca → el timer sigue desde el inicio original
-                if _spk >= 2:
-                    next_phase = "STAKE_1"
+                state.s1_drought_mode = False  # cierre completo de S1 → limpia modo sequia
+                if sym == "CRASH500":
+                    if _spk >= 2:
+                        next_phase = "STAKE_1"          # descargado — no perseguir
+                    elif _spk == 1:
+                        next_phase = "STAKE_20" if _discharge_s20_gate() else "STAKE_1"
+                    else:
+                        next_phase = "STAKE_20" if (_crash500_mid_hour_s20() and _discharge_s20_gate()) else "STAKE_1"
                 else:
-                    next_phase, _ = _drought_gate_s1()
+                    if _spk >= 2:
+                        next_phase = "STAKE_1"
+                    else:
+                        next_phase, _ = _drought_gate_s1()
+                        if next_phase == "STAKE_20" and not _discharge_s20_gate():
+                            next_phase = "STAKE_1"
             elif _phase == "STAKE_10":
                 _elapsed = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
                 if _elapsed < BURST_STAKE10_DURATION_S:
@@ -1033,19 +1135,29 @@ class EntradaDiego:
                 elif _spk == 1:
                     next_phase = "STAKE_20" if _pnl > 0 else "STAKE_10"
                 else:
-                    next_phase = "STAKE_20"
+                    next_phase = "STAKE_20" if _gap_gate_s20() else "STAKE_1"
             elif _phase == "STAKE_20":
                 if _spk >= 3:
+                    if _pnl > 0:
+                        state.s1_drought_mode = True  # 3+spk win → S1(20min) para recargar
                     next_phase = "STAKE_1"
                 elif _spk >= 1:
-                    next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
-                else:  # 0 spikes: único camino a S40 — solo si hora proyecta BUENO
-                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_1"
+                    if _pnl > 0:
+                        next_phase = "STAKE_40" if _spk == 1 else "STAKE_20"
+                    else:
+                        # CRASH500 invertido: loss siempre S1; BOOM: S20 retry
+                        next_phase = "STAKE_1" if sym == "CRASH500" else "STAKE_20"
+                else:  # 0 spikes: único camino a S40 — solo si hora BUENO y mercado activo
+                    if _s40_bueno_gate() and _gap_gate_s40():
+                        next_phase = "STAKE_40"
+                    else:
+                        next_phase = "STAKE_1"
+                        state.s1_drought_mode = True  # broker S20 sin spike → S1 extendido 20min
             elif _phase == "STAKE_40":
                 if _pnl > 0:
                     next_phase = "STAKE_1"
                 else:
-                    next_phase = "STAKE_40" if _s40_bueno_gate() else "STAKE_20"
+                    next_phase = "STAKE_40" if (_s40_bueno_gate() and _gap_gate_s40()) else "STAKE_1"
             else:
                 next_phase = "STAKE_1"
             _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f spk=%d → %s",
