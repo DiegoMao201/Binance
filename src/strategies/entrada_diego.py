@@ -242,6 +242,7 @@ class _SymState:
     burst_phase:            str   = "IDLE"   # IDLE | COOLDOWN | STAKE_20 | STAKE_40
     burst_phase_started_at: float = 0.0     # epoch inicio de la fase actual
     s1_drought_mode:        bool  = False   # True = S1 extendido 20min post-S20 sin spike
+    s20_consec_losses:      int   = 0       # losses consecutivos en S20 (2 → drought S1 20min)
     hour_spike_count_500:  int   = 0        # spikes en la hora UTC actual (gate STAKE_40)
     hour_start_ts_500:     float = 0.0      # inicio de la hora UTC vigente (epoch redondeado a hora)
     contract_start_hour_ts_500: float = 0.0  # hora UTC (epoch) cuando se abrió el contrato actual
@@ -292,6 +293,7 @@ class _SymState:
             "burst_phase":                 self.burst_phase,
             "burst_phase_started_at": round(self.burst_phase_started_at, 3),
             "s1_drought_mode":        self.s1_drought_mode,
+            "s20_consec_losses":      self.s20_consec_losses,
             "burst_stake1_s":         BURST_STAKE1_DURATION_S,
             "burst_stake1_drought_s": BURST_STAKE1_DROUGHT_S,
             "burst_stake20_s":        BURST_STAKE20_DURATION_S,
@@ -1024,7 +1026,18 @@ class EntradaDiego:
                 _np, _ns = _next_on_hour_change()
                 await _transition(_np, _ns, f"STAKE_20 15min cambio_hora→{_np}", _cid, _pnl, _spk)
                 return
-            # 2. Reglas por spikes y resultado
+            # 2. Contador de losses consecutivos en S20
+            if _pnl > 0:
+                state.s20_consec_losses = 0
+            else:
+                state.s20_consec_losses += 1
+                if state.s20_consec_losses >= 2:
+                    state.s20_consec_losses = 0
+                    state.s1_drought_mode = True
+                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
+                                      f"STAKE_20 15min loss×2→S1(20min)", _cid, _pnl, _spk)
+                    return
+            # 3. Reglas por spikes y resultado
             if _spk >= 3:
                 # 3+ spikes: win → S1(20min) para recargar; loss → S1 normal
                 if _pnl > 0:
@@ -1137,7 +1150,17 @@ class EntradaDiego:
                 else:
                     next_phase = "STAKE_20" if _gap_gate_s20() else "STAKE_1"
             elif _phase == "STAKE_20":
-                if _spk >= 3:
+                # Contador de losses consecutivos en S20
+                if _pnl > 0:
+                    state.s20_consec_losses = 0
+                else:
+                    state.s20_consec_losses += 1
+                # 2 losses seguidos → drought S1 20min (override todo)
+                if _pnl <= 0 and state.s20_consec_losses >= 2:
+                    state.s20_consec_losses = 0
+                    state.s1_drought_mode = True
+                    next_phase = "STAKE_1"
+                elif _spk >= 3:
                     if _pnl > 0:
                         state.s1_drought_mode = True  # 3+spk win → S1(20min) para recargar
                     next_phase = "STAKE_1"
