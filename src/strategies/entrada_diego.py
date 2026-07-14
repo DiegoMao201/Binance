@@ -1104,6 +1104,12 @@ class EntradaDiego:
 
             # 1. Cambio de hora: re-calibrar con la nueva hora antes que cualquier otra regla
             if _hour_changed_since_open():
+                # Bug-fix: si S1 cerró completo durante el cambio de hora, limpiar sequía igual que en el timer
+                if _phase == "STAKE_1":
+                    _el_hc   = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
+                    _dur_hc  = BURST_STAKE1_DROUGHT_S if state.s1_drought_mode else BURST_STAKE1_DURATION_S
+                    if _el_hc >= _dur_hc:
+                        state.s1_drought_mode = False
                 _np, _ = _next_on_hour_change()
                 _LOGGER.info("[ENTRADA_DIEGO] %s broker close %s pnl=%.4f cambio_hora→%s", sym, _phase, _pnl, _np)
                 state.burst_phase            = _np
@@ -1168,8 +1174,14 @@ class EntradaDiego:
                     if _pnl > 0:
                         next_phase = "STAKE_40" if _spk == 1 else "STAKE_20"
                     else:
-                        # CRASH500 invertido: loss siempre S1; BOOM: S20 retry
-                        next_phase = "STAKE_1" if sym == "CRASH500" else "STAKE_20"
+                        # CRASH500 invertido: loss siempre S1
+                        # BOOM500: S20 retry solo si BUENO (igual que timer path)
+                        if sym == "CRASH500":
+                            next_phase = "STAKE_1"
+                        elif _s40_bueno_gate():
+                            next_phase = "STAKE_20"
+                        else:
+                            next_phase = "STAKE_1"
                 else:  # 0 spikes: único camino a S40 — solo si hora BUENO y mercado activo
                     if _s40_bueno_gate() and _gap_gate_s40():
                         next_phase = "STAKE_40"
