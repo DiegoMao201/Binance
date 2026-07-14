@@ -995,9 +995,9 @@ class EntradaDiego:
                 return
             # 2. Reglas por spikes y resultado
             if _spk >= 2:
-                # 2+ spikes: hora activa — si ganó vuelve a ciclo S1; si perdió sube a S20
+                # 2+ spikes: hora activa — win/loss ambos escalan a S20 (buen momento)
                 if _pnl > 0:
-                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_10 15min ≥2spk+win→S1",  _cid, _pnl, _spk)
+                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min ≥2spk+win→S20",  _cid, _pnl, _spk)
                 else:
                     await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min ≥2spk+loss→S20", _cid, _pnl, _spk)
             elif _spk == 1:
@@ -1131,7 +1131,7 @@ class EntradaDiego:
                     state.burst_phase = "STAKE_10"
                     return
                 if _spk >= 2:
-                    next_phase = "STAKE_1" if _pnl > 0 else "STAKE_20"
+                    next_phase = "STAKE_20"  # win o loss: buen momento → escalar
                 elif _spk == 1:
                     next_phase = "STAKE_20" if _pnl > 0 else "STAKE_10"
                 else:

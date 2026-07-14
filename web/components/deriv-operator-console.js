@@ -685,7 +685,7 @@ function EntradaDiegoSection({ symbol }) {
       ? _hrChangeNext
         ? _hrChangeNext
         : spikes_in_contract >= 2
-          ? (current_profit > 0 ? "→ $1 (2+spk win)" : "→ $20 (2+spk loss)")
+          ? "→ $20 (2+spk, buen momento)"
           : spikes_in_contract === 1
           ? (current_profit > 0 ? "→ $20 (1spk win)" : "→ $10 retry (1spk loss)")
           : "→ $20 (0spk, escala)"
@@ -852,7 +852,9 @@ function EntradaDiegoSection({ symbol }) {
             {burst_phase === "STAKE_10" && (
               <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
                 <span style={{ color: "#fb923c", fontWeight: 700 }}>S10 15m:</span>
-                {" 0spk→S20 · 1spk+win→S20 · 1spk+loss→retry · 2+spk+win→S1 · 2+spk+loss→S20"}
+                {" 0spk→S20 · 1spk+win→S20 · 1spk+loss→retry · "}
+                <span style={{ color: "#22d3a3", fontWeight: 700 }}>2+spk+win→S20</span>
+                {" · 2+spk+loss→S20"}
               </div>
             )}
             {burst_phase === "STAKE_20" && (
