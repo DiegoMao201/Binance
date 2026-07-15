@@ -119,6 +119,7 @@ BURST_STAKE20_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_S",    "90
 BURST_STAKE40_AMOUNT     = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE40",    "40.0"))
 BURST_STAKE40_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE40_S",    "900"))   # 15min
 BURST_STAKE40_MAX_HOUR_SPIKES = int(os.getenv("ENTRADA_DIEGO_BURST_S40_MAX_HOUR_SPKS", "5"))  # gate: máx spikes en hora UTC para abrir $40
+HOUR_PROFIT_PROTECT_USD      = float(os.getenv("ENTRADA_DIEGO_HOUR_PROFIT_PROTECT", "4.0")) # protección: ≥$4 ganado en la hora → parar hasta siguiente hora
 
 # PnL global acumulado: cuando alcanza GLOBAL_PNL_TARGET → pausa GLOBAL_PAUSE_HOURS horas
 # PnL suma todos los cierres de BOOM500+CRASH500 (positivos y negativos)
@@ -245,6 +246,7 @@ class _SymState:
     s1_drought_mode:        bool  = False   # True = S1 extendido 20min post-S20 sin spike
     s20_consec_losses:      int   = 0       # losses consecutivos en S20 (2 → drought S1 20min)
     s20_crash500_wins:      int   = 0       # wins consecutivos en S20 CRASH500 (2 → reset a S1)
+    hour_pnl_500:           float = 0.0     # PnL acumulado en la hora UTC actual (protección $4)
     hour_spike_count_500:  int   = 0        # spikes en la hora UTC actual (gate STAKE_40)
     hour_start_ts_500:     float = 0.0      # inicio de la hora UTC vigente (epoch redondeado a hora)
     contract_start_hour_ts_500: float = 0.0  # hora UTC (epoch) cuando se abrió el contrato actual
@@ -297,6 +299,8 @@ class _SymState:
             "s1_drought_mode":        self.s1_drought_mode,
             "s20_consec_losses":      self.s20_consec_losses,
             "s20_crash500_wins":      self.s20_crash500_wins,
+            "hour_pnl_500":           round(self.hour_pnl_500, 4),
+            "hour_profit_protect_usd": HOUR_PROFIT_PROTECT_USD,
             "burst_stake1_s":           BURST_STAKE1_DURATION_S,
             "burst_stake1_drought_s":   BURST_STAKE1_DROUGHT_S,
             "burst_stake1_crash500_s":  BURST_STAKE1_CRASH500_S,
@@ -694,8 +698,9 @@ class EntradaDiego:
             # Contador de spikes por hora UTC (gate STAKE_40)
             _cur_hour_start = int(_last_spk_ts // 3600) * 3600.0
             if state.hour_start_ts_500 != _cur_hour_start:
-                state.hour_start_ts_500   = _cur_hour_start
+                state.hour_start_ts_500    = _cur_hour_start
                 state.hour_spike_count_500 = 0
+                state.hour_pnl_500         = 0.0
             state.hour_spike_count_500 += 1
             if state.burst_phase in ("STAKE_1", "STAKE_10", "STAKE_20", "STAKE_40") and state.contract_id is not None:
                 state.spikes_in_contract_500 += 1
@@ -728,6 +733,19 @@ class EntradaDiego:
         # ── Sin contrato → abrir el stake del nivel actual ────────────────────
         if state.contract_id is None:
             if now < state.broker_blocked_until_500:
+                return
+            # ── HOUR_PROFIT_PROTECT: ≥$4 ganado esta hora → esperar siguiente hora ──
+            _cur_hour = int(now // 3600) * 3600.0
+            if _cur_hour != state.hour_start_ts_500:
+                state.hour_pnl_500 = 0.0  # nueva hora → reset acumulado
+            if state.hour_pnl_500 >= HOUR_PROFIT_PROTECT_USD:
+                _wait_s = int((_cur_hour + 3600.0) - now)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s HOUR_PROFIT_PROTECT +$%.2f≥$%.0f → pausa %ds (siguiente hora)",
+                    sym, state.hour_pnl_500, HOUR_PROFIT_PROTECT_USD, _wait_s,
+                )
+                state.burst_phase            = "STAKE_1"
+                state.burst_phase_started_at = 0.0
                 return
             if state.burst_phase not in ("STAKE_1", "STAKE_10", "STAKE_20", "STAKE_40"):
                 state.burst_phase = "STAKE_20" if sym == "CRASH500" else "STAKE_1"
@@ -766,6 +784,7 @@ class EntradaDiego:
                 _LOGGER.error("[ENTRADA_DIEGO] %s SL close error: %s", sym, exc)
             state.last_close_profit = _pnl
             self._add_global_pnl(sym, _pnl, now)
+            state.hour_pnl_500 += _pnl
             _sl_next = "STAKE_40" if state.burst_phase == "STAKE_40" else "STAKE_1"
             _LOGGER.warning("[ENTRADA_DIEGO] %s SL_HARD pnl=%.4f fase=%s → %s", sym, _pnl, state.burst_phase, _sl_next)
             state.burst_phase            = _sl_next
@@ -785,6 +804,7 @@ class EntradaDiego:
                 _LOGGER.error("[ENTRADA_DIEGO] %s %s close error: %s", sym, label, exc)
             state.last_close_profit = _pnl
             self._add_global_pnl(sym, _pnl, now)
+            state.hour_pnl_500 += _pnl
             _LOGGER.info("[ENTRADA_DIEGO] %s %s pnl=%.4f spk=%d → %s", sym, label, _pnl, _spk, next_phase)
             state.burst_phase = next_phase
             _t0 = time.time()
@@ -803,6 +823,7 @@ class EntradaDiego:
             if state.hour_start_ts_500 != _cur:
                 state.hour_start_ts_500    = _cur
                 state.hour_spike_count_500 = 0
+                state.hour_pnl_500         = 0.0
             return state.hour_spike_count_500
 
         # ── Helper: ¿el contrato cruzó un límite de hora UTC? ────────────────
@@ -1120,6 +1141,7 @@ class EntradaDiego:
             state.peak_profit_500        = 0.0
             state.spikes_in_contract_500 = 0
             self._add_global_pnl(sym, _pnl, now)
+            state.hour_pnl_500 += _pnl
 
             # 1. Cambio de hora: solo BOOM500 — CRASH500 ignora hora (PNRG)
             if sym != "CRASH500" and _hour_changed_since_open():

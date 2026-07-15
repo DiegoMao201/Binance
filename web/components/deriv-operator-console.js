@@ -572,6 +572,8 @@ function EntradaDiegoSection({ symbol }) {
     hour_spike_count_500 = 0,
     contract_start_hour_ts_500 = 0,
     s20_crash500_wins = 0,
+    hour_pnl_500 = 0,
+    hour_profit_protect_usd = 4,
   } = edState;
 
   const nowSec = now / 1000;
@@ -806,6 +808,29 @@ function EntradaDiegoSection({ symbol }) {
               {_fmtS(phaseRem)}
             </span>
           </div>
+
+          {/* Protección horaria */}
+          {(() => {
+            const _protected = hour_pnl_500 >= hour_profit_protect_usd;
+            const _pnlColor  = _protected ? "#ff5d6c"
+              : hour_pnl_500 >= hour_profit_protect_usd * 0.7 ? "#f59e0b"
+              : "#22d3a3";
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>Esta hora:</span>
+                <span style={{ fontSize: 9, fontWeight: 700, color: _pnlColor }}>
+                  {hour_pnl_500 >= 0 ? "+" : ""}{hour_pnl_500.toFixed(2)}
+                </span>
+                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>/ ${hour_profit_protect_usd.toFixed(0)}</span>
+                {_protected && (
+                  <span style={{
+                    fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
+                    background: "#ff5d6c25", color: "#ff5d6c", marginLeft: 2,
+                  }}>⏸ HORA PROTEGIDA</span>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Diagrama de máquina: S1 → S10 → S20 → S40 */}
           <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4 }}>
