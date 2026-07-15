@@ -567,7 +567,7 @@ function EntradaDiegoSection({ symbol }) {
     spikes_in_contract = 0,
     burst_phase = "STAKE_1", burst_phase_started_at = 0,
     s1_drought_mode = false,
-    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
+    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 600, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
     burst_stake1_amount = 1, burst_stake10_amount = 10, burst_stake20_amount = 20, burst_stake40_amount = 40,
     hour_spike_count_500 = 0,
     contract_start_hour_ts_500 = 0,
@@ -631,7 +631,8 @@ function EntradaDiegoSection({ symbol }) {
   const _fmtS     = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec2 - burst_phase_started_at) : 0;
 
-  const phaseTotal = burst_phase === "STAKE_1"  ? (s1_drought_mode ? burst_stake1_drought_s : burst_stake1_s)
+  const isCrash500 = symbol === "CRASH500";
+  const phaseTotal = burst_phase === "STAKE_1"  ? (isCrash500 ? burst_stake1_crash500_s : (s1_drought_mode ? burst_stake1_drought_s : burst_stake1_s))
     : burst_phase === "STAKE_10" ? burst_stake10_s
     : burst_phase === "STAKE_20" ? burst_stake20_s
     : burst_phase === "STAKE_40" ? burst_stake40_s
@@ -667,7 +668,15 @@ function EntradaDiegoSection({ symbol }) {
   const _hrChangeNext = hourChanged
     ? (hour_spike_count_500 === 0 ? "→ $1 (nueva hora 0spk)" : hour_spike_count_500 === 1 ? "→ $10 (nueva hora 1spk)" : `→ $20 (nueva hora ${hour_spike_count_500}spk)`)
     : null;
-  const nextHint = burst_phase === "STAKE_1"
+  // CRASH500: lógica simple solo win/loss
+  const nextHintCrash = burst_phase === "STAKE_1"
+    ? (_hrChangeNext ? _hrChangeNext : current_profit > 0 ? "→ $20 (win, vuelve)" : "→ $1 retry (loss, espera)")
+    : burst_phase === "STAKE_20"
+    ? (_hrChangeNext ? _hrChangeNext : current_profit > 0 ? "→ $20 (win, sigue)" : "→ $1 10min (loss, recovery)")
+    : "iniciando…";
+
+  // BOOM500: lógica completa con spikes
+  const nextHintBoom = burst_phase === "STAKE_1"
     ? s1_drought_mode
       ? spikes_in_contract >= 1
         ? `→ $20 al expirar (spike llegó, sequía terminó)`
@@ -701,9 +710,7 @@ function EntradaDiegoSection({ symbol }) {
                 ? spikes_in_contract === 1
                   ? `→ $40 cluster (1spk+win)`
                   : `→ $20 cluster (${spikes_in_contract}spk+win)`
-                : (symbol === "CRASH500"
-                    ? `→ $1 (${spikes_in_contract}spk+loss CRASH)`
-                    : s40BuenoGate ? `→ $20 retry BOOM+BUENO` : `→ $1 (${spikes_in_contract}spk+loss noBUENO)`))
+                : s40BuenoGate ? `→ $20 retry+BUENO` : `→ $1 (${spikes_in_contract}spk+loss noBUENO)`)
             : s40BuenoGate
             ? `0spk+BUENO (${s40GateLabel}) → $40`
             : `0spk+noBUENO (${s40GateLabel}) → $1 20min SEQUÍA`
@@ -717,8 +724,10 @@ function EntradaDiegoSection({ symbol }) {
             : `profit- → noBUENO (${s40GateLabel}) → $1`
         : "iniciando…";
 
+  const nextHint = isCrash500 ? nextHintCrash : nextHintBoom;
+
   const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
-  const minLabel   = burst_phase === "STAKE_1" ? (s1_drought_mode ? "20min·SEQUÍA" : "6min") : "15min";
+  const minLabel   = burst_phase === "STAKE_1" ? (isCrash500 ? "10min" : (s1_drought_mode ? "20min·SEQUÍA" : "6min")) : "15min";
 
   const _displayColor = !is1000 ? phaseColor : color;
   return (
@@ -766,8 +775,11 @@ function EntradaDiegoSection({ symbol }) {
           : nextHint.includes("$10") ? "#fb923c"
           : nextHint.includes("cambio hora") ? "#62d4ff"
           : phaseColor;
-        // Diagrama de máquina: S1 → S10 → S20 → S40
-        const _phases = [
+        // Diagrama de máquina
+        const _phases = isCrash500 ? [
+          { id:"STAKE_20", label:"$20", dur:"15m",  color:"#22d3a3" },
+          { id:"STAKE_1",  label:"$1",  dur:"10m",  color:"#f59e0b" },
+        ] : [
           { id:"STAKE_1",  label:"$1",  dur: s1_drought_mode ? "20m⚡" : "6m", color: s1_drought_mode ? "#ff8c42" : "#f59e0b" },
           { id:"STAKE_10", label:"$10", dur:"15m", color:"#fb923c" },
           { id:"STAKE_20", label:"$20", dur:"15m", color:"#22d3a3" },
@@ -800,25 +812,40 @@ function EntradaDiegoSection({ symbol }) {
                   {p.label}<span style={{ fontWeight: 400, fontSize: 8, opacity: 0.7 }}> {p.dur}</span>
                 </div>
                 {i < _phases.length - 1 && (
-                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 9 }}>→</span>
+                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 9 }}>{isCrash500 ? "⇄" : "→"}</span>
                 )}
               </React.Fragment>
             ))}
-            <span style={{ marginLeft: "auto", fontSize: 8, color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-              Gate S40: {s40GateLabel} — {s40BuenoGate ? "BUENO ✓" : "NO BUENO ✗"}
-            </span>
+            {!isCrash500 && (
+              <span style={{ marginLeft: "auto", fontSize: 8, color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                Gate S40: {s40GateLabel} — {s40BuenoGate ? "BUENO ✓" : "NO BUENO ✗"}
+              </span>
+            )}
           </div>
 
-          {/* Spikes + siguiente acción */}
+          {/* Siguiente acción */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
             <span style={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>
-              {spikes_in_contract} spk contrato
-              {" · "}
-              <span style={{ color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-                {_hLabel}: {s40GateLabel}
-              </span>
-              {hourChanged && (
-                <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
+              {isCrash500 ? (
+                <>
+                  {current_profit > 0
+                    ? <span style={{ color: "#22d3a3", fontWeight: 700 }}>profit+</span>
+                    : <span style={{ color: "#ff5d6c", fontWeight: 700 }}>profit-</span>}
+                  {hourChanged && (
+                    <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
+                  )}
+                </>
+              ) : (
+                <>
+                  {spikes_in_contract} spk contrato
+                  {" · "}
+                  <span style={{ color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                    {_hLabel}: {s40GateLabel}
+                  </span>
+                  {hourChanged && (
+                    <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
+                  )}
+                </>
               )}
             </span>
             <span style={{ fontSize: 9, color: _nextColor, fontWeight: 600 }}>{nextHint}</span>
@@ -826,58 +853,83 @@ function EntradaDiegoSection({ symbol }) {
 
           {/* Reglas compactas */}
           <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 3, paddingTop: 3 }}>
-            {burst_phase === "STAKE_1" && !s1_drought_mode && (
-              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-                <span style={{ color: "#f59e0b", fontWeight: 700 }}>S1 6m:</span>
-                {" ≥2spk→S1(desc) · 1spk→S20 · "}
-                <span style={{ color: _droughtLevel==="S1_STOP" ? "#ff5d6c" : _droughtLevel==="S10" ? "#fb923c" : "rgba(255,255,255,0.4)" }}>
-                  {_droughtLevel==="S1_STOP" ? `0spk min${Math.floor(_minInHour)}≥30→S1` : _droughtLevel==="S10" ? `0spk min${Math.floor(_minInHour)}≥25→S10` : "0spk→S20 normal"}
-                </span>
-                {" · "}
-                <span style={{ color: "#62d4ff" }}>cambio hora: 0→S1 1→S10 2+→S20</span>
-              </div>
-            )}
-            {burst_phase === "STAKE_1" && s1_drought_mode && (
-              <div style={{ fontSize: 8, lineHeight: "13px" }}>
-                <span style={{ color: "#ff8c42", fontWeight: 700 }}>⚡ MODO SEQUÍA 20min:</span>
-                <span style={{ color: "rgba(255,255,255,0.55)" }}> S20 cerró sin spike</span>
-                <br />
-                <span style={{ color: spikes_in_contract >= 1 ? "#22d3a3" : "rgba(255,255,255,0.4)" }}>
-                  {spikes_in_contract >= 1
-                    ? `✓ spike llegó (${spikes_in_contract}spk) → al expirar sube a $20`
-                    : "sin spike aún · al expirar → vuelve a S1(6min)"}
-                </span>
-              </div>
-            )}
-            {burst_phase === "STAKE_10" && (
-              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-                <span style={{ color: "#fb923c", fontWeight: 700 }}>S10 15m:</span>
-                {" 0spk→S20 · 1spk+win→S20 · 1spk+loss→retry · "}
-                <span style={{ color: "#22d3a3", fontWeight: 700 }}>2+spk+win→S20</span>
-                {" · 2+spk+loss→S20"}
-              </div>
-            )}
-            {burst_phase === "STAKE_20" && (
-              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-                <span style={{ color: "#22d3a3", fontWeight: 700 }}>S20 15m — WIN:</span>
-                <span style={{ color: "#a78bfa", fontWeight: 700 }}> 1spk→$40</span>
-                {" · "}
-                <span style={{ color: "#22d3a3" }}>2spk→$20 retry</span>
-                {" · "}
-                <span style={{ color: "#f59e0b" }}>3+spk→$1 20min</span>
-                <br />
-                <span style={{ color: "#22d3a3", fontWeight: 700 }}>LOSS:</span>
-                {" 1-2spk+BOOM→$20 · 1-2spk+CRASH→$1 · "}
-                <span style={{ color: s40BuenoGate ? "#a78bfa" : "#ff8c42", fontWeight: 700 }}>
-                  0spk+BUENO→$40 · 0spk+noBUENO→$1 20min
-                </span>
-              </div>
-            )}
-            {burst_phase === "STAKE_40" && (
-              <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-                <span style={{ color: "#a78bfa", fontWeight: 700 }}>S40 15m:</span>
-                {" profit+→$1 · profit-+BUENO→retry $40 · profit-+noBUENO→$1"}
-              </div>
+            {isCrash500 ? (
+              <>
+                {burst_phase === "STAKE_20" && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#22d3a3", fontWeight: 700 }}>$20 15m:</span>
+                    {"  "}
+                    <span style={{ color: "#22d3a3" }}>win → $20 (sigue)</span>
+                    {"  ·  "}
+                    <span style={{ color: "#ff5d6c" }}>loss → $1 10min (recovery)</span>
+                  </div>
+                )}
+                {burst_phase === "STAKE_1" && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 10m:</span>
+                    {"  "}
+                    <span style={{ color: "#22d3a3" }}>win → $20 (vuelve)</span>
+                    {"  ·  "}
+                    <span style={{ color: "#ff5d6c" }}>loss → $1 retry</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {burst_phase === "STAKE_1" && !s1_drought_mode && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>S1 6m:</span>
+                    {" ≥2spk→S1(desc) · 1spk→S20 · "}
+                    <span style={{ color: _droughtLevel==="S1_STOP" ? "#ff5d6c" : _droughtLevel==="S10" ? "#fb923c" : "rgba(255,255,255,0.4)" }}>
+                      {_droughtLevel==="S1_STOP" ? `0spk min${Math.floor(_minInHour)}≥30→S1` : _droughtLevel==="S10" ? `0spk min${Math.floor(_minInHour)}≥25→S10` : "0spk→S20 normal"}
+                    </span>
+                    {" · "}
+                    <span style={{ color: "#62d4ff" }}>cambio hora: 0→S1 1→S10 2+→S20</span>
+                  </div>
+                )}
+                {burst_phase === "STAKE_1" && s1_drought_mode && (
+                  <div style={{ fontSize: 8, lineHeight: "13px" }}>
+                    <span style={{ color: "#ff8c42", fontWeight: 700 }}>⚡ MODO SEQUÍA 20min:</span>
+                    <span style={{ color: "rgba(255,255,255,0.55)" }}> S20 cerró sin spike</span>
+                    <br />
+                    <span style={{ color: spikes_in_contract >= 1 ? "#22d3a3" : "rgba(255,255,255,0.4)" }}>
+                      {spikes_in_contract >= 1
+                        ? `✓ spike llegó (${spikes_in_contract}spk) → al expirar sube a $20`
+                        : "sin spike aún · al expirar → vuelve a S1(6min)"}
+                    </span>
+                  </div>
+                )}
+                {burst_phase === "STAKE_10" && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#fb923c", fontWeight: 700 }}>S10 15m:</span>
+                    {" 0spk→S20 · 1spk+win→S20 · 1spk+loss→retry · "}
+                    <span style={{ color: "#22d3a3", fontWeight: 700 }}>2+spk+win→S20</span>
+                    {" · 2+spk+loss→S20"}
+                  </div>
+                )}
+                {burst_phase === "STAKE_20" && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#22d3a3", fontWeight: 700 }}>S20 15m — WIN:</span>
+                    <span style={{ color: "#a78bfa", fontWeight: 700 }}> 1spk→$40</span>
+                    {" · "}
+                    <span style={{ color: "#22d3a3" }}>2spk→$20 retry</span>
+                    {" · "}
+                    <span style={{ color: "#f59e0b" }}>3+spk→$1 20min</span>
+                    <br />
+                    <span style={{ color: "#22d3a3", fontWeight: 700 }}>LOSS:</span>
+                    {" 1-2spk+BOOM→$20 · "}
+                    <span style={{ color: s40BuenoGate ? "#a78bfa" : "#ff8c42", fontWeight: 700 }}>
+                      0spk+BUENO→$40 · 0spk+noBUENO→$1 20min
+                    </span>
+                  </div>
+                )}
+                {burst_phase === "STAKE_40" && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#a78bfa", fontWeight: 700 }}>S40 15m:</span>
+                    {" profit+→$1 · profit-+BUENO→retry $40 · profit-+noBUENO→$1"}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
