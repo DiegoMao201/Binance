@@ -567,7 +567,7 @@ function EntradaDiegoSection({ symbol }) {
     spikes_in_contract = 0,
     burst_phase = "STAKE_1", burst_phase_started_at = 0,
     s1_drought_mode = false,
-    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 600, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
+    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 420, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
     burst_stake1_amount = 1, burst_stake10_amount = 10, burst_stake20_amount = 20, burst_stake40_amount = 40,
     hour_spike_count_500 = 0,
     contract_start_hour_ts_500 = 0,
@@ -727,7 +727,7 @@ function EntradaDiegoSection({ symbol }) {
   const nextHint = isCrash500 ? nextHintCrash : nextHintBoom;
 
   const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
-  const minLabel   = burst_phase === "STAKE_1" ? (isCrash500 ? "10min" : (s1_drought_mode ? "20min·SEQUÍA" : "6min")) : "15min";
+  const minLabel   = burst_phase === "STAKE_1" ? (isCrash500 ? "7min" : (s1_drought_mode ? "20min·SEQUÍA" : "6min")) : "15min";
 
   const _displayColor = !is1000 ? phaseColor : color;
   return (
@@ -778,7 +778,7 @@ function EntradaDiegoSection({ symbol }) {
         // Diagrama de máquina
         const _phases = isCrash500 ? [
           { id:"STAKE_20", label:"$20", dur:"15m",  color:"#22d3a3" },
-          { id:"STAKE_1",  label:"$1",  dur:"10m",  color:"#f59e0b" },
+          { id:"STAKE_1",  label:"$1",  dur:"7m",   color:"#f59e0b" },
         ] : [
           { id:"STAKE_1",  label:"$1",  dur: s1_drought_mode ? "20m⚡" : "6m", color: s1_drought_mode ? "#ff8c42" : "#f59e0b" },
           { id:"STAKE_10", label:"$10", dur:"15m", color:"#fb923c" },
