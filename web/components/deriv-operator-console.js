@@ -567,11 +567,10 @@ function EntradaDiegoSection({ symbol }) {
     spikes_in_contract = 0,
     burst_phase = "STAKE_1", burst_phase_started_at = 0,
     s1_drought_mode = false,
-    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 600, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
-    burst_stake1_amount = 1, burst_stake10_amount = 10, burst_stake20_amount = 20, burst_stake40_amount = 40,
+    burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 300, burst_stake5_s = 600, burst_stake10_s = 900, burst_stake20_s = 900, burst_stake40_s = 900,
+    burst_stake1_amount = 1, burst_stake5_amount = 5, burst_stake10_amount = 10, burst_stake20_amount = 20, burst_stake40_amount = 40,
     hour_spike_count_500 = 0,
     contract_start_hour_ts_500 = 0,
-    s20_crash500_wins = 0,
     hour_pnl_500 = 0,
     hour_profit_protect_usd = 4,
   } = edState;
@@ -636,6 +635,7 @@ function EntradaDiegoSection({ symbol }) {
 
   const isCrash500 = symbol === "CRASH500";
   const phaseTotal = burst_phase === "STAKE_1"  ? (isCrash500 ? burst_stake1_crash500_s : (s1_drought_mode ? burst_stake1_drought_s : burst_stake1_s))
+    : burst_phase === "STAKE_5"  ? burst_stake5_s
     : burst_phase === "STAKE_10" ? burst_stake10_s
     : burst_phase === "STAKE_20" ? burst_stake20_s
     : burst_phase === "STAKE_40" ? burst_stake40_s
@@ -646,6 +646,7 @@ function EntradaDiegoSection({ symbol }) {
   const phaseColor = burst_phase === "STAKE_40" ? "#a78bfa"
     : burst_phase === "STAKE_20"               ? "#22d3a3"
     : burst_phase === "STAKE_10"               ? "#fb923c"
+    : burst_phase === "STAKE_5"                ? "#fb923c"
     : burst_phase === "STAKE_1"                ? "#f59e0b"
     : "#64748b";
 
@@ -671,19 +672,23 @@ function EntradaDiegoSection({ symbol }) {
   const _hrChangeNext = hourChanged
     ? (hour_spike_count_500 === 0 ? "→ $1 (nueva hora 0spk)" : hour_spike_count_500 === 1 ? "→ $10 (nueva hora 1spk)" : `→ $20 (nueva hora ${hour_spike_count_500}spk)`)
     : null;
-  // CRASH500: lógica spike-gated S1 + consecutive wins S20
+  // CRASH500: escalera $1→$5→$20→$40, S1/S5 siempre escalan, S20 spike-gated
   const nextHintCrash = burst_phase === "STAKE_1"
-    ? (spikes_in_contract >= 3
-        ? `→ $1 retry (${spikes_in_contract}spk, mercado agotado)`
-        : spikes_in_contract >= 1
-        ? `→ $20 al expirar (${spikes_in_contract}spk capturado)`
-        : "→ $1 retry (0spk, espera spike)")
+    ? "→ $5 al expirar (5min, siempre escala)"
+    : burst_phase === "STAKE_5"
+    ? "→ $20 al expirar (10min, siempre escala)"
     : burst_phase === "STAKE_20"
+    ? (spikes_in_contract >= 1 && current_profit > 0
+        ? `→ $40 (${spikes_in_contract}spk+win, escala!)`
+        : spikes_in_contract >= 1
+        ? `→ $1 reset (${spikes_in_contract}spk+loss)`
+        : current_profit > 0
+        ? "→ $1 reset (0spk, sin señal)"
+        : "→ $1 reset (0spk+loss)")
+    : burst_phase === "STAKE_40"
     ? (current_profit > 0
-        ? s20_crash500_wins >= 1
-          ? "→ $1 reset (2do win consecutivo)"
-          : "→ $20 (1er win, sigue)"
-        : "→ $1 10min (loss, recovery)")
+        ? "→ $1 reset (fin ciclo, ganó)"
+        : "→ $1 reset (fin ciclo, perdió)")
     : "iniciando…";
 
   // BOOM500: lógica completa con spikes
@@ -737,8 +742,10 @@ function EntradaDiegoSection({ symbol }) {
 
   const nextHint = isCrash500 ? nextHintCrash : nextHintBoom;
 
-  const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
-  const minLabel   = burst_phase === "STAKE_1" ? (isCrash500 ? "10min" : (s1_drought_mode ? "20min·SEQUÍA" : "6min")) : "15min";
+  const stakeLabel = burst_phase === "STAKE_1" ? "$1" : burst_phase === "STAKE_5" ? "$5" : burst_phase === "STAKE_10" ? "$10" : burst_phase === "STAKE_20" ? "$20" : burst_phase === "STAKE_40" ? "$40" : "–";
+  const minLabel   = burst_phase === "STAKE_1"  ? (isCrash500 ? "5min" : (s1_drought_mode ? "20min·SEQUÍA" : "6min"))
+    : burst_phase === "STAKE_5" ? "10min"
+    : "15min";
 
   const _displayColor = !is1000 ? phaseColor : color;
   return (
@@ -781,15 +788,20 @@ function EntradaDiegoSection({ symbol }) {
         const _utcH = new Date(now).getUTCHours();
         const _utcHNext = (_utcH + 1) % 24;
         const _hLabel = `${String(_utcH).padStart(2,'0')}:00-${String(_utcHNext).padStart(2,'0')}:00`;
-        const _nextColor = (nextHint.includes("BUENO") && !nextHint.includes("noBUENO")) ? "#a78bfa"
-          : nextHint.includes("noBUENO") || nextHint.includes("sequía") || nextHint.includes("S1_STOP") ? "#ff5d6c"
+        const _nextColor = nextHint.includes("$40") ? "#a78bfa"
+          : (nextHint.includes("BUENO") && !nextHint.includes("noBUENO")) ? "#a78bfa"
+          : nextHint.includes("noBUENO") || nextHint.includes("sequía") || nextHint.includes("S1_STOP") || nextHint.includes("reset") ? "#ff5d6c"
+          : nextHint.includes("$5") ? "#fb923c"
           : nextHint.includes("$10") ? "#fb923c"
           : nextHint.includes("cambio hora") ? "#62d4ff"
+          : nextHint.includes("escala") ? "#22d3a3"
           : phaseColor;
         // Diagrama de máquina
         const _phases = isCrash500 ? [
-          { id:"STAKE_20", label:"$20", dur:"15m",  color:"#22d3a3" },
-          { id:"STAKE_1",  label:"$1",  dur:"10m",  color:"#f59e0b" },
+          { id:"STAKE_1",  label:"$1",  dur:"5m",  color:"#f59e0b" },
+          { id:"STAKE_5",  label:"$5",  dur:"10m", color:"#fb923c" },
+          { id:"STAKE_20", label:"$20", dur:"15m", color:"#22d3a3" },
+          { id:"STAKE_40", label:"$40", dur:"15m", color:"#a78bfa" },
         ] : [
           { id:"STAKE_1",  label:"$1",  dur: s1_drought_mode ? "20m⚡" : "6m", color: s1_drought_mode ? "#ff8c42" : "#f59e0b" },
           { id:"STAKE_10", label:"$10", dur:"15m", color:"#fb923c" },
@@ -825,8 +837,8 @@ function EntradaDiegoSection({ symbol }) {
                 {_protected && (
                   <span style={{
                     fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
-                    background: "#ff5d6c25", color: "#ff5d6c", marginLeft: 2,
-                  }}>⏸ HORA PROTEGIDA</span>
+                    background: "#f59e0b25", color: "#f59e0b", marginLeft: 2,
+                  }}>{isCrash500 ? "↺ CICLO RESET" : "⏸ HORA PROTEGIDA"}</span>
                 )}
               </div>
             );
@@ -846,7 +858,7 @@ function EntradaDiegoSection({ symbol }) {
                   {p.label}<span style={{ fontWeight: 400, fontSize: 8, opacity: 0.7 }}> {p.dur}</span>
                 </div>
                 {i < _phases.length - 1 && (
-                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 9 }}>{isCrash500 ? "⇄" : "→"}</span>
+                  <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 9 }}>→</span>
                 )}
               </React.Fragment>
             ))}
@@ -865,9 +877,10 @@ function EntradaDiegoSection({ symbol }) {
                   {current_profit > 0
                     ? <span style={{ color: "#22d3a3", fontWeight: 700 }}>profit+</span>
                     : <span style={{ color: "#ff5d6c", fontWeight: 700 }}>profit-</span>}
-                  {hourChanged && (
-                    <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
-                  )}
+                  {" · "}
+                  <span style={{ color: spikes_in_contract >= 1 ? "#62d4ff" : "rgba(255,255,255,0.35)", fontWeight: 700 }}>
+                    {spikes_in_contract}spk
+                  </span>
                 </>
               ) : (
                 <>
@@ -889,33 +902,37 @@ function EntradaDiegoSection({ symbol }) {
           <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 3, paddingTop: 3 }}>
             {isCrash500 ? (
               <>
+                {(burst_phase === "STAKE_1" || burst_phase === "STAKE_5") && (
+                  <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
+                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 5m</span>
+                    {" → "}
+                    <span style={{ color: "#fb923c", fontWeight: 700 }}>$5 10m</span>
+                    {"  "}
+                    <span style={{ color: "rgba(255,255,255,0.4)" }}>siempre escalan (ganen o pierdan)</span>
+                    {spikes_in_contract > 0 && (
+                      <span style={{ color: "#62d4ff", fontWeight: 700 }}>{" · "}{spikes_in_contract}spk</span>
+                    )}
+                  </div>
+                )}
                 {burst_phase === "STAKE_20" && (
                   <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
                     <span style={{ color: "#22d3a3", fontWeight: 700 }}>$20 15m:</span>
                     {"  "}
-                    <span style={{ color: "#22d3a3" }}>1er win → $20</span>
+                    <span style={{ color: "#a78bfa", fontWeight: 700 }}>spike+win → $40</span>
                     {"  ·  "}
-                    <span style={{ color: "#a78bfa", fontWeight: 700 }}>2do win → $1 reset ciclo</span>
-                    {"  ·  "}
-                    <span style={{ color: "#ff5d6c" }}>loss → $1 10min</span>
-                    {s20_crash500_wins > 0 && (
-                      <span style={{ color: "#a78bfa", fontWeight: 700 }}>{" · "}{s20_crash500_wins}/2 wins</span>
+                    <span style={{ color: "#ff5d6c" }}>lo demás → $1 reset</span>
+                    {spikes_in_contract > 0 && (
+                      <span style={{ color: "#62d4ff", fontWeight: 700 }}>{" · "}{spikes_in_contract}spk ahora</span>
                     )}
                   </div>
                 )}
-                {burst_phase === "STAKE_1" && (
+                {burst_phase === "STAKE_40" && (
                   <div style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-                    <span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 10m:</span>
+                    <span style={{ color: "#a78bfa", fontWeight: 700 }}>$40 15m:</span>
                     {"  "}
-                    <span style={{ color: "rgba(255,255,255,0.4)" }}>0spk → retry</span>
-                    {"  ·  "}
-                    <span style={{ color: "#22d3a3" }}>1-2spk → $20</span>
-                    {"  ·  "}
-                    <span style={{ color: "#ff5d6c" }}>3+spk → $1 (agotado)</span>
+                    <span style={{ color: "rgba(255,255,255,0.4)" }}>siempre → $1 (fin de ciclo)</span>
                     {spikes_in_contract > 0 && (
-                      <span style={{ color: spikes_in_contract >= 3 ? "#ff5d6c" : "#22d3a3", fontWeight: 700 }}>
-                        {" · "}{spikes_in_contract}spk ahora
-                      </span>
+                      <span style={{ color: "#62d4ff", fontWeight: 700 }}>{" · "}{spikes_in_contract}spk</span>
                     )}
                   </div>
                 )}
