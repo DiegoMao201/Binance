@@ -569,7 +569,7 @@ function EntradaDiegoSection({ symbol }) {
     s1_drought_mode = false,
     crash500_s1_timer_s = 420,
     burst_stake1_s = 360, burst_stake1_drought_s = 1200, burst_stake1_crash500_s = 420,
-    burst_stake1_crash500_10m_s = 600, burst_stake1_crash500_20m_s = 1200,
+    burst_stake1_crash500_10m_s = 600, burst_stake1_crash500_17m_s = 1020, burst_stake1_crash500_20m_s = 1200,
     burst_stake5_s = 900, burst_stake10_s = 900,
     burst_stake20_s = 900, burst_stake20_crash500_s = 1200,
     burst_stake40_s = 900, burst_stake40_crash500_s = 1200,
@@ -687,7 +687,9 @@ function EntradaDiegoSection({ symbol }) {
     ? spikes_in_contract === 0
       ? `→ $20 al expirar (${_c500_s1_min}min, 0spk)`
       : spikes_in_contract === 1
-      ? `→ $20 al expirar (${_c500_s1_min}min ≤1spk)` + (crash500_s1_timer_s >= burst_stake1_crash500_20m_s ? "" : " · o S1 si timer<20m")
+      ? (crash500_s1_timer_s >= burst_stake1_crash500_17m_s
+          ? `→ $20 al expirar (${_c500_s1_min}min ≤1spk)`
+          : `→ S1(mismo timer) (${_c500_s1_min}min 1spk, necesita ≥17m)`)
       : spikes_in_contract === 2
       ? `→ $1 (${spikes_in_contract}spk, timer→12min)`
       : spikes_in_contract === 3

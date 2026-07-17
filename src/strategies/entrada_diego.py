@@ -1037,14 +1037,15 @@ class EntradaDiego:
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
             _cur_t  = state.crash500_s1_timer_s
-            _at_max = (_cur_t >= BURST_STAKE1_CRASH500_20M_S)
+            # ≥17min: ≤1 spike ya permite escalar; <17min: solo 0 spikes escalan
+            _at_max = (_cur_t >= BURST_STAKE1_CRASH500_17M_S)
             if (_spk == 0 and not _at_max) or (_spk <= 1 and _at_max):
-                # escalada a S20: 0spk<20m o ≤1spk@20m
+                # escalada a S20: 0spk<17m | ≤1spk@17-20m
                 state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S  # reset para siguiente ciclo
                 await _transition("STAKE_20", BURST_STAKE20_AMOUNT,
                     f"CRASH500 S1 {int(_cur_t//60)}min {_spk}spk→S20", _cid, _pnl, _spk)
             elif _spk == 1:
-                # 1 spike, timer < 20min → quedar en S1 con mismo timer
+                # 1 spike, timer < 17min → quedar en S1 con mismo timer
                 await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
                     f"CRASH500 S1 {int(_cur_t//60)}min 1spk→S1(mismo_timer)", _cid, _pnl, _spk)
             elif _spk == 2:
@@ -1282,12 +1283,12 @@ class EntradaDiego:
                 # CRASH500: lógica adaptativa (mismo comportamiento que timer block)
                 if sym == "CRASH500":
                     _cur_t  = state.crash500_s1_timer_s
-                    _at_max = (_cur_t >= BURST_STAKE1_CRASH500_20M_S)
+                    _at_max = (_cur_t >= BURST_STAKE1_CRASH500_17M_S)
                     if (_spk == 0 and not _at_max) or (_spk <= 1 and _at_max):
                         state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
                         next_phase = "STAKE_20"
                     elif _spk == 1:
-                        next_phase = "STAKE_1"  # 1spk timer<20min → mismo timer
+                        next_phase = "STAKE_1"  # 1spk timer<17min → mismo timer
                     elif _spk == 2:
                         state.crash500_s1_timer_s = max(_cur_t, BURST_STAKE1_CRASH500_12M_S)
                         next_phase = "STAKE_1"
