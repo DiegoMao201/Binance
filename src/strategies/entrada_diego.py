@@ -147,6 +147,13 @@ SYM_PNL_LOSS_GATE_USD  = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_GATE",   "2
 SYM_PNL_WIN_PAUSE_H    = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_WIN_PAUSE_H",  "6.0"))
 SYM_PNL_LOSS_PAUSE_H   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_PAUSE_H", "2.0"))
 
+# Horas UTC bloqueadas por análisis histórico (8,816 contratos, Mayo–Jul 2026)
+# Las 5 peores horas por símbolo: pierden consistentemente hora tras hora
+# BOOM500: 16h(WR=34%,avg=-$1.21) 13h(-$0.89) 3h(-$0.76) 10h(-$0.68) 4h(-$0.42)
+# CRASH500: 22h(avg=-$1.05) 13h(-$0.94) 16h(-$0.77) 3h(-$0.71) 1h(-$0.64)
+BOOM500_BLOCKED_UTC_HOURS:  frozenset = frozenset({3, 4, 10, 13, 16})
+CRASH500_BLOCKED_UTC_HOURS: frozenset = frozenset({1, 3, 13, 16, 22})
+
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
@@ -794,6 +801,11 @@ class EntradaDiego:
                     return  # en pausa — no abrir nuevo contrato
                 _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL_PAUSE expiró → reanudando", sym)
                 state.sym_pnl_pause_until = 0.0
+            # ── Gate hora UTC bloqueada (historial 8,816 contratos) ───────────────
+            _utc_hour = time.gmtime(now).tm_hour
+            _blocked  = BOOM500_BLOCKED_UTC_HOURS if sym == "BOOM500" else CRASH500_BLOCKED_UTC_HOURS
+            if _utc_hour in _blocked:
+                return  # hora históricamente negativa — sin operar
             # ── HOUR_PROFIT_PROTECT: ≥$4 ganado esta hora → esperar siguiente hora ──
             _cur_hour = int(now // 3600) * 3600.0
             if _cur_hour != state.hour_start_ts_500:
@@ -897,6 +909,11 @@ class EntradaDiego:
             state.contract_start_hour_ts_500  = int(time.time() // 3600) * 3600.0
             if state.sym_pnl_pause_until > time.time():
                 _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL gate → sin abrir %s", sym, next_phase)
+                return
+            _tr_utc_hour = time.gmtime().tm_hour
+            _tr_blocked  = BOOM500_BLOCKED_UTC_HOURS if sym == "BOOM500" else CRASH500_BLOCKED_UTC_HOURS
+            if _tr_utc_hour in _tr_blocked:
+                _LOGGER.info("[ENTRADA_DIEGO] %s hora %02dh UTC bloqueada → sin escalar a %s", sym, _tr_utc_hour, next_phase)
                 return
             await self._open(sym, state, time.time(), stake_override=next_stake)
 

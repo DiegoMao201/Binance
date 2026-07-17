@@ -782,6 +782,18 @@ function EntradaDiegoSection({ symbol }) {
     : isCrash500 ? "20min"
     : "15min";
 
+  // ── UTC hour block gate (historial 8,816 contratos) ────────────────────────
+  const _BOOM_BLOCKED  = new Set([3, 4, 10, 13, 16]);
+  const _CRASH_BLOCKED = new Set([1, 3, 13, 16, 22]);
+  const _curUTCH       = new Date(now).getUTCHours();
+  const _isHourBlocked = !is1000 && (isCrash500 ? _CRASH_BLOCKED.has(_curUTCH) : _BOOM_BLOCKED.has(_curUTCH));
+  const _nextUnblockedH = !is1000 ? (() => {
+    const _blocked = isCrash500 ? _CRASH_BLOCKED : _BOOM_BLOCKED;
+    let h = (_curUTCH + 1) % 24;
+    for(let i = 0; i < 24; i++) { if(!_blocked.has(h)) return h; h = (h+1)%24; }
+    return _curUTCH;
+  })() : 0;
+
   // ── PnL gate pause state ────────────────────────────────────────────────────
   const _nowSP         = now / 1000;
   const _isPausedPnl   = sym_pnl_pause_until > _nowSP;
@@ -801,7 +813,7 @@ function EntradaDiegoSection({ symbol }) {
   const _toNextWin     = _pnlWinNext  - sym_pnl_since_reset;
   const _toNextLoss    = sym_pnl_since_reset - _pnlLossNext;
 
-  const _displayColor = !is1000 ? (_isPausedPnl ? _pauseColor : phaseColor) : color;
+  const _displayColor = !is1000 ? (_isHourBlocked ? "#475569" : _isPausedPnl ? _pauseColor : phaseColor) : color;
   return (
     <div style={{ ...base, color: _displayColor, background: `${_displayColor}14`, borderColor: _displayColor }}>
       {is1000 ? (<>
@@ -828,7 +840,11 @@ function EntradaDiegoSection({ symbol }) {
       </>) : (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
-          {_isPausedPnl ? (
+          {_isHourBlocked ? (
+            <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+              background: "rgba(71,85,105,0.25)", color: "#64748b", letterSpacing: "0.05em",
+            }}>⛔ {String(_curUTCH).padStart(2,'0')}h BLOQUEADA</span>
+          ) : _isPausedPnl ? (
             <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
               background: `${_pauseColor}25`, color: _pauseColor, letterSpacing: "0.05em",
             }}>⏸ PAUSA {_pauseIsWin ? "WIN" : "LOSS"} · {_pauseRemH > 0 ? `${_pauseRemH}h ` : ""}{_pauseRemM}m</span>
@@ -837,10 +853,12 @@ function EntradaDiegoSection({ symbol }) {
               background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.05em",
             }}>{stakeLabel} · {minLabel}</span>
           )}
-          <span style={{ color: _isPausedPnl ? _pnlAccColor : pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
-            {_isPausedPnl
+          <span style={{ color: _isHourBlocked ? "#475569" : _isPausedPnl ? _pnlAccColor : pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+            {_isHourBlocked
               ? `${sym_pnl_since_reset >= 0 ? "+" : ""}${sym_pnl_since_reset.toFixed(2)}$`
-              : (contract_id ? pnlStr : "")}
+              : _isPausedPnl
+                ? `${sym_pnl_since_reset >= 0 ? "+" : ""}${sym_pnl_since_reset.toFixed(2)}$`
+                : (contract_id ? pnlStr : "")}
           </span>
         </div>
       )}
@@ -871,6 +889,35 @@ function EntradaDiegoSection({ symbol }) {
           { id:"STAKE_20", label:"$20", dur:"15m", color:"#22d3a3" },
           { id:"STAKE_40", label:"$40", dur:"15m", color:"#a78bfa" },
         ];
+        // ── Cuando la hora UTC está bloqueada por historial ───────────────────
+        if (_isHourBlocked) {
+          const _minsToNext = Math.ceil((((_nextUnblockedH - _curUTCH + 24) % 24) * 60) - (new Date(now).getUTCMinutes() === 0 ? 0 : 60 - new Date(now).getUTCMinutes()));
+          return (
+          <div style={{ padding: "6px 8px", borderRadius: 4,
+            background: "rgba(71,85,105,0.12)", border: "1px solid rgba(71,85,105,0.4)", textAlign: "center" }}>
+            <div style={{ fontSize: 8, color: "rgba(255,255,255,0.35)", marginBottom: 3, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+              hora bloqueada — historial negativo
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#64748b", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
+              {String(_curUTCH).padStart(2,'0')}:00 UTC
+            </div>
+            <div style={{ fontSize: 9, color: "rgba(255,255,255,0.35)", margin: "3px 0" }}>
+              reanuda a las <span style={{ color: "#94a3b8", fontWeight: 700 }}>
+                {String(_nextUnblockedH).padStart(2,'0')}:00 UTC
+              </span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-around", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 4, marginTop: 2 }}>
+              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
+                PnL: <span style={{ color: _pnlAccColor, fontWeight: 700 }}>{sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}</span>
+              </span>
+              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
+                5 horas bloqueadas
+              </span>
+            </div>
+          </div>
+          );
+        }
+
         // ── Cuando el símbolo está pausado por PnL gate ────────────────────────
         if (_isPausedPnl) {
           const _pPct = Math.min(100, (1 - _pauseRemS / ((_pauseIsWin ? sym_pnl_win_pause_h : sym_pnl_loss_pause_h) * 3600)) * 100);
