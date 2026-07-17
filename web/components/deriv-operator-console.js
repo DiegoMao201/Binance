@@ -580,6 +580,13 @@ function EntradaDiegoSection({ symbol }) {
     contract_start_hour_ts_500 = 0,
     hour_pnl_500 = 0,
     hour_profit_protect_usd = 4,
+    sym_pnl_since_reset = 0,
+    sym_pnl_reference = 0,
+    sym_pnl_pause_until = 0,
+    sym_pnl_win_gate = 30,
+    sym_pnl_loss_gate = 20,
+    sym_pnl_win_pause_h = 6,
+    sym_pnl_loss_pause_h = 2,
   } = edState;
 
   const nowSec = now / 1000;
@@ -869,6 +876,50 @@ function EntradaDiegoSection({ symbol }) {
                     background: "#f59e0b25", color: "#f59e0b", marginLeft: 2,
                   }}>{isCrash500 ? "↺ CICLO RESET" : "⏸ HORA PROTEGIDA"}</span>
                 )}
+              </div>
+            );
+          })()}
+
+          {/* Gate PnL por símbolo */}
+          {(() => {
+            const _nowS = now / 1000;
+            const _isPaused = sym_pnl_pause_until > _nowS;
+            const _delta = sym_pnl_since_reset - sym_pnl_reference;
+            const _toWin  = sym_pnl_win_gate  - _delta;
+            const _toLoss = sym_pnl_loss_gate  + _delta;  // delta negativo → más cerca de -loss
+            const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3"
+              : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
+            if (_isPaused) {
+              const _remS = sym_pnl_pause_until - _nowS;
+              const _remH = Math.floor(_remS / 3600);
+              const _remM = Math.floor((_remS % 3600) / 60);
+              const _isWinPause = _delta >= 0;
+              const _pauseColor = _isWinPause ? "#22d3a3" : "#f59e0b";
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4,
+                  background: `${_pauseColor}18`, borderRadius: 3, padding: "2px 5px",
+                  border: `1px solid ${_pauseColor}40` }}>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: _pauseColor }}>
+                    {_isWinPause ? "⏸ WIN" : "⏸ LOSS"} {_remH > 0 ? `${_remH}h ` : ""}{_remM}m
+                  </span>
+                  <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", marginLeft: 2 }}>
+                    acum: <span style={{ color: _pnlAccColor }}>{sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}</span>
+                  </span>
+                </div>
+              );
+            }
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>PnL acum:</span>
+                <span style={{ fontSize: 9, fontWeight: 700, color: _pnlAccColor }}>
+                  {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}
+                </span>
+                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.25)" }}>ref:{sym_pnl_reference >= 0 ? "+" : ""}{sym_pnl_reference.toFixed(0)}</span>
+                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)", marginLeft: "auto" }}>
+                  <span style={{ color: "#22d3a3" }}>▲+${_toWin.toFixed(0)}→⏸${sym_pnl_win_pause_h.toFixed(0)}h</span>
+                  {" · "}
+                  <span style={{ color: "#f59e0b" }}>▼-${_toLoss.toFixed(0)}→⏸${sym_pnl_loss_pause_h.toFixed(0)}h</span>
+                </span>
               </div>
             );
           })()}

@@ -139,6 +139,14 @@ HOUR_PROFIT_PROTECT_USD      = float(os.getenv("ENTRADA_DIEGO_HOUR_PROFIT_PROTEC
 GLOBAL_PNL_TARGET  = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PNL_TARGET",  "60.0"))
 GLOBAL_PAUSE_HOURS = float(os.getenv("ENTRADA_DIEGO_GLOBAL_PAUSE_HOURS", "8.0"))
 
+# Gate PnL por símbolo: cada $30 ganados (desde referencia) → pausa 6h
+#                       cada $20 perdidos (desde referencia) → pausa 2h
+# La referencia se actualiza al disparar cada gate → "se va de 30 en 30"
+SYM_PNL_WIN_GATE_USD   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_WIN_GATE",    "30.0"))
+SYM_PNL_LOSS_GATE_USD  = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_GATE",   "20.0"))
+SYM_PNL_WIN_PAUSE_H    = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_WIN_PAUSE_H",  "6.0"))
+SYM_PNL_LOSS_PAUSE_H   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_PAUSE_H", "2.0"))
+
 _ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
@@ -267,6 +275,9 @@ class _SymState:
     broker_blocked_until_500: float = 0.0  # hasta cuándo esperar si broker cap (precio post-spike muy alto)
     crash500_s1_timer_s:       float = 420.0  # timer adaptativo S1 CRASH500 (7/10/12/17/20min)
     crash500_real_spikes_500:  int   = 0      # spikes con ratio ≥ 50x en contrato actual (S40→S60 gate)
+    sym_pnl_since_reset:  float = 0.0   # PnL acumulado desde reset (gate por símbolo)
+    sym_pnl_reference:    float = 0.0   # referencia flotante: gate +$30/-$20 se mide desde aquí
+    sym_pnl_pause_until:  float = 0.0   # epoch hasta cuando pausado por gate PnL (0 = activo)
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
@@ -321,6 +332,13 @@ class _SymState:
             "crash500_s1_timer_s":          self.crash500_s1_timer_s,
             "crash500_real_spikes_500":     self.crash500_real_spikes_500,
             "s40_real_spike_ratio":         BURST_STAKE40_REAL_SPIKE_RATIO,
+            "sym_pnl_since_reset":          round(self.sym_pnl_since_reset, 4),
+            "sym_pnl_reference":            round(self.sym_pnl_reference, 4),
+            "sym_pnl_pause_until":          round(self.sym_pnl_pause_until, 3),
+            "sym_pnl_win_gate":             SYM_PNL_WIN_GATE_USD,
+            "sym_pnl_loss_gate":            SYM_PNL_LOSS_GATE_USD,
+            "sym_pnl_win_pause_h":          SYM_PNL_WIN_PAUSE_H,
+            "sym_pnl_loss_pause_h":         SYM_PNL_LOSS_PAUSE_H,
             "burst_stake1_s":               BURST_STAKE1_DURATION_S,
             "burst_stake1_drought_s":       BURST_STAKE1_DROUGHT_S,
             "burst_stake1_crash500_s":      BURST_STAKE1_CRASH500_S,
@@ -770,6 +788,12 @@ class EntradaDiego:
         if state.contract_id is None:
             if now < state.broker_blocked_until_500:
                 return
+            # ── Gate PnL por símbolo ──────────────────────────────────────────────
+            if state.sym_pnl_pause_until > 0:
+                if now < state.sym_pnl_pause_until:
+                    return  # en pausa — no abrir nuevo contrato
+                _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL_PAUSE expiró → reanudando", sym)
+                state.sym_pnl_pause_until = 0.0
             # ── HOUR_PROFIT_PROTECT: ≥$4 ganado esta hora → esperar siguiente hora ──
             _cur_hour = int(now // 3600) * 3600.0
             if _cur_hour != state.hour_start_ts_500:
@@ -871,6 +895,9 @@ class EntradaDiego:
             state.spikes_in_contract_500      = 0
             state.crash500_real_spikes_500    = 0
             state.contract_start_hour_ts_500  = int(time.time() // 3600) * 3600.0
+            if state.sym_pnl_pause_until > time.time():
+                _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL gate → sin abrir %s", sym, next_phase)
+                return
             await self._open(sym, state, time.time(), stake_override=next_stake)
 
         # ── Helper: spikes en la hora UTC actual (con reset si cambió la hora) ─
@@ -2000,6 +2027,20 @@ class EntradaDiego:
                 s = data.get(sym, {})
                 if not s:
                     continue
+                # Restaurar PnL gate por símbolo (independiente de contrato)
+                if sym in SYMBOLS_500:
+                    _st_pnl = self._states[sym]
+                    _st_pnl.sym_pnl_since_reset = float(s.get("sym_pnl_since_reset", 0.0))
+                    _st_pnl.sym_pnl_reference   = float(s.get("sym_pnl_reference",   0.0))
+                    _raw_sym_pause = float(s.get("sym_pnl_pause_until", 0.0))
+                    if _raw_sym_pause > now:
+                        _st_pnl.sym_pnl_pause_until = _raw_sym_pause
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s SYM_PNL_PAUSE restaurado — %.1fh restantes "
+                            "(acum=$%.2f, ref=$%.2f)",
+                            sym, (_raw_sym_pause - now) / 3600,
+                            _st_pnl.sym_pnl_since_reset, _st_pnl.sym_pnl_reference,
+                        )
                 contract_id = s.get("contract_id")
                 phase       = s.get("phase", "IDLE")
                 reopens     = int(s.get("reopens", 0))
@@ -2093,9 +2134,39 @@ class EntradaDiego:
 
         self._persist(time.time())
 
+    def _check_sym_pnl_gate(self, sym: str, now: float) -> None:
+        state  = self._states[sym]
+        _delta = state.sym_pnl_since_reset - state.sym_pnl_reference
+        if _delta >= SYM_PNL_WIN_GATE_USD:
+            state.sym_pnl_reference   = state.sym_pnl_since_reset
+            state.sym_pnl_pause_until = now + SYM_PNL_WIN_PAUSE_H * 3600
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s SYM_PNL_WIN +$%.2f desde ref → PAUSA %.0fh "
+                "(acum=$%.2f, ref→$%.2f, reanuda %s UTC)",
+                sym, _delta, SYM_PNL_WIN_PAUSE_H,
+                state.sym_pnl_since_reset, state.sym_pnl_reference,
+                __import__("datetime").datetime.utcfromtimestamp(
+                    state.sym_pnl_pause_until
+                ).strftime("%H:%M"),
+            )
+        elif _delta <= -SYM_PNL_LOSS_GATE_USD:
+            state.sym_pnl_reference   = state.sym_pnl_since_reset
+            state.sym_pnl_pause_until = now + SYM_PNL_LOSS_PAUSE_H * 3600
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s SYM_PNL_LOSS -$%.2f desde ref → PAUSA %.0fh "
+                "(acum=$%.2f, ref→$%.2f, reanuda %s UTC)",
+                sym, abs(_delta), SYM_PNL_LOSS_PAUSE_H,
+                state.sym_pnl_since_reset, state.sym_pnl_reference,
+                __import__("datetime").datetime.utcfromtimestamp(
+                    state.sym_pnl_pause_until
+                ).strftime("%H:%M"),
+            )
+
     def _add_global_pnl(self, sym: str, profit: float, now: float) -> None:
         if sym not in SYMBOLS_500:
             return
+        self._states[sym].sym_pnl_since_reset += profit
+        self._check_sym_pnl_gate(sym, now)
         self._global_pnl += profit
         if self._global_pnl >= self._global_pnl_next_target and self._global_pause_until == 0.0:
             self._global_pause_until      = now + GLOBAL_PAUSE_HOURS * 3600
