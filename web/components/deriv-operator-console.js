@@ -587,6 +587,7 @@ function EntradaDiegoSection({ symbol }) {
     sym_pnl_loss_gate = 20,
     sym_pnl_win_pause_h = 6,
     sym_pnl_loss_pause_h = 2,
+    power_30min_jump = 0,
   } = edState;
 
   const nowSec = now / 1000;
@@ -690,18 +691,14 @@ function EntradaDiegoSection({ symbol }) {
     : null;
   // CRASH500: S1(adapt)→S20(20m)→S40(20m)→S60(20m)
   const _c500_s1_min = Math.round(crash500_s1_timer_s / 60);
+  // CRASH500: POWER gate — S1_SPIKE_RESET + Σ(abs_jump) 30min
+  const _pjStrC = power_30min_jump.toFixed(1);
   const nextHintCrash = burst_phase === "STAKE_1"
-    ? spikes_in_contract === 0
-      ? `→ $20 al expirar (${_c500_s1_min}min, 0spk)`
-      : spikes_in_contract === 1
-      ? (crash500_s1_timer_s >= burst_stake1_crash500_17m_s
-          ? `→ $20 al expirar (${_c500_s1_min}min ≤1spk)`
-          : `→ S1(mismo timer) (${_c500_s1_min}min 1spk, necesita ≥17m)`)
-      : spikes_in_contract === 2
-      ? `→ $1 (${spikes_in_contract}spk, timer→12min)`
-      : spikes_in_contract === 3
-      ? `→ $1 (${spikes_in_contract}spk, timer→17min)`
-      : `→ $1 (${spikes_in_contract}spk, timer→20min)`
+    ? _powerOk
+        ? `→ $20 al expirar [POWER:${_pjStrC} ✓ en [${_powerMin}–${_powerMax}]]`
+        : power_30min_jump < _powerMin
+          ? `→ $1 (POWER:${_pjStrC} < ${_powerMin} — acumulando energía)`
+          : `→ $1 (POWER:${_pjStrC} > ${_powerMax} — sobreextendido)`
     : burst_phase === "STAKE_5"
     ? "→ $20 (legacy S5)"
     : burst_phase === "STAKE_20"
@@ -724,21 +721,14 @@ function EntradaDiegoSection({ symbol }) {
         : "→ $60 retry (loss → repite)")
     : "iniciando…";
 
-  // BOOM500: lógica completa con spikes
+  // BOOM500: lógica POWER gate — S1_SPIKE_RESET + Σ(abs_jump) 30min
+  const _pjStr = power_30min_jump.toFixed(1);
   const nextHintBoom = burst_phase === "STAKE_1"
-    ? s1_drought_mode
-      ? spikes_in_contract >= 1
-        ? `→ $20 al expirar (spike llegó, sequía terminó)`
-        : `→ $1 normal si 0spk · o $20 si llega spike`
-      : spikes_in_contract >= 2
-        ? `→ $1 otra vez (${spikes_in_contract}spk, descargado)`
-        : _hrChangeNext
-        ? _hrChangeNext
-        : _droughtLevel === "S1_STOP"
-        ? `→ $1 sequía (0spk min${Math.floor(_minInHour)}≥30)`
-        : _droughtLevel === "S10"
-        ? `→ $10 defensivo (min${Math.floor(_minInHour)}≥25)`
-        : `→ $20 normal`
+    ? _powerOk
+        ? `→ $20 al expirar [POWER:${_pjStr} ✓ en [${_powerMin}–${_powerMax}]]`
+        : power_30min_jump < _powerMin
+          ? `→ $1 (POWER:${_pjStr} < ${_powerMin} — acumulando energía)`
+          : `→ $1 (POWER:${_pjStr} > ${_powerMax} — sobreextendido)`
     : burst_phase === "STAKE_10"
       ? _hrChangeNext
         ? _hrChangeNext
@@ -782,17 +772,18 @@ function EntradaDiegoSection({ symbol }) {
     : isCrash500 ? "20min"
     : "15min";
 
-  // ── UTC hour block gate (historial 8,816 contratos) ────────────────────────
-  const _BOOM_BLOCKED  = new Set([3, 4, 10, 13, 16]);
-  const _CRASH_BLOCKED = new Set([1, 3, 13, 16, 22]);
+  // ── POWER gate: Σ(abs_jump) 30min — ATR-independiente (reemplaza gate de horas) ──
+  // CRASH500: [3,8] calibrado en 12,866 trades — PJ=[3,7) único bucket + PnL
+  // BOOM500:  [15,30] calibrado en 213 trades S20+ — WR=55.4%, PnL=+$86
+  const _powerMin      = isCrash500 ? 3.0 : 15.0;
+  const _powerMax      = isCrash500 ? 8.0 : 30.0;
+  const _powerOk       = power_30min_jump >= _powerMin && power_30min_jump <= _powerMax;
+  const _powerPctBar   = Math.min(100, (power_30min_jump / (_powerMax * 1.3)) * 100);
+  const _powerZoneLeft = Math.min(100, (_powerMin / (_powerMax * 1.3)) * 100);
+  const _powerZoneW    = Math.min(100 - _powerZoneLeft, ((_powerMax - _powerMin) / (_powerMax * 1.3)) * 100);
   const _curUTCH       = new Date(now).getUTCHours();
-  const _isHourBlocked = !is1000 && (isCrash500 ? _CRASH_BLOCKED.has(_curUTCH) : _BOOM_BLOCKED.has(_curUTCH));
-  const _nextUnblockedH = !is1000 ? (() => {
-    const _blocked = isCrash500 ? _CRASH_BLOCKED : _BOOM_BLOCKED;
-    let h = (_curUTCH + 1) % 24;
-    for(let i = 0; i < 24; i++) { if(!_blocked.has(h)) return h; h = (h+1)%24; }
-    return _curUTCH;
-  })() : 0;
+  const _isHourBlocked = false;  // gate eliminado 2026-07-18 — POWER gate reemplaza
+  const _nextUnblockedH = 0;
 
   // ── PnL gate pause state ────────────────────────────────────────────────────
   const _nowSP         = now / 1000;
@@ -884,39 +875,10 @@ function EntradaDiegoSection({ symbol }) {
           { id:"STAKE_40", label:"$40", dur:"20m", color:"#a78bfa" },
           { id:"STAKE_60", label:"$60", dur:"20m", color:"#e879f9" },
         ] : [
-          { id:"STAKE_1",  label:"$1",  dur: s1_drought_mode ? "20m⚡" : "6m", color: s1_drought_mode ? "#ff8c42" : "#f59e0b" },
-          { id:"STAKE_10", label:"$10", dur:"15m", color:"#fb923c" },
+          { id:"STAKE_1",  label:"$1",  dur:"6m⚡", color:"#f59e0b" },
           { id:"STAKE_20", label:"$20", dur:"15m", color:"#22d3a3" },
           { id:"STAKE_40", label:"$40", dur:"15m", color:"#a78bfa" },
         ];
-        // ── Cuando la hora UTC está bloqueada por historial ───────────────────
-        if (_isHourBlocked) {
-          const _minsToNext = Math.ceil((((_nextUnblockedH - _curUTCH + 24) % 24) * 60) - (new Date(now).getUTCMinutes() === 0 ? 0 : 60 - new Date(now).getUTCMinutes()));
-          return (
-          <div style={{ padding: "6px 8px", borderRadius: 4,
-            background: "rgba(71,85,105,0.12)", border: "1px solid rgba(71,85,105,0.4)", textAlign: "center" }}>
-            <div style={{ fontSize: 8, color: "rgba(255,255,255,0.35)", marginBottom: 3, letterSpacing: "0.06em", textTransform: "uppercase" }}>
-              hora bloqueada — historial negativo
-            </div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: "#64748b", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
-              {String(_curUTCH).padStart(2,'0')}:00 UTC
-            </div>
-            <div style={{ fontSize: 9, color: "rgba(255,255,255,0.35)", margin: "3px 0" }}>
-              reanuda a las <span style={{ color: "#94a3b8", fontWeight: 700 }}>
-                {String(_nextUnblockedH).padStart(2,'0')}:00 UTC
-              </span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-around", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 4, marginTop: 2 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
-                PnL: <span style={{ color: _pnlAccColor, fontWeight: 700 }}>{sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}</span>
-              </span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
-                5 horas bloqueadas
-              </span>
-            </div>
-          </div>
-          );
-        }
 
         // ── Cuando el símbolo está pausado por PnL gate ────────────────────────
         if (_isPausedPnl) {
@@ -966,28 +928,50 @@ function EntradaDiegoSection({ symbol }) {
             </span>
           </div>
 
-          {/* Protección horaria */}
-          {(() => {
-            const _protected = hour_pnl_500 >= hour_profit_protect_usd;
-            const _pnlColor  = _protected ? "#ff5d6c"
-              : hour_pnl_500 >= hour_profit_protect_usd * 0.7 ? "#f59e0b"
-              : "#22d3a3";
-            return (
-              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
-                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>Esta hora:</span>
-                <span style={{ fontSize: 9, fontWeight: 700, color: _pnlColor }}>
-                  {hour_pnl_500 >= 0 ? "+" : ""}{hour_pnl_500.toFixed(2)}
-                </span>
-                <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>/ ${hour_profit_protect_usd.toFixed(0)}</span>
-                {_protected && (
-                  <span style={{
-                    fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
-                    background: "#f59e0b25", color: "#f59e0b", marginLeft: 2,
-                  }}>{isCrash500 ? "↺ CICLO RESET" : "⏸ HORA PROTEGIDA"}</span>
-                )}
-              </div>
-            );
-          })()}
+          {/* POWER gate — Σ(abs_jump) 30min */}
+          <div style={{ marginBottom: 5 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
+              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: "0.04em" }}>
+                POWER 30m
+              </span>
+              <span style={{
+                fontSize: 9, fontWeight: 700,
+                color: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.45)",
+                fontVariantNumeric: "tabular-nums",
+              }}>
+                {power_30min_jump.toFixed(1)}
+              </span>
+              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
+                [{_powerMin}–{_powerMax}]
+              </span>
+              <span style={{
+                fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2,
+                background: _powerOk ? "rgba(34,211,163,0.15)" : "rgba(255,255,255,0.06)",
+                color: _powerOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
+                marginLeft: "auto",
+              }}>
+                {_powerOk ? "✓ S20" : burst_phase === "STAKE_1" ? "espera" : "–"}
+              </span>
+            </div>
+            {/* Barra con zona target resaltada */}
+            <div style={{ position: "relative", height: 5, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }}>
+              {/* Zona target */}
+              <div style={{
+                position: "absolute", top: 0, height: "100%",
+                left: `${_powerZoneLeft}%`, width: `${_powerZoneW}%`,
+                background: "rgba(34,211,163,0.22)",
+              }} />
+              {/* Valor actual */}
+              <div style={{
+                position: "absolute", top: 0, left: 0, height: "100%",
+                width: `${_powerPctBar}%`,
+                background: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.3)",
+                borderRadius: 3,
+                transition: "width 1s linear",
+              }} />
+            </div>
+          </div>
+
 
           {/* Gate PnL — progreso compacto (solo cuando no está pausado) */}
           <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4 }}>
