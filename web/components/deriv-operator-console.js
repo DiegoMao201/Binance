@@ -649,6 +649,17 @@ function EntradaDiegoSection({ symbol }) {
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec2 - burst_phase_started_at) : 0;
 
   const isCrash500 = symbol === "CRASH500";
+
+  // ── POWER gate vars — deben ir ANTES de nextHint para evitar TDZ ──────────
+  const _powerMin      = isCrash500 ? 3.0 : 15.0;
+  const _powerMax      = isCrash500 ? 8.0 : 30.0;
+  const _powerOk       = power_30min_jump >= _powerMin && power_30min_jump <= _powerMax;
+  const _powerPctBar   = Math.min(100, (power_30min_jump / (_powerMax * 1.3)) * 100);
+  const _powerZoneLeft = Math.min(100, (_powerMin / (_powerMax * 1.3)) * 100);
+  const _powerZoneW    = Math.min(100 - _powerZoneLeft, ((_powerMax - _powerMin) / (_powerMax * 1.3)) * 100);
+  const _pjStr         = power_30min_jump.toFixed(1);
+  const _pjStrC        = _pjStr;
+
   const phaseTotal = burst_phase === "STAKE_1"  ? (isCrash500 ? crash500_s1_timer_s : (s1_drought_mode ? burst_stake1_drought_s : burst_stake1_s))
     : burst_phase === "STAKE_5"  ? burst_stake5_s
     : burst_phase === "STAKE_10" ? burst_stake10_s
@@ -692,7 +703,6 @@ function EntradaDiegoSection({ symbol }) {
   // CRASH500: S1(adapt)→S20(20m)→S40(20m)→S60(20m)
   const _c500_s1_min = Math.round(crash500_s1_timer_s / 60);
   // CRASH500: POWER gate — S1_SPIKE_RESET + Σ(abs_jump) 30min
-  const _pjStrC = power_30min_jump.toFixed(1);
   const nextHintCrash = burst_phase === "STAKE_1"
     ? _powerOk
         ? `→ $20 al expirar [POWER:${_pjStrC} ✓ en [${_powerMin}–${_powerMax}]]`
@@ -722,7 +732,6 @@ function EntradaDiegoSection({ symbol }) {
     : "iniciando…";
 
   // BOOM500: lógica POWER gate — S1_SPIKE_RESET + Σ(abs_jump) 30min
-  const _pjStr = power_30min_jump.toFixed(1);
   const nextHintBoom = burst_phase === "STAKE_1"
     ? _powerOk
         ? `→ $20 al expirar [POWER:${_pjStr} ✓ en [${_powerMin}–${_powerMax}]]`
@@ -772,17 +781,9 @@ function EntradaDiegoSection({ symbol }) {
     : isCrash500 ? "20min"
     : "15min";
 
-  // ── POWER gate: Σ(abs_jump) 30min — ATR-independiente (reemplaza gate de horas) ──
-  // CRASH500: [3,8] calibrado en 12,866 trades — PJ=[3,7) único bucket + PnL
-  // BOOM500:  [15,30] calibrado en 213 trades S20+ — WR=55.4%, PnL=+$86
-  const _powerMin      = isCrash500 ? 3.0 : 15.0;
-  const _powerMax      = isCrash500 ? 8.0 : 30.0;
-  const _powerOk       = power_30min_jump >= _powerMin && power_30min_jump <= _powerMax;
-  const _powerPctBar   = Math.min(100, (power_30min_jump / (_powerMax * 1.3)) * 100);
-  const _powerZoneLeft = Math.min(100, (_powerMin / (_powerMax * 1.3)) * 100);
-  const _powerZoneW    = Math.min(100 - _powerZoneLeft, ((_powerMax - _powerMin) / (_powerMax * 1.3)) * 100);
+  // ── gate de horas eliminado 2026-07-18 — POWER gate reemplaza ───────────────
   const _curUTCH       = new Date(now).getUTCHours();
-  const _isHourBlocked = false;  // gate eliminado 2026-07-18 — POWER gate reemplaza
+  const _isHourBlocked = false;
   const _nextUnblockedH = 0;
 
   // ── PnL gate pause state ────────────────────────────────────────────────────
