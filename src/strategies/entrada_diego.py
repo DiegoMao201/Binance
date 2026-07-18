@@ -783,6 +783,41 @@ class EntradaDiego:
                 sym, state.burst_phase, state.spikes_in_contract_500, state.hour_spike_count_500,
                 f" real={state.crash500_real_spikes_500}(≥{int(BURST_STAKE40_REAL_SPIKE_RATIO)}x)" if sym == "CRASH500" else "",
             )
+            # ── CRASH500 S1 SPIKE-RESET: cada spike reinicia el timer S1 ────────
+            # Al cerrar y abrir S1 fresco, la power_window se resetea a solo este spike.
+            # Así al expirar el nuevo S1 (7min), POWER = solo spikes recientes (no acumulado).
+            # El POWER gate entonces evalúa limpio: si abs_jump ∈ [3,8] → S20.
+            if (sym == "CRASH500"
+                    and state.burst_phase == "STAKE_1"
+                    and state.contract_id is not None):
+                _cid_r = int(state.contract_id)
+                _pnl_r = state.current_profit
+                state.contract_id              = None
+                state.current_profit           = 0.0
+                state.peak_profit_500          = 0.0
+                state.spikes_in_contract_500   = 0
+                state.crash500_real_spikes_500 = 0
+                try:
+                    await self._executor.close_contract(_cid_r)
+                except Exception as exc:
+                    _LOGGER.error("[ENTRADA_DIEGO] CRASH500 S1_SPIKE_RESET close error: %s", exc)
+                state.last_close_profit = _pnl_r
+                self._add_global_pnl(sym, _pnl_r, now)
+                if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
+                    state.hour_pnl_500 += _pnl_r
+                # Resetear power_window: solo el spike actual (limpia acumulado previo)
+                state.power_window = [(_last_spk_ts, _power_jump)]
+                # Timer S1 fresco de 7min: al vencer → _transition → POWER gate evalúa limpio
+                state.crash500_s1_timer_s    = BURST_STAKE1_CRASH500_S
+                state.burst_phase            = "STAKE_1"
+                state.burst_phase_started_at = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] CRASH500 S1_SPIKE_RESET cid=%d pnl=%.4f pj=%.2f power_reset=[%.2f] → S1 7min",
+                    _cid_r, _pnl_r, _power_jump, _power_jump,
+                )
+                self._persist(now)
+                await self._open(sym, state, now, stake_override=BURST_STAKE1_AMOUNT)
+                return
             self._persist(now)  # guarda spikes_in_contract, last_spike_ts_500, hour_spike_count en disco
 
         # ── ORPHAN: contrato con fase sin definir → cerrar → STAKE_1 ─────────
