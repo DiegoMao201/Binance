@@ -105,7 +105,7 @@ BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2")
 
 # BOOM500: máquina 4 niveles (STAKE_1 → STAKE_10 → STAKE_20 → STAKE_40)
 # CRASH500: máquina adaptativa — S1(7-20m adapt) → S20(20m) → S40(20m) → S60(20m)
-#   S1 adaptativo: 0spk<20m→S20 | ≤1spk@20m→S20 | 1spk<20m→S1 | 2spk→12m | 3spk→17m | 4+spk→20m
+#   S1 adaptativo: 0spk<17m→S20 | ≤1spk≥17m→S20 | 1spk@10-12m→S20 | 1spk@7m→S1 | 2spk→12m | 3spk→17m | 4+spk→20m
 #   S20 20m: 0spk+WIN→S1(20m) | 1spk+WIN→S40 | 2+spk+WIN→S1(10m) | LOSE(any)→S40
 #   S40 20m: WIN→S1(7m) | LOSE+spike→S1(7m) | LOSE 0spk→S60
 #   S60 20m: WIN→S1(20m) | LOSE→retry S60 (infinito hasta ganar)
@@ -1094,15 +1094,20 @@ class EntradaDiego:
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
             _cur_t  = state.crash500_s1_timer_s
-            # ≥17min: ≤1 spike ya permite escalar; <17min: solo 0 spikes escalan
+            # ≥17min: ≤1 spike ya permite escalar; <17min: solo 0 spikes escalan normalmente
             _at_max = (_cur_t >= BURST_STAKE1_CRASH500_17M_S)
             if (_spk == 0 and not _at_max) or (_spk <= 1 and _at_max):
                 # escalada a S20: 0spk<17m | ≤1spk@17-20m
                 state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S  # reset para siguiente ciclo
                 await _transition("STAKE_20", BURST_STAKE20_AMOUNT,
                     f"CRASH500 S1 {int(_cur_t//60)}min {_spk}spk→S20", _cid, _pnl, _spk)
+            elif _spk == 1 and _cur_t >= BURST_STAKE1_CRASH500_10M_S:
+                # 1 spike con timer ≥10min: símbolo activo → escalar a S20 (no desperdiciar)
+                state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S  # reset para siguiente ciclo
+                await _transition("STAKE_20", BURST_STAKE20_AMOUNT,
+                    f"CRASH500 S1 {int(_cur_t//60)}min 1spk→S20(activo)", _cid, _pnl, _spk)
             elif _spk == 1:
-                # 1 spike, timer < 17min → quedar en S1 con mismo timer
+                # 1 spike con timer 7min → demasiado pronto, quedar en S1 mismo timer
                 await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
                     f"CRASH500 S1 {int(_cur_t//60)}min 1spk→S1(mismo_timer)", _cid, _pnl, _spk)
             elif _spk == 2:
