@@ -154,6 +154,10 @@ SYM_PNL_LOSS_PAUSE_H   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_PAUSE_H", "
 CRASH500_POWER_MIN         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MIN",     "3.0"))
 CRASH500_POWER_MAX         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MAX",     "8.0"))
 CRASH500_SYM_PNL_WIN_PAUSE_H = float(os.getenv("ENTRADA_DIEGO_CRASH500_WIN_PAUSE_H", "4.0"))
+# BOOM500 POWER gate: Σ(abs_jump) 30min ∈ [15,30] → S20 (spike-reset + 6min wait)
+# Calibrado en 213 trades S20+ Jul-2026: PJ=[15,30) WR=55.4% PnL=+$86 (único bucket +)
+BOOM500_POWER_MIN          = float(os.getenv("ENTRADA_DIEGO_BOOM500_POWER_MIN",    "15.0"))
+BOOM500_POWER_MAX          = float(os.getenv("ENTRADA_DIEGO_BOOM500_POWER_MAX",    "30.0"))
 
 # Horas UTC bloqueadas por análisis histórico (8,816 contratos, Mayo–Jul 2026)
 # Las 5 peores horas por símbolo: pierden consistentemente hora tras hora
@@ -817,6 +821,37 @@ class EntradaDiego:
                 self._persist(now)
                 await self._open(sym, state, now, stake_override=BURST_STAKE1_AMOUNT)
                 return
+            # ── BOOM500 S1 SPIKE-RESET ────────────────────────────────────────────
+            # Spike en S1 → cerrar, abrir timer fresco 6min, power_window conserva 30min
+            if (sym == "BOOM500"
+                    and state.burst_phase == "STAKE_1"
+                    and state.contract_id is not None):
+                _cid_b = int(state.contract_id)
+                _pnl_b = state.current_profit
+                state.contract_id              = None
+                state.current_profit           = 0.0
+                state.peak_profit_500          = 0.0
+                state.spikes_in_contract_500   = 0
+                state.crash500_real_spikes_500 = 0
+                try:
+                    await self._executor.close_contract(_cid_b)
+                except Exception as exc:
+                    _LOGGER.error("[ENTRADA_DIEGO] BOOM500 S1_SPIKE_RESET close error: %s", exc)
+                state.last_close_profit = _pnl_b
+                self._add_global_pnl(sym, _pnl_b, now)
+                if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
+                    state.hour_pnl_500 += _pnl_b
+                # Timer S1 fresco de 6min: al vencer → _transition → POWER gate evalúa
+                # power_window conserva 30min: los spikes viejos envejecen naturalmente
+                state.burst_phase            = "STAKE_1"
+                state.burst_phase_started_at = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] BOOM500 S1_SPIKE_RESET cid=%d pnl=%.4f pj=%.2f → S1 6min",
+                    _cid_b, _pnl_b, _power_jump,
+                )
+                self._persist(now)
+                await self._open(sym, state, now, stake_override=BURST_STAKE1_AMOUNT)
+                return
             self._persist(now)  # guarda spikes_in_contract, last_spike_ts_500, hour_spike_count en disco
 
         # ── ORPHAN: contrato con fase sin definir → cerrar → STAKE_1 ─────────
@@ -849,11 +884,6 @@ class EntradaDiego:
                     return  # en pausa — no abrir nuevo contrato
                 _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL_PAUSE expiró → reanudando", sym)
                 state.sym_pnl_pause_until = 0.0
-            # ── Gate hora UTC bloqueada (solo BOOM500 — CRASH500 usa POWER gate) ──
-            if sym == "BOOM500":
-                _utc_hour = time.gmtime(now).tm_hour
-                if _utc_hour in BOOM500_BLOCKED_UTC_HOURS:
-                    return  # hora históricamente negativa — sin operar
             # ── HOUR_PROFIT_PROTECT: ≥$4 ganado esta hora → esperar siguiente hora ──
             _cur_hour = int(now // 3600) * 3600.0
             if _cur_hour != state.hour_start_ts_500:
@@ -874,7 +904,7 @@ class EntradaDiego:
                 return
             if state.burst_phase not in ("STAKE_1", "STAKE_5", "STAKE_10", "STAKE_20", "STAKE_40", "STAKE_60"):
                 state.burst_phase = "STAKE_1"
-            # ── CRASH500 POWER gate: decide S1 vs S20 según Σ(ratio) 30min ──────
+            # ── POWER gate: decide S1 vs S20 según Σ(abs_jump) 30min ─────────────
             if sym == "CRASH500":
                 _crash_power = self._get_power_30min("CRASH500", now)
                 if CRASH500_POWER_MIN <= _crash_power <= CRASH500_POWER_MAX:
@@ -882,8 +912,18 @@ class EntradaDiego:
                 else:
                     state.burst_phase = "STAKE_1"
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE=%.0f [%.0f–%.0f] → %s",
+                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE=%.1f [%.0f–%.0f] → %s",
                     _crash_power, CRASH500_POWER_MIN, CRASH500_POWER_MAX, state.burst_phase,
+                )
+            elif sym == "BOOM500":
+                _boom_power = self._get_power_30min("BOOM500", now)
+                if BOOM500_POWER_MIN <= _boom_power <= BOOM500_POWER_MAX:
+                    state.burst_phase = "STAKE_20"
+                else:
+                    state.burst_phase = "STAKE_1"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] BOOM500 POWER_GATE=%.1f [%.0f–%.0f] → %s",
+                    _boom_power, BOOM500_POWER_MIN, BOOM500_POWER_MAX, state.burst_phase,
                 )
             if state.burst_phase_started_at == 0.0:
                 state.burst_phase_started_at   = now
@@ -971,15 +1011,7 @@ class EntradaDiego:
                 state.burst_phase = "STAKE_1"
                 state.burst_phase_started_at = 0.0
                 return
-            # hora gate: solo BOOM500; CRASH500 usa POWER gate exclusivamente
-            if sym == "BOOM500":
-                _tr_utc_hour = time.gmtime().tm_hour
-                if _tr_utc_hour in BOOM500_BLOCKED_UTC_HOURS:
-                    _LOGGER.info("[ENTRADA_DIEGO] %s hora %02dh UTC bloqueada → sin escalar a %s → reset S1", sym, _tr_utc_hour, next_phase)
-                    state.burst_phase = "STAKE_1"
-                    state.burst_phase_started_at = 0.0
-                    return
-            # ── CRASH500 POWER gate: override next_phase antes de abrir ──────────
+            # ── POWER gate (_transition): override next_phase antes de abrir ──────
             if sym == "CRASH500":
                 _crash_power_tr = self._get_power_30min("CRASH500", time.time())
                 if CRASH500_POWER_MIN <= _crash_power_tr <= CRASH500_POWER_MAX:
@@ -990,8 +1022,21 @@ class EntradaDiego:
                     next_stake = BURST_STAKE1_AMOUNT
                 state.burst_phase = next_phase
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE_TR=%.0f [%.0f–%.0f] → %s",
+                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE_TR=%.1f [%.0f–%.0f] → %s",
                     _crash_power_tr, CRASH500_POWER_MIN, CRASH500_POWER_MAX, next_phase,
+                )
+            elif sym == "BOOM500":
+                _boom_power_tr = self._get_power_30min("BOOM500", time.time())
+                if BOOM500_POWER_MIN <= _boom_power_tr <= BOOM500_POWER_MAX:
+                    next_phase = "STAKE_20"
+                    next_stake = BURST_STAKE20_AMOUNT
+                else:
+                    next_phase = "STAKE_1"
+                    next_stake = BURST_STAKE1_AMOUNT
+                state.burst_phase = next_phase
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] BOOM500 POWER_GATE_TR=%.1f [%.0f–%.0f] → %s",
+                    _boom_power_tr, BOOM500_POWER_MIN, BOOM500_POWER_MAX, next_phase,
                 )
             await self._open(sym, state, time.time(), stake_override=next_stake)
 
