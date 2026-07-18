@@ -805,9 +805,8 @@ class EntradaDiego:
                 self._add_global_pnl(sym, _pnl_r, now)
                 if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
                     state.hour_pnl_500 += _pnl_r
-                # Resetear power_window: solo el spike actual (limpia acumulado previo)
-                state.power_window = [(_last_spk_ts, _power_jump)]
-                # Timer S1 fresco de 7min: al vencer → _transition → POWER gate evalúa limpio
+                # Timer S1 fresco de 7min: al vencer → _transition → POWER gate evalúa
+                # power_window conserva los 30min: los spikes viejos envejecen naturalmente
                 state.crash500_s1_timer_s    = BURST_STAKE1_CRASH500_S
                 state.burst_phase            = "STAKE_1"
                 state.burst_phase_started_at = now
