@@ -1513,57 +1513,46 @@ class EntradaDiego:
                 else:
                     next_phase = "STAKE_20" if _gap_gate_s20() else "STAKE_1"
             elif _phase == "STAKE_20":
+                # Regla unificada broker-close: win→S1 | loss+0spk→S40 | loss+1+spk→S1
                 if sym == "CRASH500":
-                    # 0spk+WIN→S1(20m) | 1spk+WIN→S40 | 2+spk+WIN→S1(10m) | LOSE→S40
                     if _pnl > 0:
                         if _spk == 0:
                             state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                            next_phase = "STAKE_1"
-                        elif _spk == 1:
-                            next_phase = "STAKE_40"
-                        else:
+                        elif _spk >= 2:
                             state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_10M_S
-                            next_phase = "STAKE_1"
-                    else:
+                        else:
+                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
+                        next_phase = "STAKE_1"
+                    elif _spk == 0:
                         next_phase = "STAKE_40"
+                    else:
+                        state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
+                        next_phase = "STAKE_1"
                 else:
-                    # BOOM500: contador de losses consecutivos en S20
+                    # BOOM500: win→S1 | loss+0spk→S40 | loss+1+spk→S1
                     if _pnl > 0:
                         state.s20_consec_losses = 0
+                        next_phase = "STAKE_1"
+                    elif _spk == 0:
+                        state.s20_consec_losses += 1
+                        next_phase = "STAKE_40"
                     else:
                         state.s20_consec_losses += 1
-                    # 2 losses seguidos → drought S1 20min (override todo)
-                    if _pnl <= 0 and state.s20_consec_losses >= 2:
-                        state.s20_consec_losses = 0
-                        state.s1_drought_mode = True
                         next_phase = "STAKE_1"
-                    elif _spk >= 3:
-                        if _pnl > 0:
-                            state.s1_drought_mode = True  # 3+spk win → S1(20min) para recargar
-                        next_phase = "STAKE_1"
-                    elif _spk >= 1:
-                        if _pnl > 0:
-                            next_phase = "STAKE_40" if _spk == 1 else "STAKE_20"
-                        else:
-                            next_phase = "STAKE_20" if _s40_bueno_gate() else "STAKE_1"
-                    else:  # 0 spikes: único camino a S40 — solo si hora BUENO y mercado activo
-                        if _s40_bueno_gate() and _gap_gate_s40():
-                            next_phase = "STAKE_40"
-                        else:
-                            next_phase = "STAKE_1"
-                            state.s1_drought_mode = True  # broker S20 sin spike → S1 extendido 20min
             elif _phase == "STAKE_40":
                 if sym == "CRASH500":
-                    # WIN→S1(7m) | LOSE+spike(≥50x)→S1(7m) | LOSE 0real_spk→S60
+                    # WIN→S1(7m) | LOSE+spike(≥50x)→S1(7m) | LOSE 0real_spk→S80
                     if _pnl > 0 or _real_spk >= 1:
                         state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
                         next_phase = "STAKE_1"
                     else:
-                        next_phase = "STAKE_60"
-                elif _pnl > 0:
-                    next_phase = "STAKE_1"
+                        next_phase = "STAKE_80"
                 else:
-                    next_phase = "STAKE_40" if (_s40_bueno_gate() and _gap_gate_s40()) else "STAKE_1"
+                    # BOOM500: win/1+spk→S1 | 0spk+loss→S80
+                    if _pnl > 0 or _spk >= 1:
+                        next_phase = "STAKE_1"
+                    else:
+                        next_phase = "STAKE_80"
             elif _phase == "STAKE_60":
                 # CRASH500: WIN→S1(20m) | LOSE→retry S60
                 if _pnl > 0:

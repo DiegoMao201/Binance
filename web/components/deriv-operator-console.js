@@ -780,8 +780,11 @@ function EntradaDiegoSection({ symbol }) {
   const minLabel   = burst_phase === "STAKE_1"  ? (isCrash500 ? `${_c500_s1_min}min` : (s1_drought_mode ? "20min·SEQUÍA" : "6min"))
     : burst_phase === "STAKE_5"  ? "15min(legacy)"
     : burst_phase === "STAKE_10" ? "15min"
+    : burst_phase === "STAKE_20" ? "8min"
+    : burst_phase === "STAKE_40" ? "20min"
+    : burst_phase === "STAKE_60" ? "20min"
     : burst_phase === "STAKE_80" ? "20min"
-    : "8min";
+    : "–";
 
   // ── gate de horas eliminado 2026-07-18 — POWER gate reemplaza ───────────────
   const _curUTCH       = new Date(now).getUTCHours();
@@ -1008,9 +1011,9 @@ function EntradaDiegoSection({ symbol }) {
                 )}
               </React.Fragment>
             ))}
-            {!isCrash500 && (
-              <span style={{ marginLeft: "auto", fontSize: 8, color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-                Gate S40: {s40GateLabel} — {s40BuenoGate ? "BUENO ✓" : "NO BUENO ✗"}
+            {!isCrash500 && burst_phase !== "STAKE_1" && (
+              <span style={{ marginLeft: "auto", fontSize: 8, color: current_profit > 0 ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                {spikes_in_contract}spk · pnl {current_profit >= 0 ? "+" : ""}{current_profit.toFixed(2)}
               </span>
             )}
           </div>
@@ -1030,10 +1033,12 @@ function EntradaDiegoSection({ symbol }) {
                 </>
               ) : (
                 <>
-                  {spikes_in_contract} spk contrato
+                  <span style={{ color: spikes_in_contract >= 1 ? "#62d4ff" : "rgba(255,255,255,0.35)", fontWeight: 700 }}>
+                    {spikes_in_contract}spk
+                  </span>
                   {" · "}
-                  <span style={{ color: s40BuenoGate ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
-                    {_hLabel}: {s40GateLabel}
+                  <span style={{ color: current_profit > 0 ? "#22d3a3" : "#ff5d6c", fontWeight: 700 }}>
+                    {current_profit >= 0 ? "+" : ""}{current_profit.toFixed(2)} USDT
                   </span>
                   {hourChanged && (
                     <span style={{ color: "#62d4ff", fontWeight: 700 }}> · ⟳ cambio hora</span>
