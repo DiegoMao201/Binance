@@ -611,14 +611,15 @@ function EntradaDiegoSection({ symbol }) {
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
 
-  // Colores por fase
-  const phaseColor = burst_phase === "STAKE_80"   ? "#ff5d6c"
-    : burst_phase === "STAKE_60"                  ? "#e879f9"
-    : burst_phase === "STAKE_40"                  ? "#a78bfa"
-    : burst_phase === "STAKE_20"                  ? "#22d3a3"
-    : burst_phase === "STAKE_10"                  ? "#fb923c"
-    : burst_phase === "TIMER_GATE"                ? "#62d4ff"
-    : "#64748b"; // WAIT_GATE
+  // Colores por fase — WAIT con gate cumplido → mismo azul que TIMER
+  const _waitGateActive = burst_phase === "WAIT_GATE" && _gateOk;
+  const phaseColor = burst_phase === "STAKE_80"               ? "#ff5d6c"
+    : burst_phase === "STAKE_60"                              ? "#e879f9"
+    : burst_phase === "STAKE_40"                              ? "#a78bfa"
+    : burst_phase === "STAKE_20"                              ? "#22d3a3"
+    : burst_phase === "STAKE_10"                              ? "#fb923c"
+    : (burst_phase === "TIMER_GATE" || _waitGateActive)       ? "#62d4ff"
+    : "#64748b"; // WAIT_GATE sin gate
 
   // Timer durations por fase
   const _timerGateS  = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
@@ -646,6 +647,7 @@ function EntradaDiegoSection({ symbol }) {
     : burst_phase === "STAKE_60" ? "$60"
     : burst_phase === "STAKE_80" ? "$80"
     : burst_phase === "TIMER_GATE" ? (isCrash500 ? "7m" : "6m")
+    : _waitGateActive ? "GATE ✓"
     : "WAIT";
 
   // Siguiente acción prediction
