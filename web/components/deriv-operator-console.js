@@ -590,6 +590,7 @@ function EntradaDiegoSection({ symbol }) {
     sym_pnl_win_pause_h = 6,
     sym_pnl_loss_pause_h = 2,
     power_30min_jump = 0,
+    n_spikes_30min = 0,
   } = edState;
 
   const nowSec = now / 1000;
@@ -706,13 +707,13 @@ function EntradaDiegoSection({ symbol }) {
     : null;
   // CRASH500: S1(adapt)→S20(20m)→S40(20m)→S60(20m)
   const _c500_s1_min = Math.round(crash500_s1_timer_s / 60);
-  // CRASH500: POWER gate — S1_SPIKE_RESET + Σ(abs_jump) 30min
+  // CRASH500: N_SPIKES gate — n_spikes_30min == 3 exactamente abre S20
   const nextHintCrash = burst_phase === "STAKE_1"
-    ? _powerOk
-        ? `→ $20 al expirar [POWER:${_pjStrC} ✓ en [${_powerMin}–${_powerMax}]]`
-        : power_30min_jump < _powerMin
-          ? `→ $1 (POWER:${_pjStrC} < ${_powerMin} — acumulando energía)`
-          : `→ $1 (POWER:${_pjStrC} > ${_powerMax} — sobreextendido)`
+    ? n_spikes_30min === 3
+        ? `→ $20 al expirar [${n_spikes_30min} spikes ✓ gate abierto]`
+        : n_spikes_30min < 3
+          ? `→ $1 (${n_spikes_30min} spikes — necesita exactamente 3)`
+          : `→ $1 (${n_spikes_30min} spikes — demasiados, espera decay)`
     : burst_phase === "STAKE_5"
     ? "→ $20 (legacy S5)"
     : burst_phase === "STAKE_20"
@@ -810,7 +811,7 @@ function EntradaDiegoSection({ symbol }) {
   const _toNextWin     = _pnlWinNext  - sym_pnl_since_reset;
   const _toNextLoss    = sym_pnl_since_reset - _pnlLossNext;
 
-  const _displayColor = !is1000 ? (_isHourBlocked ? "#475569" : _isPausedPnl ? _pauseColor : phaseColor) : color;
+  const _displayColor = !is1000 ? (_isHourBlocked ? "#475569" : phaseColor) : color;
   return (
     <div style={{ ...base, color: _displayColor, background: `${_displayColor}14`, borderColor: _displayColor }}>
       {is1000 ? (<>
@@ -841,21 +842,13 @@ function EntradaDiegoSection({ symbol }) {
             <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
               background: "rgba(71,85,105,0.25)", color: "#64748b", letterSpacing: "0.05em",
             }}>⛔ {String(_curUTCH).padStart(2,'0')}h BLOQUEADA</span>
-          ) : _isPausedPnl ? (
-            <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-              background: `${_pauseColor}25`, color: _pauseColor, letterSpacing: "0.05em",
-            }}>⏸ PAUSA {_pauseIsWin ? "WIN" : "LOSS"} · {_pauseRemH > 0 ? `${_pauseRemH}h ` : ""}{_pauseRemM}m</span>
           ) : (
             <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
               background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.05em",
             }}>{stakeLabel} · {minLabel}</span>
           )}
-          <span style={{ color: _isHourBlocked ? "#475569" : _isPausedPnl ? _pnlAccColor : pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
-            {_isHourBlocked
-              ? `${sym_pnl_since_reset >= 0 ? "+" : ""}${sym_pnl_since_reset.toFixed(2)}$`
-              : _isPausedPnl
-                ? `${sym_pnl_since_reset >= 0 ? "+" : ""}${sym_pnl_since_reset.toFixed(2)}$`
-                : (contract_id ? pnlStr : "")}
+          <span style={{ color: _isHourBlocked ? "#475569" : pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+            {contract_id ? pnlStr : ""}
           </span>
         </div>
       )}
@@ -887,41 +880,6 @@ function EntradaDiegoSection({ symbol }) {
           { id:"STAKE_80", label:"$80", dur:"20m", color:"#ff5d6c" },
         ];
 
-        // ── Cuando el símbolo está pausado por PnL gate ────────────────────────
-        if (_isPausedPnl) {
-          const _pPct = Math.min(100, (1 - _pauseRemS / ((_pauseIsWin ? sym_pnl_win_pause_h : sym_pnl_loss_pause_h) * 3600)) * 100);
-          return (
-          <div style={{ padding: "6px 8px", borderRadius: 4,
-            background: `${_pauseColor}0d`, border: `1px solid ${_pauseColor}45`, textAlign: "center" }}>
-            {/* Razón de pausa */}
-            <div style={{ fontSize: 8, color: "rgba(255,255,255,0.45)", marginBottom: 4, letterSpacing: "0.05em" }}>
-              {_pauseIsWin ? "✓ meta +$" + sym_pnl_win_gate.toFixed(0) + " alcanzada — esperando" : "⚠ pérdida -$" + sym_pnl_loss_gate.toFixed(0) + " — descansando"}
-            </div>
-            {/* Contador grande */}
-            <div style={{ fontSize: 22, fontWeight: 700, color: _pauseColor, letterSpacing: "0.08em", fontVariantNumeric: "tabular-nums", marginBottom: 2 }}>
-              {String(_pauseRemH).padStart(2,'0')}:{String(_pauseRemM).padStart(2,'0')}:{String(_pauseRemSec).padStart(2,'0')}
-            </div>
-            {/* Barra de progreso de la pausa */}
-            <div style={{ width: "100%", height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, margin: "4px 0", overflow: "hidden" }}>
-              <div style={{ width: `${_pPct}%`, height: "100%", background: _pauseColor, transition: "width 1s linear" }} />
-            </div>
-            {/* Hora de reanudación */}
-            <div style={{ fontSize: 9, color: "rgba(255,255,255,0.5)", marginBottom: 4 }}>
-              reanuda a las <span style={{ color: _pauseColor, fontWeight: 700 }}>{_resumeUTC} UTC</span>
-            </div>
-            {/* PnL resumen */}
-            <div style={{ display: "flex", justifyContent: "space-around", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 4 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>
-                acum: <span style={{ color: _pnlAccColor, fontWeight: 700 }}>{sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}</span>
-              </span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>
-                próx. meta: <span style={{ color: "#22d3a3", fontWeight: 700 }}>+${_pnlWinNext.toFixed(0)}</span>
-              </span>
-            </div>
-          </div>
-          );
-        }
-
         return (
         <div style={{ padding: "4px 6px", borderRadius: 4,
           background: `${phaseColor}12`, border: `1px solid ${phaseColor}35` }}>
@@ -935,62 +893,83 @@ function EntradaDiegoSection({ symbol }) {
             </span>
           </div>
 
-          {/* POWER gate — Σ(abs_jump) 30min */}
+          {/* Gate principal — CRASH500: n_spikes=3 | BOOM500: POWER [15–30] */}
           <div style={{ marginBottom: 5 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: "0.04em" }}>
-                POWER 30m
-              </span>
-              <span style={{
-                fontSize: 9, fontWeight: 700,
-                color: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.45)",
-                fontVariantNumeric: "tabular-nums",
-              }}>
-                {power_30min_jump.toFixed(1)}
-              </span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>
-                [{_powerMin}–{_powerMax}]
-              </span>
-              <span style={{
-                fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2,
-                background: _powerOk ? "rgba(34,211,163,0.15)" : "rgba(255,255,255,0.06)",
-                color: _powerOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
-                marginLeft: "auto",
-              }}>
-                {_powerOk ? "✓ S20" : burst_phase === "STAKE_1" ? "espera" : "–"}
-              </span>
-            </div>
-            {/* Barra con zona target resaltada */}
-            <div style={{ position: "relative", height: 5, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }}>
-              {/* Zona target */}
-              <div style={{
-                position: "absolute", top: 0, height: "100%",
-                left: `${_powerZoneLeft}%`, width: `${_powerZoneW}%`,
-                background: "rgba(34,211,163,0.22)",
-              }} />
-              {/* Valor actual */}
-              <div style={{
-                position: "absolute", top: 0, left: 0, height: "100%",
-                width: `${_powerPctBar}%`,
-                background: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.3)",
-                borderRadius: 3,
-                transition: "width 1s linear",
-              }} />
-            </div>
+            {isCrash500 ? (
+              /* CRASH500: gate por número de spikes en 30min */
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+                  <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: "0.04em" }}>SPIKES 30m</span>
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, fontVariantNumeric: "tabular-nums",
+                    color: n_spikes_30min === 3 ? "#22d3a3" : n_spikes_30min > 3 ? "#f59e0b" : "rgba(255,255,255,0.45)",
+                  }}>
+                    {n_spikes_30min}
+                  </span>
+                  <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>/ necesita =3</span>
+                  <span style={{
+                    fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2, marginLeft: "auto",
+                    background: n_spikes_30min === 3 ? "rgba(34,211,163,0.15)" : "rgba(255,255,255,0.06)",
+                    color: n_spikes_30min === 3 ? "#22d3a3" : "rgba(255,255,255,0.3)",
+                  }}>
+                    {n_spikes_30min === 3 ? "✓ S20" : burst_phase === "STAKE_1" ? "espera" : "–"}
+                  </span>
+                </div>
+                {/* Indicador de 5 puntos: 0 1 2 [3] 4+ */}
+                <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                  {[0,1,2,3,4].map(i => {
+                    const isTarget = i === 3;
+                    const isOver   = i === 4 && n_spikes_30min >= 4;
+                    const isActive = i < 4 ? n_spikes_30min > i : n_spikes_30min >= 4;
+                    const c = isTarget && n_spikes_30min === 3 ? "#22d3a3" : isOver ? "#f59e0b" : isActive ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.1)";
+                    return (
+                      <div key={i} style={{
+                        flex: 1, height: 5, borderRadius: 2,
+                        background: c,
+                        border: isTarget ? `1px solid ${n_spikes_30min === 3 ? "#22d3a3" : "rgba(34,211,163,0.3)"}` : "none",
+                        transition: "background 0.4s",
+                      }} />
+                    );
+                  })}
+                  <span style={{ fontSize: 7, color: "rgba(255,255,255,0.25)", marginLeft: 2 }}>0→4+</span>
+                </div>
+              </div>
+            ) : (
+              /* BOOM500: gate por POWER Σ(abs_jump) 30min en [15–30] */
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
+                  <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: "0.04em" }}>POWER 30m</span>
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, fontVariantNumeric: "tabular-nums",
+                    color: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.45)",
+                  }}>
+                    {power_30min_jump.toFixed(1)}
+                  </span>
+                  <span style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>[{_powerMin}–{_powerMax}]</span>
+                  <span style={{
+                    fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2, marginLeft: "auto",
+                    background: _powerOk ? "rgba(34,211,163,0.15)" : "rgba(255,255,255,0.06)",
+                    color: _powerOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
+                  }}>
+                    {_powerOk ? "✓ S20" : burst_phase === "STAKE_1" ? "espera" : "–"}
+                  </span>
+                </div>
+                <div style={{ position: "relative", height: 5, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }}>
+                  <div style={{ position: "absolute", top: 0, height: "100%", left: `${_powerZoneLeft}%`, width: `${_powerZoneW}%`, background: "rgba(34,211,163,0.22)" }} />
+                  <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${_powerPctBar}%`, background: _powerOk ? "#22d3a3" : power_30min_jump > _powerMax ? "#f59e0b" : "rgba(255,255,255,0.3)", borderRadius: 3, transition: "width 1s linear" }} />
+                </div>
+              </div>
+            )}
           </div>
 
 
-          {/* Gate PnL — progreso compacto (solo cuando no está pausado) */}
+          {/* PnL acumulado sesión */}
           <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4 }}>
             <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>PnL:</span>
             <span style={{ fontSize: 9, fontWeight: 700, color: _pnlAccColor }}>
               {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}
             </span>
             <span style={{ fontSize: 8, color: "rgba(255,255,255,0.2)" }}>/ ref{sym_pnl_reference >= 0 ? "+" : ""}{sym_pnl_reference.toFixed(0)}</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
-              <span style={{ fontSize: 8, color: "#22d3a3" }}>▲+${_toNextWin.toFixed(0)}⏸{sym_pnl_win_pause_h.toFixed(0)}h</span>
-              <span style={{ fontSize: 8, color: "#f59e0b" }}>▼-${_toNextLoss.toFixed(0)}⏸{sym_pnl_loss_pause_h.toFixed(0)}h</span>
-            </span>
           </div>
 
           {/* Diagrama de máquina: S1 → S10 → S20 → S40 */}

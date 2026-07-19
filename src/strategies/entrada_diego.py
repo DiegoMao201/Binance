@@ -382,6 +382,7 @@ class _SymState:
             "burst_stake60_amount":         BURST_STAKE60_AMOUNT,
             "burst_stake80_amount":         BURST_STAKE80_AMOUNT,
             "power_30min_jump": round(sum(r for t, r in self.power_window if t > now - 1800.0), 2),
+            "n_spikes_30min": sum(1 for t, _ in self.power_window if t > now - 1800.0),
         }
         return d
 
@@ -2271,22 +2272,7 @@ class EntradaDiego:
         return sum(1 for t, _ in self._states[sym].power_window if t > cutoff)
 
     def _check_sym_pnl_gate(self, sym: str, now: float) -> None:
-        state  = self._states[sym]
-        _delta = state.sym_pnl_since_reset - state.sym_pnl_reference
-        # CRASH500: win pause = 4h (régimen se descarga tras ganar $30); sin loss gate (POWER gate filtra el mal momento)
-        _win_pause_h = CRASH500_SYM_PNL_WIN_PAUSE_H if sym == "CRASH500" else SYM_PNL_WIN_PAUSE_H
-        if _delta >= SYM_PNL_WIN_GATE_USD:
-            state.sym_pnl_reference   = state.sym_pnl_since_reset
-            state.sym_pnl_pause_until = now + _win_pause_h * 3600
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SYM_PNL_WIN +$%.2f desde ref → PAUSA %.0fh "
-                "(acum=$%.2f, ref→$%.2f, reanuda %s UTC)",
-                sym, _delta, _win_pause_h,
-                state.sym_pnl_since_reset, state.sym_pnl_reference,
-                __import__("datetime").datetime.utcfromtimestamp(
-                    state.sym_pnl_pause_until
-                ).strftime("%H:%M"),
-            )
+        pass  # Gates WIN/LOSS desactivados — evaluando edge del gate n_spikes/POWER
 
     def _add_global_pnl(self, sym: str, profit: float, now: float) -> None:
         if sym not in SYMBOLS_500:
