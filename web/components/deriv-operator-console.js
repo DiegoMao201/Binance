@@ -611,7 +611,14 @@ function EntradaDiegoSection({ symbol }) {
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
 
-  // Colores por fase — WAIT con gate cumplido → mismo azul que TIMER
+  // Gate conditions — deben ir ANTES de phaseColor para evitar TDZ
+  const _crashGateOk = n_spikes_30min >= CRASH_NSPK_MIN;
+  const _boomNspkOk  = n_spikes_30min >= BOOM_NSPK_MIN && n_spikes_30min < BOOM_NSPK_MAX;
+  const _boomPowOk   = power_30min_jump >= BOOM_POW_MIN && power_30min_jump < BOOM_POW_MAX;
+  const _boomGateOk  = _boomNspkOk && _boomPowOk;
+  const _gateOk      = isCrash500 ? _crashGateOk : _boomGateOk;
+
+  // Colores por fase — WAIT con gate cumplido → azul igual que TIMER
   const _waitGateActive = burst_phase === "WAIT_GATE" && _gateOk;
   const phaseColor = burst_phase === "STAKE_80"               ? "#ff5d6c"
     : burst_phase === "STAKE_60"                              ? "#e879f9"
@@ -632,13 +639,6 @@ function EntradaDiegoSection({ symbol }) {
     : 1;
   const phaseRem  = Math.max(0, phaseTotal - phaseElapsed);
   const phasePct  = burst_phase === "WAIT_GATE" ? 0 : Math.min(100, (phaseElapsed / phaseTotal) * 100);
-
-  // Gate conditions
-  const _crashGateOk = n_spikes_30min >= CRASH_NSPK_MIN;
-  const _boomNspkOk  = n_spikes_30min >= BOOM_NSPK_MIN && n_spikes_30min < BOOM_NSPK_MAX;
-  const _boomPowOk   = power_30min_jump >= BOOM_POW_MIN && power_30min_jump < BOOM_POW_MAX;
-  const _boomGateOk  = _boomNspkOk && _boomPowOk;
-  const _gateOk      = isCrash500 ? _crashGateOk : _boomGateOk;
 
   // Header label
   const _stakeLabel = burst_phase === "STAKE_10" ? "$10 · 8m"
