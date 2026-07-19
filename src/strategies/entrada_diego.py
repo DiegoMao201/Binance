@@ -912,14 +912,11 @@ class EntradaDiego:
             # Recovery = STAKE_40 o STAKE_80 tras pérdida sin spike → no sobrescribir
             _in_recovery = state.burst_phase in ("STAKE_40", "STAKE_60", "STAKE_80")
             if sym == "CRASH500" and not _in_recovery:
-                _crash_power = self._get_power_30min("CRASH500", now)
-                if CRASH500_POWER_MIN <= _crash_power <= CRASH500_POWER_MAX:
-                    state.burst_phase = "STAKE_20"
-                else:
-                    state.burst_phase = "STAKE_1"
+                _crash_nspk = self._get_spike_count_30min("CRASH500", now)
+                state.burst_phase = "STAKE_20" if _crash_nspk == 3 else "STAKE_1"
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE=%.1f [%.0f–%.0f] → %s",
-                    _crash_power, CRASH500_POWER_MIN, CRASH500_POWER_MAX, state.burst_phase,
+                    "[ENTRADA_DIEGO] CRASH500 N_SPIKES_GATE=%d → %s",
+                    _crash_nspk, state.burst_phase,
                 )
             elif sym == "BOOM500" and not _in_recovery:
                 _boom_power = self._get_power_30min("BOOM500", now)
@@ -1027,8 +1024,8 @@ class EntradaDiego:
             # Recovery phases (STAKE_40/60/80) NO se sobreescriben — tienen prioridad
             _in_recovery_tr = next_phase in ("STAKE_40", "STAKE_60", "STAKE_80")
             if sym == "CRASH500" and not _in_recovery_tr:
-                _crash_power_tr = self._get_power_30min("CRASH500", time.time())
-                if CRASH500_POWER_MIN <= _crash_power_tr <= CRASH500_POWER_MAX:
+                _crash_nspk_tr = self._get_spike_count_30min("CRASH500", time.time())
+                if _crash_nspk_tr == 3:
                     next_phase = "STAKE_20"
                     next_stake = BURST_STAKE20_AMOUNT
                 else:
@@ -1036,8 +1033,8 @@ class EntradaDiego:
                     next_stake = BURST_STAKE1_AMOUNT
                 state.burst_phase = next_phase
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 POWER_GATE_TR=%.1f [%.0f–%.0f] → %s",
-                    _crash_power_tr, CRASH500_POWER_MIN, CRASH500_POWER_MAX, next_phase,
+                    "[ENTRADA_DIEGO] CRASH500 N_SPIKES_GATE_TR=%d → %s",
+                    _crash_nspk_tr, next_phase,
                 )
             elif sym == "BOOM500" and not _in_recovery_tr:
                 _boom_power_tr = self._get_power_30min("BOOM500", time.time())
@@ -2268,6 +2265,11 @@ class EntradaDiego:
         cutoff = now - 1800.0
         return sum(r for t, r in self._states[sym].power_window if t > cutoff)
 
+    def _get_spike_count_30min(self, sym: str, now: float) -> int:
+        """Número de spikes del símbolo en los últimos 30 minutos."""
+        cutoff = now - 1800.0
+        return sum(1 for t, _ in self._states[sym].power_window if t > cutoff)
+
     def _check_sym_pnl_gate(self, sym: str, now: float) -> None:
         state  = self._states[sym]
         _delta = state.sym_pnl_since_reset - state.sym_pnl_reference
@@ -2280,19 +2282,6 @@ class EntradaDiego:
                 "[ENTRADA_DIEGO] %s SYM_PNL_WIN +$%.2f desde ref → PAUSA %.0fh "
                 "(acum=$%.2f, ref→$%.2f, reanuda %s UTC)",
                 sym, _delta, _win_pause_h,
-                state.sym_pnl_since_reset, state.sym_pnl_reference,
-                __import__("datetime").datetime.utcfromtimestamp(
-                    state.sym_pnl_pause_until
-                ).strftime("%H:%M"),
-            )
-        elif sym != "CRASH500" and _delta <= -SYM_PNL_LOSS_GATE_USD:
-            # CRASH500 no tiene loss gate — el POWER gate ya bloquea las malas condiciones
-            state.sym_pnl_reference   = state.sym_pnl_since_reset
-            state.sym_pnl_pause_until = now + SYM_PNL_LOSS_PAUSE_H * 3600
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s SYM_PNL_LOSS -$%.2f desde ref → PAUSA %.0fh "
-                "(acum=$%.2f, ref→$%.2f, reanuda %s UTC)",
-                sym, abs(_delta), SYM_PNL_LOSS_PAUSE_H,
                 state.sym_pnl_since_reset, state.sym_pnl_reference,
                 __import__("datetime").datetime.utcfromtimestamp(
                     state.sym_pnl_pause_until
