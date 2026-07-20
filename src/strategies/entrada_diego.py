@@ -158,6 +158,9 @@ SYM_PNL_LOSS_PAUSE_H   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_PAUSE_H", "
 # PJ=[3,7): WR=45.4% PnL=+$27 vs PJ=[0,3)=-$541 y PJ=[7+)=-$782 combinado.
 CRASH500_POWER_MIN         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MIN",     "3.0"))
 CRASH500_POWER_MAX         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MAX",     "8.0"))
+# CRASH500 n_spikes gate: [2,4) — análisis 1187 trades: 4-6spk WR=42-45% PnL=-$2.3/-$2.7 por trade
+CRASH500_NSPIKES_MIN       = int(os.getenv("ENTRADA_DIEGO_CRASH500_NSPIKES_MIN",     "2"))
+CRASH500_NSPIKES_MAX       = int(os.getenv("ENTRADA_DIEGO_CRASH500_NSPIKES_MAX",     "4"))   # exclusive
 CRASH500_SYM_PNL_WIN_PAUSE_H = float(os.getenv("ENTRADA_DIEGO_CRASH500_WIN_PAUSE_H", "4.0"))
 # BOOM500 DOUBLE gate: POWER [15,30) AND n_spikes [3,8) → S20
 # Análisis 1131 trades S20+ Jul-2026: gate doble n=150, WR=57.3%, PnL=+$187 (gate simple POWER: -$35)
@@ -925,7 +928,7 @@ class EntradaDiego:
                 _nspk = self._get_spike_count_30min(sym, now)
                 _pow  = self._get_power_30min(sym, now)
                 if sym == "CRASH500":
-                    _gate_met = (_nspk >= 2)
+                    _gate_met = (CRASH500_NSPIKES_MIN <= _nspk < CRASH500_NSPIKES_MAX)
                 else:
                     _gate_met = (_nspk >= 3 and BOOM500_POWER_MIN <= _pow < BOOM500_POWER_MAX)
                 if _gate_met:
@@ -1175,7 +1178,7 @@ class EntradaDiego:
             return f"Q{_q}:{_spk}/{'≥'+str(_req)}"
 
         # ── Piso de profit al 80% del peak (STAKE_10/20/40 — STAKE_1 siempre corre 10min) ──
-        _peak_trigger = (8.00 if state.burst_phase == "STAKE_80"
+        _peak_trigger = (15.00 if state.burst_phase == "STAKE_80"
                     else 4.00 if state.burst_phase == "STAKE_40"
                     else 2.00 if state.burst_phase == "STAKE_20"
                     else 1.00 if state.burst_phase == "STAKE_10"

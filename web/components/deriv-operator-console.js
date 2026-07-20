@@ -533,7 +533,7 @@ const BURST_S10_DURATION_S       = 480;   // 8min S10 BOOM500
 const BURST_S10_CRASH500_DURATION_S = 240; // 4min S10 CRASH500
 const BOOM_NSPK_MIN = 3, BOOM_NSPK_MAX = 8;
 const BOOM_POW_MIN  = 14.5, BOOM_POW_MAX = 30.0;
-const CRASH_NSPK_MIN = 2;
+const CRASH_NSPK_MIN = 2, CRASH_NSPK_MAX = 4;
 
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
@@ -613,7 +613,7 @@ function EntradaDiegoSection({ symbol }) {
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
 
   // Gate conditions — deben ir ANTES de phaseColor para evitar TDZ
-  const _crashGateOk = n_spikes_30min >= CRASH_NSPK_MIN;
+  const _crashGateOk = n_spikes_30min >= CRASH_NSPK_MIN && n_spikes_30min < CRASH_NSPK_MAX;
   const _boomNspkOk  = n_spikes_30min >= BOOM_NSPK_MIN && n_spikes_30min < BOOM_NSPK_MAX;
   const _boomPowOk   = power_30min_jump >= BOOM_POW_MIN && power_30min_jump < BOOM_POW_MAX;
   const _boomGateOk  = _boomNspkOk && _boomPowOk;
@@ -650,7 +650,7 @@ function EntradaDiegoSection({ symbol }) {
 
   // Siguiente acción prediction
   const _nextHint = burst_phase === "WAIT_GATE"
-    ? (_gateOk ? "↑ gate cumplido — iniciando timer…" : isCrash500 ? `esperando ≥${CRASH_NSPK_MIN} spikes` : `esperando [${BOOM_NSPK_MIN}-${BOOM_NSPK_MAX}) spk + POW[${BOOM_POW_MIN}-${BOOM_POW_MAX})`)
+    ? (_gateOk ? "↑ gate cumplido — iniciando timer…" : isCrash500 ? (n_spikes_30min >= CRASH_NSPK_MAX ? `zona mala ≥${CRASH_NSPK_MAX}spk — espera` : `esperando [${CRASH_NSPK_MIN}–${CRASH_NSPK_MAX}) spikes`) : `esperando [${BOOM_NSPK_MIN}-${BOOM_NSPK_MAX}) spk + POW[${BOOM_POW_MIN}-${BOOM_POW_MAX})`)
     : burst_phase === "TIMER_GATE"
     ? `→ $20 en ${_fmtS(phaseRem)}`
     : burst_phase === "STAKE_20"
@@ -737,7 +737,7 @@ function EntradaDiegoSection({ symbol }) {
               <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: "tabular-nums",
                 color: _crashGateOk ? "#22d3a3" : "rgba(255,255,255,0.5)",
               }}>{n_spikes_30min}</span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.25)" }}>/ necesita ≥{CRASH_NSPK_MIN}</span>
+              <span style={{ fontSize: 8, color: n_spikes_30min >= CRASH_NSPK_MAX ? "#f59e0b" : "rgba(255,255,255,0.25)" }}>[{CRASH_NSPK_MIN}–{CRASH_NSPK_MAX})</span>
               <span style={{ marginLeft: "auto", fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2,
                 background: _crashGateOk ? "rgba(34,211,163,0.18)" : "rgba(255,255,255,0.06)",
                 color: _crashGateOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
@@ -745,13 +745,15 @@ function EntradaDiegoSection({ symbol }) {
             </div>
             <div style={{ display: "flex", gap: 3 }}>
               {[0,1,2,3,4].map(i => {
-                const active = n_spikes_30min > i || (i === 4 && n_spikes_30min >= 4);
-                const isGate = i === CRASH_NSPK_MIN - 1; // slot 1 (≥2 means slot index 1)
-                const c = active && n_spikes_30min >= CRASH_NSPK_MIN ? "#22d3a3"
+                const active = n_spikes_30min > i;
+                const overMax = n_spikes_30min >= CRASH_NSPK_MAX;
+                const isGateSlot = i >= CRASH_NSPK_MIN - 1 && i < CRASH_NSPK_MAX - 1;
+                const c = active && overMax ? "#f59e0b"
+                  : active && _crashGateOk ? "#22d3a3"
                   : active ? "rgba(255,255,255,0.35)"
                   : "rgba(255,255,255,0.1)";
                 return <div key={i} style={{ flex: 1, height: 4, borderRadius: 2, background: c,
-                  border: isGate ? `1px solid rgba(34,211,163,0.4)` : "none",
+                  border: isGateSlot && !overMax ? `1px solid rgba(34,211,163,0.4)` : "none",
                   transition: "background 0.4s" }} />;
               })}
             </div>
@@ -824,8 +826,8 @@ function EntradaDiegoSection({ symbol }) {
         <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
           {burst_phase === "WAIT_GATE" && (
             isCrash500
-              ? <><span style={{ color: "#64748b" }}>CRASH:</span> n_spikes ≥{CRASH_NSPK_MIN} → timer 7m → $10</>
-              : <><span style={{ color: "#64748b" }}>BOOM:</span> spk[{BOOM_NSPK_MIN}-{BOOM_NSPK_MAX})+pow[{BOOM_POW_MIN}-{BOOM_POW_MAX}) → 6m → $10</>
+              ? <><span style={{ color: "#64748b" }}>CRASH:</span> spk [{CRASH_NSPK_MIN}–{CRASH_NSPK_MAX}) → timer 7m → $20</>
+              : <><span style={{ color: "#64748b" }}>BOOM:</span> spk[{BOOM_NSPK_MIN}-{BOOM_NSPK_MAX})+pow[{BOOM_POW_MIN}-{BOOM_POW_MAX}) → 6m → $20</>
           )}
           {burst_phase === "TIMER_GATE" && (
             <><span style={{ color: "#62d4ff", fontWeight: 700 }}>gate cumplido</span> · esperando {_fmtS(phaseRem)} → abre $20</>
