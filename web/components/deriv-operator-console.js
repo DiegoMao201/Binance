@@ -633,39 +633,39 @@ function EntradaDiegoSection({ symbol }) {
     ? Math.max(0, burst_profit_pos_s - profitPosElapsed) : 0;
 
   // Header label
-  const _stakeLabel = burst_phase === "STAKE_20" ? "$20"
-    : burst_phase === "STAKE_9"                  ? "$9"
-    : burst_phase === "STAKE_3"                  ? "$3"
-    : burst_phase === "STAKE_1"                  ? "$1"
+  const _stakeLabel = burst_phase === "STAKE_20" ? "$1"
+    : burst_phase === "STAKE_9"                  ? "$40"
+    : burst_phase === "STAKE_3"                  ? "$1"
+    : burst_phase === "STAKE_1"                  ? "$20"
     : "WAIT";
 
   // Siguiente acción
   const _nextHint = (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")
-    ? "abriendo $1…"
-    : profit_first_positive_ts > 0 ? `→ $1 en ${_fmtS(profitPosRem)} (profit+ ✓)`
-    : burst_phase === "STAKE_1"    ? `→ $3 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_3"    ? `→ $9 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_9"    ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_20"   ? `→ retry $20 si pierde · ${_fmtS(phaseRem)}`
+    ? "abriendo $20…"
+    : profit_first_positive_ts > 0 ? `→ $20 en ${_fmtS(profitPosRem)} (profit+ ✓)`
+    : burst_phase === "STAKE_1"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_3"    ? `→ $40 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_9"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_20"   ? `→ retry $1 si pierde · ${_fmtS(phaseRem)}`
     : "–";
 
-  const _nextColor = _nextHint.includes("$20") ? "#ff5d6c"
-    : _nextHint.includes("$9")     ? "#a78bfa"
-    : _nextHint.includes("$3")     ? "#f59e0b"
-    : _nextHint.includes("profit+") || _nextHint.includes("$1 en") ? "#22d3a3"
+  const _nextColor = _nextHint.includes("$40") ? "#a78bfa"
+    : _nextHint.includes("$20") ? "#22d3a3"
+    : _nextHint.includes("$1 si") || _nextHint.includes("retry") ? "#f59e0b"
+    : _nextHint.includes("profit+") ? "#22d3a3"
     : _nextHint.includes("abriendo") ? "#62d4ff"
     : phaseColor;
 
   const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
   const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
 
-  // Escalera: WAIT → $1 → $3 → $9 → $20
+  // Escalera: WAIT → $20 → $1 → $40 → $1
   const _ladder = [
     { id: "WAIT_GATE",  label: "WAIT", color: "#64748b" },
-    { id: "STAKE_1",    label: "$1",   color: "#22d3a3" },
-    { id: "STAKE_3",    label: "$3",   color: "#f59e0b" },
-    { id: "STAKE_9",    label: "$9",   color: "#a78bfa" },
-    { id: "STAKE_20",   label: "$20",  color: "#ff5d6c" },
+    { id: "STAKE_1",    label: "$20",  color: "#22d3a3" },
+    { id: "STAKE_3",    label: "$1",   color: "#f59e0b" },
+    { id: "STAKE_9",    label: "$40",  color: "#a78bfa" },
+    { id: "STAKE_20",   label: "$1",   color: "#ff5d6c" },
   ];
 
   const base500 = {
@@ -737,30 +737,30 @@ function EntradaDiegoSection({ symbol }) {
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
           {(burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE") && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>abriendo $1</span> inmediato…</>
+            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>abriendo $20</span> inmediato…</>
           )}
           {burst_phase === "STAKE_1" && (
-            <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$1 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
-              {"  ·  "}<span style={{ color: "#f59e0b", fontWeight: 700 }}>LOSS→$3</span>
+            <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$20 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {"  ·  "}<span style={{ color: "#f59e0b", fontWeight: 700 }}>LOSS→$1</span>
             </>
           )}
           {burst_phase === "STAKE_3" && (
-            <><span style={{ color: "#f59e0b", fontWeight: 700 }}>$3 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
-              {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>LOSS→$9</span>
+            <><span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>LOSS→$40</span>
             </>
           )}
           {burst_phase === "STAKE_9" && (
-            <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$9 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
-              {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>LOSS→$20</span>
+            <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$40 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>LOSS→$1</span>
             </>
           )}
           {burst_phase === "STAKE_20" && (
-            <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$20 RECOVERY · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
-              {"  ·  "}<span style={{ color: "#ff5d6c" }}>LOSS→retry $20</span>
+            <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$1 RECOVERY · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {"  ·  "}<span style={{ color: "#ff5d6c" }}>LOSS→retry $1</span>
             </>
           )}
         </span>

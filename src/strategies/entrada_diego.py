@@ -110,7 +110,7 @@ BOOM500_MAX_WINS_ACTIVE  = int(os.getenv("ENTRADA_DIEGO_BOOM500_MAX_WINS",  "2")
 #   S40 20m: WIN→S1(7m) | LOSE+spike→S1(7m) | LOSE 0spk→S60
 #   S60 20m: WIN→S1(20m) | LOSE→retry S60 (infinito hasta ganar)
 #   SL duro: 90% del stake activo → S1 (reset timer a 7min)
-BURST_STAKE1_AMOUNT          = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE1",              "1.0"))
+BURST_STAKE1_AMOUNT          = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE1",              "20.0"))
 BURST_STAKE1_DURATION_S      = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_S",              "360"))   # 6min BOOM500
 BURST_STAKE1_DROUGHT_S       = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_DROUGHT_S",      "1200"))  # 20min sequia BOOM500
 BURST_STAKE1_CRASH500_S      = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_CRASH500_S",     "420"))   # 7min CRASH500 S1 base
@@ -125,7 +125,7 @@ BURST_STAKE10_DURATION_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_S",   
 BURST_STAKE10_CRASH500_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_CRASH500_S",    "240"))   # 4min CRASH500 S10
 WAIT_GATE_TIMER_CRASH500_S   = int(os.getenv("ENTRADA_DIEGO_WAIT_GATE_CRASH500_S",        "420"))   # 7min espera tras n_spikes≥2
 WAIT_GATE_TIMER_BOOM500_S    = int(os.getenv("ENTRADA_DIEGO_WAIT_GATE_BOOM500_S",         "360"))   # 6min espera tras n_spikes≥3+POWER
-BURST_STAKE20_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE20",             "20.0"))
+BURST_STAKE20_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE20",             "1.0"))
 BURST_STAKE20_DURATION_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_S",             "480"))   # 8min S20 (ambos símbolos)
 BURST_STAKE20_CRASH500_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_CRASH500_S",    "480"))   # 8min CRASH500 S20
 BURST_STAKE40_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE40",             "40.0"))
@@ -170,8 +170,8 @@ BOOM500_NSPIKES_MIN        = int(os.getenv("ENTRADA_DIEGO_BOOM500_NSPIKES_MIN", 
 BOOM500_NSPIKES_MAX        = int(os.getenv("ENTRADA_DIEGO_BOOM500_NSPIKES_MAX",    "8"))    # exclusive
 
 # Escalera progresiva 500s: $1→$3→$9→$20 (retries hasta win en S20)
-BURST_STAKE3_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE3",         "3.0"))
-BURST_STAKE9_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE9",         "9.0"))
+BURST_STAKE3_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE3",         "1.0"))
+BURST_STAKE9_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE9",         "40.0"))
 BURST_STAKE_LADDER_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_LADDER_S",        "720"))   # 12min todos los stakes
 BURST_PROFIT_POSITIVE_CLOSE_S = int(os.getenv("ENTRADA_DIEGO_BURST_PROFIT_POS_S",    "90"))    # 1.5min profit+ → cerrar
 
