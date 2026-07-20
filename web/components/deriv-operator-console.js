@@ -529,8 +529,8 @@ const ED_SYMBOLS = new Set(["CRASH500", "BOOM500"]);
 // 500s: gate constants (deben coincidir con entrada_diego.py)
 const WAIT_GATE_TIMER_CRASH_S  = 420;   // 7min cooldown CRASH500
 const WAIT_GATE_TIMER_BOOM_S   = 360;   // 6min cooldown BOOM500
-const BURST_S10_DURATION_S       = 480;   // 8min S10 BOOM500
-const BURST_S10_CRASH500_DURATION_S = 240; // 4min S10 CRASH500
+const BURST_LADDER_S           = 720;   // 12min todos los stakes
+const BURST_PROFIT_POS_S       = 90;    // 1.5min profit+ → cierre anticipado
 const BOOM_NSPK_MIN = 3, BOOM_NSPK_MAX = 8;
 const BOOM_POW_MIN  = 14.5, BOOM_POW_MAX = 30.0;
 const CRASH_NSPK_MIN = 2, CRASH_NSPK_MAX = 4;
@@ -570,9 +570,8 @@ function EntradaDiegoSection({ symbol }) {
     open_ts = 0, cooldown_until = 0,
     spikes_in_contract = 0,
     burst_phase = "WAIT_GATE", burst_phase_started_at = 0,
-    burst_stake20_s = 900, burst_stake20_crash500_s = 1200,
-    burst_stake40_s = 1200, burst_stake40_crash500_s = 1200,
-    burst_stake60_s = 1200, burst_stake80_s = 1200,
+    burst_ladder_s = BURST_LADDER_S, burst_profit_pos_s = BURST_PROFIT_POS_S,
+    profit_first_positive_ts = 0,
     sym_pnl_since_reset = 0, sym_pnl_reference = 0,
     power_30min_jump = 0, n_spikes_30min = 0,
   } = edState;
@@ -608,77 +607,71 @@ function EntradaDiegoSection({ symbol }) {
     );
   }
 
-  // ── 500s: nuevo flujo WAIT_GATE → TIMER_GATE → S10 → S20 → S40 → S80 ──────
+  // ── 500s: escalera $1→$3→$9→$20 — gate → timer → stake ladder ──────
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
+  const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
 
-  // Gate conditions — deben ir ANTES de phaseColor para evitar TDZ
-  const _crashGateOk = n_spikes_30min >= CRASH_NSPK_MIN && n_spikes_30min < CRASH_NSPK_MAX;
-  const _boomNspkOk  = n_spikes_30min >= BOOM_NSPK_MIN && n_spikes_30min < BOOM_NSPK_MAX;
-  const _boomPowOk   = power_30min_jump >= BOOM_POW_MIN && power_30min_jump < BOOM_POW_MAX;
-  const _boomGateOk  = _boomNspkOk && _boomPowOk;
-  const _gateOk      = isCrash500 ? _crashGateOk : _boomGateOk;
+  // Colores por fase — escalera: S1=verde S3=ámbar S9=violeta S20=rojo
+  const phaseColor = burst_phase === "STAKE_20" ? "#ff5d6c"
+    : burst_phase === "STAKE_9"                 ? "#a78bfa"
+    : burst_phase === "STAKE_3"                 ? "#f59e0b"
+    : burst_phase === "STAKE_1"                 ? "#22d3a3"
+    : burst_phase === "TIMER_GATE"              ? "#62d4ff"
+    : "#64748b";
 
-  // Colores por fase — WAIT con gate cumplido → azul igual que TIMER
-  const _waitGateActive = burst_phase === "WAIT_GATE" && _gateOk;
-  const phaseColor = burst_phase === "STAKE_80"               ? "#ff5d6c"
-    : burst_phase === "STAKE_60"                              ? "#e879f9"
-    : burst_phase === "STAKE_40"                              ? "#a78bfa"
-    : burst_phase === "STAKE_20"                              ? "#22d3a3"
-    : (burst_phase === "TIMER_GATE" || _waitGateActive)       ? "#62d4ff"
-    : "#64748b"; // WAIT_GATE sin gate
-
-  // Timer durations por fase
-  const _timerGateS  = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
-  const phaseTotal   = burst_phase === "TIMER_GATE" ? _timerGateS
-    : burst_phase === "STAKE_20" ? (isCrash500 ? burst_stake20_crash500_s : burst_stake20_s)
-    : burst_phase === "STAKE_40" ? (isCrash500 ? burst_stake40_crash500_s : burst_stake40_s)
-    : burst_phase === "STAKE_60" ? burst_stake60_s
-    : burst_phase === "STAKE_80" ? burst_stake80_s
+  // Timer durations
+  const _timerGateS = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
+  const _ladderPhases = ["STAKE_1","STAKE_3","STAKE_9","STAKE_20"];
+  const phaseTotal  = burst_phase === "TIMER_GATE" ? _timerGateS
+    : _ladderPhases.includes(burst_phase) ? burst_ladder_s
     : 1;
   const phaseRem  = Math.max(0, phaseTotal - phaseElapsed);
   const phasePct  = burst_phase === "WAIT_GATE" ? 0 : Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
+  // Profit+ cierre anticipado: barra separada si profit_first_positive_ts activo
+  const profitPosPct = profit_first_positive_ts > 0
+    ? Math.min(100, (profitPosElapsed / burst_profit_pos_s) * 100) : 0;
+  const profitPosRem  = profit_first_positive_ts > 0
+    ? Math.max(0, burst_profit_pos_s - profitPosElapsed) : 0;
+
   // Header label
-  const _stakeLabel = burst_phase === "STAKE_20" ? "$20"
-    : burst_phase === "STAKE_40" ? "$40"
-    : burst_phase === "STAKE_60" ? "$60"
-    : burst_phase === "STAKE_80" ? "$80"
-    : burst_phase === "TIMER_GATE" ? (isCrash500 ? "7m" : "6m")
-    : _waitGateActive ? "GATE ✓"
+  const _stakeLabel = burst_phase === "STAKE_20"  ? "$20"
+    : burst_phase === "STAKE_9"                   ? "$9"
+    : burst_phase === "STAKE_3"                   ? "$3"
+    : burst_phase === "STAKE_1"                   ? "$1"
+    : burst_phase === "TIMER_GATE"                ? (isCrash500 ? "7m" : "6m")
     : "WAIT";
 
-  // Siguiente acción prediction
-  const _nextHint = burst_phase === "WAIT_GATE"
-    ? (_gateOk ? "↑ gate cumplido — iniciando timer…" : isCrash500 ? (n_spikes_30min >= CRASH_NSPK_MAX ? `zona mala ≥${CRASH_NSPK_MAX}spk — espera` : `esperando [${CRASH_NSPK_MIN}–${CRASH_NSPK_MAX}) spikes`) : `esperando [${BOOM_NSPK_MIN}-${BOOM_NSPK_MAX}) spk + POW[${BOOM_POW_MIN}-${BOOM_POW_MAX})`)
-    : burst_phase === "TIMER_GATE"
-    ? `→ $20 en ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_20"
-    ? (current_profit > 0 || spikes_in_contract >= 1 ? `→ WAIT (${current_profit > 0 ? "win" : spikes_in_contract+"spk"} ✓)` : "→ $40 (0spk+loss)")
-    : burst_phase === "STAKE_40"
-    ? (current_profit > 0 || spikes_in_contract >= 1 ? `→ WAIT (${current_profit > 0 ? "win" : spikes_in_contract+"spk"} ✓)` : "→ $80 (0spk+loss)")
-    : burst_phase === "STAKE_80"
-    ? "→ WAIT (siempre)"
+  // Siguiente acción
+  const _nextHint = burst_phase === "WAIT_GATE"   ? "esperando burst…"
+    : burst_phase === "TIMER_GATE"                ? `→ $1 en ${_fmtS(phaseRem)}`
+    : profit_first_positive_ts > 0                ? `→ $1 en ${_fmtS(profitPosRem)} (profit+ ✓)`
+    : burst_phase === "STAKE_1"                   ? `→ $3 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_3"                   ? `→ $9 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_9"                   ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_20"                  ? `→ retry $20 si pierde · ${_fmtS(phaseRem)}`
     : "–";
 
-  const _nextColor = _nextHint.includes("$80") ? "#ff5d6c"
-    : _nextHint.includes("$40") ? "#a78bfa"
-    : _nextHint.includes("$20") ? "#22d3a3"
-    : _nextHint.includes("win") || _nextHint.includes("WAIT") ? "#22d3a3"
-    : _nextHint.includes("timer") || _nextHint.includes("$10") ? "#62d4ff"
-    : _nextHint.includes("esperando") ? "#64748b"
+  const _nextColor = _nextHint.includes("$20") && burst_phase !== "TIMER_GATE" ? "#ff5d6c"
+    : _nextHint.includes("$9")     ? "#a78bfa"
+    : _nextHint.includes("$3")     ? "#f59e0b"
+    : _nextHint.includes("profit+") || _nextHint.includes("$1 en") ? "#22d3a3"
+    : burst_phase === "TIMER_GATE" ? "#62d4ff"
+    : _nextHint.includes("burst")  ? "#64748b"
     : phaseColor;
 
   const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
   const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
 
-  // Diagrama escalada: WAIT → TIMER → $20 → $40 → $80  (S10 eliminado)
+  // Escalera: WAIT → TIMER → $1 → $3 → $9 → $20
   const _ladder = [
-    { id: "WAIT_GATE",   label: "WAIT",  dur: "",     color: "#64748b" },
-    { id: "TIMER_GATE",  label: isCrash500 ? "7m" : "6m", dur: "", color: "#62d4ff" },
-    { id: "STAKE_20",    label: "$20",   dur: "",     color: "#22d3a3" },
-    { id: "STAKE_40",    label: "$40",   dur: "",     color: "#a78bfa" },
-    { id: "STAKE_80",    label: "$80",   dur: "",     color: "#ff5d6c" },
+    { id: "WAIT_GATE",  label: "WAIT", color: "#64748b" },
+    { id: "TIMER_GATE", label: isCrash500 ? "7m" : "6m", color: "#62d4ff" },
+    { id: "STAKE_1",    label: "$1",   color: "#22d3a3" },
+    { id: "STAKE_3",    label: "$3",   color: "#f59e0b" },
+    { id: "STAKE_9",    label: "$9",   color: "#a78bfa" },
+    { id: "STAKE_20",   label: "$20",  color: "#ff5d6c" },
   ];
 
   const base500 = {
@@ -724,82 +717,7 @@ function EntradaDiegoSection({ symbol }) {
         )}
       </div>
 
-      {/* Gate conditions */}
-      <div style={{ marginBottom: 5, padding: "4px 5px", borderRadius: 3,
-        background: _gateOk ? "rgba(34,211,163,0.08)" : "rgba(255,255,255,0.04)",
-        border: `1px solid ${_gateOk ? "rgba(34,211,163,0.25)" : "rgba(255,255,255,0.08)"}`,
-      }}>
-        {isCrash500 ? (
-          /* CRASH500: n_spikes_30min ≥ 2 */
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: "0.04em" }}>SPIKES 30m</span>
-              <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: "tabular-nums",
-                color: _crashGateOk ? "#22d3a3" : "rgba(255,255,255,0.5)",
-              }}>{n_spikes_30min}</span>
-              <span style={{ fontSize: 8, color: n_spikes_30min >= CRASH_NSPK_MAX ? "#f59e0b" : "rgba(255,255,255,0.25)" }}>[{CRASH_NSPK_MIN}–{CRASH_NSPK_MAX})</span>
-              <span style={{ marginLeft: "auto", fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2,
-                background: _crashGateOk ? "rgba(34,211,163,0.18)" : "rgba(255,255,255,0.06)",
-                color: _crashGateOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
-              }}>{_crashGateOk ? "✓ GATE" : "espera"}</span>
-            </div>
-            <div style={{ display: "flex", gap: 3 }}>
-              {[0,1,2,3,4].map(i => {
-                const active = n_spikes_30min > i;
-                const overMax = n_spikes_30min >= CRASH_NSPK_MAX;
-                const isGateSlot = i >= CRASH_NSPK_MIN - 1 && i < CRASH_NSPK_MAX - 1;
-                const c = active && overMax ? "#f59e0b"
-                  : active && _crashGateOk ? "#22d3a3"
-                  : active ? "rgba(255,255,255,0.35)"
-                  : "rgba(255,255,255,0.1)";
-                return <div key={i} style={{ flex: 1, height: 4, borderRadius: 2, background: c,
-                  border: isGateSlot && !overMax ? `1px solid rgba(34,211,163,0.4)` : "none",
-                  transition: "background 0.4s" }} />;
-              })}
-            </div>
-          </div>
-        ) : (
-          /* BOOM500: n_spikes [3,8) Y POWER [14.5,30) */
-          <div>
-            {/* Condición 1: n_spikes */}
-            <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)" }}>SPK</span>
-              <span style={{ fontSize: 11, fontWeight: 700, fontVariantNumeric: "tabular-nums",
-                color: _boomNspkOk ? "#22d3a3" : n_spikes_30min >= BOOM_NSPK_MAX ? "#f59e0b" : "rgba(255,255,255,0.45)",
-              }}>{n_spikes_30min}</span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.25)" }}>[{BOOM_NSPK_MIN}–{BOOM_NSPK_MAX})</span>
-              <span style={{ fontSize: 9, color: _boomNspkOk ? "#22d3a3" : "#64748b" }}>{_boomNspkOk ? "✓" : "✗"}</span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.25)", marginLeft: 6 }}>POW</span>
-              <span style={{ fontSize: 11, fontWeight: 700, fontVariantNumeric: "tabular-nums",
-                color: _boomPowOk ? "#22d3a3" : power_30min_jump >= BOOM_POW_MAX ? "#f59e0b" : "rgba(255,255,255,0.45)",
-              }}>{power_30min_jump.toFixed(1)}</span>
-              <span style={{ fontSize: 8, color: "rgba(255,255,255,0.25)" }}>[{BOOM_POW_MIN}–{BOOM_POW_MAX})</span>
-              <span style={{ fontSize: 9, color: _boomPowOk ? "#22d3a3" : "#64748b" }}>{_boomPowOk ? "✓" : "✗"}</span>
-              <span style={{ marginLeft: "auto", fontSize: 8, fontWeight: 700, padding: "1px 4px", borderRadius: 2,
-                background: _boomGateOk ? "rgba(34,211,163,0.18)" : "rgba(255,255,255,0.06)",
-                color: _boomGateOk ? "#22d3a3" : "rgba(255,255,255,0.3)",
-              }}>{_boomGateOk ? "✓ GATE" : "espera"}</span>
-            </div>
-            {/* Barra POWER */}
-            {(() => {
-              const _scl  = BOOM_POW_MAX * 1.25;
-              const _left = Math.min(100, (BOOM_POW_MIN / _scl) * 100);
-              const _w    = Math.min(100 - _left, ((BOOM_POW_MAX - BOOM_POW_MIN) / _scl) * 100);
-              const _bar  = Math.min(100, (power_30min_jump / _scl) * 100);
-              return (
-                <div style={{ position: "relative", height: 4, background: "rgba(255,255,255,0.07)", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{ position: "absolute", top: 0, height: "100%", left: `${_left}%`, width: `${_w}%`, background: "rgba(34,211,163,0.2)" }} />
-                  <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${_bar}%`,
-                    background: _boomPowOk ? "#22d3a3" : power_30min_jump >= BOOM_POW_MAX ? "#f59e0b" : "rgba(255,255,255,0.25)",
-                    borderRadius: 2, transition: "width 1s linear" }} />
-                </div>
-              );
-            })()}
-          </div>
-        )}
-      </div>
-
-      {/* Escalada: WAIT → TIMER → $10 → $20 → $40 → $80 */}
+      {/* Escalada: WAIT → TIMER → $1 → $3 → $9 → $20 */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4 }}>
         {_ladder.map((p, i) => (
           <React.Fragment key={p.id}>
@@ -825,32 +743,33 @@ function EntradaDiegoSection({ symbol }) {
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
           {burst_phase === "WAIT_GATE" && (
-            isCrash500
-              ? <><span style={{ color: "#64748b" }}>CRASH:</span> spk [{CRASH_NSPK_MIN}–{CRASH_NSPK_MAX}) → timer 7m → $20</>
-              : <><span style={{ color: "#64748b" }}>BOOM:</span> spk[{BOOM_NSPK_MIN}-{BOOM_NSPK_MAX})+pow[{BOOM_POW_MIN}-{BOOM_POW_MAX}) → 6m → $20</>
+            <><span style={{ color: "#64748b" }}>esperando burst</span> → timer {isCrash500 ? "7m" : "6m"} → $1</>
           )}
           {burst_phase === "TIMER_GATE" && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>gate cumplido</span> · esperando {_fmtS(phaseRem)} → abre $20</>
+            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>burst detectado</span> · {_fmtS(phaseRem)} → abre $1</>
+          )}
+          {burst_phase === "STAKE_1" && (
+            <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$1 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
+              {"  ·  "}<span style={{ color: "#f59e0b", fontWeight: 700 }}>LOSS→$3</span>
+            </>
+          )}
+          {burst_phase === "STAKE_3" && (
+            <><span style={{ color: "#f59e0b", fontWeight: 700 }}>$3 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
+              {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>LOSS→$9</span>
+            </>
+          )}
+          {burst_phase === "STAKE_9" && (
+            <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$9 · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
+              {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>LOSS→$20</span>
+            </>
           )}
           {burst_phase === "STAKE_20" && (
-            <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$20:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN/SPK→WAIT</span>
-              {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>0spk+LOSS→$40</span>
-              {spikes_in_contract > 0 && <span style={{ color: "#62d4ff", fontWeight: 700 }}> · {spikes_in_contract}spk</span>}
-            </>
-          )}
-          {burst_phase === "STAKE_40" && (
-            <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$40:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN/SPK→WAIT</span>
-              {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>0spk+LOSS→$80</span>
-              {spikes_in_contract > 0 && <span style={{ color: "#62d4ff", fontWeight: 700 }}> · {spikes_in_contract}spk</span>}
-            </>
-          )}
-          {burst_phase === "STAKE_80" && (
-            <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$80 RECOVERY:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→WAIT</span>
-              {"  ·  "}<span style={{ color: "#f59e0b" }}>LOSS→WAIT</span>
-              {spikes_in_contract > 0 && <span style={{ color: "#62d4ff", fontWeight: 700 }}> · {spikes_in_contract}spk</span>}
+            <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$20 RECOVERY · 12min:</span>
+              {" "}<span style={{ color: "#22d3a3" }}>WIN→$1 · profit+1.5m→$1</span>
+              {"  ·  "}<span style={{ color: "#ff5d6c" }}>LOSS→retry $20</span>
             </>
           )}
         </span>
