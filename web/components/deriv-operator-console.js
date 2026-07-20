@@ -625,14 +625,12 @@ function EntradaDiegoSection({ symbol }) {
     : burst_phase === "STAKE_60"                              ? "#e879f9"
     : burst_phase === "STAKE_40"                              ? "#a78bfa"
     : burst_phase === "STAKE_20"                              ? "#22d3a3"
-    : burst_phase === "STAKE_10"                              ? "#fb923c"
     : (burst_phase === "TIMER_GATE" || _waitGateActive)       ? "#62d4ff"
     : "#64748b"; // WAIT_GATE sin gate
 
   // Timer durations por fase
   const _timerGateS  = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
   const phaseTotal   = burst_phase === "TIMER_GATE" ? _timerGateS
-    : burst_phase === "STAKE_10" ? (isCrash500 ? BURST_S10_CRASH500_DURATION_S : BURST_S10_DURATION_S)
     : burst_phase === "STAKE_20" ? (isCrash500 ? burst_stake20_crash500_s : burst_stake20_s)
     : burst_phase === "STAKE_40" ? (isCrash500 ? burst_stake40_crash500_s : burst_stake40_s)
     : burst_phase === "STAKE_60" ? burst_stake60_s
@@ -642,9 +640,7 @@ function EntradaDiegoSection({ symbol }) {
   const phasePct  = burst_phase === "WAIT_GATE" ? 0 : Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
   // Header label
-  const _s10min = isCrash500 ? "4m" : "8m";
-  const _stakeLabel = burst_phase === "STAKE_10" ? `$10 · ${_s10min}`
-    : burst_phase === "STAKE_20" ? "$20"
+  const _stakeLabel = burst_phase === "STAKE_20" ? "$20"
     : burst_phase === "STAKE_40" ? "$40"
     : burst_phase === "STAKE_60" ? "$60"
     : burst_phase === "STAKE_80" ? "$80"
@@ -656,9 +652,7 @@ function EntradaDiegoSection({ symbol }) {
   const _nextHint = burst_phase === "WAIT_GATE"
     ? (_gateOk ? "↑ gate cumplido — iniciando timer…" : isCrash500 ? `esperando ≥${CRASH_NSPK_MIN} spikes` : `esperando [${BOOM_NSPK_MIN}-${BOOM_NSPK_MAX}) spk + POW[${BOOM_POW_MIN}-${BOOM_POW_MAX})`)
     : burst_phase === "TIMER_GATE"
-    ? `→ $10 en ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_10"
-    ? (current_profit > 0 ? "→ WAIT (win ✓)" : "→ $20 (loss → escala)")
+    ? `→ $20 en ${_fmtS(phaseRem)}`
     : burst_phase === "STAKE_20"
     ? (current_profit > 0 || spikes_in_contract >= 1 ? `→ WAIT (${current_profit > 0 ? "win" : spikes_in_contract+"spk"} ✓)` : "→ $40 (0spk+loss)")
     : burst_phase === "STAKE_40"
@@ -678,11 +672,10 @@ function EntradaDiegoSection({ symbol }) {
   const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
   const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
 
-  // Diagrama escalada: WAIT → TIMER → $10 → $20 → $40 → $80
+  // Diagrama escalada: WAIT → TIMER → $20 → $40 → $80  (S10 eliminado)
   const _ladder = [
     { id: "WAIT_GATE",   label: "WAIT",  dur: "",     color: "#64748b" },
     { id: "TIMER_GATE",  label: isCrash500 ? "7m" : "6m", dur: "", color: "#62d4ff" },
-    { id: "STAKE_10",    label: "$10",   dur: isCrash500 ? "4m" : "8m", color: "#fb923c" },
     { id: "STAKE_20",    label: "$20",   dur: "",     color: "#22d3a3" },
     { id: "STAKE_40",    label: "$40",   dur: "",     color: "#a78bfa" },
     { id: "STAKE_80",    label: "$80",   dur: "",     color: "#ff5d6c" },
@@ -835,14 +828,7 @@ function EntradaDiegoSection({ symbol }) {
               : <><span style={{ color: "#64748b" }}>BOOM:</span> spk[{BOOM_NSPK_MIN}-{BOOM_NSPK_MAX})+pow[{BOOM_POW_MIN}-{BOOM_POW_MAX}) → 6m → $10</>
           )}
           {burst_phase === "TIMER_GATE" && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>gate cumplido</span> · esperando {_fmtS(phaseRem)} → abre $10</>
-          )}
-          {burst_phase === "STAKE_10" && (
-            <><span style={{ color: "#fb923c", fontWeight: 700 }}>{`$10 ${_s10min}:`}</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→WAIT</span>
-              {"  ·  "}<span style={{ color: "#22d3a3" }}>LOSS→$20</span>
-              {spikes_in_contract > 0 && <span style={{ color: "#62d4ff", fontWeight: 700 }}> · {spikes_in_contract}spk</span>}
-            </>
+            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>gate cumplido</span> · esperando {_fmtS(phaseRem)} → abre $20</>
           )}
           {burst_phase === "STAKE_20" && (
             <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$20:</span>
