@@ -529,8 +529,9 @@ const ED_SYMBOLS = new Set(["CRASH500", "BOOM500"]);
 // 500s: gate constants (deben coincidir con entrada_diego.py)
 const WAIT_GATE_TIMER_CRASH_S  = 420;   // 7min cooldown CRASH500
 const WAIT_GATE_TIMER_BOOM_S   = 360;   // 6min cooldown BOOM500
-const BURST_S10_DURATION_S     = 480;   // 8min S10
-const BOOM_NSPK_MIN = 4, BOOM_NSPK_MAX = 8;
+const BURST_S10_DURATION_S       = 480;   // 8min S10 BOOM500
+const BURST_S10_CRASH500_DURATION_S = 240; // 4min S10 CRASH500
+const BOOM_NSPK_MIN = 3, BOOM_NSPK_MAX = 8;
 const BOOM_POW_MIN  = 14.5, BOOM_POW_MAX = 30.0;
 const CRASH_NSPK_MIN = 2;
 
@@ -631,7 +632,7 @@ function EntradaDiegoSection({ symbol }) {
   // Timer durations por fase
   const _timerGateS  = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
   const phaseTotal   = burst_phase === "TIMER_GATE" ? _timerGateS
-    : burst_phase === "STAKE_10" ? BURST_S10_DURATION_S
+    : burst_phase === "STAKE_10" ? (isCrash500 ? BURST_S10_CRASH500_DURATION_S : BURST_S10_DURATION_S)
     : burst_phase === "STAKE_20" ? (isCrash500 ? burst_stake20_crash500_s : burst_stake20_s)
     : burst_phase === "STAKE_40" ? (isCrash500 ? burst_stake40_crash500_s : burst_stake40_s)
     : burst_phase === "STAKE_60" ? burst_stake60_s
@@ -641,7 +642,8 @@ function EntradaDiegoSection({ symbol }) {
   const phasePct  = burst_phase === "WAIT_GATE" ? 0 : Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
   // Header label
-  const _stakeLabel = burst_phase === "STAKE_10" ? "$10 · 8m"
+  const _s10min = isCrash500 ? "4m" : "8m";
+  const _stakeLabel = burst_phase === "STAKE_10" ? `$10 · ${_s10min}`
     : burst_phase === "STAKE_20" ? "$20"
     : burst_phase === "STAKE_40" ? "$40"
     : burst_phase === "STAKE_60" ? "$60"
@@ -680,7 +682,7 @@ function EntradaDiegoSection({ symbol }) {
   const _ladder = [
     { id: "WAIT_GATE",   label: "WAIT",  dur: "",     color: "#64748b" },
     { id: "TIMER_GATE",  label: isCrash500 ? "7m" : "6m", dur: "", color: "#62d4ff" },
-    { id: "STAKE_10",    label: "$10",   dur: "8m",   color: "#fb923c" },
+    { id: "STAKE_10",    label: "$10",   dur: isCrash500 ? "4m" : "8m", color: "#fb923c" },
     { id: "STAKE_20",    label: "$20",   dur: "",     color: "#22d3a3" },
     { id: "STAKE_40",    label: "$40",   dur: "",     color: "#a78bfa" },
     { id: "STAKE_80",    label: "$80",   dur: "",     color: "#ff5d6c" },
@@ -762,7 +764,7 @@ function EntradaDiegoSection({ symbol }) {
             </div>
           </div>
         ) : (
-          /* BOOM500: n_spikes [4,8) Y POWER [14.5,30) */
+          /* BOOM500: n_spikes [3,8) Y POWER [14.5,30) */
           <div>
             {/* Condición 1: n_spikes */}
             <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
@@ -836,7 +838,7 @@ function EntradaDiegoSection({ symbol }) {
             <><span style={{ color: "#62d4ff", fontWeight: 700 }}>gate cumplido</span> · esperando {_fmtS(phaseRem)} → abre $10</>
           )}
           {burst_phase === "STAKE_10" && (
-            <><span style={{ color: "#fb923c", fontWeight: 700 }}>$10 8m:</span>
+            <><span style={{ color: "#fb923c", fontWeight: 700 }}>{`$10 ${_s10min}:`}</span>
               {" "}<span style={{ color: "#22d3a3" }}>WIN→WAIT</span>
               {"  ·  "}<span style={{ color: "#22d3a3" }}>LOSS→$20</span>
               {spikes_in_contract > 0 && <span style={{ color: "#62d4ff", fontWeight: 700 }}> · {spikes_in_contract}spk</span>}

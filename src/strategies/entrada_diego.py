@@ -120,8 +120,11 @@ BURST_STAKE1_CRASH500_17M_S  = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_CRASH50
 BURST_STAKE1_CRASH500_20M_S  = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE1_CRASH500_20M_S", "1200"))  # 20min: max / S20 WIN 0spk / S60 WIN
 BURST_STAKE5_AMOUNT          = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE5",              "5.0"))
 BURST_STAKE5_DURATION_S      = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE5_S",              "900"))   # legacy CRASH500 S5 (ya sin ruta activa)
-BURST_STAKE10_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE10",             "10.0"))
-BURST_STAKE10_DURATION_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_S",             "900"))   # 15min defensivo BOOM500
+BURST_STAKE10_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE10",             "1.0"))
+BURST_STAKE10_DURATION_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_S",             "480"))   # 8min BOOM500 S10
+BURST_STAKE10_CRASH500_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE10_CRASH500_S",    "240"))   # 4min CRASH500 S10
+WAIT_GATE_TIMER_CRASH500_S   = int(os.getenv("ENTRADA_DIEGO_WAIT_GATE_CRASH500_S",        "420"))   # 7min espera tras n_spikes≥2
+WAIT_GATE_TIMER_BOOM500_S    = int(os.getenv("ENTRADA_DIEGO_WAIT_GATE_BOOM500_S",         "360"))   # 6min espera tras n_spikes≥3+POWER
 BURST_STAKE20_AMOUNT         = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE20",             "20.0"))
 BURST_STAKE20_DURATION_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_S",             "480"))   # 8min S20 (ambos símbolos)
 BURST_STAKE20_CRASH500_S     = int(os.getenv("ENTRADA_DIEGO_BURST_STAKE20_CRASH500_S",    "480"))   # 8min CRASH500 S20
@@ -156,10 +159,12 @@ SYM_PNL_LOSS_PAUSE_H   = float(os.getenv("ENTRADA_DIEGO_SYM_PNL_LOSS_PAUSE_H", "
 CRASH500_POWER_MIN         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MIN",     "3.0"))
 CRASH500_POWER_MAX         = float(os.getenv("ENTRADA_DIEGO_CRASH500_POWER_MAX",     "8.0"))
 CRASH500_SYM_PNL_WIN_PAUSE_H = float(os.getenv("ENTRADA_DIEGO_CRASH500_WIN_PAUSE_H", "4.0"))
-# BOOM500 POWER gate: Σ(abs_jump) 30min ∈ [15,30] → S20 (spike-reset + 6min wait)
-# Calibrado en 213 trades S20+ Jul-2026: PJ=[15,30) WR=55.4% PnL=+$86 (único bucket +)
-BOOM500_POWER_MIN          = float(os.getenv("ENTRADA_DIEGO_BOOM500_POWER_MIN",    "14.5"))  # 14.5 en vez de 15.0 — margen float (15.0 real puede ser 14.97 y fallar >=)
+# BOOM500 DOUBLE gate: POWER [15,30) AND n_spikes [3,8) → S20
+# Análisis 1131 trades S20+ Jul-2026: gate doble n=150, WR=57.3%, PnL=+$187 (gate simple POWER: -$35)
+BOOM500_POWER_MIN          = float(os.getenv("ENTRADA_DIEGO_BOOM500_POWER_MIN",    "14.5"))  # 14.5 en vez de 15.0 — margen float
 BOOM500_POWER_MAX          = float(os.getenv("ENTRADA_DIEGO_BOOM500_POWER_MAX",    "30.0"))
+BOOM500_NSPIKES_MIN        = int(os.getenv("ENTRADA_DIEGO_BOOM500_NSPIKES_MIN",    "3"))
+BOOM500_NSPIKES_MAX        = int(os.getenv("ENTRADA_DIEGO_BOOM500_NSPIKES_MAX",    "8"))    # exclusive
 
 # Horas UTC bloqueadas por análisis histórico (8,816 contratos, Mayo–Jul 2026)
 # Las 5 peores horas por símbolo: pierden consistentemente hora tras hora
@@ -302,6 +307,7 @@ class _SymState:
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
     power_window: list = field(default_factory=list)  # [(ts, abs_jump), ...] rolling 30min — POWER gate (ATR-independiente)
+    spike_first_ts_in_contract: float = 0.0  # epoch del primer spike en contrato S40 actual (gate "spike temprano <5min")
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
 
     def remaining_s(self, now: float) -> float:
@@ -383,6 +389,8 @@ class _SymState:
             "burst_stake80_amount":         BURST_STAKE80_AMOUNT,
             "power_30min_jump": round(sum(r for t, r in self.power_window if t > now - 1800.0), 2),
             "n_spikes_30min": sum(1 for t, _ in self.power_window if t > now - 1800.0),
+            "power_window": [[t, r] for t, r in self.power_window if t > now - 1800.0],
+            "spike_first_ts_in_contract": round(self.spike_first_ts_in_contract, 3),
         }
         return d
 
@@ -783,14 +791,15 @@ class EntradaDiego:
             state.power_window = [(t, r) for t, r in state.power_window if t > _last_spk_ts - 1800.0]
             if state.burst_phase in ("STAKE_1", "STAKE_10", "STAKE_20", "STAKE_40") and state.contract_id is not None:
                 state.spikes_in_contract_500 += 1
-                if sym == "CRASH500":
-                    _spike_ratio_now = float(self._risk.get_last_spike_ratio(sym) or 0.0)
-                    if _spike_ratio_now >= BURST_STAKE40_REAL_SPIKE_RATIO:
-                        state.crash500_real_spikes_500 += 1
+                if state.burst_phase == "STAKE_40" and state.spikes_in_contract_500 == 1:
+                    state.spike_first_ts_in_contract = _last_spk_ts
+                _spike_ratio_now = float(self._risk.get_last_spike_ratio(sym) or 0.0)
+                if _spike_ratio_now >= BURST_STAKE40_REAL_SPIKE_RATIO:
+                    state.crash500_real_spikes_500 += 1  # reutilizado para ambos símbolos
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s spike fase=%s spk_contrato=%d spk_hora=%d%s",
+                "[ENTRADA_DIEGO] %s spike fase=%s spk_contrato=%d spk_hora=%d real=%d(≥%dx)",
                 sym, state.burst_phase, state.spikes_in_contract_500, state.hour_spike_count_500,
-                f" real={state.crash500_real_spikes_500}(≥{int(BURST_STAKE40_REAL_SPIKE_RATIO)}x)" if sym == "CRASH500" else "",
+                state.crash500_real_spikes_500, int(BURST_STAKE40_REAL_SPIKE_RATIO),
             )
             # ── CRASH500 S1 SPIKE-RESET: cada spike reinicia el timer S1 ────────
             # Al cerrar y abrir S1 fresco, la power_window se resetea a solo este spike.
@@ -801,11 +810,12 @@ class EntradaDiego:
                     and state.contract_id is not None):
                 _cid_r = int(state.contract_id)
                 _pnl_r = state.current_profit
-                state.contract_id              = None
-                state.current_profit           = 0.0
-                state.peak_profit_500          = 0.0
-                state.spikes_in_contract_500   = 0
-                state.crash500_real_spikes_500 = 0
+                state.contract_id                = None
+                state.current_profit             = 0.0
+                state.peak_profit_500            = 0.0
+                state.spikes_in_contract_500     = 0
+                state.crash500_real_spikes_500   = 0
+                state.spike_first_ts_in_contract = 0.0
                 try:
                     await self._executor.close_contract(_cid_r)
                 except Exception as exc:
@@ -833,11 +843,12 @@ class EntradaDiego:
                     and state.contract_id is not None):
                 _cid_b = int(state.contract_id)
                 _pnl_b = state.current_profit
-                state.contract_id              = None
-                state.current_profit           = 0.0
-                state.peak_profit_500          = 0.0
-                state.spikes_in_contract_500   = 0
-                state.crash500_real_spikes_500 = 0
+                state.contract_id                = None
+                state.current_profit             = 0.0
+                state.peak_profit_500            = 0.0
+                state.spikes_in_contract_500     = 0
+                state.crash500_real_spikes_500   = 0
+                state.spike_first_ts_in_contract = 0.0
                 try:
                     await self._executor.close_contract(_cid_b)
                 except Exception as exc:
@@ -863,84 +874,86 @@ class EntradaDiego:
         if state.burst_phase == "IDLE" and state.contract_id is not None:
             _cid = int(state.contract_id)
             _pnl = state.current_profit
-            state.contract_id            = None
-            state.current_profit         = 0.0
-            state.peak_profit_500        = 0.0
-            state.spikes_in_contract_500 = 0
+            state.contract_id                = None
+            state.current_profit             = 0.0
+            state.peak_profit_500            = 0.0
+            state.spikes_in_contract_500     = 0
+            state.spike_first_ts_in_contract = 0.0
             try:
                 await self._executor.close_contract(_cid)
             except Exception as exc:
                 _LOGGER.error("[ENTRADA_DIEGO] %s ORPHAN close error: %s", sym, exc)
             state.last_close_profit = _pnl
             self._add_global_pnl(sym, _pnl, now)
-            _np_orphan = "STAKE_1"
+            _np_orphan = "WAIT_GATE"
             _LOGGER.info("[ENTRADA_DIEGO] %s ORPHAN %d cerrado pnl=%.4f → %s", sym, _cid, _pnl, _np_orphan)
             state.burst_phase            = _np_orphan
             state.burst_phase_started_at = 0.0
             return
 
-        # ── Sin contrato → abrir el stake del nivel actual ────────────────────
+        # ── Sin contrato → manejar fase actual ───────────────────────────────
         if state.contract_id is None:
             if now < state.broker_blocked_until_500:
                 return
-            # ── Gate PnL por símbolo ──────────────────────────────────────────────
+            # Gate PnL por símbolo
             if state.sym_pnl_pause_until > 0:
                 if now < state.sym_pnl_pause_until:
-                    return  # en pausa — no abrir nuevo contrato
+                    return
                 _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL_PAUSE expiró → reanudando", sym)
                 state.sym_pnl_pause_until = 0.0
-            # ── HOUR_PROFIT_PROTECT: ≥$4 ganado esta hora → esperar siguiente hora ──
+            # Actualizar contador de hora (sin HOUR_PROFIT_PROTECT — eliminado)
             _cur_hour = int(now // 3600) * 3600.0
             if _cur_hour != state.hour_start_ts_500:
-                state.prev_hour_pnl_500 = state.hour_pnl_500  # guarda PnL de la hora que terminó
-                state.hour_pnl_500 = 0.0                       # nueva hora → reset acumulado
-            # BOOM500: protección $4 solo si la hora anterior fue ganadora (>=0)
-            # Si la hora anterior fue pérdida, esta hora corre sin límite para recuperar
-            _prev_was_win = state.prev_hour_pnl_500 >= 0.0
-            if state.hour_pnl_500 >= HOUR_PROFIT_PROTECT_USD and sym != "CRASH500" and _prev_was_win:
-                if state.burst_phase != "STAKE_1" or state.burst_phase_started_at != 0.0:
-                    _wait_s = int((_cur_hour + 3600.0) - now)
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s HOUR_PROFIT_PROTECT +$%.2f≥$%.0f (prev_hora=+$%.2f) → pausa %ds",
-                        sym, state.hour_pnl_500, HOUR_PROFIT_PROTECT_USD, state.prev_hour_pnl_500, _wait_s,
-                    )
-                state.burst_phase            = "STAKE_1"
-                state.burst_phase_started_at = 0.0
-                return
-            if state.burst_phase not in ("STAKE_1", "STAKE_5", "STAKE_10", "STAKE_20", "STAKE_40", "STAKE_60", "STAKE_80"):
-                state.burst_phase = "STAKE_1"
-            # ── POWER gate: decide S1 vs S20 — solo si NO estamos en modo recovery ──
-            # Recovery = STAKE_40 o STAKE_80 tras pérdida sin spike → no sobrescribir
-            _in_recovery = state.burst_phase in ("STAKE_40", "STAKE_60", "STAKE_80")
-            if sym == "CRASH500" and not _in_recovery:
-                _crash_nspk = self._get_spike_count_30min("CRASH500", now)
-                state.burst_phase = "STAKE_20" if _crash_nspk == 3 else "STAKE_1"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 N_SPIKES_GATE=%d → %s",
-                    _crash_nspk, state.burst_phase,
-                )
-            elif sym == "BOOM500" and not _in_recovery:
-                _boom_power = self._get_power_30min("BOOM500", now)
-                if BOOM500_POWER_MIN <= _boom_power <= BOOM500_POWER_MAX:
-                    state.burst_phase = "STAKE_20"
+                state.prev_hour_pnl_500 = state.hour_pnl_500
+                state.hour_pnl_500 = 0.0
+            # Normalizar fases desconocidas → WAIT_GATE
+            if state.burst_phase not in ("WAIT_GATE", "TIMER_GATE", "STAKE_10", "STAKE_20", "STAKE_40", "STAKE_60", "STAKE_80"):
+                state.burst_phase = "WAIT_GATE"
+            # ── WAIT_GATE: monitorear condición de entrada ────────────────────────
+            if state.burst_phase == "WAIT_GATE":
+                _nspk = self._get_spike_count_30min(sym, now)
+                _pow  = self._get_power_30min(sym, now)
+                if sym == "CRASH500":
+                    _gate_met = (_nspk >= 2)
                 else:
-                    state.burst_phase = "STAKE_1"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] BOOM500 POWER_GATE=%.1f [%.0f–%.0f] → %s",
-                    _boom_power, BOOM500_POWER_MIN, BOOM500_POWER_MAX, state.burst_phase,
-                )
-            elif _in_recovery:
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s RECOVERY_MODE fase=%s → abrir sin POWER gate",
-                    sym, state.burst_phase,
-                )
+                    _gate_met = (_nspk >= 3 and BOOM500_POWER_MIN <= _pow < BOOM500_POWER_MAX)
+                if _gate_met:
+                    state.burst_phase            = "TIMER_GATE"
+                    state.burst_phase_started_at = now
+                    _timer_s = WAIT_GATE_TIMER_CRASH500_S if sym == "CRASH500" else WAIT_GATE_TIMER_BOOM500_S
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s GATE_FIRED nspk=%d pow=%.1f → TIMER_GATE %ds",
+                        sym, _nspk, _pow, _timer_s,
+                    )
+                    self._persist(now)
+                return
+            # ── TIMER_GATE: timer corriendo → abrir S10 cuando expire ────────────
+            if state.burst_phase == "TIMER_GATE":
+                _gate_timer = WAIT_GATE_TIMER_CRASH500_S if sym == "CRASH500" else WAIT_GATE_TIMER_BOOM500_S
+                if now < state.burst_phase_started_at + _gate_timer:
+                    return
+                _nspk = self._get_spike_count_30min(sym, now)
+                _pow  = self._get_power_30min(sym, now)
+                _LOGGER.info("[ENTRADA_DIEGO] %s TIMER_GATE→S10 nspk=%d pow=%.1f", sym, _nspk, _pow)
+                state.burst_phase                = "STAKE_10"
+                state.burst_phase_started_at     = now
+                state.spikes_in_contract_500     = 0
+                state.crash500_real_spikes_500   = 0
+                state.spike_first_ts_in_contract = 0.0
+                state.contract_start_hour_ts_500 = int(now // 3600) * 3600.0
+                await self._open(sym, state, now, stake_override=BURST_STAKE10_AMOUNT)
+                return
+            # ── Recovery / direct open: STAKE_10/20/40/60/80 ─────────────────────
+            _in_recovery = state.burst_phase in ("STAKE_40", "STAKE_60", "STAKE_80")
+            if _in_recovery:
+                _LOGGER.info("[ENTRADA_DIEGO] %s RECOVERY_MODE fase=%s → abrir sin gate",
+                             sym, state.burst_phase)
             if state.burst_phase_started_at == 0.0:
-                state.burst_phase_started_at   = now
-            state.spikes_in_contract_500   = 0
-            state.crash500_real_spikes_500 = 0
-            stake = (BURST_STAKE1_AMOUNT   if state.burst_phase == "STAKE_1"
-                else BURST_STAKE5_AMOUNT   if state.burst_phase == "STAKE_5"
-                else BURST_STAKE10_AMOUNT  if state.burst_phase == "STAKE_10"
+                state.burst_phase_started_at = now
+            state.spikes_in_contract_500     = 0
+            state.crash500_real_spikes_500   = 0
+            state.spike_first_ts_in_contract = 0.0
+            stake = (BURST_STAKE10_AMOUNT  if state.burst_phase == "STAKE_10"
                 else BURST_STAKE20_AMOUNT  if state.burst_phase == "STAKE_20"
                 else BURST_STAKE40_AMOUNT  if state.burst_phase == "STAKE_40"
                 else BURST_STAKE80_AMOUNT  if state.burst_phase == "STAKE_80"
@@ -955,8 +968,9 @@ class EntradaDiego:
         if state.current_profit > state.peak_profit_500:
             state.peak_profit_500 = state.current_profit
 
-        # ── SL duro: 90% del stake → STAKE_1 ─────────────────────────────────
-        _sl_limit = (-(BURST_STAKE60_AMOUNT * 0.90) if state.burst_phase == "STAKE_60"
+        # ── SL duro: 90% del stake → WAIT_GATE ───────────────────────────────
+        _sl_limit = (-(BURST_STAKE80_AMOUNT * 0.90) if state.burst_phase == "STAKE_80"
+            else    -(BURST_STAKE60_AMOUNT * 0.90) if state.burst_phase == "STAKE_60"
             else    -(BURST_STAKE40_AMOUNT * 0.90)  if state.burst_phase == "STAKE_40"
             else    -(BURST_STAKE20_AMOUNT * 0.90)  if state.burst_phase == "STAKE_20"
             else    -(BURST_STAKE10_AMOUNT * 0.90)  if state.burst_phase == "STAKE_10"
@@ -965,11 +979,12 @@ class EntradaDiego:
         if state.current_profit < _sl_limit and state.contract_id is not None:
             _cid = int(state.contract_id)
             _pnl = state.current_profit
-            state.contract_id              = None
-            state.current_profit           = 0.0
-            state.peak_profit_500          = 0.0
-            state.spikes_in_contract_500   = 0
-            state.crash500_real_spikes_500 = 0
+            state.contract_id                = None
+            state.current_profit             = 0.0
+            state.peak_profit_500            = 0.0
+            state.spikes_in_contract_500     = 0
+            state.crash500_real_spikes_500   = 0
+            state.spike_first_ts_in_contract = 0.0
             try:
                 await self._executor.close_contract(_cid)
             except Exception as exc:
@@ -978,12 +993,10 @@ class EntradaDiego:
             self._add_global_pnl(sym, _pnl, now)
             if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
                 state.hour_pnl_500 += _pnl
-            # CRASH500: SL siempre a S1 (reset timer 7min); BOOM500: STAKE_40 se mantiene en S40
-            _sl_next = ("STAKE_1" if sym == "CRASH500"
+            # CRASH500: SL → WAIT_GATE; BOOM500: STAKE_40 se mantiene en S40, resto → WAIT_GATE
+            _sl_next = ("WAIT_GATE" if sym == "CRASH500"
                         else "STAKE_40" if state.burst_phase == "STAKE_40"
-                        else "STAKE_1")
-            if sym == "CRASH500":
-                state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S  # reset tras SL
+                        else "WAIT_GATE")
             _LOGGER.warning("[ENTRADA_DIEGO] %s SL_HARD pnl=%.4f fase=%s → %s", sym, _pnl, state.burst_phase, _sl_next)
             state.burst_phase            = _sl_next
             state.burst_phase_started_at = 0.0
@@ -992,11 +1005,12 @@ class EntradaDiego:
         # ── Helper interno: cerrar + poll + abrir siguiente ───────────────────
         async def _transition(next_phase: str, next_stake: float,
                               label: str, _cid: int, _pnl: float, _spk: int) -> None:
-            state.contract_id              = None
-            state.current_profit           = 0.0
-            state.peak_profit_500          = 0.0
-            state.spikes_in_contract_500   = 0
-            state.crash500_real_spikes_500 = 0
+            state.contract_id                = None
+            state.current_profit             = 0.0
+            state.peak_profit_500            = 0.0
+            state.spikes_in_contract_500     = 0
+            state.crash500_real_spikes_500   = 0
+            state.spike_first_ts_in_contract = 0.0
             try:
                 await self._executor.close_contract(_cid)
             except Exception as exc:
@@ -1017,45 +1031,17 @@ class EntradaDiego:
             state.crash500_real_spikes_500    = 0
             state.contract_start_hour_ts_500  = int(time.time() // 3600) * 3600.0
             if state.sym_pnl_pause_until > time.time():
-                _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL gate → sin abrir %s → reset S1", sym, next_phase)
-                state.burst_phase = "STAKE_1"
+                _LOGGER.info("[ENTRADA_DIEGO] %s SYM_PNL gate → sin abrir %s → WAIT_GATE", sym, next_phase)
+                state.burst_phase = "WAIT_GATE"
                 state.burst_phase_started_at = 0.0
+                self._persist(time.time())
                 return
-            # ── POWER gate (_transition): override next_phase antes de abrir ──────
-            # Recovery phases (STAKE_40/60/80) NO se sobreescriben — tienen prioridad
-            _in_recovery_tr = next_phase in ("STAKE_40", "STAKE_60", "STAKE_80")
-            if sym == "CRASH500" and not _in_recovery_tr:
-                _crash_nspk_tr = self._get_spike_count_30min("CRASH500", time.time())
-                if _crash_nspk_tr == 3:
-                    next_phase = "STAKE_20"
-                    next_stake = BURST_STAKE20_AMOUNT
-                else:
-                    next_phase = "STAKE_1"
-                    next_stake = BURST_STAKE1_AMOUNT
-                state.burst_phase = next_phase
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] CRASH500 N_SPIKES_GATE_TR=%d → %s",
-                    _crash_nspk_tr, next_phase,
-                )
-            elif sym == "BOOM500" and not _in_recovery_tr:
-                _boom_power_tr = self._get_power_30min("BOOM500", time.time())
-                if BOOM500_POWER_MIN <= _boom_power_tr <= BOOM500_POWER_MAX:
-                    next_phase = "STAKE_20"
-                    next_stake = BURST_STAKE20_AMOUNT
-                else:
-                    next_phase = "STAKE_1"
-                    next_stake = BURST_STAKE1_AMOUNT
-                state.burst_phase = next_phase
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] BOOM500 POWER_GATE_TR=%.1f [%.0f–%.0f] → %s",
-                    _boom_power_tr, BOOM500_POWER_MIN, BOOM500_POWER_MAX, next_phase,
-                )
-            elif _in_recovery_tr:
-                state.burst_phase = next_phase
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s RECOVERY_TR fase=%s → abrir sin POWER_GATE_TR",
-                    sym, next_phase,
-                )
+            # WAIT_GATE: cerrar contrato pero no abrir el siguiente
+            if next_phase == "WAIT_GATE":
+                state.burst_phase            = "WAIT_GATE"
+                state.burst_phase_started_at = 0.0
+                self._persist(time.time())
+                return
             await self._open(sym, state, time.time(), stake_override=next_stake)
 
         # ── Helper: spikes en la hora UTC actual (con reset si cambió la hora) ─
@@ -1078,7 +1064,7 @@ class EntradaDiego:
         def _next_on_hour_change() -> tuple:
             _h_spk = _get_hour_spike_count()
             if _h_spk == 0:
-                return "STAKE_1",  BURST_STAKE1_AMOUNT
+                return "WAIT_GATE", 0.0
             elif _h_spk == 1:
                 return "STAKE_10", BURST_STAKE10_AMOUNT
             else:
@@ -1098,6 +1084,14 @@ class EntradaDiego:
             if state.last_spike_ts_500 <= 0:
                 return True
             return (now - state.last_spike_ts_500) < 15.0 * 60
+
+        def _s40_spike_is_early() -> bool:
+            """True: primer spike en S40 llegó en los primeros 5min — pequeño, profit floor no disparó."""
+            if state.spikes_in_contract_500 == 0 or state.spike_first_ts_in_contract <= 0:
+                return False
+            if state.burst_phase_started_at <= 0:
+                return False
+            return (state.spike_first_ts_in_contract - state.burst_phase_started_at) < 300.0
 
         def _crash500_mid_hour_s20() -> bool:
             """CRASH500 mid-hora: Q1 fue activo (≥3spk acum) + quedan cuartos (min<45) + mercado vivo.
@@ -1161,7 +1155,8 @@ class EntradaDiego:
             return f"Q{_q}:{_spk}/{'≥'+str(_req)}"
 
         # ── Piso de profit al 80% del peak (STAKE_10/20/40 — STAKE_1 siempre corre 10min) ──
-        _peak_trigger = (4.00 if state.burst_phase == "STAKE_40"
+        _peak_trigger = (8.00 if state.burst_phase == "STAKE_80"
+                    else 4.00 if state.burst_phase == "STAKE_40"
                     else 2.00 if state.burst_phase == "STAKE_20"
                     else 1.00 if state.burst_phase == "STAKE_10"
                     else 9999.0)  # STAKE_1: nunca dispara
@@ -1175,61 +1170,41 @@ class EntradaDiego:
             _peak  = state.peak_profit_500
             _phase = state.burst_phase
             if _phase == "STAKE_10":
-                # profit floor en $10: si capturó 2+ spikes → S1; 1spk → S20; 0spk → S20
-                if _spk >= 2:
-                    _np, _ns = "STAKE_1",  BURST_STAKE1_AMOUNT
+                # win→WAIT_GATE | loss(any)→S20
+                if _pnl > 0:
+                    _np, _ns = "WAIT_GATE", 0.0
                 else:
                     _np, _ns = "STAKE_20", BURST_STAKE20_AMOUNT
             elif _phase == "STAKE_20":
-                # Regla unificada: win(any)→S1 | loss+0spk→S40 | loss+1+spk→S1
-                if sym == "CRASH500":
-                    if _pnl > 0:
-                        if _spk == 0:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                            _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
-                        elif _spk >= 2:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_10M_S
-                            _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
-                        else:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                            _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
-                    else:
-                        if _spk == 0:
-                            _np, _ns = "STAKE_40", BURST_STAKE40_AMOUNT
-                        else:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                            _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
-                else:  # BOOM500
-                    if _pnl > 0:
-                        _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
-                    else:
-                        if _spk == 0:
-                            _np, _ns = "STAKE_40", BURST_STAKE40_AMOUNT
-                        else:
-                            _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+                # real spikes (≥50x) para ambos símbolos
+                if _pnl > 0 or state.crash500_real_spikes_500 >= 1:
+                    _np, _ns = "WAIT_GATE", 0.0
+                else:
+                    _np, _ns = "STAKE_40", BURST_STAKE40_AMOUNT
             elif _phase == "STAKE_40":
                 if sym == "CRASH500":
-                    # WIN→S1(7m) | LOSE+spike(≥50x)→S1(7m) | LOSE 0real_spk→S80
-                    if _pnl > 0 or state.crash500_real_spikes_500 >= 1:
-                        state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                        _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+                    # WIN→WAIT | LOSE+spike(≥50x, tardío)→WAIT | LOSE 0real_spk OR early_spike→S80
+                    if _pnl > 0 or (state.crash500_real_spikes_500 >= 1 and not _s40_spike_is_early()):
+                        _np, _ns = "WAIT_GATE", 0.0
                     else:
                         _np, _ns = "STAKE_80", BURST_STAKE80_AMOUNT
                 else:
-                    # win→S1 | loss+0spk→S80 | loss+1+spk→S1
-                    if _pnl > 0 or _spk >= 1:
-                        _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+                    # win→WAIT | (late spike+loss)→WAIT | (0spk or early spike+loss)→S80
+                    if _pnl > 0 or (_spk >= 1 and not _s40_spike_is_early()):
+                        _np, _ns = "WAIT_GATE", 0.0
                     else:
                         _np, _ns = "STAKE_80", BURST_STAKE80_AMOUNT
             elif _phase == "STAKE_60":
-                # CRASH500: WIN→S1(20m) | LOSE→retry S60
+                # CRASH500: WIN→WAIT | LOSE→retry S60
                 if _pnl > 0:
-                    state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                    _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+                    _np, _ns = "WAIT_GATE", 0.0
                 else:
                     _np, _ns = "STAKE_60", BURST_STAKE60_AMOUNT
-            else:  # STAKE_1 — nunca llega aquí (peak_trigger=9999), pero por seguridad
-                _np, _ns = "STAKE_1", BURST_STAKE1_AMOUNT
+            elif _phase == "STAKE_80":
+                # S80: profit floor captura ganancia → WAIT_GATE
+                _np, _ns = "WAIT_GATE", 0.0
+            else:
+                _np, _ns = "WAIT_GATE", 0.0
             await _transition(_np, _ns,
                 f"PROFIT_FLOOR peak={_peak:.2f} floor={_peak*0.80:.2f} spk={_spk}",
                 _cid, _pnl, _spk)
@@ -1308,35 +1283,22 @@ class EntradaDiego:
                     await _transition(_np, _ns, f"STAKE_1 {_s1_label} <2spk→{_np}", _cid, _pnl, _spk)
             return
 
-        # ── Timer STAKE_10: 15min (defensivo) ────────────────────────────────
+        # ── Timer STAKE_10: 4min CRASH500 / 8min BOOM500 ───────────────────────
+        _s10_dur = BURST_STAKE10_CRASH500_S if sym == "CRASH500" else BURST_STAKE10_DURATION_S
         if (state.burst_phase == "STAKE_10"
-                and now >= state.burst_phase_started_at + BURST_STAKE10_DURATION_S
+                and now >= state.burst_phase_started_at + _s10_dur
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
-            # 1. Cambio de hora
+            _dur_min = _s10_dur // 60
             if _hour_changed_since_open():
                 _np, _ns = _next_on_hour_change()
-                await _transition(_np, _ns, f"STAKE_10 15min cambio_hora→{_np}", _cid, _pnl, _spk)
+                await _transition(_np, _ns, f"STAKE_10 {_dur_min}min cambio_hora→{_np}", _cid, _pnl, _spk)
                 return
-            # 2. Reglas por spikes y resultado
-            if _spk >= 2:
-                # 2+ spikes: hora activa — win/loss ambos escalan a S20 (buen momento)
-                if _pnl > 0:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min ≥2spk+win→S20",  _cid, _pnl, _spk)
-                else:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min ≥2spk+loss→S20", _cid, _pnl, _spk)
-            elif _spk == 1:
-                # 1 spike: si ganó escala a S20; si perdió reintenta S10
-                if _pnl > 0:
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min 1spk+win→S20",   _cid, _pnl, _spk)
-                else:
-                    await _transition("STAKE_10", BURST_STAKE10_AMOUNT, "STAKE_10 15min 1spk+loss→retry", _cid, _pnl, _spk)
+            if _pnl > 0:
+                await _transition("WAIT_GATE", 0.0, f"STAKE_10 {_dur_min}min win→WAIT_GATE", _cid, _pnl, _spk)
             else:
-                # 0 spikes: escalar solo si el mercado está activo (último spike <30min)
-                if _gap_gate_s20():
-                    await _transition("STAKE_20", BURST_STAKE20_AMOUNT, "STAKE_10 15min 0spk→S20",           _cid, _pnl, _spk)
-                else:
-                    await _transition("STAKE_1",  BURST_STAKE1_AMOUNT,  "STAKE_10 15min 0spk+gap>30min→S1", _cid, _pnl, _spk)
+                _lbl = f"{_spk}spk+loss" if _spk >= 1 else "0spk+loss"
+                await _transition("STAKE_20", BURST_STAKE20_AMOUNT, f"STAKE_10 {_dur_min}min {_lbl}→S20", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_20: 15min BOOM500 / 20min CRASH500 ───────────────────
@@ -1345,29 +1307,28 @@ class EntradaDiego:
                 and now >= state.burst_phase_started_at + _s20_dur
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
-            # 1. CRASH500: win(any)→S1 | loss+0spk→S40(20min) | loss+1+spk→S1
+            _real_spk_s20    = state.crash500_real_spikes_500
+            # 1. CRASH500: win→WAIT | loss+0real_spk(≥50x)→S40 | loss+real_spk→WAIT
             if sym == "CRASH500":
                 if _pnl > 0:
-                    state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"CRASH500 S20 8min win→S1", _cid, _pnl, _spk)
-                elif _spk == 0:
-                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"CRASH500 S20 8min loss+0spk→S40(20min)", _cid, _pnl, _spk)
+                    await _transition("WAIT_GATE", 0.0, f"CRASH500 S20 8min win→WAIT_GATE", _cid, _pnl, _spk)
+                elif _real_spk_s20 == 0:
+                    await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"CRASH500 S20 8min loss+0real_spk→S40", _cid, _pnl, _spk)
                 else:
-                    state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"CRASH500 S20 8min loss+{_spk}spk→S1", _cid, _pnl, _spk)
+                    await _transition("WAIT_GATE", 0.0, f"CRASH500 S20 8min loss+{_spk}spk({_real_spk_s20}≥50x)→WAIT_GATE", _cid, _pnl, _spk)
                 return
             # 2. Cambio de hora (BOOM500 solamente)
             if _hour_changed_since_open():
                 _np, _ns = _next_on_hour_change()
                 await _transition(_np, _ns, f"STAKE_20 8min cambio_hora→{_np}", _cid, _pnl, _spk)
                 return
-            # 3. BOOM500: win(any)→S1 | loss+0spk→S40(20min) | loss+1+spk→S1
+            # 3. BOOM500: win→WAIT | loss+0real_spk(≥50x)→S40 | loss+real_spk→WAIT
             if _pnl > 0:
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 8min win→S1", _cid, _pnl, _spk)
-            elif _spk == 0:
-                await _transition("STAKE_40", BURST_STAKE40_AMOUNT, "STAKE_20 8min loss+0spk→S40(20min)", _cid, _pnl, _spk)
+                await _transition("WAIT_GATE", 0.0, f"STAKE_20 8min win→WAIT_GATE", _cid, _pnl, _spk)
+            elif _real_spk_s20 == 0:
+                await _transition("STAKE_40", BURST_STAKE40_AMOUNT, f"STAKE_20 8min loss+0real_spk→S40", _cid, _pnl, _spk)
             else:
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_20 8min loss+{_spk}spk→S1", _cid, _pnl, _spk)
+                await _transition("WAIT_GATE", 0.0, f"STAKE_20 8min loss+{_spk}spk({_real_spk_s20}≥50x)→WAIT_GATE", _cid, _pnl, _spk)
             return
 
         # ── Timer STAKE_60 CRASH500: 20min ───────────────────────────────────
@@ -1377,8 +1338,7 @@ class EntradaDiego:
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
             if _pnl > 0:
-                state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"CRASH500 S60 20min win→S1(20min)", _cid, _pnl, _spk)
+                await _transition("WAIT_GATE", 0.0, f"CRASH500 S60 20min win→WAIT_GATE", _cid, _pnl, _spk)
             else:
                 await _transition("STAKE_60", BURST_STAKE60_AMOUNT, f"CRASH500 S60 20min loss→S60(retry)", _cid, _pnl, _spk)
             return
@@ -1389,49 +1349,57 @@ class EntradaDiego:
                 and now >= state.burst_phase_started_at + _s40_dur
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
-            # 1. CRASH500: WIN→S1(7m) | LOSE+spike(≥50x)→S1(7m) | LOSE 0real_spk→S60
+            # 1. CRASH500: WIN→WAIT | LOSE+spike(≥50x, tardío)→WAIT | LOSE 0real_spk OR spike_early→S80
             if sym == "CRASH500":
                 _real_spk = state.crash500_real_spikes_500
-                if _pnl > 0 or _real_spk >= 1:
-                    state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                    _tag = "win" if _pnl > 0 else f"{_spk}spk({_real_spk}≥50x)+loss"
-                    await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"CRASH500 S40 20min {_tag}→S1(7min)", _cid, _pnl, _spk)
+                if _pnl > 0:
+                    await _transition("WAIT_GATE", 0.0, "CRASH500 S40 20min win→WAIT_GATE", _cid, _pnl, _spk)
+                elif _real_spk >= 1 and not _s40_spike_is_early():
+                    await _transition("WAIT_GATE", 0.0, f"CRASH500 S40 20min {_spk}spk({_real_spk}≥50x)+loss→WAIT_GATE", _cid, _pnl, _spk)
                 else:
-                    await _transition("STAKE_80", BURST_STAKE80_AMOUNT, f"CRASH500 S40 20min {_spk}spk(0≥50x)+loss→S80(recovery)", _cid, _pnl, _spk)
+                    _tag = f"{_spk}spk(0≥50x)+loss" if _real_spk == 0 else f"{_spk}spk_early(<5min)+loss"
+                    await _transition("STAKE_80", BURST_STAKE80_AMOUNT, f"CRASH500 S40 20min {_tag}→S80", _cid, _pnl, _spk)
                 return
             # 2. Cambio de hora (BOOM500)
             if _hour_changed_since_open():
                 _np, _ns = _next_on_hour_change()
                 await _transition(_np, _ns, f"STAKE_40 15min cambio_hora→{_np}", _cid, _pnl, _spk)
                 return
-            # 3. BOOM500: 0spk → S80(20min) | 1+spk → S1
-            if _spk == 0:
-                await _transition("STAKE_80", BURST_STAKE80_AMOUNT, "STAKE_40 20min 0spk→S80(20min)", _cid, _pnl, _spk)
+            # 3. BOOM500: win→WAIT | (late spike+loss)→WAIT | (0spk or early spike+loss)→S80
+            if _pnl > 0:
+                await _transition("WAIT_GATE", 0.0, "STAKE_40 20min win→WAIT_GATE", _cid, _pnl, _spk)
+            elif _spk == 0 or _s40_spike_is_early():
+                _tag = "0spk" if _spk == 0 else f"{_spk}spk_early(<5min)"
+                await _transition("STAKE_80", BURST_STAKE80_AMOUNT, f"STAKE_40 20min {_tag}→S80", _cid, _pnl, _spk)
             else:
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_40 20min {_spk}spk→S1", _cid, _pnl, _spk)
+                await _transition("WAIT_GATE", 0.0, f"STAKE_40 20min {_spk}spk_tardio→WAIT_GATE", _cid, _pnl, _spk)
             return
 
-        # ── Timer STAKE_80: recovery S80 (15min) → siempre S1 ────────────────
+        # ── Timer STAKE_80: win→WAIT_GATE | loss→retry S80 (hasta ganar) ──────
         if (state.burst_phase == "STAKE_80"
                 and now >= state.burst_phase_started_at + BURST_STAKE80_DURATION_S
                 and state.contract_id is not None):
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
-            _label = "win" if _pnl > 0 else "loss"
-            await _transition("STAKE_1", BURST_STAKE1_AMOUNT, f"STAKE_80 15min {_label}→S1", _cid, _pnl, _spk)
+            if _pnl > 0:
+                await _transition("WAIT_GATE", 0.0, "STAKE_80 20min win→WAIT_GATE", _cid, _pnl, _spk)
+            else:
+                await _transition("STAKE_80", BURST_STAKE80_AMOUNT, f"STAKE_80 20min loss({_spk}spk)→S80_retry", _cid, _pnl, _spk)
             return
 
         # ── Cerrado externamente por broker → aplica misma regla de spikes ──────
         if state.contract_id is not None and self._query_contract(state.contract_id) is None:
-            _pnl      = state.current_profit
-            _phase    = state.burst_phase
-            _spk      = state.spikes_in_contract_500
-            _real_spk = state.crash500_real_spikes_500
-            state.last_close_profit        = _pnl
-            state.contract_id              = None
-            state.current_profit           = 0.0
-            state.peak_profit_500          = 0.0
-            state.spikes_in_contract_500   = 0
-            state.crash500_real_spikes_500 = 0
+            _pnl             = state.current_profit
+            _phase           = state.burst_phase
+            _spk             = state.spikes_in_contract_500
+            _real_spk        = state.crash500_real_spikes_500
+            _spike_early_bc  = _s40_spike_is_early()  # capturar antes del reset
+            state.last_close_profit          = _pnl
+            state.contract_id                = None
+            state.current_profit             = 0.0
+            state.peak_profit_500            = 0.0
+            state.spikes_in_contract_500     = 0
+            state.crash500_real_spikes_500   = 0
+            state.spike_first_ts_in_contract = 0.0
             self._add_global_pnl(sym, _pnl, now)
             if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
                 state.hour_pnl_500 += _pnl
@@ -1497,69 +1465,50 @@ class EntradaDiego:
                     return
                 next_phase = "STAKE_20"
             elif _phase == "STAKE_10":
-                _elapsed = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
-                if _elapsed < BURST_STAKE10_DURATION_S:
-                    # DPM cerró antes de los 15min → reabre STAKE_10, preserva timer
+                _elapsed   = now - state.burst_phase_started_at if state.burst_phase_started_at > 0 else 9999.0
+                _s10_dur_bc = BURST_STAKE10_CRASH500_S if sym == "CRASH500" else BURST_STAKE10_DURATION_S
+                if _elapsed < _s10_dur_bc:
                     _LOGGER.info("[ENTRADA_DIEGO] %s broker close STAKE_10 prematuro %.0fs/<%.0fs → reabre sin resetear timer",
-                                 sym, _elapsed, BURST_STAKE10_DURATION_S)
+                                 sym, _elapsed, _s10_dur_bc)
                     state.burst_phase = "STAKE_10"
                     return
-                if _spk >= 2:
-                    next_phase = "STAKE_20"  # win o loss: buen momento → escalar
-                elif _spk == 1:
-                    next_phase = "STAKE_20" if _pnl > 0 else "STAKE_10"
+                if _pnl > 0:
+                    next_phase = "WAIT_GATE"
                 else:
-                    next_phase = "STAKE_20" if _gap_gate_s20() else "STAKE_1"
+                    next_phase = "STAKE_20"
             elif _phase == "STAKE_20":
-                # Regla unificada broker-close: win→S1 | loss+0spk→S40 | loss+1+spk→S1
-                if sym == "CRASH500":
-                    if _pnl > 0:
-                        if _spk == 0:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                        elif _spk >= 2:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_10M_S
-                        else:
-                            state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                        next_phase = "STAKE_1"
-                    elif _spk == 0:
-                        next_phase = "STAKE_40"
-                    else:
-                        state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                        next_phase = "STAKE_1"
+                # real spikes (≥50x) para ambos símbolos
+                if _pnl > 0 or _real_spk >= 1:
+                    next_phase = "WAIT_GATE"
                 else:
-                    # BOOM500: win→S1 | loss+0spk→S40 | loss+1+spk→S1
-                    if _pnl > 0:
-                        state.s20_consec_losses = 0
-                        next_phase = "STAKE_1"
-                    elif _spk == 0:
-                        state.s20_consec_losses += 1
-                        next_phase = "STAKE_40"
-                    else:
-                        state.s20_consec_losses += 1
-                        next_phase = "STAKE_1"
+                    next_phase = "STAKE_40"
             elif _phase == "STAKE_40":
                 if sym == "CRASH500":
-                    # WIN→S1(7m) | LOSE+spike(≥50x)→S1(7m) | LOSE 0real_spk→S80
-                    if _pnl > 0 or _real_spk >= 1:
-                        state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_S
-                        next_phase = "STAKE_1"
+                    # WIN→WAIT | LOSE+spike(≥50x, tardío)→WAIT | LOSE 0real_spk OR spike_early→S80
+                    if _pnl > 0 or (_real_spk >= 1 and not _spike_early_bc):
+                        next_phase = "WAIT_GATE"
                     else:
                         next_phase = "STAKE_80"
                 else:
-                    # BOOM500: win/1+spk→S1 | 0spk+loss→S80
-                    if _pnl > 0 or _spk >= 1:
-                        next_phase = "STAKE_1"
+                    # BOOM500: win→WAIT | (late spike+loss)→WAIT | (0spk or early spike+loss)→S80
+                    if _pnl > 0 or (_spk >= 1 and not _spike_early_bc):
+                        next_phase = "WAIT_GATE"
                     else:
                         next_phase = "STAKE_80"
             elif _phase == "STAKE_60":
-                # CRASH500: WIN→S1(20m) | LOSE→retry S60
+                # CRASH500: WIN→WAIT | LOSE→retry S60
                 if _pnl > 0:
-                    state.crash500_s1_timer_s = BURST_STAKE1_CRASH500_20M_S
-                    next_phase = "STAKE_1"
+                    next_phase = "WAIT_GATE"
                 else:
                     next_phase = "STAKE_60"
+            elif _phase == "STAKE_80":
+                # S80: win→WAIT_GATE | loss→retry S80 (hasta ganar)
+                if _pnl > 0:
+                    next_phase = "WAIT_GATE"
+                else:
+                    next_phase = "STAKE_80"
             else:
-                next_phase = "STAKE_1"
+                next_phase = "WAIT_GATE"
             _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f spk=%d → %s",
                          sym, _phase, _pnl, _spk, next_phase)
             state.burst_phase            = next_phase
@@ -1926,22 +1875,12 @@ class EntradaDiego:
         return ladder[min(reopens, len(ladder) - 1)]
 
     async def _open(self, sym: str, state: _SymState, now: float, stake_override: float | None = None) -> None:
-        # ── HOUR_PROFIT_PROTECT (500s): ≥$4 ganado esta hora → no abrir ─────────
+        # Actualizar contador de hora (sin HOUR_PROFIT_PROTECT — eliminado)
         if sym in SYMBOLS_500:
             _cur_hour = int(now // 3600) * 3600.0
             if _cur_hour != state.hour_start_ts_500:
                 state.prev_hour_pnl_500 = state.hour_pnl_500
-                state.hour_pnl_500 = 0.0  # nueva hora → reset
-            _prev_was_win = state.prev_hour_pnl_500 >= 0.0
-            if state.hour_pnl_500 >= HOUR_PROFIT_PROTECT_USD and sym != "CRASH500" and _prev_was_win:
-                _wait_s = int((_cur_hour + 3600.0) - now)
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s HOUR_PROFIT_PROTECT +$%.2f≥$%.0f (prev=+$%.2f) → no abre, espera %ds",
-                    sym, state.hour_pnl_500, HOUR_PROFIT_PROTECT_USD, state.prev_hour_pnl_500, _wait_s,
-                )
-                state.burst_phase            = "STAKE_1"
-                state.burst_phase_started_at = 0.0
-                return
+                state.hour_pnl_500 = 0.0
 
         # Pausa global por PnL: no abrir hasta que venza el timer
         if self._global_pause_until > 0 and now < self._global_pause_until:
@@ -2010,8 +1949,9 @@ class EntradaDiego:
                 state.is_readjusted         = False
                 state.phase                 = "OPEN"
                 if sym in SYMBOLS_500:
-                    state.spikes_in_contract_500   = 0
-                    state.crash500_real_spikes_500 = 0
+                    state.spikes_in_contract_500     = 0
+                    state.crash500_real_spikes_500   = 0
+                    state.spike_first_ts_in_contract = 0.0
                     state.last_spike_ts_500 = float(self._risk.get_last_spike_ts(sym) or 0.0)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s OPEN OK contract=%s entry=%.5f stake=$%.2f",
@@ -2193,8 +2133,11 @@ class EntradaDiego:
                             st.crash_stake_idx       = int(s.get("crash_stake_idx",      0))
                             st.boom_stake_idx        = int(s.get("boom_stake_idx",       0))
                             # burst machine — críticos para evitar race condition en restart
-                            st.burst_phase            = s.get("burst_phase", "STAKE_1")
+                            st.burst_phase            = s.get("burst_phase", "WAIT_GATE")
                             st.burst_phase_started_at = float(s.get("burst_phase_started_at", 0.0))
+                            # restaurar ventana de spikes 30min para preservar gate state
+                            _pw = s.get("power_window", [])
+                            st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
                             st.hour_spike_count_500        = int(s.get("hour_spike_count_500", 0))
@@ -2204,8 +2147,9 @@ class EntradaDiego:
                             st.s20_crash500_wins           = int(s.get("s20_crash500_wins", 0))
                             st.hour_pnl_500                = float(s.get("hour_pnl_500", 0.0))
                             st.prev_hour_pnl_500           = float(s.get("prev_hour_pnl_500", 0.0))
-                            st.crash500_s1_timer_s         = float(s.get("crash500_s1_timer_s", BURST_STAKE1_CRASH500_S))
-                            st.crash500_real_spikes_500    = int(s.get("crash500_real_spikes_500", 0))
+                            st.crash500_s1_timer_s           = float(s.get("crash500_s1_timer_s", BURST_STAKE1_CRASH500_S))
+                            st.crash500_real_spikes_500      = int(s.get("crash500_real_spikes_500", 0))
+                            st.spike_first_ts_in_contract    = float(s.get("spike_first_ts_in_contract", 0.0))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
@@ -2251,6 +2195,28 @@ class EntradaDiego:
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s RESTAURADO: rest_mode=True → abrirá a $%.0f",
                         sym, REST_STAKE_1000,
+                    )
+                    continue
+
+                # 500s sin contrato: restaurar burst_phase y power_window
+                if sym in SYMBOLS_500:
+                    st = self._states[sym]
+                    _bp = s.get("burst_phase", "WAIT_GATE")
+                    st.burst_phase = _bp if _bp in (
+                        "WAIT_GATE", "TIMER_GATE", "STAKE_10", "STAKE_20", "STAKE_40", "STAKE_60", "STAKE_80"
+                    ) else "WAIT_GATE"
+                    st.burst_phase_started_at = float(s.get("burst_phase_started_at", 0.0))
+                    _pw = s.get("power_window", [])
+                    st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
+                    st.hour_spike_count_500       = int(s.get("hour_spike_count_500", 0))
+                    st.hour_start_ts_500          = float(s.get("hour_start_ts_500", 0.0))
+                    st.hour_pnl_500               = float(s.get("hour_pnl_500", 0.0))
+                    st.prev_hour_pnl_500          = float(s.get("prev_hour_pnl_500", 0.0))
+                    st.sym_pnl_since_reset        = float(s.get("sym_pnl_since_reset", 0.0))
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s RESTAURADO: burst_phase=%s pw_entries=%d nspk30=%d",
+                        sym, st.burst_phase, len(st.power_window),
+                        sum(1 for t, _ in st.power_window if t > now - 1800.0),
                     )
                     continue
 
