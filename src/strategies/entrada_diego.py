@@ -813,15 +813,6 @@ class EntradaDiego:
                 sym, state.burst_phase, state.spikes_in_contract_500, state.hour_spike_count_500,
                 state.crash500_real_spikes_500, int(BURST_STAKE40_REAL_SPIKE_RATIO),
             )
-            # ── TIMER_GATE reset: spike grande durante la espera → reiniciar timer ──
-            # ratio ≥ 60x durante TIMER_GATE → resetear timer (esperar que se calme)
-            if state.burst_phase == "TIMER_GATE":
-                _spike_ratio_tg = float(self._risk.get_last_spike_ratio(sym) or 0.0)
-                if _spike_ratio_tg >= 60.0:
-                    _gate_timer_s = WAIT_GATE_TIMER_CRASH500_S if sym == "CRASH500" else WAIT_GATE_TIMER_BOOM500_S
-                    state.burst_phase_started_at = _last_spk_ts
-                    _LOGGER.info("[ENTRADA_DIEGO] %s TIMER_GATE reset por spike ratio=%.1fx → espera %ds",
-                                 sym, _spike_ratio_tg, _gate_timer_s)
             self._persist(now)  # guarda spikes_in_contract, last_spike_ts_500, hour_spike_count en disco
 
         # ── ORPHAN: contrato con fase sin definir → cerrar → STAKE_1 ─────────
@@ -860,23 +851,12 @@ class EntradaDiego:
             if _cur_hour != state.hour_start_ts_500:
                 state.prev_hour_pnl_500 = state.hour_pnl_500
                 state.hour_pnl_500 = 0.0
-            # Normalizar fases desconocidas → WAIT_GATE
-            if state.burst_phase not in ("WAIT_GATE", "TIMER_GATE", "STAKE_1", "STAKE_3", "STAKE_9", "STAKE_20"):
+            # Normalizar fases desconocidas → STAKE_1 (sin gate ni timer)
+            if state.burst_phase not in ("WAIT_GATE", "STAKE_1", "STAKE_3", "STAKE_9", "STAKE_20"):
                 state.burst_phase = "WAIT_GATE"
-            # ── WAIT_GATE: sin gate — pasar directo a TIMER_GATE ─────────────────
-            if state.burst_phase == "WAIT_GATE":
-                state.burst_phase            = "TIMER_GATE"
-                state.burst_phase_started_at = now
-                _timer_s = WAIT_GATE_TIMER_CRASH500_S if sym == "CRASH500" else WAIT_GATE_TIMER_BOOM500_S
-                _LOGGER.info("[ENTRADA_DIEGO] %s WAIT_GATE→TIMER_GATE %ds", sym, _timer_s)
-                self._persist(now)
-                return
-            # ── TIMER_GATE: timer corriendo → abrir STAKE_1 cuando expire ────────
-            if state.burst_phase == "TIMER_GATE":
-                _gate_timer = WAIT_GATE_TIMER_CRASH500_S if sym == "CRASH500" else WAIT_GATE_TIMER_BOOM500_S
-                if now < state.burst_phase_started_at + _gate_timer:
-                    return
-                _LOGGER.info("[ENTRADA_DIEGO] %s TIMER_GATE→STAKE_1", sym)
+            # ── WAIT_GATE / TIMER_GATE: abrir STAKE_1 inmediatamente ─────────────
+            if state.burst_phase in ("WAIT_GATE", "TIMER_GATE"):
+                _LOGGER.info("[ENTRADA_DIEGO] %s %s→STAKE_1", sym, state.burst_phase)
                 state.burst_phase                = "STAKE_1"
                 state.burst_phase_started_at     = now
                 state.spikes_in_contract_500     = 0
@@ -884,6 +864,7 @@ class EntradaDiego:
                 state.spike_first_ts_in_contract = 0.0
                 state.profit_first_positive_ts   = 0.0
                 state.contract_start_hour_ts_500 = int(now // 3600) * 3600.0
+                self._persist(now)
                 await self._open(sym, state, now, stake_override=BURST_STAKE1_AMOUNT)
                 return
             # ── Direct open: fase activa sin contrato → abrir sin gate ─────────

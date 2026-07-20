@@ -613,21 +613,18 @@ function EntradaDiegoSection({ symbol }) {
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
 
   // Colores por fase — escalera: S1=verde S3=ámbar S9=violeta S20=rojo
-  const phaseColor = burst_phase === "STAKE_20" ? "#ff5d6c"
-    : burst_phase === "STAKE_9"                 ? "#a78bfa"
-    : burst_phase === "STAKE_3"                 ? "#f59e0b"
-    : burst_phase === "STAKE_1"                 ? "#22d3a3"
-    : burst_phase === "TIMER_GATE"              ? "#62d4ff"
+  const phaseColor = burst_phase === "STAKE_20"                           ? "#ff5d6c"
+    : burst_phase === "STAKE_9"                                           ? "#a78bfa"
+    : burst_phase === "STAKE_3"                                           ? "#f59e0b"
+    : burst_phase === "STAKE_1"                                           ? "#22d3a3"
+    : (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")       ? "#64748b"
     : "#64748b";
 
-  // Timer durations
-  const _timerGateS = isCrash500 ? WAIT_GATE_TIMER_CRASH_S : WAIT_GATE_TIMER_BOOM_S;
+  // Timer durations — solo stakes, no timer gate
   const _ladderPhases = ["STAKE_1","STAKE_3","STAKE_9","STAKE_20"];
-  const phaseTotal  = burst_phase === "TIMER_GATE" ? _timerGateS
-    : _ladderPhases.includes(burst_phase) ? burst_ladder_s
-    : 1;
+  const phaseTotal  = _ladderPhases.includes(burst_phase) ? burst_ladder_s : 1;
   const phaseRem  = Math.max(0, phaseTotal - phaseElapsed);
-  const phasePct  = burst_phase === "WAIT_GATE" ? 0 : Math.min(100, (phaseElapsed / phaseTotal) * 100);
+  const phasePct  = _ladderPhases.includes(burst_phase) ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
 
   // Profit+ cierre anticipado: barra separada si profit_first_positive_ts activo
   const profitPosPct = profit_first_positive_ts > 0
@@ -636,38 +633,35 @@ function EntradaDiegoSection({ symbol }) {
     ? Math.max(0, burst_profit_pos_s - profitPosElapsed) : 0;
 
   // Header label
-  const _stakeLabel = burst_phase === "STAKE_20"  ? "$20"
-    : burst_phase === "STAKE_9"                   ? "$9"
-    : burst_phase === "STAKE_3"                   ? "$3"
-    : burst_phase === "STAKE_1"                   ? "$1"
-    : burst_phase === "TIMER_GATE"                ? (isCrash500 ? "7m" : "6m")
+  const _stakeLabel = burst_phase === "STAKE_20" ? "$20"
+    : burst_phase === "STAKE_9"                  ? "$9"
+    : burst_phase === "STAKE_3"                  ? "$3"
+    : burst_phase === "STAKE_1"                  ? "$1"
     : "WAIT";
 
   // Siguiente acción
-  const _nextHint = burst_phase === "WAIT_GATE"   ? "esperando burst…"
-    : burst_phase === "TIMER_GATE"                ? `→ $1 en ${_fmtS(phaseRem)}`
-    : profit_first_positive_ts > 0                ? `→ $1 en ${_fmtS(profitPosRem)} (profit+ ✓)`
-    : burst_phase === "STAKE_1"                   ? `→ $3 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_3"                   ? `→ $9 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_9"                   ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_20"                  ? `→ retry $20 si pierde · ${_fmtS(phaseRem)}`
+  const _nextHint = (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")
+    ? "abriendo $1…"
+    : profit_first_positive_ts > 0 ? `→ $1 en ${_fmtS(profitPosRem)} (profit+ ✓)`
+    : burst_phase === "STAKE_1"    ? `→ $3 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_3"    ? `→ $9 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_9"    ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
+    : burst_phase === "STAKE_20"   ? `→ retry $20 si pierde · ${_fmtS(phaseRem)}`
     : "–";
 
-  const _nextColor = _nextHint.includes("$20") && burst_phase !== "TIMER_GATE" ? "#ff5d6c"
+  const _nextColor = _nextHint.includes("$20") ? "#ff5d6c"
     : _nextHint.includes("$9")     ? "#a78bfa"
     : _nextHint.includes("$3")     ? "#f59e0b"
     : _nextHint.includes("profit+") || _nextHint.includes("$1 en") ? "#22d3a3"
-    : burst_phase === "TIMER_GATE" ? "#62d4ff"
-    : _nextHint.includes("burst")  ? "#64748b"
+    : _nextHint.includes("abriendo") ? "#62d4ff"
     : phaseColor;
 
   const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
   const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
 
-  // Escalera: WAIT → TIMER → $1 → $3 → $9 → $20
+  // Escalera: WAIT → $1 → $3 → $9 → $20
   const _ladder = [
     { id: "WAIT_GATE",  label: "WAIT", color: "#64748b" },
-    { id: "TIMER_GATE", label: isCrash500 ? "7m" : "6m", color: "#62d4ff" },
     { id: "STAKE_1",    label: "$1",   color: "#22d3a3" },
     { id: "STAKE_3",    label: "$3",   color: "#f59e0b" },
     { id: "STAKE_9",    label: "$9",   color: "#a78bfa" },
@@ -742,11 +736,8 @@ function EntradaDiegoSection({ symbol }) {
       {/* Reglas de la fase activa */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-          {burst_phase === "WAIT_GATE" && (
-            <><span style={{ color: "#64748b" }}>esperando burst</span> → timer {isCrash500 ? "7m" : "6m"} → $1</>
-          )}
-          {burst_phase === "TIMER_GATE" && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>burst detectado</span> · {_fmtS(phaseRem)} → abre $1</>
+          {(burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE") && (
+            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>abriendo $1</span> inmediato…</>
           )}
           {burst_phase === "STAKE_1" && (
             <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$1 · 12min:</span>
