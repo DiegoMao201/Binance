@@ -524,7 +524,11 @@ function SlopeGateSection({ symbol }) {
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
 const ED_STAKE_LADDER_1000 = [5, 10, 10, 20, 20, 40, 40];
-const ED_SYMBOLS = new Set(["CRASH500", "BOOM500"]);
+const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
+// 1000s scout constants (deben coincidir con entrada_diego.py)
+const K1000_SCOUT_S_DEFAULT  = 1200;   // 20min
+const K1000_HOLD_S_DEFAULT   = 900;    // 15min
+const K1000_FLOOR_DEFAULT     = 0.80;
 
 // 500s: gate constants (deben coincidir con entrada_diego.py)
 const WAIT_GATE_TIMER_CRASH_S  = 420;   // 7min cooldown CRASH500
@@ -580,36 +584,110 @@ function EntradaDiegoSection({ symbol }) {
   const nowSec     = now / 1000;
   const is1000     = symbol.includes("1000");
   const isCrash500 = symbol === "CRASH500";
+  const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
 
-  // ── 1000s: modo simple ──────────────────────────────────────────────────────
+  // ── 1000s: escalera scout $1(20m)→$20→$40→$80→$200(floor) ──────────────────
   if (is1000) {
-    const ED_MAX_HOLD_S = 600, ED_COOLDOWN_S = 600;
-    const stakeDisplay  = ED_STAKE_LADDER_1000[Math.min(reopens, ED_STAKE_LADDER_1000.length - 1)];
-    const remaining_live = Math.max(0, phase === "OPEN" ? (open_ts + ED_MAX_HOLD_S) - nowSec
-                                      : phase === "COOLDOWN" ? cooldown_until - nowSec : 0);
-    const pct  = Math.min(100, ((ED_MAX_HOLD_S - remaining_live) / ED_MAX_HOLD_S) * 100);
-    const secs = Math.round(remaining_live), timeStr = secs >= 60 ? `${Math.floor(secs/60)}m${secs%60}s` : `${secs}s`;
-    const color = phase === "OPEN" ? "#22d3a3" : phase === "COOLDOWN" ? "#62d4ff" : "rgba(90,100,115,0.7)";
-    const pnlColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
-    const base1000 = { marginTop: 8, padding: "6px 10px", borderRadius: 6, fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11, border: `1px solid ${color}`, color, background: `${color}14` };
-    if (phase === "IDLE") return <div style={{ ...base1000, color: "rgba(90,100,115,0.7)", background: "rgba(90,100,115,0.05)", borderColor: "rgba(90,100,115,0.3)" }}><span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span><span style={{ marginLeft: 8, opacity: 0.6 }}>abriendo…</span></div>;
+    const {
+      k1000_phase = "SCOUT", k1000_phase_ts = 0, k1000_peak = 0,
+      k1000_scout_s = K1000_SCOUT_S_DEFAULT, k1000_hold_s = K1000_HOLD_S_DEFAULT,
+      k1000_floor_pct = K1000_FLOOR_DEFAULT,
+      k1000_scout_stake = 1, k1000_s20_stake = 20, k1000_s40_stake = 40,
+      k1000_s80_stake = 80, k1000_s200_stake = 200,
+    } = edState;
+
+    const _1000_phases = [
+      { id: "SCOUT",    label: "$1·20m",  color: "#22d3a3" },
+      { id: "STAKE_20", label: "$20·15m", color: "#62d4ff" },
+      { id: "STAKE_40", label: "$40·15m", color: "#f59e0b" },
+      { id: "STAKE_80", label: "$80·15m", color: "#a78bfa" },
+      { id: "STAKE_200", label: "$200",   color: "#ff5d6c" },
+    ];
+    const _stakeLabels = {
+      SCOUT: `$${k1000_scout_stake}`, STAKE_20: `$${k1000_s20_stake}`,
+      STAKE_40: `$${k1000_s40_stake}`, STAKE_80: `$${k1000_s80_stake}`,
+      STAKE_200: `$${k1000_s200_stake}`,
+    };
+
+    const ph1kColor = k1000_phase === "STAKE_200" ? "#ff5d6c"
+      : k1000_phase === "STAKE_80"  ? "#a78bfa"
+      : k1000_phase === "STAKE_40"  ? "#f59e0b"
+      : k1000_phase === "STAKE_20"  ? "#62d4ff"
+      : "#22d3a3";
+
+    const ph1kTotal   = k1000_phase === "SCOUT" ? k1000_scout_s : k1000_hold_s;
+    const ph1kElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
+    const ph1kRem     = k1000_phase === "STAKE_200" ? 0 : Math.max(0, ph1kTotal - ph1kElapsed);
+    const ph1kPct     = k1000_phase === "STAKE_200" ? 100 : Math.min(100, (ph1kElapsed / Math.max(ph1kTotal, 1)) * 100);
+
+    const pnl1kColor  = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+    const floor1kUsd  = k1000_peak * k1000_floor_pct;
+    const floorPct1k  = k1000_peak > 0 ? Math.min(100, Math.max(0, (current_profit / k1000_peak) * 100)) : 0;
+
+    const base1k = {
+      marginTop: 8, padding: "8px 10px", borderRadius: 6,
+      fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+      border: `1px solid ${ph1kColor}55`, color: ph1kColor, background: `${ph1kColor}0d`,
+    };
+
     return (
-      <div style={base1000}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontWeight: 700 }}>ENTRADA DIEGO</span>
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3, background: `${color}25`, color, letterSpacing: "0.05em" }}>{phase}</span>
-          {phase === "OPEN" && <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>{current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$</span>}
+      <div style={base1k}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: `${ph1kColor}25`, color: ph1kColor, letterSpacing: "0.06em" }}>
+            {k1000_phase}
+          </span>
+          <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+            {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
+          </span>
         </div>
-        <div style={{ width: "100%", height: 3, background: `${color}33`, borderRadius: 2, margin: "4px 0", overflow: "hidden" }}>
-          <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+
+        {/* Timer bar para fases con tiempo */}
+        {k1000_phase !== "STAKE_200" && (
+          <div style={{ width: "100%", height: 3, background: `${ph1kColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
+            <div style={{ width: `${ph1kPct}%`, height: "100%", background: ph1kColor, transition: "width 1s linear" }} />
+          </div>
+        )}
+
+        {/* Floor ratchet bar para STAKE_200 */}
+        {k1000_phase === "STAKE_200" && (
+          <div style={{ position: "relative", height: 6, background: "#ff5d6c15", borderRadius: 3, margin: "5px 0 3px", overflow: "hidden" }}>
+            <div style={{ width: `${floorPct1k}%`, height: "100%", background: k1000_peak > 0 && current_profit >= floor1kUsd ? "#ff5d6c60" : "#ff5d6c30", borderRadius: 3 }} />
+            {k1000_peak > 0 && (
+              <div style={{ position: "absolute", left: `${k1000_floor_pct * 100}%`, top: 0, height: "100%", width: 2, background: "#ff5d6c", borderRadius: 1 }} />
+            )}
+          </div>
+        )}
+
+        {/* Ladder pills */}
+        <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+          {_1000_phases.map(p => (
+            <span key={p.id} style={{
+              fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+              background: k1000_phase === p.id ? `${p.color}28` : "rgba(255,255,255,0.03)",
+              border: `1px solid ${k1000_phase === p.id ? p.color : "rgba(255,255,255,0.09)"}`,
+              color: k1000_phase === p.id ? p.color : "rgba(255,255,255,0.22)",
+              transition: "all 0.3s",
+            }}>{p.label}</span>
+          ))}
         </div>
-        <div style={{ opacity: 0.85 }}>{phase === "OPEN" ? `OPEN ${timeStr} · $${stakeDisplay}` : phase === "COOLDOWN" ? `próxima en ${timeStr}` : phase}</div>
+
+        {/* Línea de estado */}
+        <div style={{ fontSize: 10, opacity: 0.7, marginTop: 3 }}>
+          {k1000_phase === "STAKE_200" && k1000_peak > 0
+            ? `peak=+${k1000_peak.toFixed(2)}$ · floor=+${floor1kUsd.toFixed(2)}$ · actual=${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`
+            : k1000_phase === "STAKE_200"
+            ? `${_stakeLabels[k1000_phase]} · esperando primer spike…`
+            : `${_stakeLabels[k1000_phase]} · ${_fmtS(ph1kRem)} restante · ${k1000_phase === "SCOUT" ? "→$20 si expira" : "→win:SCOUT · loss:escala"}`
+          }
+        </div>
       </div>
     );
   }
 
   // ── 500s: escalera $1→$3→$9→$20 — gate → timer → stake ladder ──────
-  const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
 

@@ -68,6 +68,17 @@ DEEP_PAUSE_AT_1000 = int(os.getenv("ENTRADA_DIEGO_DEEP_PAUSE_AT",     "8"))
 # 1000s: en vez de COOLDOWN/DEEP PAUSE fuera del mercado → REST MODE a $2 (captura spikes)
 REST_STAKE_1000    = float(os.getenv("ENTRADA_DIEGO_REST_STAKE_1000", "2.0"))
 
+# 1000s: NUEVA ESTRATEGIA SCOUT — escalera $1(20m)→$20→$40→$80→$200(floor)
+K1000_SCOUT_STAKE  = float(os.getenv("ENTRADA_DIEGO_K1000_SCOUT",   "1.0"))
+K1000_S20_STAKE    = float(os.getenv("ENTRADA_DIEGO_K1000_S20",     "20.0"))
+K1000_S40_STAKE    = float(os.getenv("ENTRADA_DIEGO_K1000_S40",     "40.0"))
+K1000_S80_STAKE    = float(os.getenv("ENTRADA_DIEGO_K1000_S80",     "80.0"))
+K1000_S200_STAKE   = float(os.getenv("ENTRADA_DIEGO_K1000_S200",    "200.0"))
+K1000_SCOUT_S      = int(os.getenv("ENTRADA_DIEGO_K1000_SCOUT_S",   "1200"))  # 20min
+K1000_HOLD_S       = int(os.getenv("ENTRADA_DIEGO_K1000_HOLD_S",    "900"))   # 15min
+K1000_PROFIT_S     = int(os.getenv("ENTRADA_DIEGO_K1000_PROFIT_S",  "90"))    # 90s profit+ → cerrar ganador
+K1000_FLOOR_PCT    = float(os.getenv("ENTRADA_DIEGO_K1000_FLOOR",   "0.80"))  # floor=80% del peak (STAKE_200)
+
 # 500s: QUIET/ACTIVE
 QUIET_STAKE_500       = float(os.getenv("ENTRADA_DIEGO_QUIET_STAKE",        "1.0"))   # sensor: stake mínimo, detecta spikes directamente
 ACTIVE_STAKE_500      = float(os.getenv("ENTRADA_DIEGO_ACTIVE_STAKE",       "40.0"))  # símbolo activo
@@ -183,7 +194,7 @@ WIN_PROBE_DURATION_S          = int(os.getenv("ENTRADA_DIEGO_WIN_PROBE_S",      
 BOOM500_BLOCKED_UTC_HOURS:  frozenset = frozenset({3, 4, 10, 13, 16})
 CRASH500_BLOCKED_UTC_HOURS: frozenset = frozenset({1, 3, 13, 16, 22})
 
-_ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "BOOM1000,CRASH1000")
+_ED_DISABLED_RAW    = os.getenv("ENTRADA_DIEGO_DISABLED_SYMBOLS", "")
 SYMBOLS_ED_DISABLED = {s.strip().upper() for s in _ED_DISABLED_RAW.split(",") if s.strip()}
 
 # 500s: SL duro — separado por modo para dar espacio al $40
@@ -321,6 +332,11 @@ class _SymState:
     power_window: list = field(default_factory=list)  # [(ts, abs_jump), ...] rolling 30min — POWER gate (ATR-independiente)
     spike_first_ts_in_contract: float = 0.0  # epoch del primer spike en contrato S40 actual (gate "spike temprano <5min")
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
+    # 1000s scout ladder
+    k1000_phase:     str   = "SCOUT"   # SCOUT | STAKE_20 | STAKE_40 | STAKE_80 | STAKE_200
+    k1000_phase_ts:  float = 0.0       # epoch inicio de la fase actual
+    k1000_peak:      float = 0.0       # máximo profit visto en STAKE_200 (floor ratchet)
+    k1000_profit_ts: float = 0.0       # epoch cuando profit fue > 0 por primera vez (90s timer)
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -409,6 +425,20 @@ class _SymState:
             "burst_stake9_amount":      BURST_STAKE9_AMOUNT,
             "burst_ladder_s":           BURST_STAKE_LADDER_DURATION_S,
             "burst_profit_pos_s":       BURST_PROFIT_POSITIVE_CLOSE_S,
+            # 1000s scout ladder
+            "k1000_phase":             self.k1000_phase,
+            "k1000_phase_ts":          round(self.k1000_phase_ts, 3),
+            "k1000_peak":              round(self.k1000_peak, 4),
+            "k1000_profit_ts":         round(self.k1000_profit_ts, 3),
+            "k1000_scout_stake":       K1000_SCOUT_STAKE,
+            "k1000_s20_stake":         K1000_S20_STAKE,
+            "k1000_s40_stake":         K1000_S40_STAKE,
+            "k1000_s80_stake":         K1000_S80_STAKE,
+            "k1000_s200_stake":        K1000_S200_STAKE,
+            "k1000_scout_s":           K1000_SCOUT_S,
+            "k1000_hold_s":            K1000_HOLD_S,
+            "k1000_profit_s":          K1000_PROFIT_S,
+            "k1000_floor_pct":         K1000_FLOOR_PCT,
         }
         return d
 
@@ -480,6 +510,11 @@ class EntradaDiego:
                         if _s5 not in SYMBOLS_ED_DISABLED and _s5 not in self._watchdog_started:
                             self._watchdog_started.add(_s5)
                             asyncio.create_task(self._500_watchdog_loop(_s5))
+                    # 1000s scout también necesita watchdog propio
+                    for _s10 in SYMBOLS_1000:
+                        if _s10 not in SYMBOLS_ED_DISABLED and _s10 not in self._watchdog_started:
+                            self._watchdog_started.add(_s10)
+                            asyncio.create_task(self._1000_watchdog_loop(_s10))
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -509,6 +544,9 @@ class EntradaDiego:
             return
         if sym in SYMBOLS_500:
             await self._process_500_simple(sym)
+            return
+        if sym in SYMBOLS_1000:
+            await self._process_1000_scout(sym)
             return
         state = self._states[sym]
         now   = time.time()
@@ -1238,6 +1276,272 @@ class EntradaDiego:
                 _LOGGER.error("[ENTRADA_DIEGO] %s watchdog error: %s", sym, exc)
         _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 500 terminado", sym)
 
+    async def _1000_watchdog_loop(self, sym: str) -> None:
+        """Dispara _process_1000_scout cada 15s aunque el WS esté caído."""
+        _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 1000 iniciado (intervalo 15s)", sym)
+        while self._enabled and sym not in SYMBOLS_ED_DISABLED:
+            await asyncio.sleep(15)
+            if not self._enabled or sym in SYMBOLS_ED_DISABLED:
+                break
+            try:
+                async with self._locks[sym]:
+                    await self._process_1000_scout(sym)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s watchdog 1000 error: %s", sym, exc)
+        _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 1000 terminado", sym)
+
+    async def _process_1000_scout(self, sym: str) -> None:
+        """
+        BOOM1000/CRASH1000 — escalera scout:
+          SCOUT ($1, 20m): espera spike. Profit+ 90s → cerrar → nuevo SCOUT.
+                           20min sin spike → cerrar → STAKE_20.
+          STAKE_20 ($20, 15m): Profit+ 90s → WIN → SCOUT. Timer → STAKE_40.
+          STAKE_40 ($40, 15m): Profit+ 90s → WIN → SCOUT. Timer → STAKE_80.
+          STAKE_80 ($80, 15m): Profit+ 90s → WIN → SCOUT. Timer → STAKE_200.
+          STAKE_200 ($200, sin timer): cuando peak>0 → floor=80%·peak.
+                                       Profit < floor → cerrar → SCOUT.
+        """
+        state = self._states[sym]
+        now   = time.time()
+
+        # Normalizar fase en primera ejecución
+        if state.k1000_phase not in ("SCOUT", "STAKE_20", "STAKE_40", "STAKE_80", "STAKE_200"):
+            state.k1000_phase    = "SCOUT"
+            state.k1000_phase_ts = now
+            state.k1000_peak     = 0.0
+            state.k1000_profit_ts = 0.0
+
+        # Actualizar profit desde broker
+        if state.contract_id is not None:
+            _q = self._query_profit(state.contract_id)
+            if _q is not None:
+                state.current_profit = _q
+
+        phase = state.k1000_phase
+
+        # ── Sin contrato abierto → abrir ─────────────────────────────────────
+        if state.contract_id is None:
+            _stake_map = {
+                "SCOUT":    K1000_SCOUT_STAKE,
+                "STAKE_20": K1000_S20_STAKE,
+                "STAKE_40": K1000_S40_STAKE,
+                "STAKE_80": K1000_S80_STAKE,
+                "STAKE_200": K1000_S200_STAKE,
+            }
+            _mh_map = {
+                "SCOUT":    K1000_SCOUT_S + 120,   # broker timer = 22min (buffer)
+                "STAKE_20": K1000_HOLD_S  + 120,
+                "STAKE_40": K1000_HOLD_S  + 120,
+                "STAKE_80": K1000_HOLD_S  + 120,
+                "STAKE_200": 7200,                  # 2h de seguridad
+            }
+            await self._open_1000_scout(
+                sym, state, now,
+                _stake_map.get(phase, K1000_SCOUT_STAKE),
+                _mh_map.get(phase, K1000_SCOUT_S + 120),
+            )
+            return
+
+        # ── Contrato cerrado externamente (SL, TP, broker max_hold) ──────────
+        if self._query_contract(state.contract_id) is None:
+            _pnl = state.current_profit
+            _cid = state.contract_id
+            state.contract_id    = None
+            state.k1000_profit_ts = 0.0
+            state.last_close_profit = _pnl
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s K1000 contrato %s cerrado externamente fase=%s pnl=%.4f",
+                sym, _cid, phase, _pnl,
+            )
+            if _pnl > 0:  # broker cerró en WIN → SCOUT
+                state.k1000_phase       = "SCOUT"
+                state.k1000_peak        = 0.0
+                state.k1000_phase_ts    = now
+            else:           # broker cerró en LOSS → escalar
+                _next = {"SCOUT": "STAKE_20", "STAKE_20": "STAKE_40",
+                         "STAKE_40": "STAKE_80", "STAKE_80": "STAKE_200",
+                         "STAKE_200": "SCOUT"}.get(phase, "SCOUT")
+                state.k1000_phase       = _next
+                state.k1000_peak        = 0.0
+                state.k1000_phase_ts    = now
+            await asyncio.sleep(2.0)
+            _stake_map = {
+                "SCOUT": K1000_SCOUT_STAKE, "STAKE_20": K1000_S20_STAKE,
+                "STAKE_40": K1000_S40_STAKE, "STAKE_80": K1000_S80_STAKE,
+                "STAKE_200": K1000_S200_STAKE,
+            }
+            _mh_map = {
+                "SCOUT": K1000_SCOUT_S + 120, "STAKE_20": K1000_HOLD_S + 120,
+                "STAKE_40": K1000_HOLD_S + 120, "STAKE_80": K1000_HOLD_S + 120,
+                "STAKE_200": 7200,
+            }
+            await self._open_1000_scout(
+                sym, state, now,
+                _stake_map.get(state.k1000_phase, K1000_SCOUT_STAKE),
+                _mh_map.get(state.k1000_phase, K1000_SCOUT_S + 120),
+            )
+            return
+
+        # ── SCOUT y STAKE_20/40/80: profit+ 90s → WIN → SCOUT ─────────────
+        if phase in ("SCOUT", "STAKE_20", "STAKE_40", "STAKE_80"):
+            if state.current_profit > 0:
+                if state.k1000_profit_ts == 0.0:
+                    state.k1000_profit_ts = now
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s K1000 %s profit=%.4f → 90s timer iniciado",
+                        sym, phase, state.current_profit,
+                    )
+                    self._persist(now)
+                elif now >= state.k1000_profit_ts + K1000_PROFIT_S:
+                    # WIN → cerrar → SCOUT
+                    _pnl = state.current_profit
+                    _cid = int(state.contract_id)
+                    state.contract_id    = None
+                    try:
+                        await self._executor.close_contract(_cid)
+                    except Exception as _e:
+                        _LOGGER.error("[ENTRADA_DIEGO] %s K1000 close WIN error: %s", sym, _e)
+                    state.last_close_profit = _pnl
+                    state.k1000_profit_ts   = 0.0
+                    state.k1000_peak        = 0.0
+                    state.k1000_phase       = "SCOUT"
+                    state.k1000_phase_ts    = now
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s K1000 %s 90s WIN pnl=%.4f → SCOUT",
+                        sym, phase, _pnl,
+                    )
+                    await asyncio.sleep(2.0)
+                    await self._open_1000_scout(sym, state, now, K1000_SCOUT_STAKE, K1000_SCOUT_S + 120)
+                    return
+            else:
+                # Profit volvió a negativo → resetear timer
+                if state.k1000_profit_ts > 0:
+                    state.k1000_profit_ts = 0.0
+
+            # Timer de fase expirado → escalar
+            _phase_limit = K1000_SCOUT_S if phase == "SCOUT" else K1000_HOLD_S
+            if state.k1000_phase_ts > 0 and now >= state.k1000_phase_ts + _phase_limit:
+                _pnl = state.current_profit
+                _cid = int(state.contract_id)
+                state.contract_id    = None
+                try:
+                    await self._executor.close_contract(_cid)
+                except Exception as _e:
+                    _LOGGER.error("[ENTRADA_DIEGO] %s K1000 close timer error: %s", sym, _e)
+                state.last_close_profit = _pnl
+                state.k1000_profit_ts   = 0.0
+                state.k1000_peak        = 0.0
+                _next_phase = {
+                    "SCOUT": "STAKE_20", "STAKE_20": "STAKE_40",
+                    "STAKE_40": "STAKE_80", "STAKE_80": "STAKE_200",
+                }.get(phase, "SCOUT")
+                state.k1000_phase    = _next_phase
+                state.k1000_phase_ts = now
+                _dur = int(_phase_limit)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s K1000 %s %ds timer pnl=%.4f → %s",
+                    sym, phase, _dur, _pnl, _next_phase,
+                )
+                await asyncio.sleep(2.0)
+                _stake_map = {
+                    "STAKE_20": K1000_S20_STAKE, "STAKE_40": K1000_S40_STAKE,
+                    "STAKE_80": K1000_S80_STAKE, "STAKE_200": K1000_S200_STAKE,
+                }
+                _mh_map = {
+                    "STAKE_20": K1000_HOLD_S + 120, "STAKE_40": K1000_HOLD_S + 120,
+                    "STAKE_80": K1000_HOLD_S + 120, "STAKE_200": 7200,
+                }
+                await self._open_1000_scout(
+                    sym, state, now,
+                    _stake_map.get(_next_phase, K1000_SCOUT_STAKE),
+                    _mh_map.get(_next_phase, K1000_SCOUT_S + 120),
+                )
+                return
+
+        # ── STAKE_200: floor ratchet 80% del peak ────────────────────────────
+        elif phase == "STAKE_200":
+            if state.current_profit > state.k1000_peak:
+                state.k1000_peak = state.current_profit
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s STAKE_200 nuevo peak=%.4f", sym, state.k1000_peak,
+                )
+                self._persist(now)
+            if state.k1000_peak > 0:
+                _floor = state.k1000_peak * K1000_FLOOR_PCT
+                if state.current_profit < _floor:
+                    _pnl = state.current_profit
+                    _cid = int(state.contract_id)
+                    state.contract_id    = None
+                    try:
+                        await self._executor.close_contract(_cid)
+                    except Exception as _e:
+                        _LOGGER.error("[ENTRADA_DIEGO] %s K1000 STAKE_200 floor close error: %s", sym, _e)
+                    state.last_close_profit = _pnl
+                    state.k1000_profit_ts   = 0.0
+                    state.k1000_peak        = 0.0
+                    state.k1000_phase       = "SCOUT"
+                    state.k1000_phase_ts    = now
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s STAKE_200 floor %.4f < %.4f (peak=%.4f) → SCOUT",
+                        sym, _pnl, _floor, _floor / K1000_FLOOR_PCT,
+                    )
+                    await asyncio.sleep(2.0)
+                    await self._open_1000_scout(sym, state, now, K1000_SCOUT_STAKE, K1000_SCOUT_S + 120)
+
+    async def _open_1000_scout(
+        self, sym: str, state: _SymState, now: float,
+        stake: float, max_hold_s: int,
+    ) -> None:
+        from src.execution.deriv_trader import DerivOrder
+        side = "MULTDOWN" if "CRASH" in sym else "MULTUP"
+        _LOGGER.info(
+            "[ENTRADA_DIEGO] %s K1000 ABRIENDO %s $%.2f max_hold=%ds fase=%s",
+            sym, side, stake, max_hold_s, state.k1000_phase,
+        )
+        try:
+            async with self._open_lock:
+                order = DerivOrder(
+                    symbol=sym,
+                    side=side,
+                    stake_usdt=stake,
+                    multiplier=MULTIPLIER,
+                    stop_loss_pct=0.65,
+                    take_profit_pct=0.65,
+                    max_hold_seconds=float(max_hold_s),
+                    score_breakdown={
+                        "quality_tier": "entrada_diego",
+                        "setup":        "k1000_scout",
+                        "grade":        "ED",
+                        "score":        0.0,
+                        "entrada_diego": True,
+                    },
+                )
+                result = await self._executor.execute(order)
+            if result.get("status") == "live":
+                cid = result.get("contract_id")
+                state.contract_id    = int(cid) if cid else None
+                state.open_ts        = now
+                state.current_profit = 0.0
+                state.k1000_profit_ts = 0.0
+                state.phase          = "OPEN"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s K1000 OPEN OK contract=%s stake=$%.2f fase=%s",
+                    sym, state.contract_id, stake, state.k1000_phase,
+                )
+            elif result.get("status") == "symbol_already_open":
+                existing = result.get("open_contracts", [])
+                if existing:
+                    state.contract_id = int(existing[0])
+                    state.open_ts     = now
+                    state.phase       = "OPEN"
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s K1000 re-adjuntado contrato existente %s",
+                        sym, state.contract_id,
+                    )
+            self._persist(now)
+        except Exception as exc:
+            _LOGGER.error("[ENTRADA_DIEGO] %s K1000 _open_1000_scout error: %s", sym, exc)
+
     # ── Helpers de flujo ─────────────────────────────────────────────────────
 
     async def _post_profit_close(
@@ -1804,6 +2108,13 @@ class EntradaDiego:
                             st.s80_pending                   = bool(s.get("s80_pending", False))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
+                            _k1000_ph = s.get("k1000_phase", "SCOUT")
+                            st.k1000_phase = _k1000_ph if _k1000_ph in (
+                                "SCOUT", "STAKE_20", "STAKE_40", "STAKE_80", "STAKE_200"
+                            ) else "SCOUT"
+                            st.k1000_phase_ts = float(s.get("k1000_phase_ts", now))
+                            st.k1000_peak     = float(s.get("k1000_peak", 0.0))
+                            st.k1000_profit_ts = 0.0  # no restaurar: reiniciar 90s timer
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
                             st.phase              = "PROFIT_TIMER"
                             st.profit_positive_ts = float(s["profit_positive_ts"])
