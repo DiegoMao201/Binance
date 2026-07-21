@@ -2288,6 +2288,16 @@ export default function DerivOperatorConsole() {
   const tableRows = symFilter === "ALL" ? spikeTable : spikeTable.filter((s) => s.symbol === symFilter);
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
+  // Símbolos disponibles para filtro: unión de todos los que aparecen en datos reales
+  const _SYM_PREF = ["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"];
+  const _spkSyms  = [...new Set(spikeTable.map(r => r.symbol))];
+  const _feedSyms = [...new Set(confFeed.map(r => r.symbol))];
+  const _allSyms  = [...new Set([..._SYM_PREF, ..._spkSyms, ..._feedSyms])].filter(Boolean);
+  const allFilterSyms = _allSyms.sort((a, b) => {
+    const ai = _SYM_PREF.indexOf(a), bi = _SYM_PREF.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+
   const selectedSymbol = symFilter === "ALL" ? (symNames[0] || "CRASH500") : symFilter;
 
   return (
@@ -2347,7 +2357,7 @@ export default function DerivOperatorConsole() {
         <Panel title="Confirmaciones de posibles spikes · en vivo" accent={T.amber}
           right={
             <div style={{ display: "flex", gap: 5 }}>
-              {["ALL", ...symNames].map((sn) => (
+              {["ALL", ...allFilterSyms].map((sn) => (
                 <button key={sn} onClick={() => setSymFilter(sn)} style={{
                   background: symFilter === sn ? T.amber + "22" : "transparent",
                   color: symFilter === sn ? T.amber : T.mute,
