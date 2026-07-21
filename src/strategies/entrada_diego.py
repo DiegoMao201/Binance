@@ -174,6 +174,7 @@ BURST_STAKE3_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE3",   
 BURST_STAKE9_AMOUNT           = float(os.getenv("ENTRADA_DIEGO_BURST_STAKE9",         "40.0"))
 BURST_STAKE_LADDER_DURATION_S = int(os.getenv("ENTRADA_DIEGO_BURST_LADDER_S",        "720"))   # 12min todos los stakes
 BURST_PROFIT_POSITIVE_CLOSE_S = int(os.getenv("ENTRADA_DIEGO_BURST_PROFIT_POS_S",    "90"))    # 1.5min profit+ → cerrar
+WIN_PROBE_DURATION_S          = int(os.getenv("ENTRADA_DIEGO_WIN_PROBE_S",            "300"))   # 5min probe $1 post-win
 
 # Horas UTC bloqueadas por análisis histórico (8,816 contratos, Mayo–Jul 2026)
 # Las 5 peores horas por símbolo: pierden consistentemente hora tras hora
@@ -852,7 +853,7 @@ class EntradaDiego:
                 state.prev_hour_pnl_500 = state.hour_pnl_500
                 state.hour_pnl_500 = 0.0
             # Normalizar fases desconocidas → STAKE_1 (sin gate ni timer)
-            if state.burst_phase not in ("WAIT_GATE", "STAKE_1", "STAKE_3", "STAKE_9", "STAKE_20"):
+            if state.burst_phase not in ("WAIT_GATE", "STAKE_1", "STAKE_3", "STAKE_9", "STAKE_20", "WIN_PROBE"):
                 state.burst_phase = "WAIT_GATE"
             # ── WAIT_GATE / TIMER_GATE: abrir STAKE_1 inmediatamente ─────────────
             if state.burst_phase in ("WAIT_GATE", "TIMER_GATE"):
@@ -868,7 +869,7 @@ class EntradaDiego:
                 await self._open(sym, state, now, stake_override=BURST_STAKE1_AMOUNT)
                 return
             # ── Direct open: fase activa sin contrato → abrir sin gate ─────────
-            _in_recovery = state.burst_phase in ("STAKE_3", "STAKE_9", "STAKE_20")
+            _in_recovery = state.burst_phase in ("STAKE_3", "STAKE_9", "STAKE_20", "WIN_PROBE")
             if _in_recovery:
                 _LOGGER.info("[ENTRADA_DIEGO] %s RECOVERY_MODE fase=%s → abrir sin gate",
                              sym, state.burst_phase)
@@ -880,7 +881,7 @@ class EntradaDiego:
             state.profit_first_positive_ts   = 0.0
             stake = (BURST_STAKE20_AMOUNT if state.burst_phase == "STAKE_20"
                 else BURST_STAKE9_AMOUNT  if state.burst_phase == "STAKE_9"
-                else BURST_STAKE3_AMOUNT  if state.burst_phase == "STAKE_3"
+                else BURST_STAKE3_AMOUNT  if state.burst_phase in ("STAKE_3", "WIN_PROBE")
                 else BURST_STAKE1_AMOUNT)
             state.contract_start_hour_ts_500 = int(now // 3600) * 3600.0
             await self._open(sym, state, now, stake_override=stake)
@@ -899,11 +900,12 @@ class EntradaDiego:
         # ── SL duro: 90% del stake → WAIT_GATE ───────────────────────────────
         _sl_limit = (-(BURST_STAKE20_AMOUNT * 0.90) if state.burst_phase == "STAKE_20"
             else    -(BURST_STAKE9_AMOUNT   * 0.90) if state.burst_phase == "STAKE_9"
-            else    -(BURST_STAKE3_AMOUNT   * 0.90) if state.burst_phase == "STAKE_3"
+            else    -(BURST_STAKE3_AMOUNT   * 0.90) if state.burst_phase in ("STAKE_3", "WIN_PROBE")
             else    -(BURST_STAKE1_AMOUNT   * 0.90))
         if state.current_profit < _sl_limit and state.contract_id is not None:
             _cid = int(state.contract_id)
             _pnl = state.current_profit
+            _sl_phase = state.burst_phase
             state.contract_id                = None
             state.current_profit             = 0.0
             state.peak_profit_500            = 0.0
@@ -919,9 +921,15 @@ class EntradaDiego:
             self._add_global_pnl(sym, _pnl, now)
             if int(state.contract_start_hour_ts_500 // 3600) == int(now // 3600):
                 state.hour_pnl_500 += _pnl
-            _LOGGER.warning("[ENTRADA_DIEGO] %s SL_HARD pnl=%.4f fase=%s → WAIT_GATE", sym, _pnl, state.burst_phase)
-            state.burst_phase            = "WAIT_GATE"
-            state.burst_phase_started_at = 0.0
+            # WIN_PROBE SL → arrancar nuevo ciclo en STAKE_1; otros → WAIT_GATE
+            if _sl_phase == "WIN_PROBE":
+                _LOGGER.warning("[ENTRADA_DIEGO] %s SL_HARD pnl=%.4f fase=WIN_PROBE → STAKE_1", sym, _pnl)
+                state.burst_phase            = "STAKE_1"
+                state.burst_phase_started_at = 0.0
+            else:
+                _LOGGER.warning("[ENTRADA_DIEGO] %s SL_HARD pnl=%.4f fase=%s → WAIT_GATE", sym, _pnl, _sl_phase)
+                state.burst_phase            = "WAIT_GATE"
+                state.burst_phase_started_at = 0.0
             return
 
         # ── Helper interno: cerrar + poll + abrir siguiente ───────────────────
@@ -1076,7 +1084,7 @@ class EntradaDiego:
             _req = (1, 3, 5, 6)[min(3, int(_min // 15))]
             return f"Q{_q}:{_spk}/{'≥'+str(_req)}"
 
-        # ── Cierre anticipado: profit positivo por 1.5min → cerrar → S1 inmediato ──
+        # ── Cierre anticipado: profit positivo por 1.5min → cerrar → WIN_PROBE ──
         if (state.profit_first_positive_ts > 0
                 and now - state.profit_first_positive_ts >= BURST_PROFIT_POSITIVE_CLOSE_S
                 and state.contract_id is not None):
@@ -1085,10 +1093,23 @@ class EntradaDiego:
             _spk   = state.spikes_in_contract_500
             _phase = state.burst_phase
             _elapsed_pos = now - state.profit_first_positive_ts
-            _LOGGER.info("[ENTRADA_DIEGO] %s PROFIT+%.0fs fase=%s pnl=%.4f → S1",
+            _LOGGER.info("[ENTRADA_DIEGO] %s PROFIT+%.0fs fase=%s pnl=%.4f → WIN_PROBE",
                          sym, _elapsed_pos, _phase, _pnl)
-            await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
-                f"{_phase} profit+{int(_elapsed_pos)}s→S1", _cid, _pnl, _spk)
+            await _transition("WIN_PROBE", BURST_STAKE3_AMOUNT,
+                f"{_phase} profit+{int(_elapsed_pos)}s→WIN_PROBE", _cid, _pnl, _spk)
+            return
+
+        # ── Timer WIN_PROBE 5min: win→WIN_PROBE (ciclo), loss→STAKE_1 (nuevo ciclo) ──
+        if (state.burst_phase == "WIN_PROBE"
+                and now >= state.burst_phase_started_at + WIN_PROBE_DURATION_S
+                and state.contract_id is not None):
+            _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
+            if _pnl > 0:
+                await _transition("WIN_PROBE", BURST_STAKE3_AMOUNT,
+                    "WIN_PROBE 5min win→WIN_PROBE", _cid, _pnl, _spk)
+            else:
+                await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
+                    "WIN_PROBE 5min loss→STAKE_1", _cid, _pnl, _spk)
             return
 
         # ── Timer universal 12min: STAKE_1→S3→S9→S20(retry) ────────────────
@@ -1098,8 +1119,8 @@ class EntradaDiego:
             _cid, _pnl, _spk = int(state.contract_id), state.current_profit, state.spikes_in_contract_500
             _phase = state.burst_phase
             if _pnl > 0:
-                await _transition("STAKE_1", BURST_STAKE1_AMOUNT,
-                    f"{_phase} 12min win→S1", _cid, _pnl, _spk)
+                await _transition("WIN_PROBE", BURST_STAKE3_AMOUNT,
+                    f"{_phase} 12min win→WIN_PROBE", _cid, _pnl, _spk)
             else:
                 _nxt = {"STAKE_1": "STAKE_3", "STAKE_3": "STAKE_9",
                         "STAKE_9": "STAKE_20", "STAKE_20": "STAKE_20"}[_phase]
@@ -1134,10 +1155,11 @@ class EntradaDiego:
                 return
             # Win/loss normal
             if _pnl > 0:
-                next_phase = "STAKE_1"
+                next_phase = "WIN_PROBE"
             else:
                 next_phase = {"STAKE_1": "STAKE_3", "STAKE_3": "STAKE_9",
-                              "STAKE_9": "STAKE_20", "STAKE_20": "STAKE_20"}.get(_phase, "WAIT_GATE")
+                              "STAKE_9": "STAKE_20", "STAKE_20": "STAKE_20",
+                              "WIN_PROBE": "STAKE_1"}.get(_phase, "WAIT_GATE")
             _LOGGER.info("[ENTRADA_DIEGO] %s broker close fase=%s pnl=%.4f → %s",
                          sym, _phase, _pnl, next_phase)
             state.burst_phase            = next_phase

@@ -531,6 +531,7 @@ const WAIT_GATE_TIMER_CRASH_S  = 420;   // 7min cooldown CRASH500
 const WAIT_GATE_TIMER_BOOM_S   = 360;   // 6min cooldown BOOM500
 const BURST_LADDER_S           = 720;   // 12min todos los stakes
 const BURST_PROFIT_POS_S       = 90;    // 1.5min profit+ → cierre anticipado
+const WIN_PROBE_S              = 300;   // 5min probe $1 post-win
 const BOOM_NSPK_MIN = 3, BOOM_NSPK_MAX = 8;
 const BOOM_POW_MIN  = 14.5, BOOM_POW_MAX = 30.0;
 const CRASH_NSPK_MIN = 2, CRASH_NSPK_MAX = 4;
@@ -570,7 +571,7 @@ function EntradaDiegoSection({ symbol }) {
     open_ts = 0, cooldown_until = 0,
     spikes_in_contract = 0,
     burst_phase = "WAIT_GATE", burst_phase_started_at = 0,
-    burst_ladder_s = BURST_LADDER_S, burst_profit_pos_s = BURST_PROFIT_POS_S,
+    burst_ladder_s = BURST_LADDER_S, burst_profit_pos_s = BURST_PROFIT_POS_S, win_probe_s = WIN_PROBE_S,
     profit_first_positive_ts = 0,
     sym_pnl_since_reset = 0, sym_pnl_reference = 0,
     power_30min_jump = 0, n_spikes_30min = 0,
@@ -612,19 +613,22 @@ function EntradaDiegoSection({ symbol }) {
   const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
 
-  // Colores por fase — escalera: S1=verde S3=ámbar S9=violeta S20=rojo
+  // Colores por fase — escalera: S1=verde S3=ámbar S9=violeta S20=rojo WIN_PROBE=azul
   const phaseColor = burst_phase === "STAKE_20"                           ? "#ff5d6c"
     : burst_phase === "STAKE_9"                                           ? "#a78bfa"
     : burst_phase === "STAKE_3"                                           ? "#f59e0b"
     : burst_phase === "STAKE_1"                                           ? "#22d3a3"
+    : burst_phase === "WIN_PROBE"                                         ? "#62d4ff"
     : (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")       ? "#64748b"
     : "#64748b";
 
-  // Timer durations — solo stakes, no timer gate
+  // Timer durations: 12min para stakes, 5min para WIN_PROBE
   const _ladderPhases = ["STAKE_1","STAKE_3","STAKE_9","STAKE_20"];
-  const phaseTotal  = _ladderPhases.includes(burst_phase) ? burst_ladder_s : 1;
+  const phaseTotal  = burst_phase === "WIN_PROBE" ? win_probe_s
+    : _ladderPhases.includes(burst_phase) ? burst_ladder_s : 1;
   const phaseRem  = Math.max(0, phaseTotal - phaseElapsed);
-  const phasePct  = _ladderPhases.includes(burst_phase) ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
+  const phasePct  = (burst_phase === "WIN_PROBE" || _ladderPhases.includes(burst_phase))
+    ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
 
   // Profit+ cierre anticipado: barra separada si profit_first_positive_ts activo
   const profitPosPct = profit_first_positive_ts > 0
@@ -633,16 +637,21 @@ function EntradaDiegoSection({ symbol }) {
     ? Math.max(0, burst_profit_pos_s - profitPosElapsed) : 0;
 
   // Header label
-  const _stakeLabel = burst_phase === "STAKE_20" ? "$1"
-    : burst_phase === "STAKE_9"                  ? "$40"
-    : burst_phase === "STAKE_3"                  ? "$1"
-    : burst_phase === "STAKE_1"                  ? "$20"
+  const _stakeLabel = burst_phase === "STAKE_20"  ? "$1"
+    : burst_phase === "STAKE_9"                   ? "$40"
+    : burst_phase === "STAKE_3"                   ? "$1"
+    : burst_phase === "STAKE_1"                   ? "$20"
+    : burst_phase === "WIN_PROBE"                 ? "$1 ✦"
     : "WAIT";
 
   // Siguiente acción
   const _nextHint = (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")
     ? "abriendo $20…"
-    : profit_first_positive_ts > 0 ? `→ $20 en ${_fmtS(profitPosRem)} (profit+ ✓)`
+    : burst_phase === "WIN_PROBE" && profit_first_positive_ts > 0
+      ? `→ $1 repite en ${_fmtS(profitPosRem)} (profit+ ✓)`
+    : burst_phase === "WIN_PROBE"
+      ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
+    : profit_first_positive_ts > 0 ? `→ $1 probe en ${_fmtS(profitPosRem)} (profit+ ✓)`
     : burst_phase === "STAKE_1"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
     : burst_phase === "STAKE_3"    ? `→ $40 si pierde · ${_fmtS(phaseRem)}`
     : burst_phase === "STAKE_9"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
@@ -650,6 +659,7 @@ function EntradaDiegoSection({ symbol }) {
     : "–";
 
   const _nextColor = _nextHint.includes("$40") ? "#a78bfa"
+    : _nextHint.includes("repite") || _nextHint.includes("probe") ? "#62d4ff"
     : _nextHint.includes("$20") ? "#22d3a3"
     : _nextHint.includes("$1 si") || _nextHint.includes("retry") ? "#f59e0b"
     : _nextHint.includes("profit+") ? "#22d3a3"
@@ -659,13 +669,14 @@ function EntradaDiegoSection({ symbol }) {
   const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
   const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
 
-  // Escalera: WAIT → $20 → $1 → $40 → $1
+  // Escalera: WAIT → $20 → WIN_PROBE($1·5m) ↺  /  loss: $20→$1→$40→$1
   const _ladder = [
-    { id: "WAIT_GATE",  label: "WAIT", color: "#64748b" },
-    { id: "STAKE_1",    label: "$20",  color: "#22d3a3" },
-    { id: "STAKE_3",    label: "$1",   color: "#f59e0b" },
-    { id: "STAKE_9",    label: "$40",  color: "#a78bfa" },
-    { id: "STAKE_20",   label: "$1",   color: "#ff5d6c" },
+    { id: "WAIT_GATE",  label: "WAIT",    color: "#64748b" },
+    { id: "STAKE_1",    label: "$20",     color: "#22d3a3" },
+    { id: "WIN_PROBE",  label: "$1 ✦5m",  color: "#62d4ff" },
+    { id: "STAKE_3",    label: "$1",      color: "#f59e0b" },
+    { id: "STAKE_9",    label: "$40",     color: "#a78bfa" },
+    { id: "STAKE_20",   label: "$1",      color: "#ff5d6c" },
   ];
 
   const base500 = {
@@ -741,25 +752,31 @@ function EntradaDiegoSection({ symbol }) {
           )}
           {burst_phase === "STAKE_1" && (
             <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$20 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
               {"  ·  "}<span style={{ color: "#f59e0b", fontWeight: 700 }}>LOSS→$1</span>
+            </>
+          )}
+          {burst_phase === "WIN_PROBE" && (
+            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>$1 PROBE · 5min:</span>
+              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 repite · profit+1.5m→$1 repite</span>
+              {"  ·  "}<span style={{ color: "#22d3a3", fontWeight: 700 }}>LOSS→$20 nuevo ciclo</span>
             </>
           )}
           {burst_phase === "STAKE_3" && (
             <><span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
               {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>LOSS→$40</span>
             </>
           )}
           {burst_phase === "STAKE_9" && (
             <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$40 · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
               {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>LOSS→$1</span>
             </>
           )}
           {burst_phase === "STAKE_20" && (
             <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$1 RECOVERY · 12min:</span>
-              {" "}<span style={{ color: "#22d3a3" }}>WIN→$20 · profit+1.5m→$20</span>
+              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
               {"  ·  "}<span style={{ color: "#ff5d6c" }}>LOSS→retry $1</span>
             </>
           )}
