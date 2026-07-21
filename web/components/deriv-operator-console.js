@@ -2257,7 +2257,7 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH500", "BOOM500"];
+  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "BOOM1000", "CRASH1000"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
@@ -2348,7 +2348,6 @@ export default function DerivOperatorConsole() {
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
-        <K1000Panel />
         <R75Card />
       </div>
 
