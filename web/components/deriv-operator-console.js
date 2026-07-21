@@ -867,6 +867,22 @@ function EntradaDiegoSection({ symbol }) {
   );
 }
 
+/* ── 1000s Scout Panel ───────────────────────────────────────── */
+function K1000Panel() {
+  return (
+    <div style={{
+      background: T.panel, border: `1px solid ${T.border}`, borderRadius: 10,
+      padding: "10px 12px", minHeight: 90,
+    }}>
+      <div style={{
+        fontSize: 11, fontWeight: 800, color: T.cyan, letterSpacing: "0.07em", marginBottom: 2,
+      }}>BOOM1000 · CRASH1000 · SCOUT</div>
+      <EntradaDiegoSection symbol="BOOM1000" />
+      <EntradaDiegoSection symbol="CRASH1000" />
+    </div>
+  );
+}
+
 /* ── R_75 Volatility Card ────────────────────────────────────── */
 function R75Card() {
   const [edState, setEdState] = useState(null);
@@ -2322,6 +2338,7 @@ export default function DerivOperatorConsole() {
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
+        <K1000Panel />
         <R75Card />
       </div>
 
