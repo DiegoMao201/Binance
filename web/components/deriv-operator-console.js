@@ -687,7 +687,7 @@ function EntradaDiegoSection({ symbol }) {
   const winElapsed   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const winRemaining = last_spike_ts_500 > 0 ? Math.max(0, last_spike_ts_500 + S20_WINDOW_S - nowSec) : 0;
   const winPct       = last_spike_ts_500 > 0 ? Math.min(100, (winElapsed / S20_WINDOW_S) * 100) : 0;
-  const isS20Window  = burst_phase === "S20_WINDOW" || (last_spike_ts_500 > 0 && winRemaining > 0);
+  const isS20Window  = last_spike_ts_500 > 0 && winRemaining > 0;
 
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
   const profitPosRem     = profit_first_positive_ts > 0 ? Math.max(0, S20_POSITIVE_S - profitPosElapsed) : 0;
