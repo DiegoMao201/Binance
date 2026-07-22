@@ -530,15 +530,9 @@ const K1000_SCOUT_S_DEFAULT  = 1200;   // 20min
 const K1000_HOLD_S_DEFAULT   = 900;    // 15min
 const K1000_FLOOR_DEFAULT     = 0.80;
 
-// 500s: gate constants (deben coincidir con entrada_diego.py)
-const WAIT_GATE_TIMER_CRASH_S  = 420;   // 7min cooldown CRASH500
-const WAIT_GATE_TIMER_BOOM_S   = 360;   // 6min cooldown BOOM500
-const BURST_LADDER_S           = 720;   // 12min todos los stakes
-const BURST_PROFIT_POS_S       = 90;    // 1.5min profit+ → cierre anticipado
-const WIN_PROBE_S              = 300;   // 5min probe $1 post-win
-const BOOM_NSPK_MIN = 3, BOOM_NSPK_MAX = 8;
-const BOOM_POW_MIN  = 14.5, BOOM_POW_MAX = 30.0;
-const CRASH_NSPK_MIN = 2, CRASH_NSPK_MAX = 4;
+// 500s: S20 ventana fija (deben coincidir con entrada_diego.py)
+const S20_WINDOW_S   = 690;   // 11.5 min ventana post-spike
+const S20_POSITIVE_S = 150;   // 2.5 min profit+ sostenido → cierre anticipado
 
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
@@ -571,14 +565,11 @@ function EntradaDiegoSection({ symbol }) {
   if (!edState || !edState.enabled) return null;
 
   const {
-    phase, contract_id, current_profit = 0, reopens = 0,
-    open_ts = 0, cooldown_until = 0,
+    contract_id, current_profit = 0,
     spikes_in_contract = 0,
-    burst_phase = "WAIT_GATE", burst_phase_started_at = 0,
-    burst_ladder_s = BURST_LADDER_S, burst_profit_pos_s = BURST_PROFIT_POS_S, win_probe_s = WIN_PROBE_S,
+    burst_phase = "IDLE",
     profit_first_positive_ts = 0,
-    sym_pnl_since_reset = 0, sym_pnl_reference = 0,
-    power_30min_jump = 0, n_spikes_30min = 0,
+    sym_pnl_since_reset = 0,
   } = edState;
 
   const nowSec     = now / 1000;
@@ -687,181 +678,115 @@ function EntradaDiegoSection({ symbol }) {
     );
   }
 
-  // ── 500s: escalera $1→$3→$9→$20 — gate → timer → stake ladder ──────
-  const phaseElapsed = burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
+  // ── 500s: S20 ventana [0, 11.5min] desde último spike ───────────────
+  const {
+    last_spike_ts_500 = 0,
+    broker_blocked_until_500 = 0,
+  } = edState;
+
+  const winElapsed   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
+  const winRemaining = last_spike_ts_500 > 0 ? Math.max(0, last_spike_ts_500 + S20_WINDOW_S - nowSec) : 0;
+  const winPct       = last_spike_ts_500 > 0 ? Math.min(100, (winElapsed / S20_WINDOW_S) * 100) : 0;
+  const isS20Window  = burst_phase === "S20_WINDOW" || (last_spike_ts_500 > 0 && winRemaining > 0);
+
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
+  const profitPosRem     = profit_first_positive_ts > 0 ? Math.max(0, S20_POSITIVE_S - profitPosElapsed) : 0;
 
-  // Colores por fase — escalera: S1=verde S3=ámbar S9=violeta S20=rojo WIN_PROBE=azul
-  const phaseColor = burst_phase === "STAKE_20"                           ? "#ff5d6c"
-    : burst_phase === "STAKE_9"                                           ? "#a78bfa"
-    : burst_phase === "STAKE_3"                                           ? "#f59e0b"
-    : burst_phase === "STAKE_1"                                           ? "#22d3a3"
-    : burst_phase === "WIN_PROBE"                                         ? "#62d4ff"
-    : (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")       ? "#64748b"
-    : "#64748b";
+  const isBrokerBlocked = broker_blocked_until_500 > nowSec;
+  const brokerBlockRem  = isBrokerBlocked ? Math.ceil(broker_blocked_until_500 - nowSec) : 0;
 
-  // Timer durations: 12min para stakes, 5min para WIN_PROBE
-  const _ladderPhases = ["STAKE_1","STAKE_3","STAKE_9","STAKE_20"];
-  const phaseTotal  = burst_phase === "WIN_PROBE" ? win_probe_s
-    : _ladderPhases.includes(burst_phase) ? burst_ladder_s : 1;
-  const phaseRem  = Math.max(0, phaseTotal - phaseElapsed);
-  const phasePct  = (burst_phase === "WIN_PROBE" || _ladderPhases.includes(burst_phase))
-    ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
-
-  // Profit+ cierre anticipado: barra separada si profit_first_positive_ts activo
-  const profitPosPct = profit_first_positive_ts > 0
-    ? Math.min(100, (profitPosElapsed / burst_profit_pos_s) * 100) : 0;
-  const profitPosRem  = profit_first_positive_ts > 0
-    ? Math.max(0, burst_profit_pos_s - profitPosElapsed) : 0;
-
-  // Header label
-  const _stakeLabel = burst_phase === "STAKE_20"  ? "$1"
-    : burst_phase === "STAKE_9"                   ? "$40"
-    : burst_phase === "STAKE_3"                   ? "$1"
-    : burst_phase === "STAKE_1"                   ? "$20"
-    : burst_phase === "WIN_PROBE"                 ? "$1 ✦"
-    : "WAIT";
-
-  // Siguiente acción
-  const _nextHint = (burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE")
-    ? "abriendo $20…"
-    : burst_phase === "WIN_PROBE" && profit_first_positive_ts > 0
-      ? `→ $1 repite en ${_fmtS(profitPosRem)} (profit+ ✓)`
-    : burst_phase === "WIN_PROBE"
-      ? `→ $20 si pierde · ${_fmtS(phaseRem)}`
-    : profit_first_positive_ts > 0 ? `→ $1 probe en ${_fmtS(profitPosRem)} (profit+ ✓)`
-    : burst_phase === "STAKE_1"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_3"    ? `→ $40 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_9"    ? `→ $1 si pierde · ${_fmtS(phaseRem)}`
-    : burst_phase === "STAKE_20"   ? `→ retry $1 si pierde · ${_fmtS(phaseRem)}`
-    : "–";
-
-  const _nextColor = _nextHint.includes("$40") ? "#a78bfa"
-    : _nextHint.includes("repite") || _nextHint.includes("probe") ? "#62d4ff"
-    : _nextHint.includes("$20") ? "#22d3a3"
-    : _nextHint.includes("$1 si") || _nextHint.includes("retry") ? "#f59e0b"
-    : _nextHint.includes("profit+") ? "#22d3a3"
-    : _nextHint.includes("abriendo") ? "#62d4ff"
-    : phaseColor;
-
-  const _pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#aaa";
-  const pnlColor     = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#aaa";
-
-  // Escalera: WAIT → $20 → WIN_PROBE($1·5m) ↺  /  loss: $20→$1→$40→$1
-  const _ladder = [
-    { id: "WAIT_GATE",  label: "WAIT",    color: "#64748b" },
-    { id: "STAKE_1",    label: "$20",     color: "#22d3a3" },
-    { id: "WIN_PROBE",  label: "$1 ✦5m",  color: "#62d4ff" },
-    { id: "STAKE_3",    label: "$1",      color: "#f59e0b" },
-    { id: "STAKE_9",    label: "$40",     color: "#a78bfa" },
-    { id: "STAKE_20",   label: "$1",      color: "#ff5d6c" },
-  ];
+  const winBarColor   = winPct >= 85 ? "#ff5d6c" : winPct >= 55 ? "#f5c43c" : "#62d4ff";
+  const pnlColor500   = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+  const pnlAccColor   = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
+  const tsinceSpikeS  = last_spike_ts_500 > 0 ? nowSec - last_spike_ts_500 : null;
 
   const base500 = {
-    marginTop: 8, padding: "6px 10px", borderRadius: 6,
+    marginTop: 8, padding: "8px 10px", borderRadius: 6,
     fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-    border: `1px solid ${phaseColor}`,
-    color: phaseColor, background: `${phaseColor}10`,
+    border: `1px solid ${isS20Window ? "#62d4ff55" : "#64748b33"}`,
+    background: isS20Window ? "#62d4ff0d" : "#64748b08",
   };
 
+  if (!isS20Window) {
+    // IDLE — esperando siguiente spike
+    return (
+      <div style={base500}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#64748b22", color: "#64748b", letterSpacing: "0.06em" }}>IDLE</span>
+          <span style={{ marginLeft: "auto", fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
+            PnL {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
+          </span>
+        </div>
+        <div style={{ marginTop: 5, fontSize: 10, color: "#94a3b8" }}>
+          {tsinceSpikeS !== null
+            ? <>Sin spike: <b style={{ color: "#62d4ff" }}>{_fmtS(tsinceSpikeS)}</b>
+                <span style={{ color: "#475569", fontSize: 9 }}> · siguiente spike abre $20</span></>
+            : <span style={{ color: "#475569" }}>Sin spikes aún — esperando primer spike</span>
+          }
+        </div>
+        {isBrokerBlocked && (
+          <div style={{ marginTop: 4, fontSize: 9, color: "#f5c43c", fontWeight: 700 }}>
+            Broker bloqueado · {_fmtS(brokerBlockRem)} restante
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // S20_WINDOW activo — $20 en mercado
   return (
     <div style={base500}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5 }}>
-        <span style={{ fontWeight: 700, color: "rgba(255,255,255,0.85)", fontSize: 10 }}>ENTRADA DIEGO</span>
-        <span style={{
-          fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-          background: `${phaseColor}28`, color: phaseColor, letterSpacing: "0.05em",
-        }}>{_stakeLabel}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+        <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
+        <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+          background: "#62d4ff22", color: "#62d4ff", letterSpacing: "0.06em" }}>S20 ACTIVO $20</span>
         {contract_id && (
-          <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+          <span style={{ color: pnlColor500, fontWeight: 700, marginLeft: "auto", fontSize: 13 }}>
             {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
           </span>
         )}
         {!contract_id && (
-          <span style={{ marginLeft: "auto", fontSize: 8, color: _pnlAccColor, fontWeight: 700 }}>
-            PnL {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}
-          </span>
+          <span style={{ marginLeft: "auto", fontSize: 8, color: "#64748b" }}>sin contrato</span>
         )}
       </div>
 
-      {/* Timer bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
-        <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-          <div style={{
-            width: burst_phase === "WAIT_GATE" ? "0%" : `${phasePct}%`,
-            height: "100%", background: phaseColor, transition: "width 1s linear",
-          }} />
+      {/* Barra de ventana */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+        <div style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ width: `${winPct}%`, height: "100%", background: winBarColor, transition: "width 1s linear" }} />
         </div>
-        {burst_phase !== "WAIT_GATE" && (
-          <span style={{ fontSize: 9, color: phaseColor, fontWeight: 700, minWidth: 42, textAlign: "right" }}>
-            {_fmtS(phaseRem)}
+        <span style={{ fontSize: 9, color: winBarColor, fontWeight: 700, minWidth: 44, textAlign: "right" }}>
+          {_fmtS(winRemaining)}
+        </span>
+      </div>
+
+      {/* Info row: spikes en ventana + profit+ countdown */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 9 }}>
+        <span style={{ color: spikes_in_contract >= 1 ? "#62d4ff" : "#475569" }}>
+          {spikes_in_contract} spk en ventana
+          {tsinceSpikeS !== null && spikes_in_contract === 0 && (
+            <span style={{ color: "#475569" }}> · spike hace {_fmtS(tsinceSpikeS)}</span>
+          )}
+        </span>
+        {profit_first_positive_ts > 0 && (
+          <span style={{ color: "#22d3a3", fontWeight: 700 }}>
+            profit+ {_fmtS(profitPosRem)} → cierre
           </span>
         )}
       </div>
 
-      {/* Escalada: WAIT → TIMER → $1 → $3 → $9 → $20 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 2, marginBottom: 4 }}>
-        {_ladder.map((p, i) => (
-          <React.Fragment key={p.id}>
-            <div style={{
-              padding: "1px 4px", borderRadius: 3, fontSize: 9, fontWeight: 700, lineHeight: "14px",
-              background: burst_phase === p.id ? `${p.color}30` : "rgba(255,255,255,0.04)",
-              border: `1px solid ${burst_phase === p.id ? p.color : "rgba(255,255,255,0.1)"}`,
-              color: burst_phase === p.id ? p.color : "rgba(255,255,255,0.28)",
-            }}>
-              {p.label}{p.dur ? <span style={{ fontWeight: 400, fontSize: 7, opacity: 0.7 }}> {p.dur}</span> : null}
-            </div>
-            {i < _ladder.length - 1 && <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 8 }}>›</span>}
-          </React.Fragment>
-        ))}
-        {contract_id && (
-          <span style={{ marginLeft: "auto", fontSize: 8, color: spikes_in_contract >= 1 ? "#62d4ff" : "rgba(255,255,255,0.35)", fontWeight: 700 }}>
-            {spikes_in_contract}spk
-          </span>
+      {/* PnL acumulado */}
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 4,
+        display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
+          PnL acum {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
+        </span>
+        {isBrokerBlocked && (
+          <span style={{ fontSize: 8, color: "#f5c43c" }}>broker bloqueado {_fmtS(brokerBlockRem)}</span>
         )}
-      </div>
-
-      {/* Reglas de la fase activa */}
-      <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 8, color: "rgba(255,255,255,0.4)", lineHeight: "13px" }}>
-          {(burst_phase === "WAIT_GATE" || burst_phase === "TIMER_GATE") && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>abriendo $20</span> inmediato…</>
-          )}
-          {burst_phase === "STAKE_1" && (
-            <><span style={{ color: "#22d3a3", fontWeight: 700 }}>$20 · 12min:</span>
-              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
-              {"  ·  "}<span style={{ color: "#f59e0b", fontWeight: 700 }}>LOSS→$1</span>
-            </>
-          )}
-          {burst_phase === "WIN_PROBE" && (
-            <><span style={{ color: "#62d4ff", fontWeight: 700 }}>$1 PROBE · 5min:</span>
-              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 repite · profit+1.5m→$1 repite</span>
-              {"  ·  "}<span style={{ color: "#22d3a3", fontWeight: 700 }}>LOSS→$20 nuevo ciclo</span>
-            </>
-          )}
-          {burst_phase === "STAKE_3" && (
-            <><span style={{ color: "#f59e0b", fontWeight: 700 }}>$1 · 12min:</span>
-              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
-              {"  ·  "}<span style={{ color: "#a78bfa", fontWeight: 700 }}>LOSS→$40</span>
-            </>
-          )}
-          {burst_phase === "STAKE_9" && (
-            <><span style={{ color: "#a78bfa", fontWeight: 700 }}>$40 · 12min:</span>
-              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
-              {"  ·  "}<span style={{ color: "#ff5d6c", fontWeight: 700 }}>LOSS→$1</span>
-            </>
-          )}
-          {burst_phase === "STAKE_20" && (
-            <><span style={{ color: "#ff5d6c", fontWeight: 700 }}>$1 RECOVERY · 12min:</span>
-              {" "}<span style={{ color: "#62d4ff" }}>WIN→$1 probe 5m · profit+1.5m→$1 probe</span>
-              {"  ·  "}<span style={{ color: "#ff5d6c" }}>LOSS→retry $1</span>
-            </>
-          )}
-        </span>
-        <span style={{ fontSize: 9, color: _nextColor, fontWeight: 600, marginLeft: 8, whiteSpace: "nowrap" }}>
-          {_nextHint}
-        </span>
       </div>
     </div>
   );
@@ -1552,8 +1477,6 @@ function SymbolCard({ s }) {
         }}>{S.label}</span>
       </div>
 
-      {/* ABRE / NO ABRE — señal manual para BOOM500/CRASH500 */}
-      <TradeSignalBadge symbol={s.symbol} />
 
       {/* compact message — solo para estados críticos (no decorativos) */}
       {(isInactive || (isManualOnly && scoreGap0 != null && scoreGap0 <= 0)) && (
@@ -1566,11 +1489,6 @@ function SymbolCard({ s }) {
           </span>
         </div>
       )}
-
-      {/* D.7.0 Regime Badge v2 */}
-      <div style={{ paddingTop: 6 }}>
-        <RegimeBadgeV2 regimeData={s.d70Regime} />
-      </div>
 
       {/* ══ CASCADE MOMENTUM (solo cuando está activo) ══ */}
       {_inCascade && (
@@ -1592,158 +1510,79 @@ function SymbolCard({ s }) {
 
       {/* ENTRADA CONFIRMADA removido (Diego 2026-06-20) — redundante con SETUP+GRADE+SCAR abajo */}
 
-      {/* ══ EVALUACIÓN DETENIDA — cuando bot bloquea antes de risk.evaluate() (ej. MATURITY_HARDBLOCK) ══ */}
-      {_isStale && (
-        <div style={{
-          padding: "6px 12px", background: T.amber + "14",
-          borderBottom: `1px solid ${T.amber}33`,
-          display: "flex", alignItems: "center", gap: 8,
-        }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.amber, flexShrink: 0 }} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, fontWeight: 700, color: T.amber, letterSpacing: "0.1em" }}>
-              EVALUACION PAUSADA
-            </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.amber, opacity: 0.7, marginTop: 1 }}>
-              {`sin eval ${_evalAgeS != null ? Math.round(_evalAgeS) + "s" : "?"} · bot bloqueado antes de scoring`}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* score strip */}
-      <div style={{ padding: "9px 12px", background: T.bg2, borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score</span>
-              {_usingLiveScore
-                ? <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.green }}>· en vivo</span>
-                : scoreAgeSec != null && (
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: scoreIsStale ? T.amber : T.mute }}>
-                    · hace {scoreAgeSec < 60 ? `${Math.round(scoreAgeSec)}s` : `${Math.round(scoreAgeSec / 60)}m`}
-                  </span>
-                )
-              }
-            </div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 800, color: _dispScoreC, lineHeight: 1 }}>{num(_dispScore)}</div>
-          </div>
-          <div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Necesita</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: T.textD }}>≥ {num(gate)}</div>
-            {liveGateName && (
-              <div style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, marginTop: 1, letterSpacing: "0.04em" }}>{liveGateName}</div>
-            )}
-          </div>
-          {_rngProbC != null && (
-            <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>RNG</div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 800,
-                color: _rngProbC >= (_sn?.rng_threshold ?? 65) ? T.green : T.orange }}>
-                {_rngProbC}%
-              </div>
-            </div>
-          )}
-          <div style={{ marginLeft: "auto", textAlign: "right" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, textTransform: "uppercase" }}>Estado</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 13, fontWeight: 800, color: _dispGapC }}>
-              {_dispFalta}
-            </div>
-          </div>
-        </div>
-        {_dispPct != null && (
-          <div style={{ height: 4, borderRadius: 3, background: T.bg, overflow: "hidden", marginTop: 6 }}>
-            <div style={{ height: "100%", width: `${_dispPct}%`, background: _dispScoreC, transition: "width 500ms ease" }} />
-          </div>
-        )}
-        {live && isVetado && live?.label && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 5 }}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.amber, background: T.amber + "12", border: `1px solid ${T.amber}33`, borderRadius: 4, padding: "1px 5px" }}>
-              ⛔ {live.label}
-            </span>
-          </div>
-        )}
-        {/* ── Gate diagnostics row ── */}
-        {(liveEarlyActive || liveFvgBos != null) && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 5 }}>
-            {liveEarlyActive && (
-              <span style={{
-                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
-                color: T.amber, background: T.amber + "14",
-                border: `1px solid ${T.amber}44`, borderRadius: 4, padding: "2px 6px",
-              }}>
-                ⏱ WARMUP {liveEarlyRemain != null ? `${liveEarlyRemain}s` : "activo"}
-              </span>
-            )}
-            {liveFvgBos === true && (
-              <span style={{
-                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
-                color: T.green, background: T.green + "14",
-                border: `1px solid ${T.green}44`, borderRadius: 4, padding: "2px 6px",
-              }}>
-                BOS ✓
-              </span>
-            )}
-            {liveFvgBos === false && (
-              <span style={{
-                fontFamily: FONT_MONO, fontSize: 8, fontWeight: 700,
-                color: T.red, background: T.red + "14",
-                border: `1px solid ${T.red}44`, borderRadius: 4, padding: "2px 6px",
-              }}>
-                BOS ✗ sin confirmar
-              </span>
-            )}
-          </div>
-        )}
-      </div>
 
 
-      {/* ══ tiempo + ticks (grande) ══ */}
-      <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+
+      {/* ══ tiempo + cadencia ══ */}
+      <div style={{ padding: "11px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* Sin spike hace — grande + timing */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
           <div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Sin spike hace</div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: rc, lineHeight: 1.1 }}>{ago(secs)}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: T.textD, marginTop: 2 }}>
-              último {fmtClock(s.lastSpike?.ts)} · <span style={{ color: dirC }}>{dir || "–"}</span> · {num(s.lastSpike?.ratio, 0)}x
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: 2 }}>
+              típico {dur(medSec)} · p75 {dur(p75Sec)}
             </div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>Ticks sin spike</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 21, fontWeight: 800, color: T.cyan, lineHeight: 1.1 }}>{intC(ticks)}</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: 2 }}>típico {dur(medSec)} · p75 {dur(p75Sec)}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, letterSpacing: "0.08em", textTransform: "uppercase" }}>último spike</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 12, fontWeight: 700, color: dirC, lineHeight: 1.3 }}>{dir || "–"} {num(s.lastSpike?.ratio, 0)}x</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute }}>{fmtClock(s.lastSpike?.ts)}</div>
           </div>
         </div>
 
-        {/* barra de acumulación */}
-        <div style={{ height: 6, borderRadius: 4, background: T.bg, overflow: "hidden" }}>
-          <div style={{ height: "100%", borderRadius: 4, background: barColor, width: `${accumPct}%`, transition: "width 600ms ease" }} />
-        </div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.mute, marginTop: -4, display: "flex", justifyContent: "space-between" }}>
-          <span>{accumPct}% del techo {barSuffix}</span>
-          {_v2Ceiling != null && (
-            <span style={{ color: T.mute, opacity: 0.7 }}>
-              techo {Math.round(_v2Ceiling / 60)}m {_v2CeilSrc === "dynamic_p99_higher" ? "·p99" : _v2CeilSrc === "hardcoded_higher" ? "·fijo" : ""}
+        {/* Cadencia — h1 grande, h6 + h24 secundarios */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", minWidth: 40 }}>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 28, fontWeight: 800, color: T.text, lineHeight: 1 }}>
+              {s.counts?.h1 ?? "–"}
             </span>
-          )}
+            <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, letterSpacing: "0.08em" }}>spk/1h</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 17, fontWeight: 700, color: T.textD, lineHeight: 1 }}>
+                  {s.counts?.h6 ?? "–"}
+                </span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute }}>6h</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 600, color: T.textD, lineHeight: 1, opacity: 0.7 }}>
+                  {s.counts?.h24 ?? "–"}
+                </span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.mute, opacity: 0.7 }}>24h</span>
+              </div>
+            </div>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: T.cyan }}>
+              {num(s.ratePerHour?.h6, 1)}/h prom 6h
+            </span>
+          </div>
         </div>
 
-        {/* cadencia */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginTop: 2 }}>
-          <Stat label="1h"  value={s.counts?.h1  ?? "–"} color={T.text} />
-          <Stat label="6h"  value={s.counts?.h6  ?? "–"} color={T.textD} />
-          <Stat label="12h" value={s.counts?.h12 ?? "–"} color={T.textD} />
-          <Stat label="24h" value={s.counts?.h24 ?? "–"} color={T.textD} />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-          <Stat label="prom/h 6h"  value={num(s.ratePerHour?.h6,  1)} color={T.cyan} />
-          <Stat label="prom/h 12h" value={num(s.ratePerHour?.h12, 1)} color={T.cyan} />
-          <Stat label="prom/h 24h" value={num(s.ratePerHour?.h24, 1)} color={T.cyan} />
-        </div>
 
+        {/* Z-score de espera — alerta operacional mínima */}
+        {analytics?.spike_stats && (() => {
+          const st = analytics.spike_stats;
+          const z = st.z_score;
+          if (z == null || z < 1.5) return null;
+          const zColor = z >= 2.0 ? T.red : T.amber;
+          const zLabel = z >= 2.0 ? "SOBREPRESIÓN" : "PRESIÓN ALTA";
+          return (
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 6,
+              display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 9, fontWeight: 800, color: zColor }}>
+                {zLabel}
+              </span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 8, color: T.textD }}>
+                Z{z > 0 ? "+" : ""}{z.toFixed(2)}
+              </span>
+            </div>
+          );
+        })()}
 
-        {/* analytics — Vision 15M + ENTRY QUALITY */}
-        {analytics?.snapshot && (
+        {/* REMOVED: analytics block (V2, Entry Quality, RNG, Triple Lock, etc.) */}
+        {false && analytics?.snapshot && (
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 5, display: "flex", flexDirection: "column", gap: 3 }}>
             {analytics.spike_stats && (() => {
               const st = analytics.spike_stats;
@@ -2202,13 +2041,6 @@ function SymbolCard({ s }) {
 
         {/* D.6.5 Post-Racha Cooldown */}
         <CooldownBar cooldown={s.postRachaCooldown} />
-
-        {/* D.10.0 Slope Gate — solo BOOM500/CRASH500 */}
-        <SlopeGateSection symbol={s.symbol} />
-
-
-        {/* D.6 Ghost Live */}
-        <GhostLiveSection symbol={s.symbol} />
 
         {/* ENTRADA DIEGO — segunda línea autónoma */}
         <EntradaDiegoSection symbol={s.symbol} />
