@@ -698,153 +698,102 @@ function EntradaDiegoSection({ symbol }) {
     );
   }
 
-  // ── 500s: ventana [0, 11.5min] desde último spike ─────────────────
-  const {
-    last_spike_ts_500         = 0,
-    hour_pnl_500              = 0,
-    s500_cur_stake            = 5,
-    s500_drought_s1_ts        = 0,
-    crash500_next_open_ts     = 0,
-  } = edState;
+  // ── 500s: Ladder 28min (7 tiers × 4min) ──────────────────────────
+  const LADDER_TIERS   = [1, 2, 4, 8, 16, 32, 64];
+  const LADDER_CYCLE_S = 1680;   // 28 min
+  const CONTRACT_S     = 240;    // 4 min por contrato
+  const { last_spike_ts_500 = 0, burst_phase_started_at = 0 } = edState;
 
-  const winElapsed   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
-  const winRemaining = last_spike_ts_500 > 0 ? Math.max(0, last_spike_ts_500 + S20_WINDOW_S - nowSec) : 0;
-  const winPct       = last_spike_ts_500 > 0 ? Math.min(100, (winElapsed / S20_WINDOW_S) * 100) : 0;
-  const isS20Window  = last_spike_ts_500 > 0 && winRemaining > 0;
+  const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
+  const tierIdx     = last_spike_ts_500 > 0 ? Math.min(6, Math.floor(tSinSpike / CONTRACT_S)) : -1;
+  const isStop      = burst_phase === "STOP" || tSinSpike >= LADDER_CYCLE_S;
+  const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
+  const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
+  const contractPct = contract_id ? Math.min(100, (contractAge / CONTRACT_S) * 100) : 0;
 
-  const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
-  const profitPosRem     = profit_first_positive_ts > 0 ? Math.max(0, S20_POSITIVE_S - profitPosElapsed) : 0;
+  const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+  const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
 
-  const isHoraTarget  = hour_pnl_500 >= S500_HORA_TARGET;
-  const horaFrac500   = Math.min(1, Math.max(0, hour_pnl_500) / S500_HORA_TARGET);
-  const horaColor500  = isHoraTarget ? "#22d3a3" : hour_pnl_500 >= 0.5 ? "#f5c43c" : "#62d4ff";
-  const isDrought     = s500_drought_s1_ts > 0;
-  const effStake      = isDrought ? 1 : s500_cur_stake > 0 ? s500_cur_stake : (hour_pnl_500 >= 0.5 ? 1 : 5);
+  const cycleBarColor = cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
+  const baseColor500  = isStop ? "#64748b" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
-  const winBarColor   = winPct >= 85 ? "#ff5d6c" : winPct >= 55 ? "#f5c43c" : "#62d4ff";
-  const pnlColor500   = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
-  const pnlAccColor   = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
-  const tsinceSpikeS  = last_spike_ts_500 > 0 ? nowSec - last_spike_ts_500 : null;
-
-  // Stake label con lógica de la escalera invertida
-  const stakeLabel500 = isDrought ? "$1 probe"
-    : hour_pnl_500 >= 0.5 ? "$1 proteger"
-    : hour_pnl_500 >= 0   ? "$5 neutro"
-    : "$5 recuperar";
-
-  const base500Color = isHoraTarget ? "#22d3a3" : isS20Window ? "#62d4ff" : "#64748b";
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
     fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-    border: `1px solid ${base500Color}44`,
-    background: `${base500Color}08`,
+    border: `1px solid ${baseColor500}33`,
+    background: `${baseColor500}08`,
   };
 
-  // CRASH500: timer-based (no spike window)
-  const crash500TimerRem = isCrash500 && crash500_next_open_ts > 0 ? Math.max(0, crash500_next_open_ts - nowSec) : 0;
-  const crash500Waiting  = isCrash500 && crash500TimerRem > 0;
-
-  if (!isS20Window) {
-    // IDLE — esperando spike (BOOM500) o timer (CRASH500), o HORA_TARGET logrado
-    const idleLabel = isHoraTarget ? "HORA OK" : isDrought ? "SEQUÍA" : crash500Waiting ? "TIMER" : "IDLE";
-    const idleColor = isHoraTarget ? "#22d3a3" : isDrought ? "#f59e0b" : crash500Waiting ? "#a78bfa" : "#64748b";
-    return (
-      <div style={base500}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-            background: `${idleColor}22`, color: idleColor, letterSpacing: "0.06em" }}>{idleLabel}</span>
-          <span style={{ marginLeft: "auto", fontSize: 9, color: horaColor500, fontWeight: 700 }}>
-            hora ${hour_pnl_500.toFixed(2)}/$1
-          </span>
-        </div>
-        {/* Barra HORA_TARGET */}
-        <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.08)", borderRadius: 1, margin: "5px 0 3px", overflow: "hidden" }}>
-          <div style={{ width: `${horaFrac500 * 100}%`, height: "100%", background: horaColor500, transition: "width 1s linear" }} />
-        </div>
-        {/* CRASH500: barra de timer 2.5m */}
-        {crash500Waiting && (
-          <div style={{ width: "100%", height: 2, background: "rgba(167,139,250,0.15)", borderRadius: 1, marginTop: 2, overflow: "hidden" }}>
-            <div style={{ width: `${(1 - crash500TimerRem / 150) * 100}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
-          </div>
-        )}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-          <span style={{ fontSize: 10, color: "#94a3b8" }}>
-            {isHoraTarget
-              ? "Objetivo $1 logrado — esperando nueva hora"
-              : crash500Waiting
-                ? <><b style={{ color: "#a78bfa" }}>{_fmtS(crash500TimerRem)}</b> para próxima apertura · {stakeLabel500}</>
-                : isCrash500
-                  ? <>{stakeLabel500} al abrir · timer 2.5m</>
-                  : tsinceSpikeS !== null
-                    ? <><b style={{ color: "#62d4ff" }}>{_fmtS(tsinceSpikeS)}</b> sin spike · {stakeLabel500} al abrir</>
-                    : "Sin spikes aún — esperando primer spike"
-            }
-          </span>
-          <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
-            {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
-          </span>
-        </div>
-      </div>
-    );
-  }
-
-  // VENTANA ACTIVA — contrato en mercado
   return (
     <div style={base500}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-        <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
-        <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-          background: "#62d4ff22", color: "#62d4ff", letterSpacing: "0.06em" }}>VENTANA ${effStake}</span>
-        <span style={{ fontSize: 8, color: horaColor500, fontWeight: 700, marginLeft: 4 }}>
-          hora ${hour_pnl_500.toFixed(2)}/$1
-        </span>
-        {contract_id && (
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
+        <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>LADDER</span>
+        {isStop ? (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#64748b22", color: "#94a3b8", letterSpacing: "0.06em" }}>STOP &gt;28m</span>
+        ) : (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
+            {_fmtS(tSinSpike)} sin spike
+          </span>
+        )}
+        {contract_id ? (
           <span style={{ color: pnlColor500, fontWeight: 700, marginLeft: "auto", fontSize: 13 }}>
             {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
           </span>
-        )}
-        {!contract_id && (
-          <span style={{ marginLeft: "auto", fontSize: 8, color: "#64748b" }}>sin contrato</span>
+        ) : (
+          <span style={{ marginLeft: "auto", fontSize: 8, color: "#475569" }}>sin contrato</span>
         )}
       </div>
 
-      {/* Barra de ventana + timer */}
+      {/* Tier pills */}
+      <div style={{ display: "flex", gap: 3, marginBottom: 5 }}>
+        {LADDER_TIERS.map((s, i) => {
+          const active  = !isStop && i === tierIdx;
+          const done    = !isStop && i < tierIdx;
+          const bg      = active ? "#62d4ff" : done ? "#62d4ff22" : "rgba(255,255,255,0.06)";
+          const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
+          const fw      = active ? 800 : 600;
+          return (
+            <span key={i} style={{
+              flex: 1, textAlign: "center", fontSize: 9, fontWeight: fw,
+              padding: "2px 0", borderRadius: 3, background: bg, color: col,
+            }}>${s}</span>
+          );
+        })}
+      </div>
+
+      {/* Cycle progress bar (28 min) */}
       <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-        <div style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-          <div style={{ width: `${winPct}%`, height: "100%", background: winBarColor, transition: "width 1s linear" }} />
+        <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ width: `${cyclePct}%`, height: "100%", background: cycleBarColor, transition: "width 1s linear" }} />
         </div>
-        <span style={{ fontSize: 9, color: winBarColor, fontWeight: 700, minWidth: 44, textAlign: "right" }}>
-          {_fmtS(winRemaining)}
+        <span style={{ fontSize: 8, color: cycleBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
+          {isStop ? "STOP" : `${Math.floor((LADDER_CYCLE_S - tSinSpike) / 60)}m`}
         </span>
       </div>
 
-      {/* HORA_TARGET progress bar */}
-      <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 1, marginBottom: 3, overflow: "hidden" }}>
-        <div style={{ width: `${horaFrac500 * 100}%`, height: "100%", background: horaColor500, transition: "width 1s linear" }} />
-      </div>
-
-      {/* Info row: spikes + profit+ countdown */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 9 }}>
-        <span style={{ color: spikes_in_contract >= 1 ? "#62d4ff" : "#475569" }}>
-          {spikes_in_contract} spk · {stakeLabel500}
-          {isCrash500 && tsinceSpikeS !== null && (
-            <span style={{ color: "#475569" }}> · spike hace {_fmtS(tsinceSpikeS)}</span>
-          )}
-        </span>
-        {profit_first_positive_ts > 0 && (
-          <span style={{ color: "#22d3a3", fontWeight: 700 }}>
-            profit+ {_fmtS(profitPosRem)} → cierre
+      {/* Contract 4-min bar (solo cuando hay contrato abierto) */}
+      {contract_id && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ width: `${contractPct}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
+          </div>
+          <span style={{ fontSize: 8, color: "#a78bfa", fontWeight: 700, minWidth: 28, textAlign: "right" }}>
+            {_fmtS(Math.max(0, CONTRACT_S - contractAge))}
           </span>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Acum */}
-      <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 4,
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 8, color: "#475569" }}>
+          {isStop ? "esperando spike…" : contract_id ? "contrato 4m activo" : "abriendo siguiente"}
+        </span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
-          PnL acum {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
+          {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
         </span>
       </div>
     </div>
