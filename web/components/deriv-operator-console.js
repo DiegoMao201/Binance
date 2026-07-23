@@ -523,16 +523,19 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_STAKE_LADDER_1000 = [5, 10, 10, 20, 20, 40, 40];
 const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
-// 1000s scout constants (deben coincidir con entrada_diego.py)
-const K1000_SCOUT_S_DEFAULT  = 1200;   // 20min
-const K1000_HOLD_S_DEFAULT   = 900;    // 15min
-const K1000_FLOOR_DEFAULT     = 0.80;
+// 1000s p25-p75 state machine (coincidir con entrada_diego.py)
+const K1000_COOLING_S = 900;   // 15min cooldown post-spike (p0→p25)
+const K1000_WINDOW_S  = 900;   // 15min ventana contrato (p25→p75)
+const K1000_STAKE_START = 3;
+const K1000_STAKE_MID   = 6;
+const K1000_STAKE_MAX   = 12;
+const K1000_HORA_TARGET = 1.0; // $1/hora
 
-// 500s: S20 ventana fija (deben coincidir con entrada_diego.py)
+// 500s: S20 ventana fija (coincidir con entrada_diego.py)
 const S20_WINDOW_S   = 690;   // 11.5 min ventana post-spike
 const S20_POSITIVE_S = 150;   // 2.5 min profit+ sostenido → cierre anticipado
+const S500_HORA_TARGET = 1.0; // $1/hora por símbolo
 
 function EntradaDiegoSection({ symbol }) {
   const [edState, setEdState] = useState(null);
@@ -577,49 +580,63 @@ function EntradaDiegoSection({ symbol }) {
   const isCrash500 = symbol === "CRASH500";
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
 
-  // ── 1000s: escalera scout $1(20m)→$20→$40→$80→$200(floor) ──────────────────
+  // ── 1000s: p25-p75 state machine WAIT_SPIKE→COOLING(15m)→WINDOW(15m) ────────
   if (is1000) {
     const {
-      k1000_phase = "SCOUT", k1000_phase_ts = 0, k1000_peak = 0,
-      k1000_scout_s = K1000_SCOUT_S_DEFAULT, k1000_hold_s = K1000_HOLD_S_DEFAULT,
-      k1000_floor_pct = K1000_FLOOR_DEFAULT,
-      k1000_scout_stake = 1, k1000_s20_stake = 20, k1000_s40_stake = 40,
-      k1000_s80_stake = 80, k1000_s200_stake = 200,
+      k1000_phase     = "WAIT_SPIKE",
+      k1000_phase_ts  = 0,
+      k1000_cycle_stake = K1000_STAKE_START,
+      hour_pnl_1000   = 0,
+      k1000_blocked_until = 0,
     } = edState;
 
-    const _1000_phases = [
-      { id: "SCOUT",    label: "$1·20m",  color: "#22d3a3" },
-      { id: "STAKE_20", label: "$20·15m", color: "#62d4ff" },
-      { id: "STAKE_40", label: "$40·15m", color: "#f59e0b" },
-      { id: "STAKE_80", label: "$80·15m", color: "#a78bfa" },
-      { id: "STAKE_200", label: "$200",   color: "#ff5d6c" },
+    // Normalizar fases viejas del disco al arranque
+    const phase1k = ["WAIT_SPIKE","COOLING","WINDOW"].includes(k1000_phase)
+      ? k1000_phase : "WAIT_SPIKE";
+
+    const stake1k   = k1000_cycle_stake || K1000_STAKE_START;
+    const isBlocked = k1000_blocked_until > nowSec;
+    const blockRem  = isBlocked ? Math.ceil(k1000_blocked_until - nowSec) : 0;
+    const horaFrac  = Math.min(1, hour_pnl_1000 / K1000_HORA_TARGET);
+    const horaColor = hour_pnl_1000 >= K1000_HORA_TARGET ? "#22d3a3"
+      : hour_pnl_1000 > 0 ? "#f5c43c" : "#64748b";
+
+    // Timer por fase
+    const phaseTotal   = phase1k === "COOLING" ? K1000_COOLING_S : phase1k === "WINDOW" ? K1000_WINDOW_S : 0;
+    const phaseElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
+    const phaseRem     = phaseTotal > 0 ? Math.max(0, phaseTotal - phaseElapsed) : 0;
+    const phasePct     = phaseTotal > 0 ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
+
+    // Colores por fase
+    const phaseColor = phase1k === "WINDOW"   ? "#22d3a3"
+      : phase1k === "COOLING" ? "#62d4ff"
+      : "#64748b";
+
+    const pnl1kColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+
+    // Stake pills: $3 → $6 → $12
+    const stakePills = [
+      { v: K1000_STAKE_START, label: `$${K1000_STAKE_START}` },
+      { v: K1000_STAKE_MID,   label: `$${K1000_STAKE_MID}` },
+      { v: K1000_STAKE_MAX,   label: `$${K1000_STAKE_MAX}` },
     ];
-    const _stakeLabels = {
-      SCOUT: `$${k1000_scout_stake}`, STAKE_20: `$${k1000_s20_stake}`,
-      STAKE_40: `$${k1000_s40_stake}`, STAKE_80: `$${k1000_s80_stake}`,
-      STAKE_200: `$${k1000_s200_stake}`,
-    };
-
-    const ph1kColor = k1000_phase === "STAKE_200" ? "#ff5d6c"
-      : k1000_phase === "STAKE_80"  ? "#a78bfa"
-      : k1000_phase === "STAKE_40"  ? "#f59e0b"
-      : k1000_phase === "STAKE_20"  ? "#62d4ff"
-      : "#22d3a3";
-
-    const ph1kTotal   = k1000_phase === "SCOUT" ? k1000_scout_s : k1000_hold_s;
-    const ph1kElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
-    const ph1kRem     = k1000_phase === "STAKE_200" ? 0 : Math.max(0, ph1kTotal - ph1kElapsed);
-    const ph1kPct     = k1000_phase === "STAKE_200" ? 100 : Math.min(100, (ph1kElapsed / Math.max(ph1kTotal, 1)) * 100);
-
-    const pnl1kColor  = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
-    const floor1kUsd  = k1000_peak * k1000_floor_pct;
-    const floorPct1k  = k1000_peak > 0 ? Math.min(100, Math.max(0, (current_profit / k1000_peak) * 100)) : 0;
 
     const base1k = {
       marginTop: 8, padding: "8px 10px", borderRadius: 6,
       fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-      border: `1px solid ${ph1kColor}55`, color: ph1kColor, background: `${ph1kColor}0d`,
+      border: `1px solid ${phaseColor}55`, background: `${phaseColor}0d`,
     };
+
+    // Texto de estado por fase
+    const stateText = isBlocked
+      ? `HORA_TARGET $${hour_pnl_1000.toFixed(2)} — pausado ${_fmtS(blockRem)}`
+      : phase1k === "WAIT_SPIKE"
+        ? `Stake listo $${stake1k} · esperando spike`
+        : phase1k === "COOLING"
+          ? `Spike detectado · abriendo en ${_fmtS(phaseRem)}`
+          : contract_id
+            ? `$${stake1k} en mercado · ventana ${_fmtS(phaseRem)}`
+            : `WINDOW — sin contrato aún`;
 
     return (
       <div style={base1k}>
@@ -627,61 +644,67 @@ function EntradaDiegoSection({ symbol }) {
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-            background: `${ph1kColor}25`, color: ph1kColor, letterSpacing: "0.06em" }}>
-            {k1000_phase}
+            background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.06em" }}>
+            {isBlocked ? "BLOQUEADO" : phase1k}
           </span>
-          <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
-            {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
-          </span>
+          {phase1k === "WINDOW" && contract_id && (
+            <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+              {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
+            </span>
+          )}
+          {phase1k === "WAIT_SPIKE" && (
+            <span style={{ marginLeft: "auto", fontSize: 9, color: horaColor, fontWeight: 700 }}>
+              hora ${hour_pnl_1000.toFixed(2)}/$1
+            </span>
+          )}
         </div>
 
-        {/* Timer bar para fases con tiempo */}
-        {k1000_phase !== "STAKE_200" && (
-          <div style={{ width: "100%", height: 3, background: `${ph1kColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
-            <div style={{ width: `${ph1kPct}%`, height: "100%", background: ph1kColor, transition: "width 1s linear" }} />
+        {/* Timer bar (COOLING o WINDOW) */}
+        {(phase1k === "COOLING" || phase1k === "WINDOW") && (
+          <div style={{ width: "100%", height: 3, background: `${phaseColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
+            <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
           </div>
         )}
 
-        {/* Floor ratchet bar para STAKE_200 */}
-        {k1000_phase === "STAKE_200" && (
-          <div style={{ position: "relative", height: 6, background: "#ff5d6c15", borderRadius: 3, margin: "5px 0 3px", overflow: "hidden" }}>
-            <div style={{ width: `${floorPct1k}%`, height: "100%", background: k1000_peak > 0 && current_profit >= floor1kUsd ? "#ff5d6c60" : "#ff5d6c30", borderRadius: 3 }} />
-            {k1000_peak > 0 && (
-              <div style={{ position: "absolute", left: `${k1000_floor_pct * 100}%`, top: 0, height: "100%", width: 2, background: "#ff5d6c", borderRadius: 1 }} />
-            )}
+        {/* HORA_TARGET bar (WAIT_SPIKE) */}
+        {phase1k === "WAIT_SPIKE" && !isBlocked && (
+          <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.08)", borderRadius: 1, margin: "5px 0 3px", overflow: "hidden" }}>
+            <div style={{ width: `${horaFrac * 100}%`, height: "100%", background: horaColor, transition: "width 1s linear" }} />
           </div>
         )}
 
-        {/* Ladder pills */}
+        {/* Stake pills $3 → $6 → $12 */}
         <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-          {_1000_phases.map(p => (
-            <span key={p.id} style={{
-              fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-              background: k1000_phase === p.id ? `${p.color}28` : "rgba(255,255,255,0.03)",
-              border: `1px solid ${k1000_phase === p.id ? p.color : "rgba(255,255,255,0.09)"}`,
-              color: k1000_phase === p.id ? p.color : "rgba(255,255,255,0.22)",
-              transition: "all 0.3s",
-            }}>{p.label}</span>
-          ))}
+          {stakePills.map(p => {
+            const active = stake1k === p.v;
+            return (
+              <span key={p.v} style={{
+                fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+                background: active ? `${phaseColor}28` : "rgba(255,255,255,0.03)",
+                border: `1px solid ${active ? phaseColor : "rgba(255,255,255,0.09)"}`,
+                color: active ? phaseColor : "rgba(255,255,255,0.22)",
+                transition: "all 0.3s",
+              }}>{p.label}</span>
+            );
+          })}
+          <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
+            {phase1k === "WINDOW" ? "→spike:reset·$3" : phase1k === "COOLING" ? "→15m:WINDOW" : "→spike:COOLING"}
+          </span>
         </div>
 
         {/* Línea de estado */}
-        <div style={{ fontSize: 10, opacity: 0.7, marginTop: 3 }}>
-          {k1000_phase === "STAKE_200" && k1000_peak > 0
-            ? `peak=+${k1000_peak.toFixed(2)}$ · floor=+${floor1kUsd.toFixed(2)}$ · actual=${current_profit >= 0 ? "+" : ""}${Number(current_profit).toFixed(2)}$`
-            : k1000_phase === "STAKE_200"
-            ? `${_stakeLabels[k1000_phase]} · esperando primer spike…`
-            : `${_stakeLabels[k1000_phase]} · ${_fmtS(ph1kRem)} restante · ${k1000_phase === "SCOUT" ? "→$20 si expira" : "→win:SCOUT · loss:escala"}`
-          }
-        </div>
+        <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>{stateText}</div>
       </div>
     );
   }
 
-  // ── 500s: S20 ventana [0, 11.5min] desde último spike ───────────────
+  // ── 500s: ventana [0, 11.5min] desde último spike ─────────────────
   const {
-    last_spike_ts_500 = 0,
-    broker_blocked_until_500 = 0,
+    last_spike_ts_500         = 0,
+    hour_pnl_500              = 0,
+    s500_cur_stake            = 5,
+    s500_drought_s1_ts        = 0,
+    crash500_next_open_ts     = 0,
   } = edState;
 
   const winElapsed   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
@@ -692,57 +715,91 @@ function EntradaDiegoSection({ symbol }) {
   const profitPosElapsed = profit_first_positive_ts > 0 ? Math.max(0, nowSec - profit_first_positive_ts) : 0;
   const profitPosRem     = profit_first_positive_ts > 0 ? Math.max(0, S20_POSITIVE_S - profitPosElapsed) : 0;
 
-  const isBrokerBlocked = broker_blocked_until_500 > nowSec;
-  const brokerBlockRem  = isBrokerBlocked ? Math.ceil(broker_blocked_until_500 - nowSec) : 0;
+  const isHoraTarget  = hour_pnl_500 >= S500_HORA_TARGET;
+  const horaFrac500   = Math.min(1, Math.max(0, hour_pnl_500) / S500_HORA_TARGET);
+  const horaColor500  = isHoraTarget ? "#22d3a3" : hour_pnl_500 >= 0.5 ? "#f5c43c" : "#62d4ff";
+  const isDrought     = s500_drought_s1_ts > 0;
+  const effStake      = isDrought ? 1 : s500_cur_stake > 0 ? s500_cur_stake : (hour_pnl_500 >= 0.5 ? 1 : 5);
 
   const winBarColor   = winPct >= 85 ? "#ff5d6c" : winPct >= 55 ? "#f5c43c" : "#62d4ff";
   const pnlColor500   = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
   const pnlAccColor   = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
   const tsinceSpikeS  = last_spike_ts_500 > 0 ? nowSec - last_spike_ts_500 : null;
 
+  // Stake label con lógica de la escalera invertida
+  const stakeLabel500 = isDrought ? "$1 probe"
+    : hour_pnl_500 >= 0.5 ? "$1 proteger"
+    : hour_pnl_500 >= 0   ? "$5 neutro"
+    : "$5 recuperar";
+
+  const base500Color = isHoraTarget ? "#22d3a3" : isS20Window ? "#62d4ff" : "#64748b";
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
     fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-    border: `1px solid ${isS20Window ? "#62d4ff55" : "#64748b33"}`,
-    background: isS20Window ? "#62d4ff0d" : "#64748b08",
+    border: `1px solid ${base500Color}44`,
+    background: `${base500Color}08`,
   };
 
+  // CRASH500: timer-based (no spike window)
+  const crash500TimerRem = isCrash500 && crash500_next_open_ts > 0 ? Math.max(0, crash500_next_open_ts - nowSec) : 0;
+  const crash500Waiting  = isCrash500 && crash500TimerRem > 0;
+
   if (!isS20Window) {
-    // IDLE — esperando siguiente spike
+    // IDLE — esperando spike (BOOM500) o timer (CRASH500), o HORA_TARGET logrado
+    const idleLabel = isHoraTarget ? "HORA OK" : isDrought ? "SEQUÍA" : crash500Waiting ? "TIMER" : "IDLE";
+    const idleColor = isHoraTarget ? "#22d3a3" : isDrought ? "#f59e0b" : crash500Waiting ? "#a78bfa" : "#64748b";
     return (
       <div style={base500}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-            background: "#64748b22", color: "#64748b", letterSpacing: "0.06em" }}>IDLE</span>
-          <span style={{ marginLeft: "auto", fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
-            PnL {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
+            background: `${idleColor}22`, color: idleColor, letterSpacing: "0.06em" }}>{idleLabel}</span>
+          <span style={{ marginLeft: "auto", fontSize: 9, color: horaColor500, fontWeight: 700 }}>
+            hora ${hour_pnl_500.toFixed(2)}/$1
           </span>
         </div>
-        <div style={{ marginTop: 5, fontSize: 10, color: "#94a3b8" }}>
-          {tsinceSpikeS !== null
-            ? <>Sin spike: <b style={{ color: "#62d4ff" }}>{_fmtS(tsinceSpikeS)}</b>
-                <span style={{ color: "#475569", fontSize: 9 }}> · siguiente spike abre $20</span></>
-            : <span style={{ color: "#475569" }}>Sin spikes aún — esperando primer spike</span>
-          }
+        {/* Barra HORA_TARGET */}
+        <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.08)", borderRadius: 1, margin: "5px 0 3px", overflow: "hidden" }}>
+          <div style={{ width: `${horaFrac500 * 100}%`, height: "100%", background: horaColor500, transition: "width 1s linear" }} />
         </div>
-        {isBrokerBlocked && (
-          <div style={{ marginTop: 4, fontSize: 9, color: "#f5c43c", fontWeight: 700 }}>
-            Broker bloqueado · {_fmtS(brokerBlockRem)} restante
+        {/* CRASH500: barra de timer 2.5m */}
+        {crash500Waiting && (
+          <div style={{ width: "100%", height: 2, background: "rgba(167,139,250,0.15)", borderRadius: 1, marginTop: 2, overflow: "hidden" }}>
+            <div style={{ width: `${(1 - crash500TimerRem / 150) * 100}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
           </div>
         )}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+          <span style={{ fontSize: 10, color: "#94a3b8" }}>
+            {isHoraTarget
+              ? "Objetivo $1 logrado — esperando nueva hora"
+              : crash500Waiting
+                ? <><b style={{ color: "#a78bfa" }}>{_fmtS(crash500TimerRem)}</b> para próxima apertura · {stakeLabel500}</>
+                : isCrash500
+                  ? <>{stakeLabel500} al abrir · timer 2.5m</>
+                  : tsinceSpikeS !== null
+                    ? <><b style={{ color: "#62d4ff" }}>{_fmtS(tsinceSpikeS)}</b> sin spike · {stakeLabel500} al abrir</>
+                    : "Sin spikes aún — esperando primer spike"
+            }
+          </span>
+          <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
+            {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
+          </span>
+        </div>
       </div>
     );
   }
 
-  // S20_WINDOW activo — $20 en mercado
+  // VENTANA ACTIVA — contrato en mercado
   return (
     <div style={base500}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
         <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
         <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-          background: "#62d4ff22", color: "#62d4ff", letterSpacing: "0.06em" }}>S20 ACTIVO $20</span>
+          background: "#62d4ff22", color: "#62d4ff", letterSpacing: "0.06em" }}>VENTANA ${effStake}</span>
+        <span style={{ fontSize: 8, color: horaColor500, fontWeight: 700, marginLeft: 4 }}>
+          hora ${hour_pnl_500.toFixed(2)}/$1
+        </span>
         {contract_id && (
           <span style={{ color: pnlColor500, fontWeight: 700, marginLeft: "auto", fontSize: 13 }}>
             {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
@@ -753,8 +810,8 @@ function EntradaDiegoSection({ symbol }) {
         )}
       </div>
 
-      {/* Barra de ventana */}
-      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+      {/* Barra de ventana + timer */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
         <div style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
           <div style={{ width: `${winPct}%`, height: "100%", background: winBarColor, transition: "width 1s linear" }} />
         </div>
@@ -763,11 +820,16 @@ function EntradaDiegoSection({ symbol }) {
         </span>
       </div>
 
-      {/* Info row: spikes en ventana + profit+ countdown */}
+      {/* HORA_TARGET progress bar */}
+      <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 1, marginBottom: 3, overflow: "hidden" }}>
+        <div style={{ width: `${horaFrac500 * 100}%`, height: "100%", background: horaColor500, transition: "width 1s linear" }} />
+      </div>
+
+      {/* Info row: spikes + profit+ countdown */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 9 }}>
         <span style={{ color: spikes_in_contract >= 1 ? "#62d4ff" : "#475569" }}>
-          {spikes_in_contract} spk en ventana
-          {tsinceSpikeS !== null && spikes_in_contract === 0 && (
+          {spikes_in_contract} spk · {stakeLabel500}
+          {isCrash500 && tsinceSpikeS !== null && (
             <span style={{ color: "#475569" }}> · spike hace {_fmtS(tsinceSpikeS)}</span>
           )}
         </span>
@@ -778,15 +840,12 @@ function EntradaDiegoSection({ symbol }) {
         )}
       </div>
 
-      {/* PnL acumulado */}
+      {/* Acum */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 4,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           PnL acum {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
         </span>
-        {isBrokerBlocked && (
-          <span style={{ fontSize: 8, color: "#f5c43c" }}>broker bloqueado {_fmtS(brokerBlockRem)}</span>
-        )}
       </div>
     </div>
   );
@@ -801,7 +860,7 @@ function K1000Panel() {
     }}>
       <div style={{
         fontSize: 11, fontWeight: 800, color: T.cyan, letterSpacing: "0.07em", marginBottom: 2,
-      }}>BOOM1000 · CRASH1000 · SCOUT</div>
+      }}>BOOM1000 · CRASH1000 · p25-p75</div>
       <EntradaDiegoSection symbol="BOOM1000" />
       <EntradaDiegoSection symbol="CRASH1000" />
     </div>
