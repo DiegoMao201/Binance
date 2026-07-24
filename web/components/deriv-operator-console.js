@@ -699,7 +699,10 @@ function EntradaDiegoSection({ symbol }) {
   }
 
   // ── 500s: Ladder 28min (7 tiers × 4min) ──────────────────────────
-  const LADDER_TIERS   = [1, 2, 4, 8, 16, 32, 64];
+  // Stakes por símbolo: inversa al tiempo sin spike (más alto al inicio cuando prob. es alta)
+  const LADDER_TIERS_BOOM  = [8, 16, 8, 2, 4, 2, 1];
+  const LADDER_TIERS_CRASH = [4, 8, 16, 1, 2, 4, 1];
+  const LADDER_TIERS   = sym === "BOOM500" ? LADDER_TIERS_BOOM : LADDER_TIERS_CRASH;
   const LADDER_CYCLE_S = 1680;   // 28 min
   const CONTRACT_S     = 240;    // 4 min por contrato
   const FLOOR_PCT      = 0.85;
@@ -707,7 +710,8 @@ function EntradaDiegoSection({ symbol }) {
 
   const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const tierIdx     = last_spike_ts_500 > 0 ? Math.min(6, Math.floor(tSinSpike / CONTRACT_S)) : -1;
-  const isStop      = burst_phase === "STOP" || tSinSpike >= LADDER_CYCLE_S;
+  const isWrap      = burst_phase !== "HOUR_DONE" && tSinSpike >= LADDER_CYCLE_S;
+  const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
   const contractPct = contract_id ? Math.min(100, (contractAge / CONTRACT_S) * 100) : 0;
@@ -720,8 +724,8 @@ function EntradaDiegoSection({ symbol }) {
   const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
   const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
 
-  const cycleBarColor = cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
-  const baseColor500  = isStop ? "#64748b" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+  const cycleBarColor = isWrap ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
+  const baseColor500  = isStop ? "#64748b" : isWrap ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
@@ -737,7 +741,10 @@ function EntradaDiegoSection({ symbol }) {
         <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>LADDER</span>
         {isStop ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-            background: "#64748b22", color: "#94a3b8", letterSpacing: "0.06em" }}>STOP &gt;28m</span>
+            background: "#64748b22", color: "#94a3b8", letterSpacing: "0.06em" }}>STOP</span>
+        ) : isWrap ? (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>WRAP {_fmtS(tSinSpike)}</span>
         ) : (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
@@ -776,7 +783,7 @@ function EntradaDiegoSection({ symbol }) {
           <div style={{ width: `${cyclePct}%`, height: "100%", background: cycleBarColor, transition: "width 1s linear" }} />
         </div>
         <span style={{ fontSize: 8, color: cycleBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
-          {isStop ? "STOP" : `${Math.floor((LADDER_CYCLE_S - tSinSpike) / 60)}m`}
+          {isWrap ? "↺" : isStop ? "—" : `${Math.floor((LADDER_CYCLE_S - tSinSpike) / 60)}m`}
         </span>
       </div>
 
