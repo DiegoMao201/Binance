@@ -475,8 +475,10 @@ class _SymState:
             "k1000_s200_stake":        K1000_S200_STAKE,
             "k1000_scout_s":           K1000_SCOUT_S,
             "k1000_hold_s":            K1000_HOLD_S,
-            "k1000_profit_s":          K1000_PROFIT_S,
-            "k1000_floor_pct":         K1000_FLOOR_PCT,
+            # ladder 500
+            "peak_profit_500":         round(self.peak_profit_500, 4),
+            "ladder_cycle_s":          LADDER_500_CYCLE_S,
+            "ladder_contract_s":       LADDER_500_CONTRACT_S,
         }
         return d
 
@@ -2059,6 +2061,9 @@ class EntradaDiego:
 
     def _persist(self, now: float) -> None:
         try:
-            self._state_file.write_text(json.dumps(self.get_state_snapshot(), indent=2))
+            snapshot = self.get_state_snapshot()
+            payload  = json.dumps(snapshot, indent=2)
+            self._state_file.write_text(payload)
         except Exception as exc:
-            _LOGGER.debug("[ENTRADA_DIEGO] persist error: %s", exc)
+            import traceback
+            _LOGGER.error("[ENTRADA_DIEGO] persist FAILED: %s\n%s", exc, traceback.format_exc())
