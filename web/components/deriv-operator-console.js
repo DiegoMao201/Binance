@@ -702,7 +702,7 @@ function EntradaDiegoSection({ symbol }) {
   // Stakes por símbolo: inversa al tiempo sin spike (más alto al inicio cuando prob. es alta)
   const LADDER_TIERS_BOOM  = [8, 16, 8, 2, 4, 2, 1];
   const LADDER_TIERS_CRASH = [4, 8, 16, 1, 2, 4, 1];
-  const LADDER_TIERS   = sym === "BOOM500" ? LADDER_TIERS_BOOM : LADDER_TIERS_CRASH;
+  const LADDER_TIERS   = symbol === "BOOM500" ? LADDER_TIERS_BOOM : LADDER_TIERS_CRASH;
   const LADDER_CYCLE_S = 1680;   // 28 min
   const CONTRACT_S     = 240;    // 4 min por contrato
   const FLOOR_PCT      = 0.85;
