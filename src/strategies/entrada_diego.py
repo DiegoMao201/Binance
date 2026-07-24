@@ -918,12 +918,14 @@ class EntradaDiego:
         tier_idx, stake = self._ladder_tier_500(t_sin_spike)
 
         if tier_idx < 0:
-            # > 28 min sin spike: STOP
-            if state.burst_phase != "STOP":
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER STOP t=%.0fs (>28min) → esperando spike",
-                             sym, t_sin_spike)
-            state.burst_phase = "STOP"
+            # > 28 min sin spike: dejar terminar el contrato activo antes de STOP
             if state.contract_id is not None:
+                contract_age = now - state.burst_phase_started_at
+                if contract_age < LADDER_500_CONTRACT_S:
+                    # $64 aún dentro de sus 4 min — no cortar
+                    state.burst_phase = "LADDER"
+                    return
+                # 4 min cumplidos → cerrar y entrar STOP
                 _cid = int(state.contract_id)
                 _pnl = state.current_profit
                 state.contract_id     = None
@@ -935,7 +937,11 @@ class EntradaDiego:
                     _LOGGER.error("[ENTRADA_DIEGO] %s LADDER STOP close error: %s", sym, exc)
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER STOP cid=%s pnl=%.4f", sym, _cid, _pnl)
+                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER STOP cid=%s pnl=%.4f (ciclo completo)", sym, _cid, _pnl)
+            if state.burst_phase != "STOP":
+                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER STOP t=%.0fs (>28min) → esperando spike",
+                             sym, t_sin_spike)
+            state.burst_phase = "STOP"
             return
 
         state.burst_phase = "LADDER"
