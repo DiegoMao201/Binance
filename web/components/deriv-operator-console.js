@@ -702,7 +702,8 @@ function EntradaDiegoSection({ symbol }) {
   const LADDER_TIERS   = [1, 2, 4, 8, 16, 32, 64];
   const LADDER_CYCLE_S = 1680;   // 28 min
   const CONTRACT_S     = 240;    // 4 min por contrato
-  const { last_spike_ts_500 = 0, burst_phase_started_at = 0 } = edState;
+  const FLOOR_PCT      = 0.85;
+  const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0 } = edState;
 
   const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const tierIdx     = last_spike_ts_500 > 0 ? Math.min(6, Math.floor(tSinSpike / CONTRACT_S)) : -1;
@@ -710,6 +711,11 @@ function EntradaDiegoSection({ symbol }) {
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
   const contractPct = contract_id ? Math.min(100, (contractAge / CONTRACT_S) * 100) : 0;
+
+  // Floor: qué % del pico estamos capturando actualmente
+  const floorActive = peak_profit_500 >= 0.20 && contract_id;
+  const profitVsPeak = floorActive && peak_profit_500 > 0 ? current_profit / peak_profit_500 : null;
+  const nearFloor    = profitVsPeak !== null && profitVsPeak < (FLOOR_PCT + 0.05);
 
   const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
   const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
@@ -739,7 +745,7 @@ function EntradaDiegoSection({ symbol }) {
           </span>
         )}
         {contract_id ? (
-          <span style={{ color: pnlColor500, fontWeight: 700, marginLeft: "auto", fontSize: 13 }}>
+          <span style={{ color: nearFloor ? "#f5c43c" : pnlColor500, fontWeight: 700, marginLeft: "auto", fontSize: 13 }}>
             {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
           </span>
         ) : (
@@ -774,14 +780,26 @@ function EntradaDiegoSection({ symbol }) {
         </span>
       </div>
 
-      {/* Contract 4-min bar (solo cuando hay contrato abierto) */}
+      {/* Contract 4-min bar con floor indicator */}
       {contract_id && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden", position: "relative" }}>
             <div style={{ width: `${contractPct}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
           </div>
           <span style={{ fontSize: 8, color: "#a78bfa", fontWeight: 700, minWidth: 28, textAlign: "right" }}>
             {_fmtS(Math.max(0, CONTRACT_S - contractAge))}
+          </span>
+        </div>
+      )}
+
+      {/* Floor row: solo cuando hay pico capturado */}
+      {floorActive && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 8, marginBottom: 2 }}>
+          <span style={{ color: nearFloor ? "#f5c43c" : "#64748b" }}>
+            floor 85% · pico +{peak_profit_500.toFixed(2)}$
+          </span>
+          <span style={{ color: nearFloor ? "#f5c43c" : "#22d3a3", fontWeight: 700 }}>
+            {profitVsPeak !== null ? `${Math.round(profitVsPeak * 100)}%` : "–"}
           </span>
         </div>
       )}

@@ -874,11 +874,42 @@ class EntradaDiego:
             _LOGGER.info("[ENTRADA_DIEGO] %s LADDER t0=%s",
                          sym, "spike_hist" if _init > 0 else "now")
 
-        # ── Actualizar profit ─────────────────────────────────────────────────
+        # ── Actualizar profit y peak ──────────────────────────────────────────
         if state.contract_id is not None:
             _qp = self._query_profit(state.contract_id)
             if _qp is not None:
                 state.current_profit = _qp
+                if state.current_profit > state.peak_profit_500:
+                    state.peak_profit_500 = state.current_profit
+
+        # ── Profit floor: capturar si cae 15% desde el pico ──────────────────
+        _PROFIT_FLOOR_PCT  = 0.85   # cerrar si profit < peak × 85%
+        _PROFIT_FLOOR_MIN  = 0.20   # solo activar si peak >= $0.20 (evitar ruido)
+        if (state.contract_id is not None
+                and state.peak_profit_500 >= _PROFIT_FLOOR_MIN
+                and state.current_profit < state.peak_profit_500 * _PROFIT_FLOOR_PCT):
+            _cid = int(state.contract_id)
+            _pnl = state.current_profit
+            _pk  = state.peak_profit_500
+            state.contract_id    = None
+            state.current_profit = 0.0
+            state.peak_profit_500 = 0.0
+            try:
+                await self._executor.close_contract(_cid)
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s LADDER FLOOR close error: %s", sym, exc)
+            self._add_global_pnl(sym, _pnl, now)
+            state.last_close_profit = _pnl
+            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER FLOOR cid=%s peak=%.4f pnl=%.4f (%.0f%%)",
+                         sym, _cid, _pk, _pnl, 100 * _pnl / _pk if _pk else 0)
+            # Tras floor-close: abrir inmediatamente en tier correcto
+            _t = now - state.last_spike_ts_500
+            _ti, _st = self._ladder_tier_500(_t)
+            if _ti >= 0:
+                state.burst_phase_started_at = now
+                state.burst_phase = "LADDER"
+                await self._open(sym, state, now, stake_override=_st)
+            return
 
         # ── Calcular tier actual ──────────────────────────────────────────────
         t_sin_spike = now - state.last_spike_ts_500
@@ -893,8 +924,9 @@ class EntradaDiego:
             if state.contract_id is not None:
                 _cid = int(state.contract_id)
                 _pnl = state.current_profit
-                state.contract_id    = None
-                state.current_profit = 0.0
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
                 try:
                     await self._executor.close_contract(_cid)
                 except Exception as exc:
@@ -914,8 +946,9 @@ class EntradaDiego:
                 # Broker cerró externamente (TP/SL)
                 _cid = state.contract_id
                 _pnl = state.current_profit
-                state.contract_id    = None
-                state.current_profit = 0.0
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
                 _LOGGER.info("[ENTRADA_DIEGO] %s LADDER BROKER_CLOSE cid=%s pnl=%.4f age=%.0fs",
@@ -930,8 +963,9 @@ class EntradaDiego:
                 # 4 minutos cumplidos: cerrar y abrir siguiente tier
                 _cid = int(state.contract_id)
                 _pnl = state.current_profit
-                state.contract_id    = None
-                state.current_profit = 0.0
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
                 try:
                     await self._executor.close_contract(_cid)
                 except Exception as exc:
@@ -955,6 +989,7 @@ class EntradaDiego:
             sym, tier_idx, stake, t_sin_spike, t_sin_spike / 60,
         )
         state.burst_phase_started_at = now
+        state.peak_profit_500        = 0.0
         await self._open(sym, state, now, stake_override=stake)
 
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
@@ -1940,10 +1975,11 @@ class EntradaDiego:
                 # 500s sin contrato: restaurar burst_phase y power_window
                 if sym in SYMBOLS_500:
                     st = self._states[sym]
-                    _bp = s.get("burst_phase", "WAIT_GATE")
+                    _bp = s.get("burst_phase", "LADDER")
                     st.burst_phase = _bp if _bp in (
-                        "WAIT_GATE", "TIMER_GATE", "STAKE_10", "STAKE_20", "STAKE_40", "STAKE_60", "STAKE_80"
-                    ) else "WAIT_GATE"
+                        "WAIT_GATE", "TIMER_GATE", "STAKE_10", "STAKE_20", "STAKE_40",
+                        "STAKE_60", "STAKE_80", "LADDER", "STOP", "IDLE",
+                    ) else "LADDER"
                     st.burst_phase_started_at = float(s.get("burst_phase_started_at", 0.0))
                     _pw = s.get("power_window", [])
                     st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
@@ -1960,8 +1996,16 @@ class EntradaDiego:
                         st.hour_pnl_500 = 0.0
                     st.prev_hour_pnl_500          = float(s.get("prev_hour_pnl_500", 0.0))
                     st.sym_pnl_since_reset        = float(s.get("sym_pnl_since_reset", 0.0))
-                    # Restaurar last_spike_ts_500 para evitar drought falso al reiniciar
-                    st.last_spike_ts_500          = float(s.get("last_spike_ts_500", 0.0))
+                    # Restaurar last_spike_ts_500: si el valor guardado pone el ciclo en STOP
+                    # (>28min), resetear a now para que el bot abra inmediatamente en Tier 0.
+                    _saved_spk_ts = float(s.get("last_spike_ts_500", 0.0))
+                    _t_sin_spk_saved = now - _saved_spk_ts if _saved_spk_ts > 0 else 9999.0
+                    if _t_sin_spk_saved >= LADDER_500_CYCLE_S or _saved_spk_ts <= 0:
+                        st.last_spike_ts_500 = now
+                        _LOGGER.info("[ENTRADA_DIEGO] %s last_spike_ts_500 reset a now (t=%.0fs era STOP)",
+                                     sym, _t_sin_spk_saved)
+                    else:
+                        st.last_spike_ts_500 = _saved_spk_ts
                     st.s500_drought_s1_ts         = 0.0  # No asumir drought en arranque
                     st.broker_blocked_until_500   = 0.0  # No heredar bloqueo de sesión anterior
                     _c5ts = float(s.get("crash500_next_open_ts", 0.0))
