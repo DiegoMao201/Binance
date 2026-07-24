@@ -997,7 +997,37 @@ class EntradaDiego:
                     tier_idx, stake = 0, LADDER_500_TIERS[0][1]
                     _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap post-broker → ciclo nuevo $1", sym)
             else:
-                return  # contrato vivo: dejar correr hasta que broker lo cierre
+                # ── Cierre a los 4 min si el broker no cerró antes ────────────
+                contract_age = now - state.burst_phase_started_at
+                if contract_age >= LADDER_500_CONTRACT_S:
+                    _cid = int(state.contract_id)
+                    _pnl = state.current_profit
+                    state.contract_id     = None
+                    state.current_profit  = 0.0
+                    state.peak_profit_500 = 0.0
+                    try:
+                        await self._executor.close_contract(_cid)
+                    except Exception as exc:
+                        _LOGGER.error("[ENTRADA_DIEGO] %s LADDER 4m CLOSE error: %s", sym, exc)
+                    state.hour_pnl_500 += _pnl
+                    self._add_global_pnl(sym, _pnl, now)
+                    state.last_close_profit = _pnl
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s LADDER 4m CLOSE cid=%s pnl=%.4f tier=%d hour_pnl=+%.2f",
+                        sym, _cid, _pnl, tier_idx, state.hour_pnl_500,
+                    )
+                    if state.hour_pnl_500 >= 6.0:
+                        _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras 4m CLOSE → pausa hora", sym)
+                        state.burst_phase = "HOUR_DONE"
+                        return
+                    t_sin_spike = now - state.last_spike_ts_500
+                    tier_idx, stake = self._ladder_tier_500(t_sin_spike)
+                    if tier_idx < 0:
+                        state.last_spike_ts_500 = now
+                        tier_idx, stake = 0, LADDER_500_TIERS[0][1]
+                        _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap post-4m → ciclo nuevo $1", sym)
+                else:
+                    return  # dentro de 4 min: dejar correr (profit floor ya vigila)
 
         # ── Sin contrato: abrir en tier actual ───────────────────────────────
         t_sin_spike = now - state.last_spike_ts_500
