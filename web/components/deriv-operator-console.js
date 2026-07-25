@@ -524,13 +524,13 @@ function SlopeGateSection({ symbol }) {
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
 const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
-// 1000s p25-p75 state machine (coincidir con entrada_diego.py)
-const K1000_COOLING_S = 900;   // 15min cooldown post-spike (p0→p25)
-const K1000_WINDOW_S  = 900;   // 15min ventana contrato (p25→p75)
-const K1000_STAKE_START = 3;
-const K1000_STAKE_MID   = 6;
-const K1000_STAKE_MAX   = 12;
-const K1000_HORA_TARGET = 1.0; // $1/hora
+// 1000s ciclo simple (coincidir con entrada_diego.py)
+const K1000_WAIT_S       = 900;   // 15min espera entre contratos
+const K1000_CONTRACT_S   = 600;   // 10min duración contrato
+const K1000_SPIKE_HOLD_S = 240;   // 4min espera post-spike
+const K1000_STAKE_START  = 3;
+const K1000_STAKES_1000  = [3, 6, 15, 30]; // escalera $3→$6→$15→$30
+const K1000_HORA_TARGET  = 1.0; // (legacy display)
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
 const S20_WINDOW_S   = 690;   // 11.5 min ventana post-spike
@@ -580,46 +580,36 @@ function EntradaDiegoSection({ symbol }) {
   const isCrash500 = symbol === "CRASH500";
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
 
-  // ── 1000s: p25-p75 state machine WAIT_SPIKE→COOLING(15m)→WINDOW(15m) ────────
+  // ── 1000s: ciclo simple WAIT(15m) → IN_CONTRACT(10m) → SPIKE_HOLD(4m) ────
   if (is1000) {
     const {
-      k1000_phase     = "WAIT_SPIKE",
-      k1000_phase_ts  = 0,
-      k1000_cycle_stake = K1000_STAKE_START,
-      hour_pnl_1000   = 0,
-      k1000_blocked_until = 0,
+      k1000_phase          = "WAIT",
+      k1000_phase_ts       = 0,
+      k1000_stake_idx      = 0,
+      k1000_cycle_stake    = K1000_STAKE_START,
+      k1000_spike_hold_until = 0,
     } = edState;
 
-    // Normalizar fases viejas del disco al arranque
-    const phase1k = ["WAIT_SPIKE","COOLING","WINDOW"].includes(k1000_phase)
-      ? k1000_phase : "WAIT_SPIKE";
-
-    const stake1k   = k1000_cycle_stake || K1000_STAKE_START;
-    const isBlocked = k1000_blocked_until > nowSec;
-    const blockRem  = isBlocked ? Math.ceil(k1000_blocked_until - nowSec) : 0;
-    const horaFrac  = Math.min(1, hour_pnl_1000 / K1000_HORA_TARGET);
-    const horaColor = hour_pnl_1000 >= K1000_HORA_TARGET ? "#22d3a3"
-      : hour_pnl_1000 > 0 ? "#f5c43c" : "#64748b";
+    const phase1k   = ["WAIT","IN_CONTRACT","SPIKE_HOLD"].includes(k1000_phase)
+      ? k1000_phase : "WAIT";
+    const stakeIdx  = Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
+    const stake1k   = k1000_cycle_stake || K1000_STAKES_1000[stakeIdx];
 
     // Timer por fase
-    const phaseTotal   = phase1k === "COOLING" ? K1000_COOLING_S : phase1k === "WINDOW" ? K1000_WINDOW_S : 0;
     const phaseElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
-    const phaseRem     = phaseTotal > 0 ? Math.max(0, phaseTotal - phaseElapsed) : 0;
-    const phasePct     = phaseTotal > 0 ? Math.min(100, (phaseElapsed / phaseTotal) * 100) : 0;
+    const phaseTotal   = phase1k === "WAIT" ? K1000_WAIT_S
+      : phase1k === "IN_CONTRACT" ? K1000_CONTRACT_S : K1000_SPIKE_HOLD_S;
+    const phaseRem   = phase1k === "SPIKE_HOLD" && k1000_spike_hold_until > 0
+      ? Math.max(0, k1000_spike_hold_until - nowSec)
+      : Math.max(0, phaseTotal - phaseElapsed);
+    const phasePct   = Math.min(100, (phaseElapsed / phaseTotal) * 100);
 
     // Colores por fase
-    const phaseColor = phase1k === "WINDOW"   ? "#22d3a3"
-      : phase1k === "COOLING" ? "#62d4ff"
+    const phaseColor = phase1k === "IN_CONTRACT" ? "#22d3a3"
+      : phase1k === "SPIKE_HOLD"   ? "#f5c43c"
       : "#64748b";
 
     const pnl1kColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
-
-    // Stake pills: $3 → $6 → $12
-    const stakePills = [
-      { v: K1000_STAKE_START, label: `$${K1000_STAKE_START}` },
-      { v: K1000_STAKE_MID,   label: `$${K1000_STAKE_MID}` },
-      { v: K1000_STAKE_MAX,   label: `$${K1000_STAKE_MAX}` },
-    ];
 
     const base1k = {
       marginTop: 8, padding: "8px 10px", borderRadius: 6,
@@ -628,15 +618,13 @@ function EntradaDiegoSection({ symbol }) {
     };
 
     // Texto de estado por fase
-    const stateText = isBlocked
-      ? `HORA_TARGET $${hour_pnl_1000.toFixed(2)} — pausado ${_fmtS(blockRem)}`
-      : phase1k === "WAIT_SPIKE"
-        ? `Stake listo $${stake1k} · esperando spike`
-        : phase1k === "COOLING"
-          ? `Spike detectado · abriendo en ${_fmtS(phaseRem)}`
-          : contract_id
-            ? `$${stake1k} en mercado · ventana ${_fmtS(phaseRem)}`
-            : `WINDOW — sin contrato aún`;
+    const stateText = phase1k === "WAIT"
+      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k}`
+      : phase1k === "IN_CONTRACT"
+        ? contract_id
+          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
+          : `IN_CONTRACT — abriendo contrato...`
+        : `Spike! Cerrando en ${_fmtS(phaseRem)}`;
 
     return (
       <div style={base1k}>
@@ -645,50 +633,36 @@ function EntradaDiegoSection({ symbol }) {
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
             background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.06em" }}>
-            {isBlocked ? "BLOQUEADO" : phase1k}
+            {phase1k}
           </span>
-          {phase1k === "WINDOW" && contract_id && (
+          {(phase1k === "IN_CONTRACT" || phase1k === "SPIKE_HOLD") && contract_id && (
             <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
               {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
             </span>
           )}
-          {phase1k === "WAIT_SPIKE" && (
-            <span style={{ marginLeft: "auto", fontSize: 9, color: horaColor, fontWeight: 700 }}>
-              hora ${hour_pnl_1000.toFixed(2)}/$1
-            </span>
-          )}
         </div>
 
-        {/* Timer bar (COOLING o WINDOW) */}
-        {(phase1k === "COOLING" || phase1k === "WINDOW") && (
-          <div style={{ width: "100%", height: 3, background: `${phaseColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
-            <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
-          </div>
-        )}
+        {/* Timer bar */}
+        <div style={{ width: "100%", height: 3, background: `${phaseColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
+          <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
+        </div>
 
-        {/* HORA_TARGET bar (WAIT_SPIKE) */}
-        {phase1k === "WAIT_SPIKE" && !isBlocked && (
-          <div style={{ width: "100%", height: 2, background: "rgba(255,255,255,0.08)", borderRadius: 1, margin: "5px 0 3px", overflow: "hidden" }}>
-            <div style={{ width: `${horaFrac * 100}%`, height: "100%", background: horaColor, transition: "width 1s linear" }} />
-          </div>
-        )}
-
-        {/* Stake pills $3 → $6 → $12 */}
+        {/* Stake pills $3 → $6 → $15 → $30 */}
         <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-          {stakePills.map(p => {
-            const active = stake1k === p.v;
+          {K1000_STAKES_1000.map((s, i) => {
+            const active = i === stakeIdx;
             return (
-              <span key={p.v} style={{
+              <span key={i} style={{
                 fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
                 background: active ? `${phaseColor}28` : "rgba(255,255,255,0.03)",
                 border: `1px solid ${active ? phaseColor : "rgba(255,255,255,0.09)"}`,
                 color: active ? phaseColor : "rgba(255,255,255,0.22)",
                 transition: "all 0.3s",
-              }}>{p.label}</span>
+              }}>${s}</span>
             );
           })}
           <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
-            {phase1k === "WINDOW" ? "→spike:reset·$3" : phase1k === "COOLING" ? "→15m:WINDOW" : "→spike:COOLING"}
+            {phase1k === "IN_CONTRACT" ? "→spike:SPIKE_HOLD" : phase1k === "SPIKE_HOLD" ? "→4m:reset·$3" : "→15m:abrir"}
           </span>
         </div>
 
@@ -700,7 +674,7 @@ function EntradaDiegoSection({ symbol }) {
 
   // ── 500s: Ladder 12min (3 tiers × 4min) + REST 20min ─────────────
   // Zona caliente: 78% de spikes en 0-12min. Después → REST 20min.
-  const LADDER_TIERS   = [4, 12, 32];   // ambos símbolos: $4→$12→$32
+  const LADDER_TIERS   = [32, 12, 4];   // ambos símbolos: $32→$12→$4 (mayor stake al inicio)
   const LADDER_CYCLE_S = 720;    // 12 min zona caliente
   const LADDER_REST_S  = 1200;   // 20 min descanso
   const CONTRACT_S     = 240;    // 4 min por contrato
