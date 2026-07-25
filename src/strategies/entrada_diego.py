@@ -251,8 +251,10 @@ LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
 LADDER_BURST_MAX_STAKE  = 32.0    # cap burst = tier2 base (no doblar $32)
 LADDER_500_CYCLE_S    = 720.0    # 12 min — fin zona caliente → REST
 LADDER_500_CONTRACT_S = 240.0    # 4 min por contrato (cerrar manualmente)
-LADDER_500_REST_S     = 1200.0   # 20 min descanso (post-ciclo sin spike o 2 wins)
-S500_CONSEC_WINS_REST = 2        # wins consecutivos → REST 20min
+LADDER_500_REST_S     = 1200.0   # 20 min descanso (post-ciclo sin spike o 2 wins con profit+)
+S500_CONSEC_WINS_REST = 2        # wins consecutivos (con hour_pnl>0) → REST 20min
+# Si ≥N spikes llegan DURANTE el REST → post-cluster, sequía probable → esperar siguiente hora
+LADDER_REST_CLUSTER_SPIKES = 3
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
 S500_STAKE_LOW        = 4.0      # tier0 = $4 (nuevo mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
@@ -328,8 +330,9 @@ class _SymState:
     spikes_in_contract_500: int   = 0    # reservado — compatibilidad estado guardado
     last_spike_ts_500:      float = 0.0  # reservado — compatibilidad estado guardado
     protecting_500:         bool  = False # True: estamos en $1 sensor
-    consec_wins_500:        int   = 0    # wins consecutivos ladder 500 (2 → REST 20min)
+    consec_wins_500:        int   = 0    # wins consecutivos ladder 500 (2 + hour_pnl>0 → REST)
     ladder_rest_until_500:  float = 0.0  # epoch hasta cuando en REST (0 = activo)
+    rest_spikes_500:        int   = 0    # spikes contados durante el REST actual
     protection_started_at:  float = 0.0  # epoch inicio del $1 sensor actual
     protection_spikes:      int   = 0    # spikes desde que entró a este $1 sensor (se resetea al volver de $20)
     burst_spikes_total:     int   = 0    # acumulado global del burst en la hora UTC actual
@@ -486,6 +489,7 @@ class _SymState:
             "ladder_rest_s":           LADDER_500_REST_S,
             "consec_wins_500":         self.consec_wins_500,
             "ladder_rest_until_500":   round(self.ladder_rest_until_500, 3),
+            "rest_spikes_500":         self.rest_spikes_500,
         }
         return d
 
@@ -880,16 +884,17 @@ class EntradaDiego:
         return LADDER_500_TIERS[0][1]
 
     def _ladder_check_rest_500(self, sym: str, pnl: float, now: float) -> bool:
-        """Actualiza wins consecutivos. Si ≥2 wins → REST 20min. Retorna True si REST activado."""
+        """Actualiza wins consecutivos. Si ≥2 wins Y hour_pnl>0 → REST 20min. Retorna True si REST."""
         state = self._states[sym]
         if pnl > 0.05:
             state.consec_wins_500 += 1
-            if state.consec_wins_500 >= S500_CONSEC_WINS_REST:
+            if state.consec_wins_500 >= S500_CONSEC_WINS_REST and state.hour_pnl_500 > 0:
                 state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                state.rest_spikes_500 = 0
                 state.consec_wins_500 = 0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER REST 20min (%d wins consecutivos, pnl=%.2f)",
-                    sym, S500_CONSEC_WINS_REST, pnl,
+                    "[ENTRADA_DIEGO] %s LADDER REST 20min (%d wins, hour_pnl=+%.2f)",
+                    sym, S500_CONSEC_WINS_REST, state.hour_pnl_500,
                 )
                 return True
         else:
@@ -930,26 +935,39 @@ class EntradaDiego:
                 state.burst_phase = "HOUR_DONE"
             return
 
-        # ── Gate REST 20min (post-ciclo sin spike o 2 wins consecutivos) ──────
+        # ── Gate REST 20min (post-ciclo sin spike o 2 wins+profit positivo) ────
         if state.ladder_rest_until_500 > 0:
-            # Si llega spike nuevo durante el descanso → reactivar inmediatamente
+            # Contar spikes durante el descanso (NO cancelar REST, solo registrar)
             _spk_check = float(self._risk.get_last_spike_ts(sym) or 0.0)
             if _spk_check > state.last_spike_ts_500 and _spk_check > 0:
                 _gap = (_spk_check - state.last_spike_ts_500) if state.last_spike_ts_500 > 0 else 9999.0
-                state.last_spike_ts_500 = _spk_check
-                state.ladder_rest_until_500 = 0.0
-                state.consec_wins_500 = 0
+                state.last_spike_ts_500 = _spk_check   # actualizar referencia
+                state.rest_spikes_500  += 1
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER REST cancelado por spike (gap=%.0fs) → reactivar $4",
-                    sym, _gap,
+                    "[ENTRADA_DIEGO] %s LADDER REST spike #%d (gap=%.0fs) — acumulando en descanso",
+                    sym, state.rest_spikes_500, _gap,
                 )
-            elif now < state.ladder_rest_until_500:
+            if now < state.ladder_rest_until_500:
+                return  # descanso activo
+            # REST terminado: evaluar si re-entrar o esperar siguiente hora
+            _rspk = state.rest_spikes_500
+            state.rest_spikes_500       = 0
+            state.ladder_rest_until_500 = 0.0
+            if _rspk >= LADDER_REST_CLUSTER_SPIKES:
+                # Cluster de spikes durante el REST → sequía post-cluster probable
+                _next_hour = float(int(now // 3600 + 1) * 3600)
+                state.ladder_rest_until_500 = _next_hour
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER %d spikes en REST → post-cluster, esperar siguiente hora UTC",
+                    sym, _rspk,
+                )
                 return
-            else:
-                # REST terminado naturalmente: ciclo fresco
-                state.ladder_rest_until_500 = 0.0
+            # Pocos spikes (o cero): ciclo fresco
+            if _rspk == 0:
                 state.last_spike_ts_500 = now
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST terminado → ciclo fresco $4", sym)
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s LADDER REST terminado (%d spikes) → ciclo fresco $4", sym, _rspk,
+            )
 
         # ── Spike tracking ────────────────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
@@ -1052,7 +1070,8 @@ class EntradaDiego:
                     return
             # Fin zona caliente (con o sin contrato) → REST 20 min
             state.ladder_rest_until_500 = now + LADDER_500_REST_S
-            state.consec_wins_500 = 0
+            state.consec_wins_500  = 0
+            state.rest_spikes_500  = 0
             _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (zona caliente agotada)", sym)
             return
 
@@ -2036,6 +2055,7 @@ class EntradaDiego:
                             st.consec_wins_500       = int(s.get("consec_wins_500", 0))
                             _rut = float(s.get("ladder_rest_until_500", 0.0))
                             st.ladder_rest_until_500 = _rut if _rut > now else 0.0
+                            st.rest_spikes_500       = int(s.get("rest_spikes_500", 0))
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                             _k1000_ph = s.get("k1000_phase", "WAIT_SPIKE")
