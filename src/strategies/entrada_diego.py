@@ -912,28 +912,19 @@ class EntradaDiego:
         # ── Reset hora UTC ────────────────────────────────────────────────────
         _cur_hour_epoch = float(int(now // 3600) * 3600)
         if state.hour_start_ts_500 < _cur_hour_epoch:
-            # Nueva hora: resetear PnL y reactivar si estaba en HOUR_DONE
+            # Nueva hora: resetear PnL acumulada (usada para gate REST 2wins)
             _prev = state.hour_pnl_500
             state.prev_hour_pnl_500  = _prev
             state.hour_pnl_500       = 0.0
             state.hour_start_ts_500  = _cur_hour_epoch
+            # Si venía de HOUR_DONE (estado legado) o REST extendido hasta esta hora → reactivar
             if state.burst_phase == "HOUR_DONE":
                 state.burst_phase       = "LADDER"
-                state.last_spike_ts_500 = now   # ciclo fresco desde $1
+                state.last_spike_ts_500 = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER nueva hora UTC → ciclo fresco $1 (prev_pnl=+%.2f)",
+                    "[ENTRADA_DIEGO] %s LADDER nueva hora UTC → ciclo fresco (prev_pnl=+%.2f)",
                     sym, _prev,
                 )
-
-        # ── Gate hora: ≥$6 ganados → no operar resto de la hora ──────────────
-        if state.hour_pnl_500 >= 6.0:
-            if state.burst_phase != "HOUR_DONE":
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s HOUR_DONE hour_pnl=+%.2f → pausa hasta siguiente hora UTC",
-                    sym, state.hour_pnl_500,
-                )
-                state.burst_phase = "HOUR_DONE"
-            return
 
         # ── Gate REST 20min (post-ciclo sin spike o 2 wins+profit positivo) ────
         if state.ladder_rest_until_500 > 0:
@@ -1014,11 +1005,7 @@ class EntradaDiego:
                 "[ENTRADA_DIEGO] %s LADDER FLOOR cid=%s peak=%.4f pnl=%.4f (%.0f%%) hour_pnl=+%.2f",
                 sym, _cid, _pk, _pnl, 100 * _pnl / _pk if _pk else 0, state.hour_pnl_500,
             )
-            if state.hour_pnl_500 >= 6.0:
-                _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras FLOOR → pausa hora", sym)
-                state.burst_phase = "HOUR_DONE"
-                return
-            # Protección: 2 wins consecutivos → REST 20min
+            # Protección: 2 wins consecutivos con hour_pnl>0 → REST 20min
             if self._ladder_check_rest_500(sym, _pnl, now):
                 return
             # Reabrir en tier correcto (o REST si >12min sin spike)
@@ -1065,9 +1052,6 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s LADDER 12min END cid=%s pnl=%.4f hour_pnl=+%.2f",
                     sym, _cid, _pnl, state.hour_pnl_500,
                 )
-                if state.hour_pnl_500 >= 6.0:
-                    state.burst_phase = "HOUR_DONE"
-                    return
             # Fin zona caliente (con o sin contrato) → REST 20 min
             state.ladder_rest_until_500 = now + LADDER_500_REST_S
             state.consec_wins_500  = 0
@@ -1094,10 +1078,6 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s LADDER BROKER_CLOSE cid=%s pnl=%.4f age=%.0fs hour_pnl=+%.2f",
                     sym, _cid, _pnl, _age, state.hour_pnl_500,
                 )
-                if state.hour_pnl_500 >= 6.0:
-                    _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras BROKER_CLOSE → pausa hora", sym)
-                    state.burst_phase = "HOUR_DONE"
-                    return
                 if self._ladder_check_rest_500(sym, _pnl, now):
                     return
                 # Recalcular tier
@@ -1128,10 +1108,6 @@ class EntradaDiego:
                         "[ENTRADA_DIEGO] %s LADDER 4m CLOSE cid=%s pnl=%.4f tier=%d hour_pnl=+%.2f",
                         sym, _cid, _pnl, tier_idx, state.hour_pnl_500,
                     )
-                    if state.hour_pnl_500 >= 6.0:
-                        _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras 4m CLOSE → pausa hora", sym)
-                        state.burst_phase = "HOUR_DONE"
-                        return
                     if self._ladder_check_rest_500(sym, _pnl, now):
                         return
                     t_sin_spike = now - state.last_spike_ts_500
