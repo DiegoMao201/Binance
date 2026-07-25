@@ -237,21 +237,24 @@ SPIKE_DETECTOR_BOOM_MIN_RATIO = float(os.getenv("ENTRADA_DIEGO_SPIKE_DET_BOOM_MI
 STAKE_500_FIXED        = float(os.getenv("ENTRADA_DIEGO_500_STAKE",   "3.0"))
 SL_USD_500_SIMPLE      = float(os.getenv("ENTRADA_DIEGO_500_SL_USD",  "14.0"))
 HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   # 30 min
-# ── 500s Ladder: ciclo 28min, 7 tiers de 4min cada uno ───────────────────
-# Escalada por tiempo sin spike: $1→$2→$4→$8→$16→$32→$64 → STOP (>28m)
+# ── 500s Ladder: solo zona caliente 0-12min (78% de spikes histórico aquí) ──
+# 3 tiers × 4min = 12 min. Después → REST 20min (no más escalada en sequía).
+# Dato 14h: tier0 WR=62-75% (+$3/$2), tiers1+ WR=0-27% (solo pérdidas).
 LADDER_500_TIERS: list[tuple[float, float]] = [
-    (240,   1.0),   # 0-4 min   sin spike
-    (480,   2.0),   # 4-8 min
-    (720,   4.0),   # 8-12 min
-    (960,   8.0),   # 12-16 min
-    (1200, 16.0),   # 16-20 min
-    (1440, 32.0),   # 20-24 min
-    (1680, 64.0),   # 24-28 min
+    (240,   4.0),   # tier0: 0-4 min  → zona caliente inicio
+    (480,  12.0),   # tier1: 4-8 min  → zona caliente media
+    (720,  32.0),   # tier2: 8-12 min → zona caliente máxima
 ]
-LADDER_500_CYCLE_S    = 1680.0   # 28 min — tras esto: STOP, esperar spike
+# Ventana burst: si hay ≥2 spikes en los últimos BURST_WINDOW_S → multiplicar stake ×2
+LADDER_BURST_WINDOW_S   = 300.0   # 5 min
+LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
+LADDER_BURST_MAX_STAKE  = 32.0    # cap burst = tier2 base (no doblar $32)
+LADDER_500_CYCLE_S    = 720.0    # 12 min — fin zona caliente → REST
 LADDER_500_CONTRACT_S = 240.0    # 4 min por contrato (cerrar manualmente)
+LADDER_500_REST_S     = 1200.0   # 20 min descanso (post-ciclo sin spike o 2 wins)
+S500_CONSEC_WINS_REST = 2        # wins consecutivos → REST 20min
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
-S500_STAKE_LOW        = 1.0
+S500_STAKE_LOW        = 4.0      # tier0 = $4 (nuevo mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
 S500_HOUR_TARGET_USD  = float(os.getenv("S500_HOUR_TARGET_USD", "1.0"))
 
@@ -325,7 +328,8 @@ class _SymState:
     spikes_in_contract_500: int   = 0    # reservado — compatibilidad estado guardado
     last_spike_ts_500:      float = 0.0  # reservado — compatibilidad estado guardado
     protecting_500:         bool  = False # True: estamos en $1 sensor
-    consec_wins_500:        int   = 0    # wins consecutivos con PnL>0 en $20
+    consec_wins_500:        int   = 0    # wins consecutivos ladder 500 (2 → REST 20min)
+    ladder_rest_until_500:  float = 0.0  # epoch hasta cuando en REST (0 = activo)
     protection_started_at:  float = 0.0  # epoch inicio del $1 sensor actual
     protection_spikes:      int   = 0    # spikes desde que entró a este $1 sensor (se resetea al volver de $20)
     burst_spikes_total:     int   = 0    # acumulado global del burst en la hora UTC actual
@@ -479,6 +483,9 @@ class _SymState:
             "peak_profit_500":         round(self.peak_profit_500, 4),
             "ladder_cycle_s":          LADDER_500_CYCLE_S,
             "ladder_contract_s":       LADDER_500_CONTRACT_S,
+            "ladder_rest_s":           LADDER_500_REST_S,
+            "consec_wins_500":         self.consec_wins_500,
+            "ladder_rest_until_500":   round(self.ladder_rest_until_500, 3),
         }
         return d
 
@@ -846,12 +853,48 @@ class EntradaDiego:
                 )
                 await self._open(sym, state, now)
 
-    def _ladder_tier_500(self, t_sin_spike: float) -> tuple[int, float]:
-        """Retorna (tier_idx, stake). tier_idx=-1 si t >= 28min (STOP)."""
+    def _ladder_tier_500(self, sym: str, t_sin_spike: float) -> tuple[int, float]:
+        """Retorna (tier_idx, stake). tier_idx=-1 si ≥12min (fuera de zona caliente)."""
         for idx, (t_max, stake) in enumerate(LADDER_500_TIERS):
             if t_sin_spike < t_max:
                 return idx, stake
         return -1, 0.0
+
+    def _burst_stake_500(self, sym: str, now: float, base_stake: float) -> float:
+        """Aplica ×2 si hay ≥2 spikes en últimos 5min (burst confirmado). Cap $32."""
+        state = self._states[sym]
+        cutoff = now - LADDER_BURST_WINDOW_S
+        n_recent = sum(1 for t in state.recent_spike_ts if t > cutoff)
+        if n_recent >= LADDER_BURST_MIN_SPIKES:
+            boosted = min(base_stake * 2.0, LADDER_BURST_MAX_STAKE)
+            if boosted != base_stake:
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER BURST boost stake $%.0f→$%.0f (%d spikes/5min)",
+                    sym, base_stake, boosted, n_recent,
+                )
+            return boosted
+        return base_stake
+
+    def _ladder_initial_stake(self, sym: str) -> float:
+        """Stake del tier 0 (igual para ambos símbolos)."""
+        return LADDER_500_TIERS[0][1]
+
+    def _ladder_check_rest_500(self, sym: str, pnl: float, now: float) -> bool:
+        """Actualiza wins consecutivos. Si ≥2 wins → REST 20min. Retorna True si REST activado."""
+        state = self._states[sym]
+        if pnl > 0.05:
+            state.consec_wins_500 += 1
+            if state.consec_wins_500 >= S500_CONSEC_WINS_REST:
+                state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                state.consec_wins_500 = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER REST 20min (%d wins consecutivos, pnl=%.2f)",
+                    sym, S500_CONSEC_WINS_REST, pnl,
+                )
+                return True
+        else:
+            state.consec_wins_500 = 0
+        return False
 
     # ── 500s: escalera de stake por tiempo sin spike ─────────────────────────
     # Ciclo infinito: $1→$2→$4→$8→$16→$32→$64 → wrap → $1  (broker cierra)
@@ -886,6 +929,15 @@ class EntradaDiego:
                 )
                 state.burst_phase = "HOUR_DONE"
             return
+
+        # ── Gate REST 20min (post-ciclo sin spike o 2 wins consecutivos) ──────
+        if state.ladder_rest_until_500 > 0:
+            if now < state.ladder_rest_until_500:
+                return
+            # REST terminado: ciclo fresco
+            state.ladder_rest_until_500 = 0.0
+            state.last_spike_ts_500 = now
+            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST terminado → ciclo fresco $4", sym)
 
         # ── Spike tracking ────────────────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
@@ -936,13 +988,17 @@ class EntradaDiego:
                 _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras FLOOR → pausa hora", sym)
                 state.burst_phase = "HOUR_DONE"
                 return
-            # Reabrir en tier correcto (o ciclo nuevo si ≥28min)
+            # Protección: 2 wins consecutivos → REST 20min
+            if self._ladder_check_rest_500(sym, _pnl, now):
+                return
+            # Reabrir en tier correcto (o REST si >12min sin spike)
             _t = now - state.last_spike_ts_500
-            _ti, _st = self._ladder_tier_500(_t)
+            _ti, _st = self._ladder_tier_500(sym, _t)
             if _ti < 0:
-                state.last_spike_ts_500 = now
-                _ti, _st = 0, LADDER_500_TIERS[0][1]
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap post-FLOOR → ciclo nuevo $1", sym)
+                state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (post-FLOOR >12min)", sym)
+                return
+            _st = self._burst_stake_500(sym, now, _st)
             state.burst_phase         = "LADDER"
             state.burst_phase_started_at = now
             state.peak_profit_500     = 0.0
@@ -951,19 +1007,42 @@ class EntradaDiego:
 
         # ── Tier actual ───────────────────────────────────────────────────────
         t_sin_spike = now - state.last_spike_ts_500
-        tier_idx, stake = self._ladder_tier_500(t_sin_spike)
+        tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
+        stake = self._burst_stake_500(sym, now, stake)
 
-        # ── ≥28min: ciclo wrappea en cuanto el contrato cierre ────────────────
+        # ── >12min sin spike: cerrar contrato y entrar REST 20min ─────────────
         if tier_idx < 0:
             if state.contract_id is not None:
-                # El $64 todavía corre: dejar al broker cerrarlo, luego wrap
-                state.burst_phase = "LADDER"
-                return
-            # Sin contrato: wrappear ciclo → $1
-            state.last_spike_ts_500 = now
-            t_sin_spike = 0.0
-            tier_idx, stake = 0, LADDER_500_TIERS[0][1]
-            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap → ciclo nuevo $1", sym)
+                contract_age = now - state.burst_phase_started_at
+                if contract_age < LADDER_500_CONTRACT_S:
+                    # Tier2 dentro de sus 4 min: dejar correr (floor vigila)
+                    state.burst_phase = "LADDER"
+                    return
+                # 4 min cumplidos → cerrar y entrar REST
+                _cid = int(state.contract_id)
+                _pnl = state.current_profit
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
+                try:
+                    await self._executor.close_contract(_cid)
+                except Exception as exc:
+                    _LOGGER.error("[ENTRADA_DIEGO] %s LADDER 12min CLOSE error: %s", sym, exc)
+                state.hour_pnl_500 += _pnl
+                self._add_global_pnl(sym, _pnl, now)
+                state.last_close_profit = _pnl
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER 12min END cid=%s pnl=%.4f hour_pnl=+%.2f",
+                    sym, _cid, _pnl, state.hour_pnl_500,
+                )
+                if state.hour_pnl_500 >= 6.0:
+                    state.burst_phase = "HOUR_DONE"
+                    return
+            # Fin zona caliente (con o sin contrato) → REST 20 min
+            state.ladder_rest_until_500 = now + LADDER_500_REST_S
+            state.consec_wins_500 = 0
+            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (zona caliente agotada)", sym)
+            return
 
         state.burst_phase = "LADDER"
 
@@ -988,14 +1067,16 @@ class EntradaDiego:
                     _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras BROKER_CLOSE → pausa hora", sym)
                     state.burst_phase = "HOUR_DONE"
                     return
-                # Recalcular tier (podría haber wrapeado durante la vida del contrato)
+                if self._ladder_check_rest_500(sym, _pnl, now):
+                    return
+                # Recalcular tier
                 t_sin_spike = now - state.last_spike_ts_500
-                tier_idx, stake = self._ladder_tier_500(t_sin_spike)
+                tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
                 if tier_idx < 0:
-                    # $64 cerró y ciclo ≥28min → wrap → $1
-                    state.last_spike_ts_500 = now
-                    tier_idx, stake = 0, LADDER_500_TIERS[0][1]
-                    _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap post-broker → ciclo nuevo $1", sym)
+                    state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                    _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (broker close, >12min)", sym)
+                    return
+                stake = self._burst_stake_500(sym, now, stake)
             else:
                 # ── Cierre a los 4 min si el broker no cerró antes ────────────
                 contract_age = now - state.burst_phase_started_at
@@ -1020,12 +1101,15 @@ class EntradaDiego:
                         _LOGGER.info("[ENTRADA_DIEGO] %s HOUR_DONE tras 4m CLOSE → pausa hora", sym)
                         state.burst_phase = "HOUR_DONE"
                         return
+                    if self._ladder_check_rest_500(sym, _pnl, now):
+                        return
                     t_sin_spike = now - state.last_spike_ts_500
-                    tier_idx, stake = self._ladder_tier_500(t_sin_spike)
+                    tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
                     if tier_idx < 0:
-                        state.last_spike_ts_500 = now
-                        tier_idx, stake = 0, LADDER_500_TIERS[0][1]
-                        _LOGGER.info("[ENTRADA_DIEGO] %s LADDER wrap post-4m → ciclo nuevo $1", sym)
+                        state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                        _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (4m close, >12min)", sym)
+                        return
+                    stake = self._burst_stake_500(sym, now, stake)
                 else:
                     return  # dentro de 4 min: dejar correr (profit floor ya vigila)
 
@@ -1937,6 +2021,9 @@ class EntradaDiego:
                             st.s80_pending                   = bool(s.get("s80_pending", False))
                             _c5ts = float(s.get("crash500_next_open_ts", 0.0))
                             st.crash500_next_open_ts = _c5ts if _c5ts > now else 0.0
+                            st.consec_wins_500       = int(s.get("consec_wins_500", 0))
+                            _rut = float(s.get("ladder_rest_until_500", 0.0))
+                            st.ladder_rest_until_500 = _rut if _rut > now else 0.0
                         if sym in SYMBOLS_1000:
                             st.rest_mode = bool(s.get("rest_mode", False))
                             _k1000_ph = s.get("k1000_phase", "WAIT_SPIKE")
