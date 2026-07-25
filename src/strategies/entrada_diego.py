@@ -932,12 +932,24 @@ class EntradaDiego:
 
         # ── Gate REST 20min (post-ciclo sin spike o 2 wins consecutivos) ──────
         if state.ladder_rest_until_500 > 0:
-            if now < state.ladder_rest_until_500:
+            # Si llega spike nuevo durante el descanso → reactivar inmediatamente
+            _spk_check = float(self._risk.get_last_spike_ts(sym) or 0.0)
+            if _spk_check > state.last_spike_ts_500 and _spk_check > 0:
+                _gap = (_spk_check - state.last_spike_ts_500) if state.last_spike_ts_500 > 0 else 9999.0
+                state.last_spike_ts_500 = _spk_check
+                state.ladder_rest_until_500 = 0.0
+                state.consec_wins_500 = 0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER REST cancelado por spike (gap=%.0fs) → reactivar $4",
+                    sym, _gap,
+                )
+            elif now < state.ladder_rest_until_500:
                 return
-            # REST terminado: ciclo fresco
-            state.ladder_rest_until_500 = 0.0
-            state.last_spike_ts_500 = now
-            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST terminado → ciclo fresco $4", sym)
+            else:
+                # REST terminado naturalmente: ciclo fresco
+                state.ladder_rest_until_500 = 0.0
+                state.last_spike_ts_500 = now
+                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST terminado → ciclo fresco $4", sym)
 
         # ── Spike tracking ────────────────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
