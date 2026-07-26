@@ -523,7 +523,7 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"]);
+const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 // 1000s ciclo simple (coincidir con entrada_diego.py)
 const K1000_WAIT_S       = 900;   // 15min espera entre contratos
 const K1000_CONTRACT_S   = 600;   // 10min duración contrato
@@ -576,7 +576,7 @@ function EntradaDiegoSection({ symbol }) {
   } = edState;
 
   const nowSec     = now / 1000;
-  const is1000     = symbol.includes("1000");
+  const is1000     = symbol.includes("1000") || symbol.includes("900");
   const isCrash500 = symbol === "CRASH500";
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
 
@@ -2109,7 +2109,7 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "BOOM1000", "CRASH1000"];
+  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
@@ -2141,7 +2141,7 @@ export default function DerivOperatorConsole() {
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
   // Símbolos disponibles para filtro: unión de todos los que aparecen en datos reales
-  const _SYM_PREF = ["CRASH500", "BOOM500", "CRASH1000", "BOOM1000"];
+  const _SYM_PREF = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
   const _spkSyms  = [...new Set(spikeTable.map(r => r.symbol))];
   const _feedSyms = [...new Set(confFeed.map(r => r.symbol))];
   const _allSyms  = [...new Set([..._SYM_PREF, ..._spkSyms, ..._feedSyms])].filter(Boolean);
