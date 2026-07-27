@@ -41,9 +41,13 @@ from typing import Any, Optional
 _LOGGER = logging.getLogger("entrada_diego")
 
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
+SYMBOLS_600  = {"CRASH600",  "BOOM600"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
+SYMBOLS_900  = {"CRASH900",  "BOOM900"}
 SYMBOLS_R    = set()   # R_75 y JD75 suspendidos — no estudiados aún
-SYMBOLS_ED   = SYMBOLS_500 | SYMBOLS_1000 | SYMBOLS_R
+SYMBOLS_LADDER = SYMBOLS_500 | SYMBOLS_600   # todos usan lógica LADDER
+SYMBOLS_K1000  = SYMBOLS_1000 | SYMBOLS_900  # todos usan ciclo K1000
+SYMBOLS_ED   = SYMBOLS_LADDER | SYMBOLS_K1000 | SYMBOLS_R
 
 _STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+
 # CRASH500 escalación gradual: $5 (sensor activo) → $20 (2do spike) → $40 (recovery) → $60 (máximo)
@@ -69,11 +73,14 @@ DEEP_PAUSE_AT_1000 = int(os.getenv("ENTRADA_DIEGO_DEEP_PAUSE_AT",     "8"))
 REST_STAKE_1000    = float(os.getenv("ENTRADA_DIEGO_REST_STAKE_1000", "2.0"))
 
 # 1000s: ventana p25-p75 — entrar a los 15min del spike, salir a los 30min si no llegó spike
-K1000_ENTRY_DELAY_S = int(os.getenv("K1000_ENTRY_DELAY_S",  "900"))   # 15min cooldown post-spike antes de entrar
-K1000_OPEN_WINDOW_S = int(os.getenv("K1000_OPEN_WINDOW_S",  "900"))   # 15min ventana abierta (p25→p75)
+K1000_ENTRY_DELAY_S = int(os.getenv("K1000_ENTRY_DELAY_S",  "900"))   # 15min espera entre contratos
+K1000_OPEN_WINDOW_S = int(os.getenv("K1000_OPEN_WINDOW_S",  "900"))   # (legacy alias)
 K1000_STAKE_START   = float(os.getenv("K1000_STAKE_START",  "3.0"))   # stake inicial
-K1000_STAKE_MID     = float(os.getenv("K1000_STAKE_MID",    "6.0"))   # 1ra escalada (sin spike en ventana)
-K1000_STAKE_MAX     = float(os.getenv("K1000_STAKE_MAX",    "12.0"))  # tope escalada
+K1000_STAKE_MID     = float(os.getenv("K1000_STAKE_MID",    "6.0"))   # (legacy alias)
+K1000_STAKE_MAX     = float(os.getenv("K1000_STAKE_MAX",    "30.0"))  # (legacy alias)
+K1000_CONTRACT_S    = int(os.getenv("K1000_CONTRACT_S",     "600"))   # 10 min duración contrato
+K1000_SPIKE_HOLD_S  = int(os.getenv("K1000_SPIKE_HOLD_S",  "240"))   # 4 min espera post-spike antes de cerrar
+K1000_STAKES_1000   = [3.0, 6.0, 15.0, 30.0]                         # escalera: $3→$6→$15→$30
 # Aliases para compatibilidad con to_dict y referencias externas
 K1000_SCOUT_STAKE = K1000_STAKE_START
 K1000_S20_STAKE   = K1000_STAKE_MID
@@ -238,25 +245,44 @@ STAKE_500_FIXED        = float(os.getenv("ENTRADA_DIEGO_500_STAKE",   "3.0"))
 SL_USD_500_SIMPLE      = float(os.getenv("ENTRADA_DIEGO_500_SL_USD",  "14.0"))
 HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   # 30 min
 # ── 500s Ladder: solo zona caliente 0-12min (78% de spikes histórico aquí) ──
-# 3 tiers × 4min = 12 min. Después → REST 20min (no más escalada en sequía).
-# Dato 14h: tier0 WR=62-75% (+$3/$2), tiers1+ WR=0-27% (solo pérdidas).
+# BOOM500: $32 inmediato → pausa 6min fuera → $8 → $32 (24min total)
+# 0.0 como stake = pausa programada, bot espera fuera sin abrir contrato
 LADDER_500_TIERS: list[tuple[float, float]] = [
-    (240,   4.0),   # tier0: 0-4 min  → zona caliente inicio
-    (480,  12.0),   # tier1: 4-8 min  → zona caliente media
-    (720,  32.0),   # tier2: 8-12 min → zona caliente máxima
+    (360,   32.0),  # tier0:  0-6min  → $32  (spike inmediato, máxima probabilidad)
+    (720,    0.0),  # PAUSA:  6-12min → fuera (zona muerta, WR=20%)
+    (1080,   8.0),  # tier1: 12-18min → $8   (acercándose al próximo spike)
+    (1440,  32.0),  # tier2: 18-24min → $32  (sequía profunda, rebote inminente)
 ]
+LADDER_500_TIERS_CRASH: list[tuple[float, float]] = [
+    (360,   8.0),   # tier0: 0-6 min  → $8
+    (720,  32.0),   # tier1: 6-12 min → $32
+]
+LADDER_500_CYCLE_S       = 1440.0  # 24 min — ciclo completo BOOM500 (4 slots × 6min)
+LADDER_500_CYCLE_S_CRASH = 720.0   # 12 min — fin zona caliente CRASH500
+# ── 600s Ladder: pausa 5min → $8 (5-11min) → $32 (11-17min) — mismo para BOOM/CRASH ──
+LADDER_600_TIERS: list[tuple[float, float]] = [
+    (300,    0.0),  # PAUSA:  0-5min  → fuera (esperar spike fresco)
+    (660,    8.0),  # tier0:  5-11min → $8
+    (1020,  32.0),  # tier1: 11-17min → $32
+]
+LADDER_600_CYCLE_S = 1020.0   # 17 min — fin zona caliente 600s
 # Ventana burst: si hay ≥2 spikes en los últimos BURST_WINDOW_S → multiplicar stake ×2
 LADDER_BURST_WINDOW_S   = 300.0   # 5 min
 LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
-LADDER_BURST_MAX_STAKE  = 32.0    # cap burst = tier2 base (no doblar $32)
-LADDER_500_CYCLE_S    = 720.0    # 12 min — fin zona caliente → REST
-LADDER_500_CONTRACT_S = 240.0    # 4 min por contrato (cerrar manualmente)
-LADDER_500_REST_S     = 1200.0   # 20 min descanso (post-ciclo sin spike o 2 wins con profit+)
-S500_CONSEC_WINS_REST = 2        # wins consecutivos (con hour_pnl>0) → REST 20min
+LADDER_BURST_MAX_STAKE  = 64.0    # cap burst
+LADDER_500_CONTRACT_S       = 360.0   # 6 min por contrato (ambos símbolos)
+LADDER_500_CONTRACT_S_CRASH = 360.0   # 6 min por contrato CRASH500
+LADDER_500_REST_S           = 1200.0  # 20 min descanso CRASH500
+LADDER_500_REST_S_BOOM      = 1800.0  # 30 min descanso BOOM500
+S500_CONSEC_WINS_REST = 2        # wins consecutivos (con hour_pnl>0) → REST
+REST_MIN_STAKE_500    = 5.0      # stake mínimo para contar win hacia REST (ambos tiers $8/$32 cuentan)
+TP_RATCHET_MIN_PNL   = 15.0     # pnl mínimo en BROKER_CLOSE (no-FLOOR) para detectar tp_or_ratchet
+TP_RATCHET_PAUSE_S   = 1800.0   # 30 min pausa global tras tp_or_ratchet (el mercado se revierte)
 # Si ≥N spikes llegan DURANTE el REST → post-cluster, sequía probable → esperar siguiente hora
-LADDER_REST_CLUSTER_SPIKES = 3
+LADDER_REST_CLUSTER_SPIKES      = 5   # CRASH500: ≥5 spikes en REST → post-cluster
+LADDER_REST_CLUSTER_SPIKES_BOOM = 99  # BOOM500: mercado muy activo, no bloquear por cluster
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
-S500_STAKE_LOW        = 4.0      # tier0 = $4 (nuevo mínimo)
+S500_STAKE_LOW        = 4.0      # tier2 = $4 (mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
 S500_HOUR_TARGET_USD  = float(os.getenv("S500_HOUR_TARGET_USD", "1.0"))
 
@@ -358,11 +384,13 @@ class _SymState:
     sym_pnl_pause_until:  float = 0.0   # epoch hasta cuando pausado por gate PnL (0 = activo)
     rest_mode: bool = False         # True = abriendo a $2 post-profit/deep-pause — solo 1000s
     is_readjusted: bool = False     # True cuando se re-adjuntó a contrato viejo (no abrir PROFIT_TIMER en ACTIVE)
+    pnl_accounted_by_floor: bool = False  # True cuando FLOOR ya contabilizó el PnL — evita doble conteo en BROKER_CLOSE
+    current_stake_500: float = 0.0       # stake del contrato activo — para filtrar REST en stakes bajos
     power_window: list = field(default_factory=list)  # [(ts, abs_jump), ...] rolling 30min — POWER gate (ATR-independiente)
     spike_first_ts_in_contract: float = 0.0  # epoch del primer spike en contrato S40 actual (gate "spike temprano <5min")
     r75_direction: str = "MULTUP"  # R_75: MULTUP o MULTDOWN; flip si pierde, mantiene si gana
     # 1000s scout ladder
-    k1000_phase:          str   = "WAIT_SPIKE"   # WAIT_SPIKE | COOLING | WINDOW
+    k1000_phase:          str   = "WAIT"   # WAIT | IN_CONTRACT | SPIKE_HOLD
     k1000_phase_ts:       float = 0.0       # epoch inicio de la fase actual
     k1000_peak:           float = 0.0       # máximo profit visto en STAKE_200 (floor ratchet)
     k1000_profit_ts:      float = 0.0       # epoch cuando profit fue > 0 por primera vez (90s timer)
@@ -370,7 +398,8 @@ class _SymState:
     k1000_cycle_stake:      float = 0.0     # stake vigente para el ciclo actual (0=usar K1000_STAKE_START)
     hour_pnl_1000:      float = 0.0         # PnL acumulado en hora UTC actual — 1000s
     hour_start_ts_1000: float = 0.0         # inicio hora UTC vigente — 1000s
-    k1000_blocked_until: float = 0.0        # epoch hasta el que no abrir 1000s (HORA_TARGET $1)
+    k1000_blocked_until: float = 0.0        # (legacy — no usado en nueva lógica simple)
+    k1000_stake_idx:    int   = 0           # posición en K1000_STAKES_1000 (0=$3, 1=$6, 2=$15, 3=$30)
     s500_drought_s1_ts:      float = 0.0   # epoch S1 post-sequía; 0 = sin drought recovery
     s500_cur_stake:          float = 0.0   # stake actual 500s; 0 = usar STAKE_500_FIXED
     s500_pnl_counted_cid:    int   = 0     # contrato cuyo pnl ya fue sumado en PROFIT_CLOSE (evitar double-count en BROKER_CLOSE)
@@ -472,6 +501,9 @@ class _SymState:
             "hour_pnl_1000":           round(self.hour_pnl_1000, 4),
             "hour_start_ts_1000":      round(self.hour_start_ts_1000, 3),
             "k1000_blocked_until":     round(self.k1000_blocked_until, 3),
+            "k1000_stake_idx":         self.k1000_stake_idx,
+            "k1000_contract_s":        K1000_CONTRACT_S,
+            "k1000_spike_hold_s":      K1000_SPIKE_HOLD_S,
             "s500_drought_s1_ts":      round(self.s500_drought_s1_ts, 3),
             "s500_cur_stake":          round(self.s500_cur_stake, 2),
             "crash500_next_open_ts":   round(self.crash500_next_open_ts, 3),
@@ -556,16 +588,16 @@ class EntradaDiego:
                     for _r in SYMBOLS_R:
                         if _r not in SYMBOLS_ED_DISABLED:
                             asyncio.create_task(self._r75_independent_loop(_r))
-                    # BOOM/CRASH 500 necesitan watchdog independiente por si el WS se cae
-                    for _s5 in SYMBOLS_500:
-                        if _s5 not in SYMBOLS_ED_DISABLED and _s5 not in self._watchdog_started:
-                            self._watchdog_started.add(_s5)
-                            asyncio.create_task(self._500_watchdog_loop(_s5))
-                    # 1000s scout también necesita watchdog propio
-                    for _s10 in SYMBOLS_1000:
-                        if _s10 not in SYMBOLS_ED_DISABLED and _s10 not in self._watchdog_started:
-                            self._watchdog_started.add(_s10)
-                            asyncio.create_task(self._1000_watchdog_loop(_s10))
+                    # LADDER symbols (500+600) necesitan watchdog independiente
+                    for _slad in SYMBOLS_LADDER:
+                        if _slad not in SYMBOLS_ED_DISABLED and _slad not in self._watchdog_started:
+                            self._watchdog_started.add(_slad)
+                            asyncio.create_task(self._500_watchdog_loop(_slad))
+                    # K1000 symbols (1000+900) scout también necesita watchdog propio
+                    for _sk in SYMBOLS_K1000:
+                        if _sk not in SYMBOLS_ED_DISABLED and _sk not in self._watchdog_started:
+                            self._watchdog_started.add(_sk)
+                            asyncio.create_task(self._1000_watchdog_loop(_sk))
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -593,10 +625,10 @@ class EntradaDiego:
         if sym in SYMBOLS_R:
             await self._process_r75(sym, tick)
             return
-        if sym in SYMBOLS_500:
+        if sym in SYMBOLS_LADDER:  # 500 + 600
             await self._process_500_simple(sym)
             return
-        if sym in SYMBOLS_1000:
+        if sym in SYMBOLS_K1000:  # 1000 + 900
             await self._process_1000_scout(sym)
             return
         state = self._states[sym]
@@ -858,9 +890,17 @@ class EntradaDiego:
                 await self._open(sym, state, now)
 
     def _ladder_tier_500(self, sym: str, t_sin_spike: float) -> tuple[int, float]:
-        """Retorna (tier_idx, stake). tier_idx=-1 si ≥12min (fuera de zona caliente)."""
-        for idx, (t_max, stake) in enumerate(LADDER_500_TIERS):
+        """Retorna (tier_idx, stake). tier_idx=-1 si fuera de zona caliente o pausa programada."""
+        if "600" in sym:
+            tiers = LADDER_600_TIERS
+        elif "CRASH" in sym:
+            tiers = LADDER_500_TIERS_CRASH
+        else:
+            tiers = LADDER_500_TIERS
+        for idx, (t_max, stake) in enumerate(tiers):
             if t_sin_spike < t_max:
+                if stake <= 0.0:  # pausa programada — zona muerta, no abrir
+                    return -1, 0.0
                 return idx, stake
         return -1, 0.0
 
@@ -880,21 +920,35 @@ class EntradaDiego:
         return base_stake
 
     def _ladder_initial_stake(self, sym: str) -> float:
-        """Stake del tier 0 (igual para ambos símbolos)."""
-        return LADDER_500_TIERS[0][1]
+        """Stake del primer tier con stake>0 según símbolo."""
+        if "600" in sym:
+            tiers = LADDER_600_TIERS
+        elif "CRASH" in sym:
+            tiers = LADDER_500_TIERS_CRASH
+        else:
+            tiers = LADDER_500_TIERS
+        return next((s for _, s in tiers if s > 0), 0.0)
 
     def _ladder_check_rest_500(self, sym: str, pnl: float, now: float) -> bool:
-        """Actualiza wins consecutivos. Si ≥2 wins Y hour_pnl>0 → REST 20min. Retorna True si REST."""
+        """Actualiza wins consecutivos. Si ≥2 wins Y hour_pnl>0 → REST 20min. Retorna True si REST.
+        Solo cuenta wins de stakes ≥ REST_MIN_STAKE_500 ($10) — los stakes bajos ($1/$4) no protegen nada."""
         state = self._states[sym]
         if pnl > 0.05:
+            if state.current_stake_500 < REST_MIN_STAKE_500:
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s win $%.2f con stake $%.0f < $%.0f → no cuenta para REST",
+                    sym, pnl, state.current_stake_500, REST_MIN_STAKE_500,
+                )
+                return False
             state.consec_wins_500 += 1
             if state.consec_wins_500 >= S500_CONSEC_WINS_REST and state.hour_pnl_500 > 0:
-                state.ladder_rest_until_500 = now + LADDER_500_REST_S
+                _rest_s = LADDER_500_REST_S_BOOM if "BOOM" in sym else LADDER_500_REST_S
+                state.ladder_rest_until_500 = now + _rest_s
                 state.rest_spikes_500 = 0
                 state.consec_wins_500 = 0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER REST 20min (%d wins, hour_pnl=+%.2f)",
-                    sym, S500_CONSEC_WINS_REST, state.hour_pnl_500,
+                    "[ENTRADA_DIEGO] %s LADDER REST %.0fmin (%d wins, hour_pnl=+%.2f)",
+                    sym, _rest_s / 60, S500_CONSEC_WINS_REST, state.hour_pnl_500,
                 )
                 return True
         else:
@@ -944,7 +998,8 @@ class EntradaDiego:
             _rspk = state.rest_spikes_500
             state.rest_spikes_500       = 0
             state.ladder_rest_until_500 = 0.0
-            if _rspk >= LADDER_REST_CLUSTER_SPIKES:
+            _cluster_threshold = LADDER_REST_CLUSTER_SPIKES_BOOM if "BOOM" in sym else LADDER_REST_CLUSTER_SPIKES
+            if _rspk >= _cluster_threshold:
                 # Cluster de spikes durante el REST → sequía post-cluster probable
                 _next_hour = float(int(now // 3600 + 1) * 3600)
                 state.ladder_rest_until_500 = _next_hour
@@ -953,11 +1008,11 @@ class EntradaDiego:
                     sym, _rspk,
                 )
                 return
-            # Pocos spikes (o cero): ciclo fresco
-            if _rspk == 0:
-                state.last_spike_ts_500 = now
+            # REST terminado: last_spike_ts_500 ya apunta al spike real más reciente (actualizado durante REST)
+            # Si ese spike fue >12min atrás → tier=-1 → sequía → esperar siguiente spike (sin re-REST)
+            # Si fue <12min atrás → tier válido → abrir normalmente
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s LADDER REST terminado (%d spikes) → ciclo fresco $4", sym, _rspk,
+                "[ENTRADA_DIEGO] %s LADDER REST terminado (%d spikes) → evaluando tier", sym, _rspk,
             )
 
         # ── Spike tracking ────────────────────────────────────────────────────
@@ -1001,6 +1056,7 @@ class EntradaDiego:
             state.hour_pnl_500 += _pnl
             self._add_global_pnl(sym, _pnl, now)
             state.last_close_profit = _pnl
+            state.pnl_accounted_by_floor = True  # evitar doble conteo si BROKER_CLOSE re-procesa
             _LOGGER.info(
                 "[ENTRADA_DIEGO] %s LADDER FLOOR cid=%s peak=%.4f pnl=%.4f (%.0f%%) hour_pnl=+%.2f",
                 sym, _cid, _pk, _pnl, 100 * _pnl / _pk if _pk else 0, state.hour_pnl_500,
@@ -1008,12 +1064,11 @@ class EntradaDiego:
             # Protección: 2 wins consecutivos con hour_pnl>0 → REST 20min
             if self._ladder_check_rest_500(sym, _pnl, now):
                 return
-            # Reabrir en tier correcto (o REST si >12min sin spike)
+            # Reabrir en tier correcto (o esperar spike si >12min)
             _t = now - state.last_spike_ts_500
             _ti, _st = self._ladder_tier_500(sym, _t)
             if _ti < 0:
-                state.ladder_rest_until_500 = now + LADDER_500_REST_S
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (post-FLOOR >12min)", sym)
+                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER sequía post-FLOOR → esperando spike", sym)
                 return
             _st = self._burst_stake_500(sym, now, _st)
             state.burst_phase         = "LADDER"
@@ -1027,15 +1082,16 @@ class EntradaDiego:
         tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
         stake = self._burst_stake_500(sym, now, stake)
 
-        # ── >12min sin spike: cerrar contrato y entrar REST 20min ─────────────
+        # ── >12min sin spike: sequía — cerrar contrato si aplica, esperar próximo spike ──
         if tier_idx < 0:
             if state.contract_id is not None:
                 contract_age = now - state.burst_phase_started_at
-                if contract_age < LADDER_500_CONTRACT_S:
-                    # Tier2 dentro de sus 4 min: dejar correr (floor vigila)
+                _contract_s = LADDER_500_CONTRACT_S_CRASH if "CRASH" in sym else LADDER_500_CONTRACT_S
+                if contract_age < _contract_s:
+                    # Dentro del tiempo de contrato: dejar correr (floor vigila)
                     state.burst_phase = "LADDER"
                     return
-                # 4 min cumplidos → cerrar y entrar REST
+                # 4 min cumplidos → cerrar (sin REST — sequía no activa descanso)
                 _cid = int(state.contract_id)
                 _pnl = state.current_profit
                 state.contract_id     = None
@@ -1049,14 +1105,13 @@ class EntradaDiego:
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER 12min END cid=%s pnl=%.4f hour_pnl=+%.2f",
+                    "[ENTRADA_DIEGO] %s LADDER 12min END cid=%s pnl=%.4f hour_pnl=+%.2f → sequía, esperando spike",
                     sym, _cid, _pnl, state.hour_pnl_500,
                 )
-            # Fin zona caliente (con o sin contrato) → REST 20 min
-            state.ladder_rest_until_500 = now + LADDER_500_REST_S
-            state.consec_wins_500  = 0
-            state.rest_spikes_500  = 0
-            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (zona caliente agotada)", sym)
+                # Incluso en sequía, si fue win y protege profit → REST (raro pero posible)
+                if self._ladder_check_rest_500(sym, _pnl, now):
+                    return
+            # Sequía activa: no abrir, esperar próximo spike naturalmente
             return
 
         state.burst_phase = "LADDER"
@@ -1068,30 +1123,42 @@ class EntradaDiego:
                 _cid = state.contract_id
                 _pnl = state.current_profit
                 _age = now - state.burst_phase_started_at
+                _floor_counted = state.pnl_accounted_by_floor
                 state.contract_id     = None
                 state.current_profit  = 0.0
                 state.peak_profit_500 = 0.0
-                state.hour_pnl_500   += _pnl
-                self._add_global_pnl(sym, _pnl, now)
+                state.pnl_accounted_by_floor = False
+                if not _floor_counted:
+                    state.hour_pnl_500 += _pnl
+                    self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER BROKER_CLOSE cid=%s pnl=%.4f age=%.0fs hour_pnl=+%.2f",
+                    "[ENTRADA_DIEGO] %s LADDER BROKER_CLOSE cid=%s pnl=%.4f age=%.0fs hour_pnl=+%.2f%s",
                     sym, _cid, _pnl, _age, state.hour_pnl_500,
+                    " (floor_counted)" if _floor_counted else "",
                 )
-                if self._ladder_check_rest_500(sym, _pnl, now):
+                # tp_or_ratchet: broker cerró con ganancia grande sin FLOOR nuestro → pausa global 30min
+                if not _floor_counted and _pnl >= TP_RATCHET_MIN_PNL:
+                    self._global_pause_until = now + TP_RATCHET_PAUSE_S
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s TP_OR_RATCHET detectado pnl=+%.2f → pausa global 30min hasta %s",
+                        sym, _pnl, __import__('datetime').datetime.utcfromtimestamp(self._global_pause_until).strftime('%H:%M UTC'),
+                    )
+                    return
+                if not _floor_counted and self._ladder_check_rest_500(sym, _pnl, now):
                     return
                 # Recalcular tier
                 t_sin_spike = now - state.last_spike_ts_500
                 tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
                 if tier_idx < 0:
-                    state.ladder_rest_until_500 = now + LADDER_500_REST_S
-                    _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (broker close, >12min)", sym)
+                    _LOGGER.info("[ENTRADA_DIEGO] %s LADDER sequía broker-close → esperando spike", sym)
                     return
                 stake = self._burst_stake_500(sym, now, stake)
             else:
-                # ── Cierre a los 4 min si el broker no cerró antes ────────────
+                # ── Cierre al tiempo de contrato si el broker no cerró antes ──
+                _contract_s  = LADDER_500_CONTRACT_S_CRASH if "CRASH" in sym else LADDER_500_CONTRACT_S
                 contract_age = now - state.burst_phase_started_at
-                if contract_age >= LADDER_500_CONTRACT_S:
+                if contract_age >= _contract_s:
                     _cid = int(state.contract_id)
                     _pnl = state.current_profit
                     state.contract_id     = None
@@ -1100,21 +1167,20 @@ class EntradaDiego:
                     try:
                         await self._executor.close_contract(_cid)
                     except Exception as exc:
-                        _LOGGER.error("[ENTRADA_DIEGO] %s LADDER 4m CLOSE error: %s", sym, exc)
+                        _LOGGER.error("[ENTRADA_DIEGO] %s LADDER CLOSE error: %s", sym, exc)
                     state.hour_pnl_500 += _pnl
                     self._add_global_pnl(sym, _pnl, now)
                     state.last_close_profit = _pnl
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s LADDER 4m CLOSE cid=%s pnl=%.4f tier=%d hour_pnl=+%.2f",
-                        sym, _cid, _pnl, tier_idx, state.hour_pnl_500,
+                        "[ENTRADA_DIEGO] %s LADDER %.0fm CLOSE cid=%s pnl=%.4f tier=%d hour_pnl=+%.2f",
+                        sym, _contract_s / 60, _cid, _pnl, tier_idx, state.hour_pnl_500,
                     )
                     if self._ladder_check_rest_500(sym, _pnl, now):
                         return
                     t_sin_spike = now - state.last_spike_ts_500
                     tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
                     if tier_idx < 0:
-                        state.ladder_rest_until_500 = now + LADDER_500_REST_S
-                        _LOGGER.info("[ENTRADA_DIEGO] %s LADDER REST 20min (4m close, >12min)", sym)
+                        _LOGGER.info("[ENTRADA_DIEGO] %s LADDER sequía 4m-close → esperando spike", sym)
                         return
                     stake = self._burst_stake_500(sym, now, stake)
                 else:
@@ -1218,80 +1284,29 @@ class EntradaDiego:
         _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 1000 terminado", sym)
 
     async def _process_1000_scout(self, sym: str) -> None:
+        await self._process_1000_simple(sym)
+
+    async def _process_1000_simple(self, sym: str) -> None:
         """
-        BOOM1000/CRASH1000 — ventana p25-p75:
-          Spike → esperar 15min (COOLING) → abrir $3 (WINDOW) → esperar hasta min 30
-          Si spike llega durante WINDOW: cerrar + reset stake $3 → COOLING (nuevo spike)
-          Si 30min sin spike: cerrar + escalar ($3→$6→$12) → WAIT_SPIKE
-        HORA_TARGET $1/hora por símbolo — igual que 500s.
+        BOOM1000/CRASH1000 — ciclo simple sin depender de spikes externos:
+          WAIT 15min → IN_CONTRACT 10min
+          Spike en contrato → SPIKE_HOLD 4min → cerrar → reset $3 → WAIT 15min
+          Sin spike 10min → cerrar → escalar → WAIT 15min
+          Escalada: $3 → $6 → $15 → $30 → $3 (reset al completar ciclo)
         """
         state = self._states[sym]
         now   = time.time()
 
-        # Normalizar stake del ciclo
-        if state.k1000_cycle_stake <= 0:
-            state.k1000_cycle_stake = K1000_STAKE_START
+        # Normalizar índice de stake (0-3)
+        _sidx = max(0, min(getattr(state, "k1000_stake_idx", 0), len(K1000_STAKES_1000) - 1))
+        state.k1000_stake_idx  = _sidx
+        _stake = K1000_STAKES_1000[_sidx]
+        state.k1000_cycle_stake = _stake  # sync display
+
         # Normalizar fase (backward compat con fases antiguas)
-        if state.k1000_phase not in ("WAIT_SPIKE", "COOLING", "WINDOW"):
-            state.k1000_phase    = "WAIT_SPIKE"
+        if state.k1000_phase not in ("WAIT", "IN_CONTRACT", "SPIKE_HOLD"):
+            state.k1000_phase    = "WAIT"
             state.k1000_phase_ts = now
-
-        # ── Hora UTC: resetear PnL 1000s al cambiar de hora ────────────────────
-        _cur_hour_1000 = float(int(now // 3600) * 3600)
-        if state.hour_start_ts_1000 == 0.0 or _cur_hour_1000 > state.hour_start_ts_1000:
-            if state.hour_start_ts_1000 > 0 and state.hour_pnl_1000 != 0.0:
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 nueva hora UTC → reset hour_pnl $%.4f",
-                    sym, state.hour_pnl_1000,
-                )
-            state.hour_start_ts_1000 = _cur_hour_1000
-            state.hour_pnl_1000      = 0.0
-            if state.k1000_blocked_until > 0 and now >= state.k1000_blocked_until:
-                state.k1000_blocked_until = 0.0
-
-        # ── HORA_TARGET gate: $1/hora por símbolo ───────────────────────────
-        if state.k1000_blocked_until > now:
-            return
-        if state.hour_pnl_1000 >= S500_HOUR_TARGET_USD:
-            _nxt = (_cur_hour_1000 + 3600.0)
-            state.k1000_blocked_until = _nxt
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s K1000 HORA_TARGET $%.2f → pausa hasta h+1",
-                sym, state.hour_pnl_1000,
-            )
-            return
-
-        # Actualizar profit desde broker
-        if state.contract_id is not None:
-            _q = self._query_profit(state.contract_id)
-            if _q is not None:
-                state.current_profit = _q
-
-        # ── Cierre inmediato si hour_pnl + unrealized >= $1 ─────────────────
-        if (state.contract_id is not None
-                and state.current_profit > 0
-                and state.hour_pnl_1000 + state.current_profit >= S500_HOUR_TARGET_USD):
-            _cid = int(state.contract_id)
-            _pnl = state.current_profit
-            state.contract_id            = None
-            state.k1000_spike_hold_until = 0.0
-            state.k1000_profit_ts        = 0.0
-            state.k1000_peak             = 0.0
-            try:
-                await self._executor.close_contract(_cid)
-            except Exception as _e:
-                _LOGGER.error("[ENTRADA_DIEGO] %s K1000 HORA_TARGET-close error: %s", sym, _e)
-            state.last_close_profit = _pnl
-            state.k1000_phase       = "WAIT_SPIKE"
-            state.k1000_phase_ts    = now
-            state.hour_pnl_1000    += _pnl
-            state.k1000_blocked_until = _cur_hour_1000 + 3600.0
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s K1000 HORA_TARGET $%.2f logrado → pausa hasta h+1",
-                sym, state.hour_pnl_1000,
-            )
-            self._persist(now)
-            return
 
         # ── Detección de spike ──────────────────────────────────────────────
         _last_spk_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
@@ -1300,122 +1315,152 @@ class EntradaDiego:
             state.last_spike_ts = _last_spk_ts
 
         phase = state.k1000_phase
-        _stake = state.k1000_cycle_stake or K1000_STAKE_START
 
         # ────────────────────────────────────────────────────────────────────
-        # WAIT_SPIKE: fuera del mercado, esperando spike
+        # WAIT: fuera del mercado, esperando 15min
         # ────────────────────────────────────────────────────────────────────
-        if phase == "WAIT_SPIKE":
+        if phase == "WAIT":
+            # Spike durante espera → reiniciar timer de 15min desde ahora
             if _new_spike:
-                state.k1000_phase    = "COOLING"
-                state.k1000_phase_ts = _last_spk_ts
+                _elapsed = now - state.k1000_phase_ts
+                state.k1000_phase_ts = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 spike → COOLING 15min stake=$%.0f",
-                    sym, _stake,
+                    "[ENTRADA_DIEGO] %s K1000 WAIT spike → timer reiniciado (faltaban %.0fs)",
+                    sym, max(0.0, K1000_ENTRY_DELAY_S - _elapsed),
                 )
-            return
-
-        # ────────────────────────────────────────────────────────────────────
-        # COOLING: spike detectado, esperando 15min antes de entrar (p0→p25)
-        # ────────────────────────────────────────────────────────────────────
-        if phase == "COOLING":
-            if _new_spike:
-                # Nuevo spike durante espera → resetear cooldown desde este spike
-                state.k1000_phase_ts = _last_spk_ts
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 spike en COOLING → reset 15min",
-                    sym,
-                )
+                self._persist(now)
                 return
             if now >= state.k1000_phase_ts + K1000_ENTRY_DELAY_S:
-                # 15min cumplidos → entrar a la ventana p25-p75
-                state.k1000_phase    = "WINDOW"
-                state.k1000_phase_ts = now  # inicio de la ventana de 15min
+                state.k1000_phase    = "IN_CONTRACT"
+                state.k1000_phase_ts = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 15min cumplidos → WINDOW $%.0f (p25-p75)",
-                    sym, _stake,
+                    "[ENTRADA_DIEGO] %s K1000 WAIT 15min → IN_CONTRACT $%.0f (idx=%d)",
+                    sym, _stake, _sidx,
                 )
-                await self._open_1000_scout(sym, state, now)
+                await self._open_1000_simple(sym, state, now)
             return
 
         # ────────────────────────────────────────────────────────────────────
-        # WINDOW: contrato abierto, ventana p25-p75 (15min desde apertura)
+        # IN_CONTRACT: contrato abierto, duración 10min
         # ────────────────────────────────────────────────────────────────────
-        if phase == "WINDOW":
-            # Contrato cerrado externamente por SL → escalar y esperar fuera
-            if state.contract_id is None:
-                _pnl = state.current_profit
-                state.last_close_profit = _pnl
-                state.hour_pnl_1000    += _pnl
-                _next = K1000_STAKE_MID if _stake < K1000_STAKE_MID else K1000_STAKE_MAX
-                state.k1000_cycle_stake = _next
-                state.k1000_phase       = "WAIT_SPIKE"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 WINDOW SL/ext pnl=%.4f → stake=$%.0f WAIT_SPIKE (hour_pnl=%.4f)",
-                    sym, _pnl, _next, state.hour_pnl_1000,
-                )
-                return
+        if phase == "IN_CONTRACT":
+            # Actualizar profit y detectar cierre por broker
+            _broker_closed = False
+            if state.contract_id is not None:
+                _qp = self._query_profit(state.contract_id)
+                if _qp is not None:
+                    state.current_profit = _qp
+                else:
+                    _broker_closed = True
+                    state.contract_id = None
 
-            # Spike durante la ventana → PROFIT: cerrar + reset stake + COOLING
-            if _new_spike:
-                _pnl = state.current_profit
-                _cid = int(state.contract_id)
-                state.contract_id = None
-                try:
-                    await self._executor.close_contract(_cid)
-                except Exception as _e:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s K1000 WINDOW spike-close error: %s", sym, _e)
-                state.last_close_profit = _pnl
-                state.hour_pnl_1000    += _pnl
-                # Spike llegó → reset stake a $3, COOLING desde este spike
-                state.k1000_cycle_stake = K1000_STAKE_START
-                state.k1000_phase       = "COOLING"
-                state.k1000_phase_ts    = _last_spk_ts
+            # Spike → entrar SPIKE_HOLD 4min (no cerrar todavía)
+            if _new_spike and state.contract_id is not None:
+                state.k1000_phase            = "SPIKE_HOLD"
+                state.k1000_spike_hold_until = now + K1000_SPIKE_HOLD_S
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 WINDOW spike pnl=%.4f → stake=$3 COOLING (hour_pnl=%.4f)",
-                    sym, _pnl, state.hour_pnl_1000,
+                    "[ENTRADA_DIEGO] %s K1000 spike en contrato → SPIKE_HOLD 4min (profit=%.4f)",
+                    sym, state.current_profit,
                 )
                 self._persist(now)
                 return
 
-            # Ventana expirada (30min desde spike, 15min de contrato) → cerrar + escalar
-            if now >= state.k1000_phase_ts + K1000_OPEN_WINDOW_S:
-                _pnl = state.current_profit
+            # Broker cerró el contrato (SL/TP) → escalar y esperar
+            if _broker_closed or state.contract_id is None:
+                _pnl = state.last_close_profit if _broker_closed else state.current_profit
+                _next_idx = (_sidx + 1) % len(K1000_STAKES_1000)
+                state.k1000_stake_idx = _next_idx
+                state.k1000_cycle_stake = K1000_STAKES_1000[_next_idx]
+                state.k1000_phase    = "WAIT"
+                state.k1000_phase_ts = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s K1000 broker-close pnl=%.4f → idx %d→%d ($%.0f) WAIT 15min",
+                    sym, _pnl, _sidx, _next_idx, K1000_STAKES_1000[_next_idx],
+                )
+                self._persist(now)
+                return
+
+            # 10min cumplidos sin spike → cerrar y escalar
+            if now >= state.k1000_phase_ts + K1000_CONTRACT_S:
                 _cid = int(state.contract_id)
-                state.contract_id = None
+                _pnl = state.current_profit
+                state.contract_id    = None
+                state.current_profit = 0.0
                 try:
                     await self._executor.close_contract(_cid)
                 except Exception as _e:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s K1000 WINDOW timer-close error: %s", sym, _e)
+                    _LOGGER.error("[ENTRADA_DIEGO] %s K1000 10min CLOSE error: %s", sym, _e)
+                _next_idx = (_sidx + 1) % len(K1000_STAKES_1000)
+                state.k1000_stake_idx   = _next_idx
+                state.k1000_cycle_stake = K1000_STAKES_1000[_next_idx]
                 state.last_close_profit = _pnl
-                state.hour_pnl_1000    += _pnl
-                _next = K1000_STAKE_MID if _stake < K1000_STAKE_MID else K1000_STAKE_MAX
-                state.k1000_cycle_stake = _next
-                state.k1000_phase       = "WAIT_SPIKE"
+                state.k1000_phase       = "WAIT"
+                state.k1000_phase_ts    = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 WINDOW 30min sin spike pnl=%.4f → stake=$%.0f WAIT_SPIKE (hour_pnl=%.4f)",
-                    sym, _pnl, _next, state.hour_pnl_1000,
+                    "[ENTRADA_DIEGO] %s K1000 10min sin spike pnl=%.4f → idx %d→%d ($%.0f) WAIT 15min",
+                    sym, _pnl, _sidx, _next_idx, K1000_STAKES_1000[_next_idx],
+                )
+                self._persist(now)
+            return
+
+        # ────────────────────────────────────────────────────────────────────
+        # SPIKE_HOLD: spike llegó, esperar 4min más antes de cerrar
+        # ────────────────────────────────────────────────────────────────────
+        if phase == "SPIKE_HOLD":
+            # Actualizar profit y detectar cierre por broker
+            _broker_closed_sh = False
+            if state.contract_id is not None:
+                _qp = self._query_profit(state.contract_id)
+                if _qp is not None:
+                    state.current_profit = _qp
+                else:
+                    _broker_closed_sh = True
+                    state.contract_id = None
+
+            # Broker cerró antes de los 4min → spike → reset $3
+            if _broker_closed_sh or state.contract_id is None:
+                _pnl = state.current_profit
+                state.k1000_stake_idx   = 0
+                state.k1000_cycle_stake = K1000_STAKES_1000[0]
+                state.last_close_profit = _pnl
+                state.k1000_phase       = "WAIT"
+                state.k1000_phase_ts    = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s K1000 SPIKE_HOLD broker-close pnl=%.4f → reset $3 WAIT 15min", sym, _pnl,
+                )
+                self._persist(now)
+                return
+
+            # 4min cumplidos → cerrar y reset stake a $3
+            if now >= state.k1000_spike_hold_until:
+                _cid = int(state.contract_id)
+                _pnl = state.current_profit
+                state.contract_id    = None
+                state.current_profit = 0.0
+                try:
+                    await self._executor.close_contract(_cid)
+                except Exception as _e:
+                    _LOGGER.error("[ENTRADA_DIEGO] %s K1000 SPIKE_HOLD close error: %s", sym, _e)
+                state.k1000_stake_idx   = 0
+                state.k1000_cycle_stake = K1000_STAKES_1000[0]
+                state.last_close_profit = _pnl
+                state.k1000_phase       = "WAIT"
+                state.k1000_phase_ts    = now
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s K1000 SPIKE_HOLD 4min END pnl=%.4f → reset $3 WAIT 15min", sym, _pnl,
                 )
                 self._persist(now)
 
     async def _open_1000_scout(self, sym: str, state: _SymState, now: float) -> None:
-        # Gate HORA_TARGET: no abrir si ya llegamos a $1 en esta hora
-        if state.k1000_blocked_until > now or state.hour_pnl_1000 >= S500_HOUR_TARGET_USD:
-            _nxt = float((int(now // 3600) + 1) * 3600)
-            if state.k1000_blocked_until < _nxt:
-                state.k1000_blocked_until = _nxt
-            state.k1000_phase = "WAIT_SPIKE"
-            _LOGGER.info(
-                "[ENTRADA_DIEGO] %s K1000 HORA_TARGET gate → no abrir (hour_pnl=%.4f)",
-                sym, state.hour_pnl_1000,
-            )
-            return
+        await self._open_1000_simple(sym, state, now)
+
+    async def _open_1000_simple(self, sym: str, state: _SymState, now: float) -> None:
         from src.execution.deriv_trader import DerivOrder
-        stake      = state.k1000_cycle_stake or K1000_STAKE_START
-        max_hold_s = K1000_OPEN_WINDOW_S + 60  # ventana + margen
+        stake      = state.k1000_cycle_stake or K1000_STAKES_1000[0]
+        max_hold_s = K1000_CONTRACT_S + K1000_SPIKE_HOLD_S + 60  # 10min + 4min margen
         side       = "MULTDOWN" if "CRASH" in sym else "MULTUP"
         _LOGGER.info(
-            "[ENTRADA_DIEGO] %s K1000 ABRIENDO %s $%.0f max_hold=%ds (WINDOW p25-p75)",
+            "[ENTRADA_DIEGO] %s K1000 ABRIENDO %s $%.0f max_hold=%ds (10min contrato)",
             sym, side, stake, max_hold_s,
         )
         try:
@@ -1430,7 +1475,7 @@ class EntradaDiego:
                     max_hold_seconds=float(max_hold_s),
                     score_breakdown={
                         "quality_tier": "entrada_diego",
-                        "setup":        "k1000_window",
+                        "setup":        "k1000_simple",
                         "grade":        "ED",
                         "score":        0.0,
                         "entrada_diego": True,
@@ -1449,7 +1494,6 @@ class EntradaDiego:
                     sym, state.contract_id, stake,
                 )
             elif result and result.get("status") == "symbol_already_open":
-                # Re-adjuntar contrato existente
                 _existing = result.get("open_contracts", [])
                 if _existing:
                     state.contract_id = int(_existing[0])
@@ -1457,12 +1501,14 @@ class EntradaDiego:
                     state.phase       = "OPEN"
                     _LOGGER.info("[ENTRADA_DIEGO] %s K1000 re-adjuntado contrato %s", sym, state.contract_id)
             else:
-                state.k1000_phase = "WAIT_SPIKE"
-                _LOGGER.warning("[ENTRADA_DIEGO] %s K1000 OPEN no-live → WAIT_SPIKE", sym)
+                state.k1000_phase = "WAIT"
+                state.k1000_phase_ts = now
+                _LOGGER.warning("[ENTRADA_DIEGO] %s K1000 OPEN no-live → WAIT 15min", sym)
             self._persist(now)
         except Exception as exc:
             _LOGGER.error("[ENTRADA_DIEGO] %s K1000 open error $%.0f: %s", sym, stake, exc)
-            state.k1000_phase = "WAIT_SPIKE"
+            state.k1000_phase = "WAIT"
+            state.k1000_phase_ts = now
             self._persist(now)
 
     # ── Helpers de flujo ─────────────────────────────────────────────────────
@@ -1830,6 +1876,8 @@ class EntradaDiego:
                     state.spikes_in_contract_500     = 0
                     state.crash500_real_spikes_500   = 0
                     state.spike_first_ts_in_contract = 0.0
+                    state.pnl_accounted_by_floor     = False  # contrato nuevo, reset flag
+                    state.current_stake_500          = stake  # guardar stake para filtro REST
                     # last_spike_ts_500 NO se sobreescribe aquí — es el inicio de ventana
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s OPEN OK contract=%s entry=%.5f stake=$%.2f",
@@ -1970,7 +2018,7 @@ class EntradaDiego:
                 if not s:
                     continue
                 # Restaurar PnL gate por símbolo (independiente de contrato)
-                if sym in SYMBOLS_500:
+                if sym in SYMBOLS_LADDER:
                     _st_pnl = self._states[sym]
                     _st_pnl.sym_pnl_since_reset = float(s.get("sym_pnl_since_reset", 0.0))
                     _st_pnl.sym_pnl_reference   = float(s.get("sym_pnl_reference",   0.0))
@@ -1996,7 +2044,7 @@ class EntradaDiego:
                         st.open_ts           = float(s.get("open_ts", now))
                         st.last_spike_ts     = float(s.get("last_spike_ts", 0.0))
                         st.last_close_profit = float(s.get("last_close_profit", 0.0))
-                        if sym in SYMBOLS_500:
+                        if sym in SYMBOLS_LADDER:
                             st.sym_mode              = s.get("sym_mode", "QUIET")
                             st.consec_max_holds      = int(s.get("consec_max_holds", 0))
                             st.consec_wins_active    = int(s.get("consec_wins_active", 0))
@@ -2028,25 +2076,28 @@ class EntradaDiego:
                             st.s80_pending                   = bool(s.get("s80_pending", False))
                             _c5ts = float(s.get("crash500_next_open_ts", 0.0))
                             st.crash500_next_open_ts = _c5ts if _c5ts > now else 0.0
-                            st.consec_wins_500       = int(s.get("consec_wins_500", 0))
+                            st.consec_wins_500       = 0  # siempre reset: no heredar wins de sesión anterior
                             _rut = float(s.get("ladder_rest_until_500", 0.0))
                             st.ladder_rest_until_500 = _rut if _rut > now else 0.0
                             st.rest_spikes_500       = int(s.get("rest_spikes_500", 0))
-                        if sym in SYMBOLS_1000:
-                            st.rest_mode = bool(s.get("rest_mode", False))
-                            _k1000_ph = s.get("k1000_phase", "WAIT_SPIKE")
-                            st.k1000_phase = _k1000_ph if _k1000_ph in (
-                                "WAIT_SPIKE", "COOLING", "WINDOW",
-                                "SCOUT", "STAKE_20", "STAKE_40", "STAKE_80", "STAKE_200",
-                            ) else "WAIT_SPIKE"
-                            st.k1000_phase_ts    = float(s.get("k1000_phase_ts", now))
-                            st.k1000_peak        = float(s.get("k1000_peak", 0.0))
-                            st.k1000_profit_ts   = 0.0  # no restaurar: reiniciar 90s timer
-                            st.k1000_cycle_stake = float(s.get("k1000_cycle_stake", K1000_STAKE_START))
-                            st.hour_pnl_1000     = float(s.get("hour_pnl_1000", 0.0))
-                            st.hour_start_ts_1000 = float(s.get("hour_start_ts_1000", 0.0))
-                            _k1000_block = float(s.get("k1000_blocked_until", 0.0))
-                            st.k1000_blocked_until = _k1000_block if _k1000_block > now else 0.0
+                        if sym in SYMBOLS_K1000:
+                            _k1000_ph_raw2 = s.get("k1000_phase", "WAIT")
+                            _K1000_PM2 = {
+                                "WAIT_SPIKE": "WAIT", "COOLING": "WAIT",
+                                "WINDOW": "IN_CONTRACT",
+                                "SCOUT": "WAIT", "STAKE_20": "WAIT",
+                                "STAKE_40": "WAIT", "STAKE_80": "WAIT", "STAKE_200": "WAIT",
+                            }
+                            if _k1000_ph_raw2 in ("WAIT", "IN_CONTRACT", "SPIKE_HOLD"):
+                                st.k1000_phase = _k1000_ph_raw2
+                            else:
+                                st.k1000_phase = _K1000_PM2.get(_k1000_ph_raw2, "WAIT")
+                            st.k1000_phase_ts         = float(s.get("k1000_phase_ts", now))
+                            st.k1000_spike_hold_until = float(s.get("k1000_spike_hold_until", 0.0))
+                            st.k1000_stake_idx        = int(s.get("k1000_stake_idx", 0))
+                            st.k1000_cycle_stake      = K1000_STAKES_1000[max(0, min(st.k1000_stake_idx, len(K1000_STAKES_1000) - 1))]
+                            st.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
+                            st.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
                             st.phase              = "PROFIT_TIMER"
                             st.profit_positive_ts = float(s["profit_positive_ts"])
@@ -2055,32 +2106,38 @@ class EntradaDiego:
                             st.profit_positive_ts = 0.0
                         if sym in SYMBOLS_R:
                             st.r75_direction = s.get("r75_direction", "MULTUP")
-                        mode_tag = f" [{st.sym_mode} max_holds={st.consec_max_holds} wins={st.consec_wins_active}]" if sym in SYMBOLS_500 else ""
+                        mode_tag = f" [{st.sym_mode} max_holds={st.consec_max_holds} wins={st.consec_wins_active}]" if sym in SYMBOLS_LADDER else ""
                         _LOGGER.info(
                             "[ENTRADA_DIEGO] %s RESTAURADO: phase=%s contract=%s reopens=%d%s",
                             sym, st.phase, contract_id, st.reopens, mode_tag,
                         )
                         continue
 
-                # Sin contrato — restaurar k1000_phase para 1000s (importante: no depender de contract_id)
-                if sym in SYMBOLS_1000:
+                # Sin contrato — restaurar k1000_phase para 1000s/900s (importante: no depender de contract_id)
+                if sym in SYMBOLS_K1000:
                     _st_1k = self._states[sym]
-                    _k1000_ph = s.get("k1000_phase", "WAIT_SPIKE")
-                    _st_1k.k1000_phase = _k1000_ph if _k1000_ph in (
-                        "WAIT_SPIKE", "COOLING", "WINDOW",
-                        "SCOUT", "STAKE_20", "STAKE_40", "STAKE_80", "STAKE_200",
-                    ) else "WAIT_SPIKE"
+                    _k1000_ph_raw = s.get("k1000_phase", "WAIT")
+                    # Normalizar fases antiguas a nuevas
+                    _K1000_PHASE_MAP = {
+                        "WAIT_SPIKE": "WAIT", "COOLING": "WAIT",
+                        "WINDOW": "IN_CONTRACT",
+                        "SCOUT": "WAIT", "STAKE_20": "WAIT",
+                        "STAKE_40": "WAIT", "STAKE_80": "WAIT", "STAKE_200": "WAIT",
+                    }
+                    if _k1000_ph_raw in ("WAIT", "IN_CONTRACT", "SPIKE_HOLD"):
+                        _st_1k.k1000_phase = _k1000_ph_raw
+                    else:
+                        _st_1k.k1000_phase = _K1000_PHASE_MAP.get(_k1000_ph_raw, "WAIT")
                     _st_1k.k1000_phase_ts    = float(s.get("k1000_phase_ts", now))
-                    _st_1k.k1000_peak        = float(s.get("k1000_peak", 0.0))
+                    _st_1k.k1000_spike_hold_until = float(s.get("k1000_spike_hold_until", 0.0))
                     _st_1k.last_spike_ts     = float(s.get("last_spike_ts", 0.0))
-                    _st_1k.k1000_cycle_stake = float(s.get("k1000_cycle_stake", K1000_STAKE_START))
+                    _st_1k.k1000_stake_idx   = int(s.get("k1000_stake_idx", 0))
+                    _st_1k.k1000_cycle_stake = K1000_STAKES_1000[max(0, min(_st_1k.k1000_stake_idx, len(K1000_STAKES_1000) - 1))]
                     _st_1k.hour_pnl_1000     = float(s.get("hour_pnl_1000", 0.0))
                     _st_1k.hour_start_ts_1000 = float(s.get("hour_start_ts_1000", 0.0))
-                    _k1000_block = float(s.get("k1000_blocked_until", 0.0))
-                    _st_1k.k1000_blocked_until = _k1000_block if _k1000_block > now else 0.0
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s K1000 sin contrato → phase=%s stake=$%.0f hour_pnl=$%.4f",
-                        sym, _st_1k.k1000_phase, _st_1k.k1000_cycle_stake, _st_1k.hour_pnl_1000,
+                        "[ENTRADA_DIEGO] %s K1000 RESTAURADO sin contrato → phase=%s stake=$%.0f idx=%d",
+                        sym, _st_1k.k1000_phase, _st_1k.k1000_cycle_stake, _st_1k.k1000_stake_idx,
                     )
                     continue
 
@@ -2094,18 +2151,18 @@ class EntradaDiego:
                     st.reopens        = reopens
                     if sym in SYMBOLS_R:
                         st.r75_direction = s.get("r75_direction", "MULTUP")
-                    _next = REST_STAKE_1000 if sym in SYMBOLS_1000 else (R75_STAKE if sym in SYMBOLS_R else QUIET_STAKE_500)
+                    _next = REST_STAKE_1000 if sym in SYMBOLS_K1000 else (R75_STAKE if sym in SYMBOLS_R else QUIET_STAKE_500)
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s RESTAURADO: COOLDOWN %.0fs restantes → abrirá en $%.0f",
                         sym, cooldown_until - now, _next,
                     )
                     # Convertir COOLDOWN legacy a rest_mode en cuanto termine el timer
-                    if sym in SYMBOLS_1000:
+                    if sym in SYMBOLS_K1000:
                         st.rest_mode = True
                     continue
 
                 # Sin contrato y sin COOLDOWN vigente — verificar si rest_mode persistido
-                if sym in SYMBOLS_1000 and bool(s.get("rest_mode", False)):
+                if sym in SYMBOLS_K1000 and bool(s.get("rest_mode", False)):
                     st = self._states[sym]
                     st.rest_mode = True
                     st.reopens   = 0
@@ -2115,20 +2172,27 @@ class EntradaDiego:
                     )
                     continue
 
-                # 500s sin contrato: restaurar burst_phase y power_window
-                if sym in SYMBOLS_500:
+                # LADDER (500+600) sin contrato: restore COMPLETO — ningún campo crítico se pierde en deploy
+                if sym in SYMBOLS_LADDER:
                     st = self._states[sym]
+
+                    # ── Fase y timing del ciclo ───────────────────────────────
                     _bp = s.get("burst_phase", "LADDER")
                     st.burst_phase = _bp if _bp in (
                         "WAIT_GATE", "TIMER_GATE", "STAKE_10", "STAKE_20", "STAKE_40",
                         "STAKE_60", "STAKE_80", "LADDER", "STOP", "IDLE", "HOUR_DONE",
                     ) else "LADDER"
                     st.burst_phase_started_at = float(s.get("burst_phase_started_at", 0.0))
+
+                    # ── Ventana de spikes 30min (para POWER y burst multiplier) ──
                     _pw = s.get("power_window", [])
                     st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
-                    st.hour_spike_count_500       = int(s.get("hour_spike_count_500", 0))
-                    st.hour_start_ts_500          = float(s.get("hour_start_ts_500", 0.0))
-                    # Restaurar hour_pnl si es la misma hora UTC (preservar HORA_TARGET tracking)
+
+                    # ── Contadores de hora ────────────────────────────────────
+                    st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))
+                    st.hour_start_ts_500     = float(s.get("hour_start_ts_500", 0.0))
+
+                    # ── PnL hora (solo si misma hora UTC) ────────────────────
                     _saved_hour_ts = float(s.get("hour_start_ts_500", 0.0))
                     _cur_hour_ts   = float(int(now // 3600) * 3600)
                     if _saved_hour_ts > 0 and _saved_hour_ts == _cur_hour_ts:
@@ -2137,26 +2201,43 @@ class EntradaDiego:
                                      sym, st.hour_pnl_500)
                     else:
                         st.hour_pnl_500 = 0.0
-                    st.prev_hour_pnl_500          = float(s.get("prev_hour_pnl_500", 0.0))
-                    st.sym_pnl_since_reset        = float(s.get("sym_pnl_since_reset", 0.0))
-                    # Restaurar last_spike_ts_500: si el valor guardado pone el ciclo en STOP
-                    # (>28min), resetear a now para que el bot abra inmediatamente en Tier 0.
-                    _saved_spk_ts = float(s.get("last_spike_ts_500", 0.0))
-                    _t_sin_spk_saved = now - _saved_spk_ts if _saved_spk_ts > 0 else 9999.0
-                    if _t_sin_spk_saved >= LADDER_500_CYCLE_S or _saved_spk_ts <= 0:
-                        st.last_spike_ts_500 = now
-                        _LOGGER.info("[ENTRADA_DIEGO] %s last_spike_ts_500 reset a now (t=%.0fs era STOP)",
-                                     sym, _t_sin_spk_saved)
-                    else:
-                        st.last_spike_ts_500 = _saved_spk_ts
-                    st.s500_drought_s1_ts         = 0.0  # No asumir drought en arranque
-                    st.broker_blocked_until_500   = 0.0  # No heredar bloqueo de sesión anterior
+                    st.prev_hour_pnl_500   = float(s.get("prev_hour_pnl_500", 0.0))
+                    st.sym_pnl_since_reset = float(s.get("sym_pnl_since_reset", 0.0))
+
+                    # ── Timestamp del último spike (NO resetear a now) ────────
+                    # Resetear a now crearía un spike falso → abriría contratos en sequía.
+                    st.last_spike_ts_500 = float(s.get("last_spike_ts_500", 0.0))
+                    _t_sin_spk_log = now - st.last_spike_ts_500 if st.last_spike_ts_500 > 0 else 9999.0
+                    _cycle_s  = LADDER_600_CYCLE_S if "600" in sym else (LADDER_500_CYCLE_S_CRASH if "CRASH" in sym else LADDER_500_CYCLE_S)
+                    _tier_log = "HOT" if _t_sin_spk_log < _cycle_s else "SEQUÍA"
+
+                    # ── REST — restaurar para no abrir si el bot estaba descansando ──
+                    st.consec_wins_500       = 0   # siempre 0: no heredar wins de sesión anterior
+                    _rut = float(s.get("ladder_rest_until_500", 0.0))
+                    # Para BOOM500: si el bloqueo guardado excede REST normal (>1800s desde ahora)
+                    # es un post-cluster, no un REST de wins — no restaurar para BOOM500
+                    _rest_s_sym = LADDER_500_REST_S_BOOM if "BOOM" in sym else LADDER_500_REST_S
+                    _is_post_cluster = "BOOM" in sym and _rut > now + _rest_s_sym
+                    st.ladder_rest_until_500 = (_rut if _rut > now else 0.0) if not _is_post_cluster else 0.0
+                    if _is_post_cluster:
+                        _LOGGER.info("[ENTRADA_DIEGO] %s post-cluster ignorado en restore → operando", sym)
+                    st.rest_spikes_500       = int(s.get("rest_spikes_500", 0))
+
+                    # ── Otros campos del ciclo ────────────────────────────────
+                    st.peak_profit_500           = float(s.get("peak_profit_500", 0.0))
+                    st.s20_consec_losses         = int(s.get("s20_consec_losses", 0))
+                    st.s20_crash500_wins         = int(s.get("s20_crash500_wins", 0))
+                    st.s500_drought_s1_ts        = 0.0   # No asumir drought en arranque
+                    st.broker_blocked_until_500  = 0.0   # No heredar bloqueo de sesión anterior
                     _c5ts = float(s.get("crash500_next_open_ts", 0.0))
                     st.crash500_next_open_ts = _c5ts if _c5ts > now else 0.0
+
+                    _rest_tag = f" REST={st.ladder_rest_until_500 - now:.0f}s" if st.ladder_rest_until_500 > now else ""
                     _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s RESTAURADO: burst_phase=%s pw_entries=%d nspk30=%d",
-                        sym, st.burst_phase, len(st.power_window),
+                        "[ENTRADA_DIEGO] %s RESTAURADO: burst_phase=%s spike=%.0fs(%s) pw=%d pnl_h=$%.2f%s",
+                        sym, st.burst_phase, _t_sin_spk_log, _tier_log,
                         sum(1 for t, _ in st.power_window if t > now - 1800.0),
+                        st.hour_pnl_500, _rest_tag,
                     )
                     continue
 
