@@ -525,12 +525,13 @@ function SlopeGateSection({ symbol }) {
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
 const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 // 1000s ciclo simple (coincidir con entrada_diego.py)
-const K1000_WAIT_S       = 900;   // 15min espera entre contratos
+const K1000_WAIT_S       = 900;   // 15min espera 1000s
+const K1000_WAIT_900_S   = 720;   // 12min espera 900s
 const K1000_CONTRACT_S   = 600;   // 10min duración contrato
 const K1000_SPIKE_HOLD_S = 240;   // 4min espera post-spike
-const K1000_STAKE_START  = 3;
-const K1000_STAKES_1000  = [3, 6, 15, 30]; // escalera $3→$6→$15→$30
-const K1000_HORA_TARGET  = 1.0; // (legacy display)
+const K1000_STAKE_START  = 20;    // stake inicial $20
+const K1000_STAKES_1000  = [20, 20, 40, 40, 80, 80]; // escalera $20×2→$40×2→$80×2
+const POWER_GATE_MIN     = 10.0;  // gate 500s: bloquear si POWER < 10
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
 const S20_WINDOW_S   = 690;   // 11.5 min ventana post-spike
@@ -577,7 +578,9 @@ function EntradaDiegoSection({ symbol }) {
 
   const nowSec     = now / 1000;
   const is1000     = symbol.includes("1000") || symbol.includes("900");
+  const is900      = symbol.includes("900");
   const is600      = symbol.includes("600");
+  const is500      = symbol === "BOOM500" || symbol === "CRASH500";
   const isCrash500 = symbol === "CRASH500";
   const isBoom500  = symbol === "BOOM500";
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
@@ -597,9 +600,10 @@ function EntradaDiegoSection({ symbol }) {
     const stakeIdx  = Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
     const stake1k   = k1000_cycle_stake || K1000_STAKES_1000[stakeIdx];
 
-    // Timer por fase
+    // Timer por fase (900s espera 12min, 1000s 15min)
+    const waitS        = is900 ? K1000_WAIT_900_S : K1000_WAIT_S;
     const phaseElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
-    const phaseTotal   = phase1k === "WAIT" ? K1000_WAIT_S
+    const phaseTotal   = phase1k === "WAIT" ? waitS
       : phase1k === "IN_CONTRACT" ? K1000_CONTRACT_S : K1000_SPIKE_HOLD_S;
     const phaseRem   = phase1k === "SPIKE_HOLD" && k1000_spike_hold_until > 0
       ? Math.max(0, k1000_spike_hold_until - nowSec)
@@ -621,7 +625,7 @@ function EntradaDiegoSection({ symbol }) {
 
     // Texto de estado por fase
     const stateText = phase1k === "WAIT"
-      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k}`
+      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (${is900 ? "12" : "15"}min)`
       : phase1k === "IN_CONTRACT"
         ? contract_id
           ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
@@ -649,7 +653,7 @@ function EntradaDiegoSection({ symbol }) {
           <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
         </div>
 
-        {/* Stake pills $3 → $6 → $15 → $30 */}
+        {/* Stake pills $20×2 → $40×2 → $80×2 */}
         <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
           {K1000_STAKES_1000.map((s, i) => {
             const active = i === stakeIdx;
@@ -664,7 +668,7 @@ function EntradaDiegoSection({ symbol }) {
             );
           })}
           <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
-            {phase1k === "IN_CONTRACT" ? "→spike:SPIKE_HOLD" : phase1k === "SPIKE_HOLD" ? "→4m:reset·$3" : "→15m:abrir"}
+            {phase1k === "IN_CONTRACT" ? "→spike:SPIKE_HOLD" : phase1k === "SPIKE_HOLD" ? `→4m:reset·$${K1000_STAKES_1000[0]}` : `→${is900 ? "12" : "15"}m:abrir`}
           </span>
         </div>
 
@@ -677,19 +681,17 @@ function EntradaDiegoSection({ symbol }) {
   // ── 500s/600s: LADDER — tiers y ciclos por símbolo ───────────────
   // Tier defs: [tiempo_corte_s, stake_$] — stake=0 = PAUSA (no abre)
   const TIER_DEFS = is600
-    ? [[300, 0], [660, 8], [1020, 32]]               // 600s:  PAUSA→$8→$32 (17min)
-    : isCrash500
-      ? [[360, 8], [720, 32]]                        // CRASH: $8→$32 (12min)
-      : [[360, 32], [720, 0], [1080, 8], [1440, 32]]; // BOOM:  $32→PAUSA→$8→$32 (24min)
-  const LADDER_CYCLE_S = is600 ? 1020 : isCrash500 ? 720 : 1440;
-  const LADDER_REST_S  = symbol.includes("BOOM") ? 1800 : 1200;
-  const CONTRACT_S     = 360;   // 6 min por contrato
+    ? [[240, 0], [600, 8], [960, 16], [1560, 32]]    // 600s:  PAUSA(4m)→$8(6m)→$16(6m)→$32(10m)
+    : [[360, 8], [720, 32]];                          // 500s (BOOM+CRASH): $8(6m)→$32(6m)
+  const LADDER_CYCLE_S = is600 ? 1560 : 720;
+  const LADDER_REST_S  = 1200;
   const FLOOR_PCT      = 0.85;
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
-          ladder_rest_until_500 = 0, consec_wins_500 = 0 } = edState;
+          ladder_rest_until_500 = 0, consec_wins_500 = 0,
+          power_30min_jump = 0, n_spikes_30min = 0 } = edState;
 
   const nowSec2       = now / 1000;
-  const isResting     = ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
+  const isResting     = !is500 && ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
   const restRemaining = isResting ? Math.max(0, ladder_rest_until_500 - nowSec2) : 0;
   const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const tierIdx = last_spike_ts_500 > 0
@@ -697,7 +699,8 @@ function EntradaDiegoSection({ symbol }) {
     : -1;
   const currentTierStake  = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
   const currentTierIsPausa = currentTierStake === 0;
-  const isWrap      = false;   // ya no hay wrap, solo REST
+  const CONTRACT_S = is600 && currentTierStake >= 32 ? 600 : 360;
+  const powerBlocked = is500 && !contract_id && power_30min_jump < POWER_GATE_MIN;
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
@@ -711,8 +714,8 @@ function EntradaDiegoSection({ symbol }) {
   const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
   const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
 
-  const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
-  const baseColor500  = isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+  const cycleBarColor = isResting ? "#a78bfa" : powerBlocked ? "#ff5d6c" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
+  const baseColor500  = isStop ? "#64748b" : isResting ? "#a78bfa" : powerBlocked ? "#ff5d6c" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
@@ -741,6 +744,15 @@ function EntradaDiegoSection({ symbol }) {
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
             {_fmtS(tSinSpike)} sin spike
+          </span>
+        )}
+        {/* POWER gate badge para 500s */}
+        {is500 && (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: powerBlocked ? "#ff5d6c22" : "#22d3a322",
+            color: powerBlocked ? "#ff5d6c" : "#22d3a3",
+            letterSpacing: "0.04em" }}>
+            ⚡{power_30min_jump.toFixed(1)} {powerBlocked ? "BLOQ" : "OK"}
           </span>
         )}
         {contract_id ? (
@@ -813,8 +825,8 @@ function EntradaDiegoSection({ symbol }) {
       {/* Acum */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 8, color: currentTierIsPausa && !isStop && !isResting ? "#ff5d6c99" : "#475569" }}>
-          {isStop ? "esperando spike…" : contract_id ? "contrato 6m activo" : currentTierIsPausa ? "PAUSA — sin apertura" : "abriendo siguiente"}
+        <span style={{ fontSize: 8, color: powerBlocked ? "#ff5d6c99" : currentTierIsPausa && !isStop && !isResting ? "#ff5d6c99" : "#475569" }}>
+          {isStop ? "esperando spike…" : powerBlocked ? `POWER ${power_30min_jump.toFixed(1)} < ${POWER_GATE_MIN} — gate bloqueado` : contract_id ? `contrato ${CONTRACT_S === 600 ? "10" : "6"}m activo` : currentTierIsPausa ? "PAUSA — sin apertura" : "abriendo siguiente"}
         </span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
@@ -824,7 +836,7 @@ function EntradaDiegoSection({ symbol }) {
   );
 }
 
-/* ── 1000s Scout Panel ───────────────────────────────────────── */
+/* ── 900s/1000s Scout Panel ──────────────────────────────────── */
 function K1000Panel() {
   return (
     <div style={{
@@ -833,7 +845,9 @@ function K1000Panel() {
     }}>
       <div style={{
         fontSize: 11, fontWeight: 800, color: T.cyan, letterSpacing: "0.07em", marginBottom: 2,
-      }}>BOOM1000 · CRASH1000 · p25-p75</div>
+      }}>900s · 1000s — $20→$40→$80</div>
+      <EntradaDiegoSection symbol="BOOM900" />
+      <EntradaDiegoSection symbol="CRASH900" />
       <EntradaDiegoSection symbol="BOOM1000" />
       <EntradaDiegoSection symbol="CRASH1000" />
     </div>
