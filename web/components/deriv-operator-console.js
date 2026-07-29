@@ -531,7 +531,7 @@ const K1000_CONTRACT_S   = 600;   // 10min duración contrato
 const K1000_SPIKE_HOLD_S = 240;   // 4min espera post-spike
 const K1000_STAKE_START  = 20;    // stake inicial $20
 const K1000_STAKES_1000  = [20, 20, 40, 40, 80, 80]; // escalera $20×2→$40×2→$80×2
-const POWER_GATE_MIN     = 10.0;  // gate 500s: bloquear si POWER < 10
+// POWER gate eliminado — 500s y 600s abren directo en spike
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
 const S20_WINDOW_S   = 690;   // 11.5 min ventana post-spike
@@ -678,20 +678,18 @@ function EntradaDiegoSection({ symbol }) {
     );
   }
 
-  // ── 500s/600s: LADDER — tiers y ciclos por símbolo ───────────────
-  // Tier defs: [tiempo_corte_s, stake_$] — stake=0 = PAUSA (no abre)
-  const TIER_DEFS = is600
-    ? [[240, 0], [600, 8], [960, 16], [1560, 32]]    // 600s:  PAUSA(4m)→$8(6m)→$16(6m)→$32(10m)
-    : [[360, 8], [720, 32]];                          // 500s (BOOM+CRASH): $8(6m)→$32(6m)
-  const LADDER_CYCLE_S = is600 ? 1560 : 720;
-  const LADDER_REST_S  = 1200;
+  // ── 500s/600s: LADDER — único tier $32, 7min, sin gate ──────────
+  // 500s y 600s operan igual: spike → $32 directo, contrato 7min, REST 20min tras 1 win>$1
+  const TIER_DEFS = [[420, 32]];  // único tier: spike → $32 / 7min
+  const LADDER_CYCLE_S = 420;     // 7 min — ventana activa tras spike
+  const LADDER_REST_S  = 1200;    // 20 min REST tras 1 win>$1
   const FLOOR_PCT      = 0.85;
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0,
           power_30min_jump = 0, n_spikes_30min = 0 } = edState;
 
   const nowSec2       = now / 1000;
-  const isResting     = !is500 && ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
+  const isResting     = ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
   const restRemaining = isResting ? Math.max(0, ladder_rest_until_500 - nowSec2) : 0;
   const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const tierIdx = last_spike_ts_500 > 0
@@ -699,8 +697,8 @@ function EntradaDiegoSection({ symbol }) {
     : -1;
   const currentTierStake  = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
   const currentTierIsPausa = currentTierStake === 0;
-  const CONTRACT_S = is600 && currentTierStake >= 32 ? 600 : 360;
-  const powerBlocked = is500 && !contract_id && power_30min_jump < POWER_GATE_MIN;
+  const CONTRACT_S   = 420;   // 7 min — igual para 500s y 600s
+  const powerBlocked = false; // gate eliminado
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
@@ -714,8 +712,8 @@ function EntradaDiegoSection({ symbol }) {
   const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
   const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
 
-  const cycleBarColor = isResting ? "#a78bfa" : powerBlocked ? "#ff5d6c" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
-  const baseColor500  = isStop ? "#64748b" : isResting ? "#a78bfa" : powerBlocked ? "#ff5d6c" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+  const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
+  const baseColor500  = isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
@@ -738,21 +736,12 @@ function EntradaDiegoSection({ symbol }) {
         ) : isResting ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>
-            REST {_fmtS(restRemaining)} {consec_wins_500 > 0 ? `(${consec_wins_500}W)` : ""}
+            REST {_fmtS(restRemaining)} · 1W&gt;$1
           </span>
         ) : (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
             {_fmtS(tSinSpike)} sin spike
-          </span>
-        )}
-        {/* POWER gate badge para 500s */}
-        {is500 && (
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-            background: powerBlocked ? "#ff5d6c22" : "#22d3a322",
-            color: powerBlocked ? "#ff5d6c" : "#22d3a3",
-            letterSpacing: "0.04em" }}>
-            ⚡{power_30min_jump.toFixed(1)} {powerBlocked ? "BLOQ" : "OK"}
           </span>
         )}
         {contract_id ? (
@@ -798,7 +787,7 @@ function EntradaDiegoSection({ symbol }) {
         </span>
       </div>
 
-      {/* Contract 6-min bar con floor indicator */}
+      {/* Contract 7-min bar con floor indicator */}
       {contract_id && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
           <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden", position: "relative" }}>
@@ -825,8 +814,8 @@ function EntradaDiegoSection({ symbol }) {
       {/* Acum */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 8, color: powerBlocked ? "#ff5d6c99" : currentTierIsPausa && !isStop && !isResting ? "#ff5d6c99" : "#475569" }}>
-          {isStop ? "esperando spike…" : powerBlocked ? `POWER ${power_30min_jump.toFixed(1)} < ${POWER_GATE_MIN} — gate bloqueado` : contract_id ? `contrato ${CONTRACT_S === 600 ? "10" : "6"}m activo` : currentTierIsPausa ? "PAUSA — sin apertura" : "abriendo siguiente"}
+        <span style={{ fontSize: 8, color: "#475569" }}>
+          {isStop ? "esperando spike…" : contract_id ? "contrato 7m activo" : isResting ? "REST — esperando spike" : "esperando spike → $32"}
         </span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
