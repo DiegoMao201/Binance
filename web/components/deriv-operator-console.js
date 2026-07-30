@@ -776,7 +776,7 @@ function EntradaDiegoSection({ symbol }) {
       {isResting && (() => {
         const restElapsed  = Math.max(0, LADDER_REST_S - restRemaining);
         const restPct      = Math.min(100, (restElapsed / LADDER_REST_S) * 100);
-        const spkColor     = rest_spikes_500 >= 2 ? "#f5c43c" : rest_spikes_500 >= 1 ? "#94a3b8" : "#475569";
+        const spkColor     = rest_spikes_500 >= 3 ? "#f5c43c" : rest_spikes_500 >= 1 ? "#94a3b8" : "#475569";
         return (
           <div style={{ marginBottom: 4 }}>
             {/* barra */}
@@ -792,7 +792,7 @@ function EntradaDiegoSection({ symbol }) {
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
               <span style={{ color: "#475569" }}>+{_fmtS(restElapsed)} transcurrido</span>
               <span style={{ color: spkColor, fontWeight: 700 }}>
-                {rest_spikes_500}/3 spikes {rest_spikes_500 >= 2 ? "⚠" : ""}
+                {rest_spikes_500}/4 spikes {rest_spikes_500 >= 3 ? "⚠" : ""}
               </span>
             </div>
           </div>

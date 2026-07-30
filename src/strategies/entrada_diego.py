@@ -277,7 +277,7 @@ REST_MIN_HOUR_PNL_500   = 4.0   # hora UTC debe tener >$4 ganados para activar R
 TP_RATCHET_MIN_PNL   = 15.0     # pnl mínimo en BROKER_CLOSE (no-FLOOR) para detectar tp_or_ratchet
 TP_RATCHET_PAUSE_S   = 1800.0   # 30 min pausa global tras tp_or_ratchet (el mercado se revierte)
 # Si ≥N spikes llegan DURANTE el REST → mercado quemado → extender REST 20min más (se reinicia el contador)
-LADDER_REST_SPIKE_EXTEND = 3   # ≥3 spikes durante REST → +20min (aplica a 500s y 600s, BOOM y CRASH)
+LADDER_REST_SPIKE_EXTEND = 4   # ≥4 spikes durante REST → +20min (aplica a 500s y 600s, BOOM y CRASH)
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
 S500_STAKE_LOW        = 4.0      # tier2 = $4 (mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
