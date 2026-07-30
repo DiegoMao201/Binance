@@ -250,25 +250,25 @@ HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   
 # ── 500s Ladder: 2 tiers con gate POWER≥10 — $8 (0-6min) → $32 (6-12min) ──
 # Mismo para BOOM500 y CRASH500. Gate POWER_GATE_500_MIN bloquea mercado muerto.
 LADDER_500_TIERS: list[tuple[float, float]] = [
-    (420,  32.0),   # único tier: 0-7min desde spike → $32
+    (240,  32.0),   # único tier: 0-4min desde spike → $32
 ]
 LADDER_500_TIERS_CRASH: list[tuple[float, float]] = [
-    (420,  32.0),   # único tier: 0-7min desde spike → $32
+    (240,  32.0),   # único tier: 0-4min desde spike → $32
 ]
-LADDER_500_CYCLE_S       = 420.0   # 7 min — ventana activa tras spike
-LADDER_500_CYCLE_S_CRASH = 420.0   # 7 min — ventana activa tras spike
+LADDER_500_CYCLE_S       = 240.0   # 4 min — ventana activa tras spike
+LADDER_500_CYCLE_S_CRASH = 240.0   # 4 min — ventana activa tras spike
 # ── 600s Ladder: igual que 500s — $32 directo, 7min, solo en cluster (POWER gate) ──
 LADDER_600_TIERS: list[tuple[float, float]] = [
-    (420,  32.0),   # único tier: 0-7min desde spike → $32
+    (240,  32.0),   # único tier: 0-4min desde spike → $32
 ]
-LADDER_600_CYCLE_S = 420.0    # 7 min — ventana activa tras spike
-LADDER_600_CONTRACT_S_32 = 420.0  # 7 min — duración contrato $32 (500s y 600s)
+LADDER_600_CYCLE_S = 240.0    # 4 min — ventana activa tras spike
+LADDER_600_CONTRACT_S_32 = 240.0  # 4 min — duración contrato $32 (500s y 600s)
 # Ventana burst: si hay ≥2 spikes en los últimos BURST_WINDOW_S → multiplicar stake ×2
 LADDER_BURST_WINDOW_S   = 300.0   # 5 min
 LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
 LADDER_BURST_MAX_STAKE  = 64.0    # cap burst
-LADDER_500_CONTRACT_S       = 420.0   # 7 min por contrato
-LADDER_500_CONTRACT_S_CRASH = 420.0   # 7 min por contrato CRASH500
+LADDER_500_CONTRACT_S       = 240.0   # 4 min por contrato
+LADDER_500_CONTRACT_S_CRASH = 240.0   # 4 min por contrato CRASH500
 LADDER_500_REST_S           = 1800.0  # 30 min descanso (500s y 600s)
 LADDER_500_REST_S_BOOM      = 1800.0  # 30 min descanso BOOM
 S500_CONSEC_WINS_REST    = 1     # wins → REST (1 win > $1 → pausa 20min)
@@ -1080,7 +1080,11 @@ class EntradaDiego:
                     # Dentro del tiempo de contrato: dejar correr (floor vigila)
                     state.burst_phase = "LADDER"
                     return
-                # 4 min cumplidos → cerrar (sin REST — sequía no activa descanso)
+                # Spike llegó con profit → floor activo, suspender timer por sequía
+                if state.peak_profit_500 >= _PROFIT_FLOOR_MIN:
+                    state.burst_phase = "LADDER"
+                    return
+                # 4 min cumplidos y sin profit → cerrar (sin REST — sequía no activa descanso)
                 _cid = int(state.contract_id)
                 _pnl = state.current_profit
                 state.contract_id     = None
@@ -1147,6 +1151,9 @@ class EntradaDiego:
                     _contract_s = LADDER_500_CONTRACT_S_CRASH if "CRASH" in sym else LADDER_500_CONTRACT_S
                 contract_age = now - state.burst_phase_started_at
                 if contract_age >= _contract_s:
+                    # Spike llegó con profit → floor activo, el 85% maneja el cierre
+                    if state.peak_profit_500 >= _PROFIT_FLOOR_MIN:
+                        return
                     _cid = int(state.contract_id)
                     _pnl = state.current_profit
                     state.contract_id     = None

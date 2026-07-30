@@ -680,8 +680,8 @@ function EntradaDiegoSection({ symbol }) {
 
   // ── 500s/600s: LADDER — único tier $32, 7min, sin gate ──────────
   // 500s y 600s operan igual: spike → $32 directo, contrato 7min, REST 20min tras 1 win>$1
-  const TIER_DEFS = [[420, 32]];  // único tier: spike → $32 / 7min
-  const LADDER_CYCLE_S = 420;     // 7 min — ventana activa tras spike
+  const TIER_DEFS = [[240, 32]];  // único tier: spike → $32 / 4min
+  const LADDER_CYCLE_S = 240;     // 4 min — ventana activa tras spike
   const LADDER_REST_S  = 1200;    // 20 min REST tras 1 win>$1
   const FLOOR_PCT      = 0.85;
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
@@ -811,7 +811,7 @@ function EntradaDiegoSection({ symbol }) {
         </div>
       )}
 
-      {/* Contract 7-min bar con floor indicator */}
+      {/* Contract bar — 4min timer o floor activo */}
       {contract_id && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
           <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden", position: "relative" }}>
@@ -839,7 +839,7 @@ function EntradaDiegoSection({ symbol }) {
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: "#475569" }}>
-          {isStop ? "esperando spike…" : contract_id ? "contrato 7m activo" : isResting ? "REST — esperando spike" : "esperando spike → $32"}
+          {isStop ? "esperando spike…" : contract_id ? (peak_profit_500 >= 0.20 ? "FLOOR activo — esperando 85%" : "contrato 4m activo") : isResting ? "REST — esperando spike" : "esperando spike → $32"}
         </span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
