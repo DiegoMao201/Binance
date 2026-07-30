@@ -685,7 +685,7 @@ function EntradaDiegoSection({ symbol }) {
   const LADDER_REST_S  = 1200;    // 20 min REST tras 1 win>$1
   const FLOOR_PCT      = 0.85;
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
-          ladder_rest_until_500 = 0, consec_wins_500 = 0,
+          ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           power_30min_jump = 0, n_spikes_30min = 0 } = edState;
 
   const nowSec2       = now / 1000;
@@ -736,7 +736,7 @@ function EntradaDiegoSection({ symbol }) {
         ) : isResting ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>
-            REST {_fmtS(restRemaining)} · 1W&gt;$1
+            REST {_fmtS(restRemaining)}
           </span>
         ) : (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
@@ -772,20 +772,44 @@ function EntradaDiegoSection({ symbol }) {
         })}
       </div>
 
-      {/* Cycle progress bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-        <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-          {isResting ? (
-            <div style={{ width: `${Math.min(100, (1 - restRemaining / LADDER_REST_S) * 100)}%`,
-              height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
-          ) : (
+      {/* REST progress bar — visible solo cuando está en descanso */}
+      {isResting && (() => {
+        const restElapsed  = Math.max(0, LADDER_REST_S - restRemaining);
+        const restPct      = Math.min(100, (restElapsed / LADDER_REST_S) * 100);
+        const spkColor     = rest_spikes_500 >= 2 ? "#f5c43c" : rest_spikes_500 >= 1 ? "#94a3b8" : "#475569";
+        return (
+          <div style={{ marginBottom: 4 }}>
+            {/* barra */}
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
+              <div style={{ flex: 1, height: 4, background: "rgba(167,139,250,0.15)", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ width: `${restPct}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
+              </div>
+              <span style={{ fontSize: 8, color: "#a78bfa", fontWeight: 700, minWidth: 30, textAlign: "right" }}>
+                -{_fmtS(restRemaining)}
+              </span>
+            </div>
+            {/* fila: tiempo transcurrido + spikes */}
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
+              <span style={{ color: "#475569" }}>+{_fmtS(restElapsed)} transcurrido</span>
+              <span style={{ color: spkColor, fontWeight: 700 }}>
+                {rest_spikes_500}/3 spikes {rest_spikes_500 >= 2 ? "⚠" : ""}
+              </span>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Cycle progress bar — visible fuera del REST */}
+      {!isResting && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+          <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
             <div style={{ width: `${cyclePct}%`, height: "100%", background: cycleBarColor, transition: "width 1s linear" }} />
-          )}
+          </div>
+          <span style={{ fontSize: 8, color: cycleBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
+            {isStop ? "—" : `${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) / 60)}m${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) % 60)}s`}
+          </span>
         </div>
-        <span style={{ fontSize: 8, color: cycleBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
-          {isResting ? `↺${_fmtS(restRemaining)}` : isStop ? "—" : `${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) / 60)}m${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) % 60)}s`}
-        </span>
-      </div>
+      )}
 
       {/* Contract 7-min bar con floor indicator */}
       {contract_id && (

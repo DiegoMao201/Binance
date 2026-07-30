@@ -276,9 +276,8 @@ REST_MIN_STAKE_500      = 5.0   # stake mínimo para contar win hacia REST
 REST_MIN_HOUR_PNL_500   = 4.0   # hora UTC debe tener >$4 ganados para activar REST
 TP_RATCHET_MIN_PNL   = 15.0     # pnl mínimo en BROKER_CLOSE (no-FLOOR) para detectar tp_or_ratchet
 TP_RATCHET_PAUSE_S   = 1800.0   # 30 min pausa global tras tp_or_ratchet (el mercado se revierte)
-# Si ≥N spikes llegan DURANTE el REST → post-cluster, sequía probable → esperar siguiente hora
-LADDER_REST_CLUSTER_SPIKES      = 5   # CRASH500: ≥5 spikes en REST → post-cluster
-LADDER_REST_CLUSTER_SPIKES_BOOM = 99  # BOOM500: mercado muy activo, no bloquear por cluster
+# Si ≥N spikes llegan DURANTE el REST → mercado quemado → extender REST 20min más (se reinicia el contador)
+LADDER_REST_SPIKE_EXTEND = 3   # ≥3 spikes durante REST → +20min (aplica a 500s y 600s, BOOM y CRASH)
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
 S500_STAKE_LOW        = 4.0      # tier2 = $4 (mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
@@ -986,22 +985,19 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s LADDER REST spike #%d (gap=%.0fs) pw=%.1f — acumulando en descanso",
                     sym, state.rest_spikes_500, _gap, self._get_power_30min(sym, now),
                 )
+                # ≥3 spikes en REST → mercado quemado → extender 20min más, resetear contador
+                if state.rest_spikes_500 >= LADDER_REST_SPIKE_EXTEND:
+                    state.ladder_rest_until_500 = now + 1200.0
+                    state.rest_spikes_500 = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s LADDER REST extendido +20min (spike #%d ≥ %d → mercado quemado)",
+                        sym, LADDER_REST_SPIKE_EXTEND, LADDER_REST_SPIKE_EXTEND,
+                    )
             if now < state.ladder_rest_until_500:
                 return  # descanso activo
-            # REST terminado: evaluar si re-entrar o esperar siguiente hora
-            _rspk = state.rest_spikes_500
+            # REST terminado
             state.rest_spikes_500       = 0
             state.ladder_rest_until_500 = 0.0
-            _cluster_threshold = LADDER_REST_CLUSTER_SPIKES_BOOM if "BOOM" in sym else LADDER_REST_CLUSTER_SPIKES
-            if _rspk >= _cluster_threshold:
-                # Cluster de spikes durante el REST → sequía post-cluster probable
-                _next_hour = float(int(now // 3600 + 1) * 3600)
-                state.ladder_rest_until_500 = _next_hour
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s LADDER %d spikes en REST → post-cluster, esperar siguiente hora UTC",
-                    sym, _rspk,
-                )
-                return
             # REST terminado: last_spike_ts_500 ya apunta al spike real más reciente (actualizado durante REST)
             # Si ese spike fue >12min atrás → tier=-1 → sequía → esperar siguiente spike (sin re-REST)
             # Si fue <12min atrás → tier válido → abrir normalmente
