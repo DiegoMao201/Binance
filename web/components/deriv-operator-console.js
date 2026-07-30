@@ -525,10 +525,11 @@ function SlopeGateSection({ symbol }) {
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
 const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 // 1000s ciclo simple (coincidir con entrada_diego.py)
-const K1000_WAIT_S       = 900;   // 15min espera 1000s
-const K1000_WAIT_900_S   = 720;   // 12min espera 900s
-const K1000_CONTRACT_S   = 600;   // 10min duración contrato
-const K1000_SPIKE_HOLD_S = 240;   // 4min espera post-spike
+const K1000_WAIT_S         = 480;   // 8min espera 1000s
+const K1000_WAIT_900_S     = 480;   // 8min espera 900s
+const K1000_CONTRACT_S     = 1200;  // 20min duración contrato (timer-triggered)
+const K1000_SPIKE_CONTRACT_S = 240; // 4min duración contrato (spike-triggered)
+const K1000_SPIKE_HOLD_S   = 240;   // 4min espera post-spike
 const K1000_STAKE_START  = 20;    // stake inicial $20
 const K1000_STAKES_1000  = [20, 20, 40, 40, 80, 80]; // escalera $20×2→$40×2→$80×2
 // POWER gate eliminado — 500s y 600s abren directo en spike
@@ -593,6 +594,7 @@ function EntradaDiegoSection({ symbol }) {
       k1000_stake_idx      = 0,
       k1000_cycle_stake    = K1000_STAKE_START,
       k1000_spike_hold_until = 0,
+      k1000_spike_triggered  = false,
     } = edState;
 
     const phase1k   = ["WAIT","IN_CONTRACT","SPIKE_HOLD"].includes(k1000_phase)
@@ -600,11 +602,12 @@ function EntradaDiegoSection({ symbol }) {
     const stakeIdx  = Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
     const stake1k   = k1000_cycle_stake || K1000_STAKES_1000[stakeIdx];
 
-    // Timer por fase (900s espera 12min, 1000s 15min)
+    // Timer por fase (ambos 8min; contrato: 4min si spike, 20min si timer)
     const waitS        = is900 ? K1000_WAIT_900_S : K1000_WAIT_S;
+    const contractS1k  = k1000_spike_triggered ? K1000_SPIKE_CONTRACT_S : K1000_CONTRACT_S;
     const phaseElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
     const phaseTotal   = phase1k === "WAIT" ? waitS
-      : phase1k === "IN_CONTRACT" ? K1000_CONTRACT_S : K1000_SPIKE_HOLD_S;
+      : phase1k === "IN_CONTRACT" ? contractS1k : K1000_SPIKE_HOLD_S;
     const phaseRem   = phase1k === "SPIKE_HOLD" && k1000_spike_hold_until > 0
       ? Math.max(0, k1000_spike_hold_until - nowSec)
       : Math.max(0, phaseTotal - phaseElapsed);
@@ -625,10 +628,10 @@ function EntradaDiegoSection({ symbol }) {
 
     // Texto de estado por fase
     const stateText = phase1k === "WAIT"
-      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (${is900 ? "12" : "15"}min)`
+      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (8min)`
       : phase1k === "IN_CONTRACT"
         ? contract_id
-          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
+          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)} (${k1000_spike_triggered ? "4m spike" : "20m timer"})`
           : `IN_CONTRACT — abriendo contrato...`
         : `Spike! Cerrando en ${_fmtS(phaseRem)}`;
 
@@ -678,15 +681,16 @@ function EntradaDiegoSection({ symbol }) {
     );
   }
 
-  // ── 500s/600s: LADDER — único tier $32, 7min, sin gate ──────────
-  // 500s y 600s operan igual: spike → $32 directo, contrato 7min, REST 20min tras 1 win>$1
-  const TIER_DEFS = [[240, 32]];  // único tier: spike → $32 / 4min
-  const LADDER_CYCLE_S = 240;     // 4 min — ventana activa tras spike
+  // ── 500s/600s: LADDER — $32/2min → zona muerta 3min → $8/8min ──────────
+  // Tier 0: spike → $32 (2min). Tier 1: zona muerta (3min). Tier 2: $8 (8min). REST 20min tras 1 win>$1
+  const TIER_DEFS = [[120, 32], [300, 0], [780, 8]];
+  const LADDER_CYCLE_S = 780;     // 13 min — ventana activa completa
   const LADDER_REST_S  = 1200;    // 20 min REST tras 1 win>$1
   const FLOOR_PCT      = 0.85;
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
-          power_30min_jump = 0, n_spikes_30min = 0 } = edState;
+          power_30min_jump = 0, n_spikes_30min = 0,
+          ladder_active_contract_s = 0 } = edState;
 
   const nowSec2       = now / 1000;
   const isResting     = ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
@@ -697,7 +701,8 @@ function EntradaDiegoSection({ symbol }) {
     : -1;
   const currentTierStake  = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
   const currentTierIsPausa = currentTierStake === 0;
-  const CONTRACT_S   = 420;   // 7 min — igual para 500s y 600s
+  // CONTRACT_S: usa el valor almacenado al abrir (120s tier0/$32, 480s tier2/$8). Fallback: 120s.
+  const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s : (tierIdx === 2 ? 480 : 120);
   const powerBlocked = false; // gate eliminado
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
@@ -811,7 +816,7 @@ function EntradaDiegoSection({ symbol }) {
         </div>
       )}
 
-      {/* Contract bar — 4min timer o floor activo */}
+      {/* Contract bar — 2min/$32 o 8min/$8 según tier */}
       {contract_id && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
           <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden", position: "relative" }}>
@@ -839,7 +844,7 @@ function EntradaDiegoSection({ symbol }) {
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 8, color: "#475569" }}>
-          {isStop ? "esperando spike…" : contract_id ? (peak_profit_500 >= 0.20 ? "FLOOR activo — esperando 85%" : "contrato 4m activo") : isResting ? "REST — esperando spike" : "esperando spike → $32"}
+          {isStop ? "esperando spike…" : contract_id ? (peak_profit_500 >= 0.20 ? "FLOOR activo — esperando 85%" : tierIdx === 2 ? "contrato 8m $8 activo" : "contrato 2m $32 activo") : isResting ? "REST — esperando spike" : currentTierIsPausa ? "zona muerta — esperando 3m" : "esperando spike → $32"}
         </span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
