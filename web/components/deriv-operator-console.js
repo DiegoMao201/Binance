@@ -671,60 +671,92 @@ function EntradaDiegoSection({ symbol }) {
             );
           })}
           <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
-            {phase1k === "IN_CONTRACT" ? "→spike:SPIKE_HOLD" : phase1k === "SPIKE_HOLD" ? `→4m:reset·$${K1000_STAKES_1000[0]}` : `→${is900 ? "12" : "15"}m:abrir`}
+            {phase1k === "IN_CONTRACT" ? `→spike:SPIKE_HOLD` : phase1k === "SPIKE_HOLD" ? `→4m:reset·$${K1000_STAKES_1000[0]}` : `→8m:abrir`}
           </span>
         </div>
 
         {/* Línea de estado */}
         <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>{stateText}</div>
+
+        {/* Gate diario $20 */}
+        {(() => {
+          const d1k = edState.day_pnl_1000 || 0;
+          const d1kColor = d1k >= 20 ? "#22d3a3" : d1k >= 10 ? "#f5c43c" : "#475569";
+          return (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4 }}>
+              <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ width: `${Math.min(100, (d1k / 20) * 100)}%`, height: "100%",
+                  background: d1kColor, transition: "width 1s linear" }} />
+              </div>
+              <span style={{ fontSize: 8, color: d1kColor, fontWeight: 700, minWidth: 44, textAlign: "right" }}>
+                {d1k >= 0 ? "+" : ""}{d1k.toFixed(2)}/$20
+              </span>
+            </div>
+          );
+        })()}
       </div>
     );
   }
 
-  // ── 500s/600s: LADDER — $32/2min → zona muerta 3min → $8/8min ──────────
-  // Tier 0: spike → $32 (2min). Tier 1: zona muerta (3min). Tier 2: $8 (8min). REST 20min tras 1 win>$1
-  const TIER_DEFS = [[120, 32], [300, 0], [780, 8]];
-  const LADDER_CYCLE_S = 780;     // 13 min — ventana activa completa
-  const LADDER_REST_S  = 1200;    // 20 min REST tras 1 win>$1
+  // ── 500s/600s: configuración POR SÍMBOLO ──────────────────────────────────
+  // BOOM500: solo minuto 0-1.5m, $32, sin REST
+  // CRASH500: solo minuto 2-8m, $32 (6m contrato), sin REST
+  // BOOM600/CRASH600: solo minuto 2-9m, $32 (7m contrato), con REST
+  const TIER_DEFS  = isBoom500 ? [[90,  32]]
+                   : isCrash500 ? [[120, 0], [480, 32]]
+                   :              [[120, 0], [540, 32]];
+  const LADDER_CYCLE_S = isBoom500 ? 90 : isCrash500 ? 480 : 540;
+  const LADDER_REST_S  = 1200;
   const FLOOR_PCT      = 0.85;
+  const HAS_REST       = !is500;  // 500s: nunca REST; 600s: sí REST
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
-          power_30min_jump = 0, n_spikes_30min = 0,
-          ladder_active_contract_s = 0 } = edState;
+          ladder_active_contract_s = 0, day_pnl_500 = 0 } = edState;
+  const DAILY_GATE = 20;
 
   const nowSec2       = now / 1000;
-  const isResting     = ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
+  const isResting     = HAS_REST && ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
   const restRemaining = isResting ? Math.max(0, ladder_rest_until_500 - nowSec2) : 0;
-  const tSinSpike   = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
+  const isDayDone     = day_pnl_500 >= DAILY_GATE;
+  const tSinSpike     = last_spike_ts_500 > 0 ? Math.max(0, nowSec - last_spike_ts_500) : 0;
   const tierIdx = last_spike_ts_500 > 0
     ? (() => { for (let i = 0; i < TIER_DEFS.length; i++) { if (tSinSpike < TIER_DEFS[i][0]) return i; } return -1; })()
     : -1;
-  const currentTierStake  = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
+  const currentTierStake   = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
   const currentTierIsPausa = currentTierStake === 0;
-  // CONTRACT_S: usa el valor almacenado al abrir (120s tier0/$32, 480s tier2/$8). Fallback: 120s.
-  const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s : (tierIdx === 2 ? 480 : 120);
-  const powerBlocked = false; // gate eliminado
+  // CONTRACT_S: del estado del bot (asignado al abrir) o fallback por símbolo
+  const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s
+                   : isBoom500 ? 90 : isCrash500 ? 360 : 420;
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
   const contractPct = contract_id ? Math.min(100, (contractAge / CONTRACT_S) * 100) : 0;
 
-  // Floor: qué % del pico estamos capturando actualmente
-  const floorActive = peak_profit_500 >= 0.20 && contract_id;
+  const floorActive  = peak_profit_500 >= 0.20 && contract_id;
   const profitVsPeak = floorActive && peak_profit_500 > 0 ? current_profit / peak_profit_500 : null;
   const nearFloor    = profitVsPeak !== null && profitVsPeak < (FLOOR_PCT + 0.05);
-
-  const pnlColor500 = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
-  const pnlAccColor = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
-
+  const pnlColor500  = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+  const pnlAccColor  = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
+  const dayPnlColor  = day_pnl_500 >= DAILY_GATE ? "#22d3a3" : day_pnl_500 >= DAILY_GATE * 0.5 ? "#f5c43c" : "#64748b";
   const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
-  const baseColor500  = isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+  const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+
+  // Label del rango por símbolo
+  const rangeLabel = isBoom500 ? "0–1.5m $32" : isCrash500 ? "2–8m $32" : "2–9m $32";
+  // Texto de estado
+  const statusText = isDayDone ? `DONE día +$${day_pnl_500.toFixed(2)} ≥ $${DAILY_GATE}`
+    : isStop ? "esperando spike…"
+    : contract_id
+      ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $32`)
+      : isResting ? "REST — próximo spike"
+      : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}`
+      : `esperando spike → ${rangeLabel}`;
 
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
     fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
     border: `1px solid ${baseColor500}33`,
-    background: `${baseColor500}08`,
+    background: isDayDone ? "rgba(34,211,163,0.05)" : `${baseColor500}08`,
   };
 
   return (
@@ -732,17 +764,16 @@ function EntradaDiegoSection({ symbol }) {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
         <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>LADDER</span>
-        {isStop ? (
+        <span style={{ fontSize: 8, color: "#475569", fontWeight: 600 }}>{rangeLabel}</span>
+        {isDayDone ? (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#22d3a322", color: "#22d3a3", letterSpacing: "0.06em" }}>DÍA DONE ✓</span>
+        ) : isStop ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#64748b22", color: "#94a3b8", letterSpacing: "0.06em" }}>STOP</span>
-        ) : burst_phase === "HOUR_DONE" ? (
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-            background: "#22d3a322", color: "#22d3a3", letterSpacing: "0.06em" }}>HORA DONE ✓</span>
         ) : isResting ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-            background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>
-            REST {_fmtS(restRemaining)}
-          </span>
+            background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>REST {_fmtS(restRemaining)}</span>
         ) : (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
@@ -758,33 +789,34 @@ function EntradaDiegoSection({ symbol }) {
         )}
       </div>
 
-      {/* Tier pills */}
+      {/* Tier pills — muestran la ventana operativa */}
       <div style={{ display: "flex", gap: 3, marginBottom: 5 }}>
         {TIER_DEFS.map(([cutoff, stake], i) => {
           const isPausa = stake === 0;
-          const active  = !isStop && i === tierIdx;
-          const done    = !isStop && i < tierIdx;
-          const activeBg = isPausa ? "#ff5d6c" : "#62d4ff";
+          const active  = !isStop && !isDayDone && i === tierIdx;
+          const done    = !isStop && !isDayDone && i < tierIdx;
+          const activeBg = isPausa ? "#f5c43c" : "#62d4ff";
           const bg      = active ? activeBg : done ? "#62d4ff22" : "rgba(255,255,255,0.06)";
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
-          const fw      = active ? 800 : 600;
+          const label   = isPausa
+            ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
+            : `$32 · ${i === 0 && isBoom500 ? "1.5m" : isCrash500 ? "6m" : "7m"}`;
           return (
             <span key={i} style={{
-              flex: 1, textAlign: "center", fontSize: 9, fontWeight: fw,
+              flex: 1, textAlign: "center", fontSize: 8, fontWeight: active ? 800 : 600,
               padding: "2px 0", borderRadius: 3, background: bg, color: col,
-            }}>{isPausa ? "PAUSA" : `$${stake}`}</span>
+            }}>{label}</span>
           );
         })}
       </div>
 
-      {/* REST progress bar — visible solo cuando está en descanso */}
-      {isResting && (() => {
-        const restElapsed  = Math.max(0, LADDER_REST_S - restRemaining);
-        const restPct      = Math.min(100, (restElapsed / LADDER_REST_S) * 100);
-        const spkColor     = rest_spikes_500 >= 3 ? "#f5c43c" : rest_spikes_500 >= 1 ? "#94a3b8" : "#475569";
+      {/* REST bar — solo 600s */}
+      {HAS_REST && isResting && (() => {
+        const restElapsed = Math.max(0, LADDER_REST_S - restRemaining);
+        const restPct     = Math.min(100, (restElapsed / LADDER_REST_S) * 100);
+        const spkColor    = rest_spikes_500 >= 3 ? "#f5c43c" : rest_spikes_500 >= 1 ? "#94a3b8" : "#475569";
         return (
           <div style={{ marginBottom: 4 }}>
-            {/* barra */}
             <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
               <div style={{ flex: 1, height: 4, background: "rgba(167,139,250,0.15)", borderRadius: 2, overflow: "hidden" }}>
                 <div style={{ width: `${restPct}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
@@ -793,33 +825,30 @@ function EntradaDiegoSection({ symbol }) {
                 -{_fmtS(restRemaining)}
               </span>
             </div>
-            {/* fila: tiempo transcurrido + spikes */}
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
               <span style={{ color: "#475569" }}>+{_fmtS(restElapsed)} transcurrido</span>
-              <span style={{ color: spkColor, fontWeight: 700 }}>
-                {rest_spikes_500}/4 spikes {rest_spikes_500 >= 3 ? "⚠" : ""}
-              </span>
+              <span style={{ color: spkColor, fontWeight: 700 }}>{rest_spikes_500}/4 spikes {rest_spikes_500 >= 3 ? "⚠" : ""}</span>
             </div>
           </div>
         );
       })()}
 
-      {/* Cycle progress bar — visible fuera del REST */}
-      {!isResting && (
+      {/* Cycle progress bar */}
+      {!isResting && !isDayDone && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
           <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
             <div style={{ width: `${cyclePct}%`, height: "100%", background: cycleBarColor, transition: "width 1s linear" }} />
           </div>
           <span style={{ fontSize: 8, color: cycleBarColor, fontWeight: 700, minWidth: 28, textAlign: "right" }}>
-            {isStop ? "—" : `${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) / 60)}m${Math.floor(Math.max(0, LADDER_CYCLE_S - tSinSpike) % 60)}s`}
+            {isStop ? "—" : _fmtS(Math.max(0, LADDER_CYCLE_S - tSinSpike))}
           </span>
         </div>
       )}
 
-      {/* Contract bar — 2min/$32 o 8min/$8 según tier */}
+      {/* Contract bar */}
       {contract_id && (
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden", position: "relative" }}>
+          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
             <div style={{ width: `${contractPct}%`, height: "100%", background: "#a78bfa", transition: "width 1s linear" }} />
           </div>
           <span style={{ fontSize: 8, color: "#a78bfa", fontWeight: 700, minWidth: 28, textAlign: "right" }}>
@@ -828,24 +857,31 @@ function EntradaDiegoSection({ symbol }) {
         </div>
       )}
 
-      {/* Floor row: solo cuando hay pico capturado */}
+      {/* Floor row */}
       {floorActive && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 8, marginBottom: 2 }}>
-          <span style={{ color: nearFloor ? "#f5c43c" : "#64748b" }}>
-            floor 85% · pico +{peak_profit_500.toFixed(2)}$
-          </span>
+          <span style={{ color: nearFloor ? "#f5c43c" : "#64748b" }}>floor 85% · pico +{peak_profit_500.toFixed(2)}$</span>
           <span style={{ color: nearFloor ? "#f5c43c" : "#22d3a3", fontWeight: 700 }}>
             {profitVsPeak !== null ? `${Math.round(profitVsPeak * 100)}%` : "–"}
           </span>
         </div>
       )}
 
+      {/* Gate diario $20 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+        <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{ width: `${Math.min(100, (day_pnl_500 / DAILY_GATE) * 100)}%`, height: "100%",
+            background: dayPnlColor, transition: "width 1s linear" }} />
+        </div>
+        <span style={{ fontSize: 8, color: dayPnlColor, fontWeight: 700, minWidth: 40, textAlign: "right" }}>
+          {day_pnl_500 >= 0 ? "+" : ""}{day_pnl_500.toFixed(2)}/${DAILY_GATE}
+        </span>
+      </div>
+
       {/* Acum */}
       <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 3, marginTop: 2,
         display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 8, color: "#475569" }}>
-          {isStop ? "esperando spike…" : contract_id ? (peak_profit_500 >= 0.20 ? "FLOOR activo — esperando 85%" : tierIdx === 2 ? "contrato 8m $8 activo" : "contrato 2m $32 activo") : isResting ? "REST — esperando spike" : currentTierIsPausa ? "zona muerta — esperando 3m" : "esperando spike → $32"}
-        </span>
+        <span style={{ fontSize: 8, color: isDayDone ? "#22d3a3" : "#475569" }}>{statusText}</span>
         <span style={{ fontSize: 8, color: pnlAccColor, fontWeight: 700 }}>
           {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(2)}$
         </span>
