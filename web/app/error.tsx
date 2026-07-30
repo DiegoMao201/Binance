@@ -26,6 +26,13 @@ export default function RootError({
 }) {
   useEffect(() => {
     console.error("[RootError boundary] digest:", error.digest, error);
+    // ChunkLoadError = deploy nuevo con chunks invalidados → hard reload automático
+    const isChunk =
+      error.name === "ChunkLoadError" ||
+      /loading chunk|failed to fetch|loading css chunk/i.test(error.message);
+    if (isChunk) {
+      window.location.reload();
+    }
   }, [error]);
 
   return (
