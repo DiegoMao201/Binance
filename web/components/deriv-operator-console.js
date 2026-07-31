@@ -706,13 +706,13 @@ function EntradaDiegoSection({ symbol }) {
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           ladder_active_contract_s = 0, day_pnl_500 = 0,
           dead_zone_spikes_500 = 0 } = edState;
-  // p25/p50 dinámicos para BOOM500 (fallback histórico: 126s/363s de 393 muestras)
+  // p50 dinámico para BOOM500 (fallback histórico: 363s de 393 muestras)
   const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
   const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
-  const boomOpenAt     = isBoom500 ? boom500_p25 : 0;
+  // open_at=0: BOOM500 abre inmediatamente al spike, cierra en p50+2min
   const boomCloseAt    = isBoom500 ? (boom500_p50 + 120) : 0;
   const TIER_DEFS  = isBoom500
-    ? (boomOpenAt > 0 ? [[boomOpenAt, 0], [boomCloseAt, 32]] : [[boomCloseAt, 32]])
+    ? [[boomCloseAt, 32]]                     // sin zona muerta — $32 desde t=0
     : isCrash500 ? [[120, 0], [480, 32]]
     :              [[120, 0], [540, 32]];
   const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? 480 : 540;
@@ -748,9 +748,9 @@ function EntradaDiegoSection({ symbol }) {
   const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
   const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
-  // Label del rango por símbolo (BOOM500 dinámico)
+  // Label del rango por símbolo (BOOM500 dinámico — abre en t=0)
   const rangeLabel = isBoom500
-    ? `${(boomOpenAt/60).toFixed(1)}–${(boomCloseAt/60).toFixed(1)}m $32 (p25=${(boom500_p25/60).toFixed(1)}m·p50=${(boom500_p50/60).toFixed(1)}m)`
+    ? `0–${(boomCloseAt/60).toFixed(1)}m $32 (p50=${(boom500_p50/60).toFixed(1)}m)`
     : isCrash500 ? "2–8m $32" : "2–9m $32";
   // Indicador de alerta dead-zone y racha wins para 500s
   const dzAlert = is500 && !contract_id && !isResting
@@ -765,6 +765,7 @@ function EntradaDiegoSection({ symbol }) {
       ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $32${winAlert}`)
       : isResting ? "REST 20m — próximo spike"
       : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}${dzAlert}`
+      : tierIdx < 0 && isBoom500 ? `sequía — esperando spike${dzAlert}`
       : `esperando spike → ${rangeLabel}${dzAlert}${winAlert}`;
 
   const base500 = {
@@ -814,7 +815,7 @@ function EntradaDiegoSection({ symbol }) {
           const bg      = active ? activeBg : done ? "#62d4ff22" : "rgba(255,255,255,0.06)";
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
           const label   = isPausa
-            ? (isCrash500 || is600 ? "espera 2m" : boomOpenAt > 0 ? `espera ${(boomOpenAt/60).toFixed(1)}m` : "PAUSA")
+            ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
             : `$32 · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? "6m" : "7m"}`;
           return (
             <span key={i} style={{
