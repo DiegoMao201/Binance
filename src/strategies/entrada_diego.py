@@ -1358,19 +1358,12 @@ class EntradaDiego:
         # ────────────────────────────────────────────────────────────────────
         _wait_s = K1000_ENTRY_DELAY_900_S if "900" in sym else K1000_ENTRY_DELAY_S
         if phase == "WAIT":
-            # Spike durante espera → resetear ciclo a $20 y abrir inmediatamente
-            # Regla: cualquier spike reinicia el ciclo, sin importar donde estemos
+            # Spike durante espera: ignorar — dejar correr el contador de 8min sin abrir
             if _new_spike:
-                state.k1000_stake_idx      = 0
-                state.k1000_cycle_stake    = K1000_STAKES_1000[0]
-                state.k1000_spike_triggered = True
-                state.k1000_phase    = "IN_CONTRACT"
-                state.k1000_phase_ts = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 WAIT spike → reset idx=0 → IN_CONTRACT 4min $%.0f",
-                    sym, K1000_STAKES_1000[0],
+                    "[ENTRADA_DIEGO] %s K1000 WAIT spike ignorado — contador 8min sigue (%.0fs restantes)",
+                    sym, max(0.0, _wait_s - (now - state.k1000_phase_ts)),
                 )
-                await self._open_1000_simple(sym, state, now)
                 return
             if now >= state.k1000_phase_ts + _wait_s:
                 state.k1000_spike_triggered = False

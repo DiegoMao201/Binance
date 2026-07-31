@@ -628,10 +628,10 @@ function EntradaDiegoSection({ symbol }) {
 
     // Texto de estado por fase
     const stateText = phase1k === "WAIT"
-      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (8min)`
+      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (20min)`
       : phase1k === "IN_CONTRACT"
         ? contract_id
-          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)} (${k1000_spike_triggered ? "4m spike" : "20m timer"})`
+          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
           : `IN_CONTRACT — abriendo contrato...`
         : `Spike! Cerrando en ${_fmtS(phaseRem)}`;
 
