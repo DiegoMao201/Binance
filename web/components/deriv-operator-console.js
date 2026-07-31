@@ -708,7 +708,7 @@ function EntradaDiegoSection({ symbol }) {
   // p25/p50 dinámicos para BOOM500 (fallback histórico: 126s/363s de 393 muestras)
   const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
   const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
-  const boomOpenAt     = isBoom500 ? Math.max(0, boom500_p25 - 180) : 0;
+  const boomOpenAt     = isBoom500 ? boom500_p25 : 0;
   const boomCloseAt    = isBoom500 ? (boom500_p50 + 120) : 0;
   const TIER_DEFS  = isBoom500
     ? (boomOpenAt > 0 ? [[boomOpenAt, 0], [boomCloseAt, 32]] : [[boomCloseAt, 32]])

@@ -917,6 +917,52 @@ class EntradaDiego:
                 )
                 await self._open(sym, state, now)
 
+    def _seed_boom500_buffer(self, state: Any) -> None:
+        """Siembra spike_ts_buffer_500 desde deriv_spike_events.json al arrancar.
+        Solo actúa si el buffer está vacío o tiene <5 entradas.
+        Usa los spikes de las últimas 24h para reflejar condiciones actuales."""
+        if len(getattr(state, 'spike_ts_buffer_500', [])) >= 5:
+            return  # ya tiene datos suficientes — no sobreescribir
+        events_path = self._logs_dir / "deriv_spike_events.json"
+        if not events_path.exists():
+            return
+        try:
+            events = json.loads(events_path.read_text())
+            cutoff = time.time() - 86400  # últimas 24h para reflejar mercado actual
+            boom_ts = sorted(
+                float(e['ts']) for e in events
+                if isinstance(e, dict) and e.get('symbol') == 'BOOM500'
+                and float(e.get('ts', 0)) > cutoff
+            )
+            if len(boom_ts) < 6:
+                # Si no hay suficientes en 24h, ampliar a 72h
+                cutoff72 = time.time() - 259200
+                boom_ts = sorted(
+                    float(e['ts']) for e in events
+                    if isinstance(e, dict) and e.get('symbol') == 'BOOM500'
+                    and float(e.get('ts', 0)) > cutoff72
+                )
+            boom_ts = boom_ts[-100:]
+            state.spike_ts_buffer_500 = boom_ts
+            intervals = sorted(
+                b - a for a, b in zip(boom_ts, boom_ts[1:]) if 0 < b - a < 7200
+            )
+            n = len(intervals)
+            if n >= 5:
+                def _pct(p: float) -> float:
+                    idx = (p / 100.0) * (n - 1)
+                    lo = int(idx)
+                    return intervals[lo] + (idx - lo) * (intervals[min(lo + 1, n - 1)] - intervals[lo])
+                state.boom500_p25 = _pct(25.0)
+                state.boom500_p50 = _pct(50.0)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] BOOM500 buffer sembrado: %d spikes, p25=%.0fs(%.1fm) p50=%.0fs(%.1fm)",
+                    n + 1, state.boom500_p25, state.boom500_p25 / 60,
+                    state.boom500_p50, state.boom500_p50 / 60,
+                )
+        except Exception as exc:
+            _LOGGER.warning("[ENTRADA_DIEGO] BOOM500 seed buffer error: %s", exc)
+
     def _update_boom500_percentiles(self, state: Any, new_spike_ts: float) -> None:
         """Actualiza p25/p50 de intervalo entre spikes de BOOM500 con buffer rolling de 100 muestras."""
         buf: list = getattr(state, 'spike_ts_buffer_500', [])
@@ -946,10 +992,10 @@ class EntradaDiego:
     def _ladder_tier_500(self, sym: str, t_sin_spike: float, state: Any = None) -> tuple[int, float]:
         """Retorna (tier_idx, stake). tier_idx=-1 si fuera de zona caliente o pausa programada."""
         if "BOOM" in sym and "500" in sym:
-            # Ventana dinámica: abre max(0, p25-3min) tras spike, cierra p50+2min
+            # Ventana dinámica: abre exactamente en p25, cierra en p50+2min
             p25 = getattr(state, 'boom500_p25', 126.0) if state is not None else 126.0
             p50 = getattr(state, 'boom500_p50', 363.0) if state is not None else 363.0
-            open_at  = max(0.0, p25 - 180.0)
+            open_at  = p25
             close_at = p50 + 120.0
             if t_sin_spike < open_at or t_sin_spike >= close_at:
                 return -1, 0.0
@@ -2158,6 +2204,11 @@ class EntradaDiego:
 
     async def _restore_from_disk(self) -> None:
         try:
+            # Sembrar buffer BOOM500 desde spike_events al arrancar (cubre primer arranque y restarts)
+            for _sym, _st in self._states.items():
+                if "BOOM" in _sym and "500" in _sym:
+                    self._seed_boom500_buffer(_st)
+
             if not self._state_file.exists():
                 return
             data = json.loads(self._state_file.read_text())
@@ -2231,6 +2282,8 @@ class EntradaDiego:
                             st.spike_ts_buffer_500 = [float(t) for t in s.get("spike_ts_buffer_500", [])]
                             st.boom500_p25 = float(s.get("boom500_p25", 126.0))
                             st.boom500_p50 = float(s.get("boom500_p50", 363.0))
+                            if "BOOM" in sym and "500" in sym:
+                                self._seed_boom500_buffer(st)
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
                             st.hour_spike_count_500        = int(s.get("hour_spike_count_500", 0))
@@ -2362,6 +2415,8 @@ class EntradaDiego:
                     st.spike_ts_buffer_500 = [float(t) for t in s.get("spike_ts_buffer_500", [])]
                     st.boom500_p25 = float(s.get("boom500_p25", 126.0))
                     st.boom500_p50 = float(s.get("boom500_p50", 363.0))
+                    if "BOOM" in sym and "500" in sym:
+                        self._seed_boom500_buffer(st)  # siembra desde spike_events si buffer vacío
 
                     # ── Contadores de hora ────────────────────────────────────
                     st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))
