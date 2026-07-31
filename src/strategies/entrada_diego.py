@@ -410,6 +410,9 @@ class _SymState:
     s500_drought_s1_ts:      float = 0.0   # epoch S1 post-sequía; 0 = sin drought recovery
     s500_cur_stake:          float = 0.0   # stake actual 500s; 0 = usar STAKE_500_FIXED
     s500_pnl_counted_cid:    int   = 0     # contrato cuyo pnl ya fue sumado en PROFIT_CLOSE (evitar double-count en BROKER_CLOSE)
+    spike_ts_buffer_500:     list  = field(default_factory=list)  # últimas 100 ts de spikes BOOM500 para p25/p50 dinámico
+    boom500_p25:             float = 126.0  # p25 intervalo entre spikes (segundos) — fallback histórico 393 muestras
+    boom500_p50:             float = 363.0  # p50 intervalo entre spikes (segundos) — fallback histórico 393 muestras
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -540,6 +543,10 @@ class _SymState:
             "ladder_rest_until_500":   round(self.ladder_rest_until_500, 3),
             "rest_spikes_500":         self.rest_spikes_500,
             "current_stake_500":       round(self.current_stake_500, 2),
+            # BOOM500 ventana dinámica p25/p50
+            "boom500_p25":             round(getattr(self, 'boom500_p25', 126.0), 1),
+            "boom500_p50":             round(getattr(self, 'boom500_p50', 363.0), 1),
+            "spike_ts_buffer_500":     [round(t, 3) for t in getattr(self, 'spike_ts_buffer_500', [])],
         }
         return d
 
@@ -910,8 +917,43 @@ class EntradaDiego:
                 )
                 await self._open(sym, state, now)
 
-    def _ladder_tier_500(self, sym: str, t_sin_spike: float) -> tuple[int, float]:
+    def _update_boom500_percentiles(self, state: Any, new_spike_ts: float) -> None:
+        """Actualiza p25/p50 de intervalo entre spikes de BOOM500 con buffer rolling de 100 muestras."""
+        buf: list = getattr(state, 'spike_ts_buffer_500', [])
+        buf.append(new_spike_ts)
+        buf = buf[-100:]
+        state.spike_ts_buffer_500 = buf
+        if len(buf) < 6:
+            return  # insuficientes muestras — mantener fallback histórico
+        intervals = sorted(
+            b - a for a, b in zip(buf, buf[1:]) if 0 < b - a < 7200
+        )
+        n = len(intervals)
+        if n < 5:
+            return
+        def _pct(p: float) -> float:
+            idx = (p / 100.0) * (n - 1)
+            lo = int(idx)
+            return intervals[lo] + (idx - lo) * (intervals[min(lo + 1, n - 1)] - intervals[lo])
+        state.boom500_p25 = _pct(25.0)
+        state.boom500_p50 = _pct(50.0)
+        _LOGGER.info(
+            "[ENTRADA_DIEGO] BOOM500 percentiles p25=%.0fs(%.1fm) p50=%.0fs(%.1fm) n=%d",
+            state.boom500_p25, state.boom500_p25 / 60,
+            state.boom500_p50, state.boom500_p50 / 60, n,
+        )
+
+    def _ladder_tier_500(self, sym: str, t_sin_spike: float, state: Any = None) -> tuple[int, float]:
         """Retorna (tier_idx, stake). tier_idx=-1 si fuera de zona caliente o pausa programada."""
+        if "BOOM" in sym and "500" in sym:
+            # Ventana dinámica: abre max(0, p25-3min) tras spike, cierra p50+2min
+            p25 = getattr(state, 'boom500_p25', 126.0) if state is not None else 126.0
+            p50 = getattr(state, 'boom500_p50', 363.0) if state is not None else 363.0
+            open_at  = max(0.0, p25 - 180.0)
+            close_at = p50 + 120.0
+            if t_sin_spike < open_at or t_sin_spike >= close_at:
+                return -1, 0.0
+            return 0, 32.0
         if "600" in sym:
             tiers = LADDER_600_TIERS
         elif "CRASH" in sym:
@@ -920,7 +962,7 @@ class EntradaDiego:
             tiers = LADDER_500_TIERS
         for idx, (t_max, stake) in enumerate(tiers):
             if t_sin_spike < t_max:
-                if stake <= 0.0:  # pausa programada — zona muerta, no abrir
+                if stake <= 0.0:
                     return -1, 0.0
                 return idx, stake
         return -1, 0.0
@@ -1046,6 +1088,9 @@ class EntradaDiego:
             if _abs_jump > 0:
                 state.power_window.append((_last_spk, _abs_jump))
                 state.power_window = [(t, r) for t, r in state.power_window if t > now - 1800.0]
+            # Actualizar p25/p50 dinámico para BOOM500
+            if "BOOM" in sym and "500" in sym:
+                self._update_boom500_percentiles(state, _last_spk)
             _LOGGER.info(
                 "[ENTRADA_DIEGO] %s LADDER spike gap=%.0fs jump=%.2f pw=%.1f → ciclo reset",
                 sym, _gap, _abs_jump, self._get_power_30min(sym, now),
@@ -1098,7 +1143,7 @@ class EntradaDiego:
 
         # ── Tier actual ───────────────────────────────────────────────────────
         t_sin_spike = now - state.last_spike_ts_500
-        tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike)
+        tier_idx, stake = self._ladder_tier_500(sym, t_sin_spike, state)
         stake = self._burst_stake_500(sym, now, stake)
 
         # ── >ciclo sin spike: sequía — cerrar contrato si aplica, esperar próximo spike ──
@@ -1218,11 +1263,17 @@ class EntradaDiego:
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
         if "600" in sym:
-            state.ladder_active_contract_s = LADDER_600_CONTRACT_S_32      # 7min
+            state.ladder_active_contract_s = LADDER_600_CONTRACT_S_32                   # 7min
         elif "CRASH" in sym:
-            state.ladder_active_contract_s = LADDER_500_CONTRACT_S_CRASH   # 6min
+            state.ladder_active_contract_s = LADDER_500_CONTRACT_S_CRASH                # 6min
+        elif "BOOM" in sym and "500" in sym:
+            # Duración dinámica: tiempo restante hasta p50+2min desde el último spike
+            _p50 = getattr(state, 'boom500_p50', 363.0)
+            _p25 = getattr(state, 'boom500_p25', 126.0)
+            _close_at = _p50 + 120.0
+            state.ladder_active_contract_s = max(30.0, _close_at - t_sin_spike)
         else:
-            state.ladder_active_contract_s = LADDER_500_CONTRACT_S         # 1.5min
+            state.ladder_active_contract_s = LADDER_500_CONTRACT_S
         await self._open(sym, state, now, stake_override=stake)
 
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
@@ -2176,6 +2227,10 @@ class EntradaDiego:
                             # restaurar ventana de spikes 30min para preservar gate state
                             _pw = s.get("power_window", [])
                             st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
+                            # Buffer p25/p50 dinámico BOOM500
+                            st.spike_ts_buffer_500 = [float(t) for t in s.get("spike_ts_buffer_500", [])]
+                            st.boom500_p25 = float(s.get("boom500_p25", 126.0))
+                            st.boom500_p50 = float(s.get("boom500_p50", 363.0))
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
                             st.hour_spike_count_500        = int(s.get("hour_spike_count_500", 0))
@@ -2303,6 +2358,10 @@ class EntradaDiego:
                     # ── Ventana de spikes 30min (para POWER y burst multiplier) ──
                     _pw = s.get("power_window", [])
                     st.power_window = [(float(t), float(r)) for t, r in _pw if float(t) > now - 1800.0]
+                    # ── Buffer p25/p50 dinámico BOOM500 ──────────────────────────
+                    st.spike_ts_buffer_500 = [float(t) for t in s.get("spike_ts_buffer_500", [])]
+                    st.boom500_p25 = float(s.get("boom500_p25", 126.0))
+                    st.boom500_p50 = float(s.get("boom500_p50", 363.0))
 
                     # ── Contadores de hora ────────────────────────────────────
                     st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))

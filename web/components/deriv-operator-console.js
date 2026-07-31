@@ -699,19 +699,25 @@ function EntradaDiegoSection({ symbol }) {
   }
 
   // ── 500s/600s: configuración POR SÍMBOLO ──────────────────────────────────
-  // BOOM500: solo minuto 0-4m, $32, sin REST
+  // BOOM500: ventana dinámica [p25-3m, p50+2m] calculada en vivo por el bot
   // CRASH500: solo minuto 2-8m, $32 (6m contrato), sin REST
   // BOOM600/CRASH600: solo minuto 2-9m, $32 (7m contrato), con REST
-  const TIER_DEFS  = isBoom500 ? [[240, 32]]
-                   : isCrash500 ? [[120, 0], [480, 32]]
-                   :              [[120, 0], [540, 32]];
-  const LADDER_CYCLE_S = isBoom500 ? 240 : isCrash500 ? 480 : 540;
-  const LADDER_REST_S  = 1200;
-  const FLOOR_PCT      = 0.85;
-  const HAS_REST       = !is500;  // 500s: nunca REST; 600s: sí REST
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           ladder_active_contract_s = 0, day_pnl_500 = 0 } = edState;
+  // p25/p50 dinámicos para BOOM500 (fallback histórico: 126s/363s de 393 muestras)
+  const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
+  const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
+  const boomOpenAt     = isBoom500 ? Math.max(0, boom500_p25 - 180) : 0;
+  const boomCloseAt    = isBoom500 ? (boom500_p50 + 120) : 0;
+  const TIER_DEFS  = isBoom500
+    ? (boomOpenAt > 0 ? [[boomOpenAt, 0], [boomCloseAt, 32]] : [[boomCloseAt, 32]])
+    : isCrash500 ? [[120, 0], [480, 32]]
+    :              [[120, 0], [540, 32]];
+  const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? 480 : 540;
+  const LADDER_REST_S  = 1200;
+  const FLOOR_PCT      = 0.85;
+  const HAS_REST       = !is500;  // 500s: nunca REST; 600s: sí REST
   const DAILY_GATE = 20;
 
   const nowSec2       = now / 1000;
@@ -724,9 +730,9 @@ function EntradaDiegoSection({ symbol }) {
     : -1;
   const currentTierStake   = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
   const currentTierIsPausa = currentTierStake === 0;
-  // CONTRACT_S: del estado del bot (asignado al abrir) o fallback por símbolo
+  // CONTRACT_S: del estado del bot (asignado al abrir) o fallback dinámico por símbolo
   const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s
-                   : isBoom500 ? 240 : isCrash500 ? 360 : 420;
+                   : isBoom500 ? boomCloseAt : isCrash500 ? 360 : 420;
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
@@ -741,8 +747,10 @@ function EntradaDiegoSection({ symbol }) {
   const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
   const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
-  // Label del rango por símbolo
-  const rangeLabel = isBoom500 ? "0–4m $32" : isCrash500 ? "2–8m $32" : "2–9m $32";
+  // Label del rango por símbolo (BOOM500 dinámico)
+  const rangeLabel = isBoom500
+    ? `${(boomOpenAt/60).toFixed(1)}–${(boomCloseAt/60).toFixed(1)}m $32 (p25=${(boom500_p25/60).toFixed(1)}m·p50=${(boom500_p50/60).toFixed(1)}m)`
+    : isCrash500 ? "2–8m $32" : "2–9m $32";
   // Texto de estado
   const statusText = isDayDone ? `DONE día +$${day_pnl_500.toFixed(2)} ≥ $${DAILY_GATE}`
     : isStop ? "esperando spike…"
@@ -799,8 +807,8 @@ function EntradaDiegoSection({ symbol }) {
           const bg      = active ? activeBg : done ? "#62d4ff22" : "rgba(255,255,255,0.06)";
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
           const label   = isPausa
-            ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
-            : `$32 · ${i === 0 && isBoom500 ? "4m" : isCrash500 ? "6m" : "7m"}`;
+            ? (isCrash500 || is600 ? "espera 2m" : boomOpenAt > 0 ? `espera ${(boomOpenAt/60).toFixed(1)}m` : "PAUSA")
+            : `$32 · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? "6m" : "7m"}`;
           return (
             <span key={i} style={{
               flex: 1, textAlign: "center", fontSize: 8, fontWeight: active ? 800 : 600,
