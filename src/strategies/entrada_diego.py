@@ -251,13 +251,13 @@ HOLD_TIME_S_500_SIMPLE = int(os.getenv("ENTRADA_DIEGO_500_HOLD_S",   "1800"))   
 # ── 500s Ladder: 2 tiers con gate POWER≥10 — $8 (0-6min) → $32 (6-12min) ──
 # Mismo para BOOM500 y CRASH500. Gate POWER_GATE_500_MIN bloquea mercado muerto.
 LADDER_500_TIERS: list[tuple[float, float]] = [
-    (90,  32.0),    # BOOM500: 0-1.5min desde spike → $32 (contrato 1.5min), no hay más tiers
+    (240, 32.0),    # BOOM500: 0-4min desde spike → $32 (contrato 4min), no hay más tiers
 ]
 LADDER_500_TIERS_CRASH: list[tuple[float, float]] = [
     (120,  0.0),    # CRASH500 tier 0: 0-2min → zona muerta (espera)
     (480, 32.0),    # CRASH500 tier 1: 2-8min → $32 (contrato 6min)
 ]
-LADDER_500_CYCLE_S       = 90.0    # BOOM500: 1.5min ventana
+LADDER_500_CYCLE_S       = 240.0   # BOOM500: 4min ventana
 LADDER_500_CYCLE_S_CRASH = 480.0   # CRASH500: 8min ciclo total desde spike
 # ── 600s Ladder: zona muerta 0-2min → operan minuto 2 a 9 ($32, 7min contrato) ──
 LADDER_600_TIERS: list[tuple[float, float]] = [
@@ -270,7 +270,7 @@ LADDER_600_CONTRACT_S_32 = 420.0  # 7 min — contrato 600s (minuto 2 al 9)
 LADDER_BURST_WINDOW_S   = 300.0   # 5 min
 LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
 LADDER_BURST_MAX_STAKE  = 64.0    # cap burst
-LADDER_500_CONTRACT_S       = 90.0    # 1.5 min — BOOM500 (minuto 0 al 1.5)
+LADDER_500_CONTRACT_S       = 240.0   # 4 min — BOOM500 (minuto 0 al 4)
 LADDER_500_CONTRACT_S_CRASH = 360.0   # 6 min — CRASH500 (minuto 2 al 8)
 LADDER_DAILY_PNL_GATE       = 20.0    # $20 ganado en el día → pausa hasta siguiente día UTC
 LADDER_500_REST_S           = 1800.0  # 30 min descanso (500s y 600s)
