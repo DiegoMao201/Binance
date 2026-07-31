@@ -413,6 +413,7 @@ class _SymState:
     spike_ts_buffer_500:     list  = field(default_factory=list)  # últimas 100 ts de spikes BOOM500 para p25/p50 dinámico
     boom500_p25:             float = 126.0  # p25 intervalo entre spikes (segundos) — fallback histórico 393 muestras
     boom500_p50:             float = 363.0  # p50 intervalo entre spikes (segundos) — fallback histórico 393 muestras
+    dead_zone_spikes_500:    int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 20min
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -547,6 +548,7 @@ class _SymState:
             "boom500_p25":             round(getattr(self, 'boom500_p25', 126.0), 1),
             "boom500_p50":             round(getattr(self, 'boom500_p50', 363.0), 1),
             "spike_ts_buffer_500":     [round(t, 3) for t in getattr(self, 'spike_ts_buffer_500', [])],
+            "dead_zone_spikes_500":    getattr(self, 'dead_zone_spikes_500', 0),
         }
         return d
 
@@ -1039,11 +1041,35 @@ class EntradaDiego:
         return next((s for _, s in tiers if s > 0), 0.0)
 
     def _ladder_check_rest_500(self, sym: str, pnl: float, now: float) -> bool:
-        """600s: 1 win > $1 → REST 20min. 500s: nunca descansan (siempre operan en su rango)."""
+        """500s: REST 20min tras 2 wins consecutivos. 600s: REST 20min tras 1 win > $1."""
+        state = self._states[sym]
         if "500" in sym:
+            # 2 wins consecutivos → REST 20min
+            if pnl > 1.0:
+                state.consec_wins_500 += 1
+                if state.consec_wins_500 >= 2:
+                    state.ladder_rest_until_500  = now + 1200.0
+                    state.rest_spikes_500        = 0
+                    state.dead_zone_spikes_500   = 0
+                    state.consec_wins_500        = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s 500 REST 20min — 2 wins consecutivos", sym,
+                    )
+                    return True
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s win #%d/2 (pnl=+$%.2f) — falta 1 más para REST",
+                    sym, state.consec_wins_500, pnl,
+                )
+            else:
+                if state.consec_wins_500 > 0:
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s racha cortada (pnl=$%.2f) → consec_wins=0",
+                        sym, pnl,
+                    )
+                state.consec_wins_500 = 0
             return False
+        # 600s: 1 win > $1 → REST 20min
         if pnl > 1.0:
-            state = self._states[sym]
             state.ladder_rest_until_500 = now + 1200.0
             state.rest_spikes_500 = 0
             state.consec_wins_500 = 0
@@ -1137,9 +1163,21 @@ class EntradaDiego:
             # Actualizar p25/p50 dinámico para BOOM500
             if "BOOM" in sym and "500" in sym:
                 self._update_boom500_percentiles(state, _last_spk)
+            # Dead zone spike tracking: si no hay contrato abierto, contamos el spike perdido
+            if state.contract_id is None and "500" in sym:
+                state.dead_zone_spikes_500 += 1
+                if state.dead_zone_spikes_500 >= 2:
+                    state.ladder_rest_until_500  = now + 1200.0
+                    state.dead_zone_spikes_500   = 0
+                    state.consec_wins_500        = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s DEAD_ZONE REST 20min — ≥2 spikes perdidos fuera de ventana",
+                        sym,
+                    )
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s LADDER spike gap=%.0fs jump=%.2f pw=%.1f → ciclo reset",
+                "[ENTRADA_DIEGO] %s LADDER spike gap=%.0fs jump=%.2f pw=%.1f → ciclo reset (dz_spk=%d)",
                 sym, _gap, _abs_jump, self._get_power_30min(sym, now),
+                getattr(state, 'dead_zone_spikes_500', 0),
             )
             self._persist(now)
 
@@ -1308,6 +1346,7 @@ class EntradaDiego:
         state.burst_phase            = "LADDER"
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
+        state.dead_zone_spikes_500   = 0  # entramos al mercado — reiniciar contador dead zone
         if "600" in sym:
             state.ladder_active_contract_s = LADDER_600_CONTRACT_S_32                   # 7min
         elif "CRASH" in sym:
@@ -2284,6 +2323,7 @@ class EntradaDiego:
                             st.boom500_p50 = float(s.get("boom500_p50", 363.0))
                             if "BOOM" in sym and "500" in sym:
                                 self._seed_boom500_buffer(st)
+                            st.dead_zone_spikes_500 = 0
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
                             st.hour_spike_count_500        = int(s.get("hour_spike_count_500", 0))
@@ -2417,6 +2457,7 @@ class EntradaDiego:
                     st.boom500_p50 = float(s.get("boom500_p50", 363.0))
                     if "BOOM" in sym and "500" in sym:
                         self._seed_boom500_buffer(st)  # siembra desde spike_events si buffer vacío
+                    st.dead_zone_spikes_500 = 0  # no heredar contador dead zone entre sesiones
 
                     # ── Contadores de hora ────────────────────────────────────
                     st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))

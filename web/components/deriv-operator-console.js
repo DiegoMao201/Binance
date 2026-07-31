@@ -704,7 +704,8 @@ function EntradaDiegoSection({ symbol }) {
   // BOOM600/CRASH600: solo minuto 2-9m, $32 (7m contrato), con REST
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
-          ladder_active_contract_s = 0, day_pnl_500 = 0 } = edState;
+          ladder_active_contract_s = 0, day_pnl_500 = 0,
+          dead_zone_spikes_500 = 0 } = edState;
   // p25/p50 dinámicos para BOOM500 (fallback histórico: 126s/363s de 393 muestras)
   const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
   const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
@@ -717,7 +718,7 @@ function EntradaDiegoSection({ symbol }) {
   const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? 480 : 540;
   const LADDER_REST_S  = 1200;
   const FLOOR_PCT      = 0.85;
-  const HAS_REST       = !is500;  // 500s: nunca REST; 600s: sí REST
+  const HAS_REST       = true;  // todos pueden REST: 500s tras 2 wins o 2 dead-zone spikes; 600s tras 1 win
   const DAILY_GATE = 20;
 
   const nowSec2       = now / 1000;
@@ -751,14 +752,20 @@ function EntradaDiegoSection({ symbol }) {
   const rangeLabel = isBoom500
     ? `${(boomOpenAt/60).toFixed(1)}–${(boomCloseAt/60).toFixed(1)}m $32 (p25=${(boom500_p25/60).toFixed(1)}m·p50=${(boom500_p50/60).toFixed(1)}m)`
     : isCrash500 ? "2–8m $32" : "2–9m $32";
+  // Indicador de alerta dead-zone y racha wins para 500s
+  const dzAlert = is500 && !contract_id && !isResting
+    ? (dead_zone_spikes_500 >= 1 ? ` ⚡${dead_zone_spikes_500}/2dz` : "")
+    : "";
+  const winAlert = is500 && consec_wins_500 >= 1 && !isResting
+    ? ` 🏆${consec_wins_500}/2w` : "";
   // Texto de estado
   const statusText = isDayDone ? `DONE día +$${day_pnl_500.toFixed(2)} ≥ $${DAILY_GATE}`
     : isStop ? "esperando spike…"
     : contract_id
-      ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $32`)
-      : isResting ? "REST — próximo spike"
-      : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}`
-      : `esperando spike → ${rangeLabel}`;
+      ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $32${winAlert}`)
+      : isResting ? "REST 20m — próximo spike"
+      : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}${dzAlert}`
+      : `esperando spike → ${rangeLabel}${dzAlert}${winAlert}`;
 
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
@@ -835,7 +842,11 @@ function EntradaDiegoSection({ symbol }) {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8 }}>
               <span style={{ color: "#475569" }}>+{_fmtS(restElapsed)} transcurrido</span>
-              <span style={{ color: spkColor, fontWeight: 700 }}>{rest_spikes_500}/4 spikes {rest_spikes_500 >= 3 ? "⚠" : ""}</span>
+              <span style={{ color: spkColor, fontWeight: 700 }}>
+                {is500
+                  ? `${consec_wins_500}w · ${dead_zone_spikes_500}dz ${rest_spikes_500 >= 3 ? "⚠" : ""}`
+                  : `${rest_spikes_500}/4 spikes ${rest_spikes_500 >= 3 ? "⚠" : ""}`}
+              </span>
             </div>
           </div>
         );
