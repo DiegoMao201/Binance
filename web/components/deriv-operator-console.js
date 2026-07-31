@@ -706,16 +706,19 @@ function EntradaDiegoSection({ symbol }) {
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           ladder_active_contract_s = 0, day_pnl_500 = 0,
           dead_zone_spikes_500 = 0 } = edState;
-  // p50 dinámico para BOOM500 (fallback histórico: 363s de 393 muestras)
+  // p50 dinámico para BOOM500/CRASH500 (fallback histórico: 363s de 393 muestras)
   const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
   const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
+  const crash500_p50   = isCrash500 ? (edState.crash500_p50 || 363) : 0;
   // open_at=0: BOOM500 abre inmediatamente al spike, cierra en p50+2min
   const boomCloseAt    = isBoom500 ? (boom500_p50 + 120) : 0;
+  // CRASH500: zona muerta 2min fija, cierra en p50+2min dinámico
+  const crashCloseAt   = isCrash500 ? (crash500_p50 + 120) : 0;
   const TIER_DEFS  = isBoom500
-    ? [[boomCloseAt, 32]]                     // sin zona muerta — $32 desde t=0
-    : isCrash500 ? [[120, 0], [480, 32]]
+    ? [[boomCloseAt, 32]]                              // sin zona muerta — $32 desde t=0
+    : isCrash500 ? [[120, 0], [crashCloseAt, 32]]      // zona muerta 2m, cierre dinámico
     :              [[120, 0], [540, 32]];
-  const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? 480 : 540;
+  const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : 540;
   const LADDER_REST_S  = 1200;
   const FLOOR_PCT      = 0.85;
   const HAS_REST       = true;  // todos pueden REST: 500s tras 2 wins o 2 dead-zone spikes; 600s tras 1 win
@@ -733,7 +736,7 @@ function EntradaDiegoSection({ symbol }) {
   const currentTierIsPausa = currentTierStake === 0;
   // CONTRACT_S: del estado del bot (asignado al abrir) o fallback dinámico por símbolo
   const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s
-                   : isBoom500 ? boomCloseAt : isCrash500 ? 360 : 420;
+                   : isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : 420;
   const isStop      = burst_phase === "STOP";
   const cyclePct    = last_spike_ts_500 > 0 ? Math.min(100, (tSinSpike / LADDER_CYCLE_S) * 100) : 0;
   const contractAge = contract_id && burst_phase_started_at > 0 ? Math.max(0, nowSec - burst_phase_started_at) : 0;
@@ -748,10 +751,11 @@ function EntradaDiegoSection({ symbol }) {
   const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
   const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
-  // Label del rango por símbolo (BOOM500 dinámico — abre en t=0)
+  // Label del rango por símbolo (BOOM500/CRASH500 dinámico)
   const rangeLabel = isBoom500
     ? `0–${(boomCloseAt/60).toFixed(1)}m $32 (p50=${(boom500_p50/60).toFixed(1)}m)`
-    : isCrash500 ? "2–8m $32" : "2–9m $32";
+    : isCrash500 ? `2–${(crashCloseAt/60).toFixed(1)}m $32 (p50=${(crash500_p50/60).toFixed(1)}m)`
+    : "2–9m $32";
   // Indicador de alerta dead-zone y racha wins para 500s
   const dzAlert = is500 && !contract_id && !isResting
     ? (dead_zone_spikes_500 >= 1 ? ` ⚡${dead_zone_spikes_500}/2dz` : "")
@@ -816,7 +820,7 @@ function EntradaDiegoSection({ symbol }) {
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
           const label   = isPausa
             ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
-            : `$32 · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? "6m" : "7m"}`;
+            : `$32 · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? `${(crashCloseAt/60).toFixed(1)}m` : "7m"}`;
           return (
             <span key={i} style={{
               flex: 1, textAlign: "center", fontSize: 8, fontWeight: active ? 800 : 600,
