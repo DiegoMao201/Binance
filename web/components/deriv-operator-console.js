@@ -728,7 +728,7 @@ function EntradaDiegoSection({ symbol }) {
   const LADDER_REST_S  = 900;
   const FLOOR_PCT      = 0.85;
   const HAS_REST       = true;
-  const DAILY_GATE = 10;
+  const DAILY_GATE = 30;
 
   const nowSec2       = now / 1000;
   const isResting     = HAS_REST && ladder_rest_until_500 > 0 && nowSec2 < ladder_rest_until_500;
