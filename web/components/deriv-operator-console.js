@@ -719,7 +719,7 @@ function EntradaDiegoSection({ symbol }) {
     : isCrash500 ? [[120, 0], [crashCloseAt, 32]]      // zona muerta 2m, cierre dinámico
     :              [[120, 0], [540, 32]];
   const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : 540;
-  const LADDER_REST_S  = 1200;
+  const LADDER_REST_S  = 900;
   const FLOOR_PCT      = 0.85;
   const HAS_REST       = true;  // todos pueden REST: 500s tras 2 wins o 2 dead-zone spikes; 600s tras 1 win
   const DAILY_GATE = 20;
@@ -767,7 +767,7 @@ function EntradaDiegoSection({ symbol }) {
     : isStop ? "esperando spike…"
     : contract_id
       ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $32${winAlert}`)
-      : isResting ? "REST 20m — próximo spike"
+      : isResting ? "REST 15m — abre al terminar"
       : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}${dzAlert}`
       : tierIdx < 0 && isBoom500 ? `sequía — esperando spike${dzAlert}`
       : `esperando spike → ${rangeLabel}${dzAlert}${winAlert}`;
