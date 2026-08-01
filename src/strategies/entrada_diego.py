@@ -272,7 +272,7 @@ LADDER_BURST_MIN_SPIKES = 2       # spikes confirmados para burst
 LADDER_BURST_MAX_STAKE  = 64.0    # cap burst
 LADDER_500_CONTRACT_S       = 240.0   # 4 min — BOOM500 (minuto 0 al 4)
 LADDER_500_CONTRACT_S_CRASH = 360.0   # 6 min — CRASH500 (minuto 2 al 8)
-LADDER_DAILY_PNL_GATE       = 20.0    # $20 ganado en el día → pausa hasta siguiente día UTC
+LADDER_DAILY_PNL_GATE       = 20.0    # $20 ganado desde el reset → pausa hasta siguiente reset
 LADDER_500_REST_S           = 900.0   # 15 min descanso (500s y 600s)
 LADDER_500_REST_S_BOOM      = 900.0   # 15 min descanso BOOM
 S500_CONSEC_WINS_REST    = 1     # wins → REST (1 win > $1 → pausa 20min)
@@ -1170,8 +1170,8 @@ class EntradaDiego:
             state.day_pnl_500     = 0.0
             state.day_start_ts_500 = _cur_day_epoch
             _LOGGER.info("[ENTRADA_DIEGO] %s nuevo día UTC → day_pnl=0", sym)
-        if getattr(state, 'day_pnl_500', 0.0) >= LADDER_DAILY_PNL_GATE:
-            return  # objetivo diario $20 alcanzado — pausa hasta mañana
+        if getattr(state, 'sym_pnl_since_reset', 0.0) >= LADDER_DAILY_PNL_GATE:
+            return  # objetivo $20 desde reset alcanzado — pausa hasta siguiente reset
 
         # ── Reset hora UTC ────────────────────────────────────────────────────
         _cur_hour_epoch = float(int(now // 3600) * 3600)
@@ -2592,10 +2592,10 @@ class EntradaDiego:
                     if _saved_day_ts > 0 and _saved_day_ts == _cur_day_ts:
                         st.day_pnl_500      = float(s.get("day_pnl_500", 0.0))
                         st.day_start_ts_500 = _saved_day_ts
-                        if st.day_pnl_500 >= LADDER_DAILY_PNL_GATE:
+                        if st.sym_pnl_since_reset >= LADDER_DAILY_PNL_GATE:
                             _LOGGER.info(
-                                "[ENTRADA_DIEGO] %s gate diario restaurado: day_pnl=+$%.2f >= $%.0f → DONE hasta mañana",
-                                sym, st.day_pnl_500, LADDER_DAILY_PNL_GATE,
+                                "[ENTRADA_DIEGO] %s gate reset restaurado: pnl_since_reset=+$%.2f >= $%.0f → DONE hasta siguiente reset",
+                                sym, st.sym_pnl_since_reset, LADDER_DAILY_PNL_GATE,
                             )
                     else:
                         st.day_pnl_500      = 0.0
