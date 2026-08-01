@@ -628,7 +628,7 @@ function EntradaDiegoSection({ symbol }) {
 
     // Texto de estado por fase
     const stateText = phase1k === "WAIT"
-      ? `Esperando ${_fmtS(phaseRem)} · abrirá $${stake1k} (20min)`
+      ? `Post-spike · abrirá en ${_fmtS(phaseRem)} $${stake1k} (20min)`
       : phase1k === "IN_CONTRACT"
         ? contract_id
           ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
@@ -671,7 +671,7 @@ function EntradaDiegoSection({ symbol }) {
             );
           })}
           <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
-            {phase1k === "IN_CONTRACT" ? `→spike:SPIKE_HOLD` : phase1k === "SPIKE_HOLD" ? `→4m:reset·$${K1000_STAKES_1000[0]}` : `→8m:abrir`}
+            {phase1k === "IN_CONTRACT" ? `→spike:SPIKE_HOLD` : phase1k === "SPIKE_HOLD" ? `→4m:WAIT8m·$${K1000_STAKES_1000[0]}` : `→8m:abrir (post-spike)`}
           </span>
         </div>
 
