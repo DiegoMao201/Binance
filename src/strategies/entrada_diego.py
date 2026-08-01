@@ -1579,11 +1579,12 @@ class EntradaDiego:
         # ────────────────────────────────────────────────────────────────────
         _wait_s = K1000_ENTRY_DELAY_900_S if "900" in sym else K1000_ENTRY_DELAY_S
         if phase == "WAIT":
-            # Spike durante espera: ignorar — dejar correr el contador de 8min sin abrir
+            # Spike durante espera: reiniciar timer (mercado activo → esperar que se calme)
             if _new_spike:
+                state.k1000_phase_ts = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 WAIT spike ignorado — contador 8min sigue (%.0fs restantes)",
-                    sym, max(0.0, _wait_s - (now - state.k1000_phase_ts)),
+                    "[ENTRADA_DIEGO] %s K1000 WAIT spike → timer REINICIADO 8min",
+                    sym,
                 )
                 return
             if now >= state.k1000_phase_ts + _wait_s:
