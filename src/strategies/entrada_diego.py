@@ -82,7 +82,7 @@ K1000_STAKE_MAX     = float(os.getenv("K1000_STAKE_MAX",    "30.0"))  # (legacy 
 K1000_CONTRACT_S       = int(os.getenv("K1000_CONTRACT_S",     "1200"))  # 20 min duración contrato (timer-triggered)
 K1000_SPIKE_CONTRACT_S = 240                                            # 4 min duración contrato (spike-triggered)
 K1000_SPIKE_HOLD_S     = int(os.getenv("K1000_SPIKE_HOLD_S",  "240")) # 4 min espera post-spike antes de cerrar
-K1000_STAKES_1000   = [2.0, 2.0, 4.0, 4.0, 8.0, 8.0, 16.0, 16.0]    # escalera: $2×2→$4×2→$8×2→$16×2
+K1000_STAKES_1000   = [10.0, 20.0, 20.0, 40.0, 40.0, 80.0, 80.0]    # escalera: $10×1→$20×2→$40×2→$80×2
 # Aliases para compatibilidad con to_dict y referencias externas
 K1000_SCOUT_STAKE = K1000_STAKE_START
 K1000_S20_STAKE   = K1000_STAKE_MID
@@ -420,6 +420,7 @@ class _SymState:
     spike_ts_buffer_crash600: list  = field(default_factory=list)  # últimas 100 ts de spikes CRASH600 para p50 dinámico
     crash600_p50:             float = 420.0  # p50 intervalo entre spikes CRASH600 (segundos) — fallback 7min
     dead_zone_spikes_500:     int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 15min
+    ladder_recovery_level_500: int  = 0      # 0=normal $4, 1=recovery $20/20m, 2=recovery $60/30m
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -563,7 +564,8 @@ class _SymState:
             "spike_ts_buffer_boom600":   [round(t, 3) for t in getattr(self, 'spike_ts_buffer_boom600', [])],
             "crash600_p50":              round(getattr(self, 'crash600_p50', 420.0), 1),
             "spike_ts_buffer_crash600":  [round(t, 3) for t in getattr(self, 'spike_ts_buffer_crash600', [])],
-            "dead_zone_spikes_500":      getattr(self, 'dead_zone_spikes_500', 0),
+            "dead_zone_spikes_500":         getattr(self, 'dead_zone_spikes_500', 0),
+            "ladder_recovery_level_500":    getattr(self, 'ladder_recovery_level_500', 0),
         }
         return d
 
@@ -587,6 +589,7 @@ class EntradaDiego:
         self._k1000_pending_ts:    dict[str, float] = {}  # debounce reintento pendiente (no persistido)
         self._k1000_spike_check:   dict[str, float] = {}  # ventana 5s para detectar profit+ post-spike
         self._k1000_had_spike:     dict[str, bool]  = {}  # True si hubo spike en el contrato actual
+        self._500_had_spike:       dict[str, bool]  = {}  # True si hubo spike en contrato 500s/600s activo
         self._restore_lock = asyncio.Lock()
         self._restored     = False
         self._global_pnl:              float = 0.0                # PnL acumulado total
@@ -1354,8 +1357,11 @@ class EntradaDiego:
                 self._update_boom600_percentiles(state, _last_spk)
             elif "CRASH" in sym and "600" in sym:
                 self._update_crash600_percentiles(state, _last_spk)
-            # Dead zone spike tracking: si no hay contrato abierto, contamos el spike perdido
-            if state.contract_id is None and "500" in sym:
+            # Spike durante contrato activo: marcar para lógica de recovery
+            if state.contract_id is not None:
+                self._500_had_spike[sym] = True
+            # Dead zone spike tracking: si no hay contrato abierto y no estamos en recovery
+            if state.contract_id is None and "500" in sym and getattr(state, 'ladder_recovery_level_500', 0) == 0:
                 state.dead_zone_spikes_500 += 1
                 if state.dead_zone_spikes_500 >= 2:
                     state.ladder_rest_until_500  = now + LADDER_500_REST_S
@@ -1411,8 +1417,9 @@ class EntradaDiego:
                 "[ENTRADA_DIEGO] %s LADDER FLOOR cid=%s peak=%.4f pnl=%.4f (%.0f%%) hour=+%.2f day=+%.2f",
                 sym, _cid, _pk, _pnl, 100 * _pnl / _pk if _pk else 0, state.hour_pnl_500, state.day_pnl_500,
             )
-            # Un contrato por spike — después del FLOOR esperar siguiente spike
-            self._ladder_check_rest_500(sym, _pnl, now)  # contabilizar win si aplica
+            self._500_had_spike.pop(sym, None)
+            state.ladder_recovery_level_500 = 0  # floor = profit → reset recovery
+            self._ladder_check_rest_500(sym, _pnl, now)
             _LOGGER.info("[ENTRADA_DIEGO] %s LADDER FLOOR → esperando siguiente spike", sym)
             return
 
@@ -1452,7 +1459,12 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s LADDER END cid=%s pnl=%.4f hour=+%.2f day=+%.2f → sequía",
                     sym, _cid, _pnl, state.hour_pnl_500, state.day_pnl_500,
                 )
-                # Incluso en sequía, si fue win y protege profit → REST (raro pero posible)
+                _had_spk_rec = self._500_had_spike.pop(sym, False)
+                if _pnl > 0 or _had_spk_rec:
+                    state.ladder_recovery_level_500 = 0
+                elif _pnl <= 0:
+                    _rl = getattr(state, 'ladder_recovery_level_500', 0)
+                    state.ladder_recovery_level_500 = _rl + 1 if _rl < 2 else 0
                 if self._ladder_check_rest_500(sym, _pnl, now):
                     return
             # Sequía activa: no abrir, esperar próximo spike naturalmente
@@ -1490,10 +1502,18 @@ class EntradaDiego:
                         sym, _pnl, __import__('datetime').datetime.utcfromtimestamp(self._global_pause_until).strftime('%H:%M UTC'),
                     )
                     return
+                _had_spk_rec = self._500_had_spike.pop(sym, False)
+                if _pnl > 0 or _had_spk_rec:
+                    state.ladder_recovery_level_500 = 0
+                elif _pnl <= 0:
+                    _rl = getattr(state, 'ladder_recovery_level_500', 0)
+                    state.ladder_recovery_level_500 = _rl + 1 if _rl < 2 else 0
                 if not _floor_counted:
                     self._ladder_check_rest_500(sym, _pnl, now)
-                # Un contrato por spike — después de cualquier cierre esperar siguiente spike
-                _LOGGER.info("[ENTRADA_DIEGO] %s LADDER broker-close → esperando siguiente spike", sym)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s LADDER broker-close pnl=%.4f spk=%s rec_lvl→%d",
+                    sym, _pnl, _had_spk_rec, state.ladder_recovery_level_500,
+                )
                 return
             else:
                 # ── Cierre al tiempo de contrato si el broker no cerró antes ──
@@ -1520,17 +1540,45 @@ class EntradaDiego:
                         "[ENTRADA_DIEGO] %s LADDER %.0fm CLOSE cid=%s pnl=%.4f tier=%d hour=+%.2f day=+%.2f",
                         sym, _contract_s / 60, _cid, _pnl, tier_idx, state.hour_pnl_500, state.day_pnl_500,
                     )
+                    _had_spk_rec = self._500_had_spike.pop(sym, False)
+                    if _pnl > 0 or _had_spk_rec:
+                        state.ladder_recovery_level_500 = 0
+                    elif _pnl <= 0:
+                        _rl = getattr(state, 'ladder_recovery_level_500', 0)
+                        state.ladder_recovery_level_500 = _rl + 1 if _rl < 2 else 0
                     self._ladder_check_rest_500(sym, _pnl, now)
-                    # Un contrato por spike — esperar siguiente spike tras el cierre
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s LADDER timer-close pnl=%.4f spk=%s rec_lvl→%d",
+                        sym, _pnl, _had_spk_rec, state.ladder_recovery_level_500,
+                    )
                     return
                 else:
-                    return  # dentro de 7 min: dejar correr (profit floor ya vigila)
+                    return  # dentro del tiempo de contrato: dejar correr
 
         # ── Sin contrato: abrir en tier actual ───────────────────────────────
         # Guard: no abrir si REST todavía activo (caso contrato que se cerró durante REST)
         if state.ladder_rest_until_500 > 0 and now < state.ladder_rest_until_500:
             return
-        # Sin gate — 500s y 600s operan igual: spike → $32, 7min, REST tras 2 wins
+        # Recovery escalation: loss sin spike → abrir inmediatamente sin esperar spike
+        _rec_lvl = getattr(state, 'ladder_recovery_level_500', 0)
+        if _rec_lvl == 1:
+            state.burst_phase            = "LADDER"
+            state.burst_phase_started_at = now
+            state.peak_profit_500        = 0.0
+            state.dead_zone_spikes_500   = 0
+            state.ladder_active_contract_s = 1200.0  # 20 min
+            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-1 $20/20min (loss sin spike)", sym)
+            await self._open(sym, state, now, stake_override=20.0)
+            return
+        elif _rec_lvl == 2:
+            state.burst_phase            = "LADDER"
+            state.burst_phase_started_at = now
+            state.peak_profit_500        = 0.0
+            state.dead_zone_spikes_500   = 0
+            state.ladder_active_contract_s = 1800.0  # 30 min
+            _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-2 $60/30min (loss sin spike x2)", sym)
+            await self._open(sym, state, now, stake_override=60.0)
+            return
         t_sin_spike = now - state.last_spike_ts_500
         _LOGGER.info(
             "[ENTRADA_DIEGO] %s LADDER OPEN tier=%d stake=$%.0f t=%.0fs (%.1fm) power=%.1f hour_pnl=+%.2f",
@@ -2550,6 +2598,7 @@ class EntradaDiego:
                             if "CRASH" in sym and "600" in sym:
                                 self._seed_crash600_buffer(st)
                             st.dead_zone_spikes_500 = 0
+                            st.ladder_recovery_level_500 = int(s.get("ladder_recovery_level_500", 0))
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
                             st.hour_spike_count_500        = int(s.get("hour_spike_count_500", 0))
@@ -2707,6 +2756,7 @@ class EntradaDiego:
                     if "CRASH" in sym and "600" in sym:
                         self._seed_crash600_buffer(st)
                     st.dead_zone_spikes_500 = 0  # no heredar contador dead zone entre sesiones
+                    st.ladder_recovery_level_500 = int(s.get("ladder_recovery_level_500", 0))
 
                     # ── Contadores de hora ────────────────────────────────────
                     st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))

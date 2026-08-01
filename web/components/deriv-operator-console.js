@@ -531,7 +531,7 @@ const K1000_CONTRACT_S     = 1200;  // 20min duración contrato (timer-triggered
 const K1000_SPIKE_CONTRACT_S = 240; // 4min duración contrato (spike-triggered)
 const K1000_SPIKE_HOLD_S   = 240;   // 4min espera post-spike
 const K1000_STAKE_START  = 20;    // stake inicial $20
-const K1000_STAKES_1000  = [2, 2, 4, 4, 8, 8, 16, 16]; // escalera $2×2→$4×2→$8×2→$16×2
+const K1000_STAKES_1000  = [10, 20, 20, 40, 40, 80, 80]; // escalera $10×1→$20×2→$40×2→$80×2
 // POWER gate eliminado — 500s y 600s abren directo en spike
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
