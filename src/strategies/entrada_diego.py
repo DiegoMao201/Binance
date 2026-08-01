@@ -273,8 +273,8 @@ LADDER_BURST_MAX_STAKE  = 64.0    # cap burst
 LADDER_500_CONTRACT_S       = 240.0   # 4 min — BOOM500 (minuto 0 al 4)
 LADDER_500_CONTRACT_S_CRASH = 360.0   # 6 min — CRASH500 (minuto 2 al 8)
 LADDER_DAILY_PNL_GATE       = 20.0    # $20 ganado en el día → pausa hasta siguiente día UTC
-LADDER_500_REST_S           = 1800.0  # 30 min descanso (500s y 600s)
-LADDER_500_REST_S_BOOM      = 1800.0  # 30 min descanso BOOM
+LADDER_500_REST_S           = 900.0   # 15 min descanso (500s y 600s)
+LADDER_500_REST_S_BOOM      = 900.0   # 15 min descanso BOOM
 S500_CONSEC_WINS_REST    = 1     # wins → REST (1 win > $1 → pausa 20min)
 REST_MIN_STAKE_500      = 5.0   # stake mínimo para contar win hacia REST
 REST_MIN_HOUR_PNL_500   = 4.0   # hora UTC debe tener >$4 ganados para activar REST
@@ -410,10 +410,12 @@ class _SymState:
     s500_drought_s1_ts:      float = 0.0   # epoch S1 post-sequía; 0 = sin drought recovery
     s500_cur_stake:          float = 0.0   # stake actual 500s; 0 = usar STAKE_500_FIXED
     s500_pnl_counted_cid:    int   = 0     # contrato cuyo pnl ya fue sumado en PROFIT_CLOSE (evitar double-count en BROKER_CLOSE)
-    spike_ts_buffer_500:     list  = field(default_factory=list)  # últimas 100 ts de spikes BOOM500 para p25/p50 dinámico
-    boom500_p25:             float = 126.0  # p25 intervalo entre spikes (segundos) — fallback histórico 393 muestras
-    boom500_p50:             float = 363.0  # p50 intervalo entre spikes (segundos) — fallback histórico 393 muestras
-    dead_zone_spikes_500:    int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 20min
+    spike_ts_buffer_500:      list  = field(default_factory=list)  # últimas 100 ts de spikes BOOM500 para p25/p50 dinámico
+    boom500_p25:              float = 126.0  # p25 intervalo entre spikes (segundos) — fallback histórico 393 muestras
+    boom500_p50:              float = 363.0  # p50 intervalo entre spikes (segundos) — fallback histórico 393 muestras
+    spike_ts_buffer_crash500: list  = field(default_factory=list)  # últimas 100 ts de spikes CRASH500 para p50 dinámico
+    crash500_p50:             float = 363.0  # p50 intervalo entre spikes CRASH500 (segundos) — fallback histórico
+    dead_zone_spikes_500:     int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 20min
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -538,6 +540,7 @@ class _SymState:
             "ladder_active_contract_s": round(getattr(self, 'ladder_active_contract_s', 0.0), 1),
             "ladder_daily_gate":        LADDER_DAILY_PNL_GATE,
             "day_pnl_500":              round(getattr(self, 'day_pnl_500', 0.0), 4),
+            "day_start_ts_500":         round(getattr(self, 'day_start_ts_500', 0.0), 0),
             "day_pnl_1000":             round(getattr(self, 'day_pnl_1000', 0.0), 4),
             "ladder_rest_s":            LADDER_500_REST_S,
             "consec_wins_500":          self.consec_wins_500,
@@ -545,10 +548,13 @@ class _SymState:
             "rest_spikes_500":         self.rest_spikes_500,
             "current_stake_500":       round(self.current_stake_500, 2),
             # BOOM500 ventana dinámica p25/p50
-            "boom500_p25":             round(getattr(self, 'boom500_p25', 126.0), 1),
-            "boom500_p50":             round(getattr(self, 'boom500_p50', 363.0), 1),
-            "spike_ts_buffer_500":     [round(t, 3) for t in getattr(self, 'spike_ts_buffer_500', [])],
-            "dead_zone_spikes_500":    getattr(self, 'dead_zone_spikes_500', 0),
+            "boom500_p25":              round(getattr(self, 'boom500_p25', 126.0), 1),
+            "boom500_p50":              round(getattr(self, 'boom500_p50', 363.0), 1),
+            "spike_ts_buffer_500":      [round(t, 3) for t in getattr(self, 'spike_ts_buffer_500', [])],
+            # CRASH500 salida dinámica p50
+            "crash500_p50":             round(getattr(self, 'crash500_p50', 363.0), 1),
+            "spike_ts_buffer_crash500": [round(t, 3) for t in getattr(self, 'spike_ts_buffer_crash500', [])],
+            "dead_zone_spikes_500":     getattr(self, 'dead_zone_spikes_500', 0),
         }
         return d
 
@@ -991,17 +997,87 @@ class EntradaDiego:
             state.boom500_p50, state.boom500_p50 / 60, n,
         )
 
+    def _seed_crash500_buffer(self, state: Any) -> None:
+        """Siembra spike_ts_buffer_crash500 desde deriv_spike_events.json al arrancar."""
+        if len(getattr(state, 'spike_ts_buffer_crash500', [])) >= 5:
+            return
+        events_path = self._logs_dir / "deriv_spike_events.json"
+        if not events_path.exists():
+            return
+        try:
+            events = json.loads(events_path.read_text())
+            cutoff = time.time() - 86400
+            crash_ts = sorted(
+                float(e['ts']) for e in events
+                if isinstance(e, dict) and e.get('symbol') == 'CRASH500'
+                and float(e.get('ts', 0)) > cutoff
+            )
+            if len(crash_ts) < 6:
+                cutoff72 = time.time() - 259200
+                crash_ts = sorted(
+                    float(e['ts']) for e in events
+                    if isinstance(e, dict) and e.get('symbol') == 'CRASH500'
+                    and float(e.get('ts', 0)) > cutoff72
+                )
+            crash_ts = crash_ts[-100:]
+            state.spike_ts_buffer_crash500 = crash_ts
+            intervals = sorted(
+                b - a for a, b in zip(crash_ts, crash_ts[1:]) if 0 < b - a < 7200
+            )
+            n = len(intervals)
+            if n >= 5:
+                def _pct(p: float) -> float:
+                    idx = (p / 100.0) * (n - 1)
+                    lo = int(idx)
+                    return intervals[lo] + (idx - lo) * (intervals[min(lo + 1, n - 1)] - intervals[lo])
+                state.crash500_p50 = _pct(50.0)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] CRASH500 buffer sembrado: %d spikes, p50=%.0fs(%.1fm)",
+                    n + 1, state.crash500_p50, state.crash500_p50 / 60,
+                )
+        except Exception as exc:
+            _LOGGER.warning("[ENTRADA_DIEGO] CRASH500 seed buffer error: %s", exc)
+
+    def _update_crash500_percentiles(self, state: Any, new_spike_ts: float) -> None:
+        """Actualiza p50 de intervalo entre spikes de CRASH500 con buffer rolling de 100 muestras."""
+        buf: list = getattr(state, 'spike_ts_buffer_crash500', [])
+        buf.append(new_spike_ts)
+        buf = buf[-100:]
+        state.spike_ts_buffer_crash500 = buf
+        if len(buf) < 6:
+            return
+        intervals = sorted(
+            b - a for a, b in zip(buf, buf[1:]) if 0 < b - a < 7200
+        )
+        n = len(intervals)
+        if n < 5:
+            return
+        def _pct(p: float) -> float:
+            idx = (p / 100.0) * (n - 1)
+            lo = int(idx)
+            return intervals[lo] + (idx - lo) * (intervals[min(lo + 1, n - 1)] - intervals[lo])
+        state.crash500_p50 = _pct(50.0)
+        _LOGGER.info(
+            "[ENTRADA_DIEGO] CRASH500 percentiles p50=%.0fs(%.1fm) n=%d",
+            state.crash500_p50, state.crash500_p50 / 60, n,
+        )
+
     def _ladder_tier_500(self, sym: str, t_sin_spike: float, state: Any = None) -> tuple[int, float]:
         """Retorna (tier_idx, stake). tier_idx=-1 si fuera de zona caliente o pausa programada."""
         if "BOOM" in sym and "500" in sym:
-            # Ventana dinámica: abre exactamente en p25, cierra en p50+2min
-            p25 = getattr(state, 'boom500_p25', 126.0) if state is not None else 126.0
+            # Abre inmediatamente al spike (t=0), cierra en p50+2min para maximizar captura
             p50 = getattr(state, 'boom500_p50', 363.0) if state is not None else 363.0
-            open_at  = p25
             close_at = p50 + 120.0
-            if t_sin_spike < open_at or t_sin_spike >= close_at:
+            if t_sin_spike >= close_at:
                 return -1, 0.0
             return 0, 32.0
+        if "CRASH" in sym and "500" in sym:
+            # Zona muerta fija 2min, cierre dinámico en p50+2min
+            p50 = getattr(state, 'crash500_p50', 363.0) if state is not None else 363.0
+            close_at = p50 + 120.0
+            if t_sin_spike < 120.0 or t_sin_spike >= close_at:
+                return -1, 0.0
+            return 1, 32.0
         if "600" in sym:
             tiers = LADDER_600_TIERS
         elif "CRASH" in sym:
@@ -1048,7 +1124,7 @@ class EntradaDiego:
             if pnl > 1.0:
                 state.consec_wins_500 += 1
                 if state.consec_wins_500 >= 2:
-                    state.ladder_rest_until_500  = now + 1200.0
+                    state.ladder_rest_until_500  = now + LADDER_500_REST_S
                     state.rest_spikes_500        = 0
                     state.dead_zone_spikes_500   = 0
                     state.consec_wins_500        = 0
@@ -1070,7 +1146,7 @@ class EntradaDiego:
             return False
         # 600s: 1 win > $1 → REST 20min
         if pnl > 1.0:
-            state.ladder_rest_until_500 = now + 1200.0
+            state.ladder_rest_until_500 = now + LADDER_500_REST_S
             state.rest_spikes_500 = 0
             state.consec_wins_500 = 0
             _LOGGER.info(
@@ -1130,26 +1206,28 @@ class EntradaDiego:
                     "[ENTRADA_DIEGO] %s LADDER REST spike #%d (gap=%.0fs) pw=%.1f — acumulando en descanso",
                     sym, state.rest_spikes_500, _gap, self._get_power_30min(sym, now),
                 )
-                # ≥3 spikes en REST → mercado quemado → extender 20min más, resetear contador
-                if state.rest_spikes_500 >= LADDER_REST_SPIKE_EXTEND:
-                    state.ladder_rest_until_500 = now + 1200.0
-                    state.rest_spikes_500 = 0
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s LADDER REST extendido +20min (spike #%d ≥ %d → mercado quemado)",
-                        sym, LADDER_REST_SPIKE_EXTEND, LADDER_REST_SPIKE_EXTEND,
-                    )
+                # No extender REST por spikes — cada spike perdido es oportunidad, no señal de peligro
             if now < state.ladder_rest_until_500:
-                return  # descanso activo
+                if state.contract_id is None:
+                    return  # sin contrato abierto → esperar REST
+                # Hay contrato abierto durante REST → seguir para gestionar (floor, timer)
+                # El bloque de apertura al final del tick protege contra abrir otro
             # REST terminado
             _rspk = state.rest_spikes_500
             state.rest_spikes_500       = 0
             state.ladder_rest_until_500 = 0.0
-            # REST terminado: last_spike_ts_500 ya apunta al spike real más reciente (actualizado durante REST)
-            # Si ese spike fue >12min atrás → tier=-1 → sequía → esperar siguiente spike (sin re-REST)
-            # Si fue <12min atrás → tier válido → abrir normalmente
             _LOGGER.info(
-                "[ENTRADA_DIEGO] %s LADDER REST terminado (%d spikes) → evaluando tier", sym, _rspk,
+                "[ENTRADA_DIEGO] %s LADDER REST terminado (%d spikes) → apertura inmediata 7min", sym, _rspk,
             )
+            # REST terminado → abrir de inmediato sin importar t_sin_spike
+            if state.contract_id is None:
+                state.burst_phase            = "LADDER"
+                state.burst_phase_started_at = now
+                state.peak_profit_500        = 0.0
+                state.dead_zone_spikes_500   = 0
+                state.ladder_active_contract_s = 420.0  # 7min fijo post-REST
+                await self._open(sym, state, now, stake_override=32.0)
+            return
 
         # ── Spike tracking ────────────────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
@@ -1160,14 +1238,16 @@ class EntradaDiego:
             if _abs_jump > 0:
                 state.power_window.append((_last_spk, _abs_jump))
                 state.power_window = [(t, r) for t, r in state.power_window if t > now - 1800.0]
-            # Actualizar p25/p50 dinámico para BOOM500
+            # Actualizar p25/p50 dinámico para BOOM500; p50 dinámico para CRASH500
             if "BOOM" in sym and "500" in sym:
                 self._update_boom500_percentiles(state, _last_spk)
+            elif "CRASH" in sym and "500" in sym:
+                self._update_crash500_percentiles(state, _last_spk)
             # Dead zone spike tracking: si no hay contrato abierto, contamos el spike perdido
             if state.contract_id is None and "500" in sym:
                 state.dead_zone_spikes_500 += 1
                 if state.dead_zone_spikes_500 >= 2:
-                    state.ladder_rest_until_500  = now + 1200.0
+                    state.ladder_rest_until_500  = now + LADDER_500_REST_S
                     state.dead_zone_spikes_500   = 0
                     state.consec_wins_500        = 0
                     _LOGGER.info(
@@ -1336,6 +1416,9 @@ class EntradaDiego:
                     return  # dentro de 7 min: dejar correr (profit floor ya vigila)
 
         # ── Sin contrato: abrir en tier actual ───────────────────────────────
+        # Guard: no abrir si REST todavía activo (caso contrato que se cerró durante REST)
+        if state.ladder_rest_until_500 > 0 and now < state.ladder_rest_until_500:
+            return
         # Sin gate — 500s y 600s operan igual: spike → $32, 7min, REST tras 2 wins
         t_sin_spike = now - state.last_spike_ts_500
         _LOGGER.info(
@@ -1349,12 +1432,14 @@ class EntradaDiego:
         state.dead_zone_spikes_500   = 0  # entramos al mercado — reiniciar contador dead zone
         if "600" in sym:
             state.ladder_active_contract_s = LADDER_600_CONTRACT_S_32                   # 7min
-        elif "CRASH" in sym:
-            state.ladder_active_contract_s = LADDER_500_CONTRACT_S_CRASH                # 6min
+        elif "CRASH" in sym and "500" in sym:
+            # Duración dinámica: tiempo restante hasta p50+2min desde el último spike
+            _p50_crash = getattr(state, 'crash500_p50', 363.0)
+            _close_at_crash = _p50_crash + 120.0
+            state.ladder_active_contract_s = max(30.0, _close_at_crash - t_sin_spike)
         elif "BOOM" in sym and "500" in sym:
             # Duración dinámica: tiempo restante hasta p50+2min desde el último spike
             _p50 = getattr(state, 'boom500_p50', 363.0)
-            _p25 = getattr(state, 'boom500_p25', 126.0)
             _close_at = _p50 + 120.0
             state.ladder_active_contract_s = max(30.0, _close_at - t_sin_spike)
         else:
@@ -1583,29 +1668,31 @@ class EntradaDiego:
                     )
 
             # Broker cerró el contrato (SL/TP)
-            # Si hubo spike en este contrato → reset ciclo a $20 (spike = señal fresca)
-            # Si NO hubo spike → escalar (contrato perdido sin señal)
+            # Si hubo spike → WAIT 8min (spike marca señal, esperar reset)
+            # Si NO hubo spike → reabrir inmediatamente (escalar, sin espera)
             if _broker_closed:
                 _pnl = state.last_close_profit
                 state.day_pnl_1000 = getattr(state, 'day_pnl_1000', 0.0) + _pnl
-                _had_spk = self._k1000_had_spike.get(sym, False)
+                _had_spk = self._k1000_had_spike.pop(sym, False)
                 _next_idx = 0 if _had_spk else (_sidx + 1) % len(K1000_STAKES_1000)
-                _reason   = "spike→reset" if _had_spk else "sin-spike→escala"
+                _reason   = "spike→WAIT" if _had_spk else "sin-spike→inmediato"
                 state.k1000_stake_idx   = _next_idx
                 state.k1000_cycle_stake = K1000_STAKES_1000[_next_idx]
-                state.k1000_phase    = "WAIT"
-                state.k1000_phase_ts = now
+                state.k1000_phase_ts    = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 broker-close pnl=%.4f day=+%.2f %s → idx→%d ($%.0f) WAIT %.0fmin",
+                    "[ENTRADA_DIEGO] %s K1000 broker-close pnl=%.4f day=+%.2f %s idx→%d ($%.0f)",
                     sym, _pnl, state.day_pnl_1000, _reason, _next_idx, K1000_STAKES_1000[_next_idx],
-                    (K1000_ENTRY_DELAY_900_S if "900" in sym else K1000_ENTRY_DELAY_S) / 60,
                 )
                 self._persist(now)
+                if _had_spk:
+                    state.k1000_phase = "WAIT"
+                else:
+                    state.k1000_phase = "IN_CONTRACT"
+                    await self._open_1000_simple(sym, state, now)
                 return
 
             # Tiempo del contrato cumplido (4min si spike-triggered, 20min si timer)
-            # Si hubo spike en este contrato → reset ciclo (spike llegó, resultado adverso)
-            # Si NO hubo spike → escalar (perdimos esperando spike que nunca llegó)
+            # Si hubo spike → WAIT 8min; si NO hubo spike → reabrir inmediatamente
             _this_contract_s = K1000_SPIKE_CONTRACT_S if getattr(state, 'k1000_spike_triggered', False) else K1000_CONTRACT_S
             if now >= state.k1000_phase_ts + _this_contract_s:
                 _cid = int(state.contract_id)
@@ -1616,22 +1703,25 @@ class EntradaDiego:
                     await self._executor.close_contract(_cid)
                 except Exception as _e:
                     _LOGGER.error("[ENTRADA_DIEGO] %s K1000 contrato CLOSE error: %s", sym, _e)
-                _had_spk = self._k1000_had_spike.get(sym, False)
+                _had_spk = self._k1000_had_spike.pop(sym, False)
                 _next_idx = 0 if _had_spk else (_sidx + 1) % len(K1000_STAKES_1000)
-                _reason   = "spike→reset" if _had_spk else "sin-spike→escala"
+                _reason   = "spike→WAIT" if _had_spk else "sin-spike→inmediato"
                 state.k1000_stake_idx      = _next_idx
                 state.k1000_cycle_stake    = K1000_STAKES_1000[_next_idx]
                 state.k1000_spike_triggered = False
                 state.last_close_profit    = _pnl
                 state.day_pnl_1000 = getattr(state, 'day_pnl_1000', 0.0) + _pnl
-                state.k1000_phase          = "WAIT"
                 state.k1000_phase_ts       = now
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s K1000 %.0fmin pnl=%.4f day=+%.2f %s → idx→%d ($%.0f) WAIT %.0fmin",
+                    "[ENTRADA_DIEGO] %s K1000 %.0fmin pnl=%.4f day=+%.2f %s idx→%d ($%.0f)",
                     sym, _this_contract_s / 60, _pnl, state.day_pnl_1000, _reason, _next_idx, K1000_STAKES_1000[_next_idx],
-                    (K1000_ENTRY_DELAY_900_S if "900" in sym else K1000_ENTRY_DELAY_S) / 60,
                 )
                 self._persist(now)
+                if _had_spk:
+                    state.k1000_phase = "WAIT"
+                else:
+                    state.k1000_phase = "IN_CONTRACT"
+                    await self._open_1000_simple(sym, state, now)
             return
 
         # ────────────────────────────────────────────────────────────────────
@@ -2243,10 +2333,12 @@ class EntradaDiego:
 
     async def _restore_from_disk(self) -> None:
         try:
-            # Sembrar buffer BOOM500 desde spike_events al arrancar (cubre primer arranque y restarts)
+            # Sembrar buffers desde spike_events al arrancar (cubre primer arranque y restarts)
             for _sym, _st in self._states.items():
                 if "BOOM" in _sym and "500" in _sym:
                     self._seed_boom500_buffer(_st)
+                elif "CRASH" in _sym and "500" in _sym:
+                    self._seed_crash500_buffer(_st)
 
             if not self._state_file.exists():
                 return
@@ -2323,6 +2415,11 @@ class EntradaDiego:
                             st.boom500_p50 = float(s.get("boom500_p50", 363.0))
                             if "BOOM" in sym and "500" in sym:
                                 self._seed_boom500_buffer(st)
+                            # Buffer p50 dinámico CRASH500
+                            st.spike_ts_buffer_crash500 = [float(t) for t in s.get("spike_ts_buffer_crash500", [])]
+                            st.crash500_p50 = float(s.get("crash500_p50", 363.0))
+                            if "CRASH" in sym and "500" in sym:
+                                self._seed_crash500_buffer(st)
                             st.dead_zone_spikes_500 = 0
                             st.spikes_in_contract_500 = int(s.get("spikes_in_contract", 0))
                             st.last_spike_ts_500      = float(s.get("last_spike_ts_500", 0.0))
@@ -2333,6 +2430,15 @@ class EntradaDiego:
                             st.s20_crash500_wins           = int(s.get("s20_crash500_wins", 0))
                             st.hour_pnl_500                = float(s.get("hour_pnl_500", 0.0))
                             st.prev_hour_pnl_500           = float(s.get("prev_hour_pnl_500", 0.0))
+                            # Gate diario $20 — restaurar para no resetear al reiniciar
+                            _saved_day_ts2 = float(s.get("day_start_ts_500", 0.0))
+                            _cur_day_ts2   = float(int(now // 86400) * 86400)
+                            if _saved_day_ts2 > 0 and _saved_day_ts2 == _cur_day_ts2:
+                                st.day_pnl_500      = float(s.get("day_pnl_500", 0.0))
+                                st.day_start_ts_500 = _saved_day_ts2
+                            else:
+                                st.day_pnl_500      = 0.0
+                                st.day_start_ts_500 = 0.0
                             st.crash500_s1_timer_s           = float(s.get("crash500_s1_timer_s", BURST_STAKE1_CRASH500_S))
                             st.crash500_real_spikes_500      = int(s.get("crash500_real_spikes_500", 0))
                             st.spike_first_ts_in_contract    = float(s.get("spike_first_ts_in_contract", 0.0))
@@ -2457,6 +2563,11 @@ class EntradaDiego:
                     st.boom500_p50 = float(s.get("boom500_p50", 363.0))
                     if "BOOM" in sym and "500" in sym:
                         self._seed_boom500_buffer(st)  # siembra desde spike_events si buffer vacío
+                    # ── Buffer p50 dinámico CRASH500 ─────────────────────────────
+                    st.spike_ts_buffer_crash500 = [float(t) for t in s.get("spike_ts_buffer_crash500", [])]
+                    st.crash500_p50 = float(s.get("crash500_p50", 363.0))
+                    if "CRASH" in sym and "500" in sym:
+                        self._seed_crash500_buffer(st)
                     st.dead_zone_spikes_500 = 0  # no heredar contador dead zone entre sesiones
 
                     # ── Contadores de hora ────────────────────────────────────
@@ -2474,6 +2585,20 @@ class EntradaDiego:
                         st.hour_pnl_500 = 0.0
                     st.prev_hour_pnl_500   = float(s.get("prev_hour_pnl_500", 0.0))
                     st.sym_pnl_since_reset = float(s.get("sym_pnl_since_reset", 0.0))
+                    # ── Gate diario $20 — restaurar para no operar si ya se alcanzó ──
+                    _saved_day_ts = float(s.get("day_start_ts_500", 0.0))
+                    _cur_day_ts   = float(int(now // 86400) * 86400)
+                    if _saved_day_ts > 0 and _saved_day_ts == _cur_day_ts:
+                        st.day_pnl_500      = float(s.get("day_pnl_500", 0.0))
+                        st.day_start_ts_500 = _saved_day_ts
+                        if st.day_pnl_500 >= LADDER_DAILY_PNL_GATE:
+                            _LOGGER.info(
+                                "[ENTRADA_DIEGO] %s gate diario restaurado: day_pnl=+$%.2f >= $%.0f → DONE hasta mañana",
+                                sym, st.day_pnl_500, LADDER_DAILY_PNL_GATE,
+                            )
+                    else:
+                        st.day_pnl_500      = 0.0
+                        st.day_start_ts_500 = 0.0
 
                     # ── Timestamp del último spike (NO resetear a now) ────────
                     # Resetear a now crearía un spike falso → abriría contratos en sequía.
