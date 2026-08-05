@@ -699,13 +699,21 @@ function EntradaDiegoSection({ symbol }) {
   }
 
   // ── 500s/600s: configuración POR SÍMBOLO ──────────────────────────────────
-  // BOOM500: abre t=0, cierra p50+2min ($4)
-  // CRASH500: zona muerta 2min, cierra p50+2min ($4)
-  // BOOM600/CRASH600: zona muerta 2min, cierra p50+2min dinámico ($4)
+  // BOOM500: L0=$20 t=0 (gate gap>120 n30≥6), rec=$10
+  // CRASH500: L0=$4 zona muerta 2min (gate n30≥4), rec=$20 (gate n30≥4 prev<300s)
+  // BOOM600: L0=$20 zona muerta 2min (gate gap>300 n30<3), rec=$10 (gate n30<6)
+  // CRASH600: L0=$10 zona muerta 2min (sin gate), rec=$20 (gate prev∉[120,300))
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           ladder_active_contract_s = 0, day_pnl_500 = 0,
-          dead_zone_spikes_500 = 0 } = edState;
+          dead_zone_spikes_500 = 0,
+          ladder_recovery_level_500 = 0, current_stake_500 = 0,
+          ed_n30 = 0, ed_gap_s = -1, ed_gap_prev = -1 } = edState;
+  // L0 stake y recovery stake varían por símbolo
+  const l0Stake  = (symbol === "CRASH500") ? 4 : (symbol === "CRASH600") ? 10 : 20;
+  const rec1Stake = (symbol === "BOOM500" || symbol === "BOOM600") ? 10 : 20;
+  const recStake = ladder_recovery_level_500 >= 1 ? rec1Stake : l0Stake;
+  const isRecovery = ladder_recovery_level_500 > 0;
   // p50 dinámico por símbolo
   const boom500_p25    = isBoom500 ? (edState.boom500_p25 || 126) : 0;
   const boom500_p50    = isBoom500 ? (edState.boom500_p50 || 363) : 0;
@@ -756,26 +764,50 @@ function EntradaDiegoSection({ symbol }) {
   const pnlAccColor  = sym_pnl_since_reset > 0 ? "#22d3a3" : sym_pnl_since_reset < 0 ? "#ff5d6c" : "#64748b";
   const dayPnlColor  = sym_pnl_since_reset >= DAILY_GATE ? "#22d3a3" : sym_pnl_since_reset >= DAILY_GATE * 0.5 ? "#f5c43c" : "#64748b";
   const cycleBarColor = isResting ? "#a78bfa" : cyclePct >= 90 ? "#ff5d6c" : cyclePct >= 65 ? "#f5c43c" : "#62d4ff";
-  const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
+  const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : isRecovery ? "#f97316" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
   // Label del rango por símbolo (dinámico p50 para todos)
   const rangeLabel = isBoom500
-    ? `0–${(boomCloseAt/60).toFixed(1)}m $4 (p50=${(boom500_p50/60).toFixed(1)}m)`
-    : isCrash500 ? `2–${(crashCloseAt/60).toFixed(1)}m $4 (p50=${(crash500_p50/60).toFixed(1)}m)`
-    : isBoom600  ? `2–${(boom6CloseAt/60).toFixed(1)}m $4 (p50=${(boom600_p50/60).toFixed(1)}m)`
-    : isCrash600 ? `2–${(crash6CloseAt/60).toFixed(1)}m $4 (p50=${(crash600_p50/60).toFixed(1)}m)`
+    ? `0–${(boomCloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom500_p50/60).toFixed(1)}m)`
+    : isCrash500 ? `2–${(crashCloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash500_p50/60).toFixed(1)}m)`
+    : isBoom600  ? `2–${(boom6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom600_p50/60).toFixed(1)}m)`
+    : isCrash600 ? `2–${(crash6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash600_p50/60).toFixed(1)}m)`
     : "2–9m $4";
   // Indicador de alerta dead-zone y racha wins para 500s
   const dzAlert = is500 && !contract_id && !isResting
     ? (dead_zone_spikes_500 >= 1 ? ` ⚡${dead_zone_spikes_500}/2dz` : "")
     : "";
   const winAlert = is500 && consec_wins_500 >= 1 && !isResting
-    ? ` 🏆${consec_wins_500}/2w` : "";
+    ? ` ${consec_wins_500}/2w` : "";
+  const activeStake = current_stake_500 > 0 ? current_stake_500 : recStake;
+
+  // ── Gates: L0 y Recovery-1 ──────────────────────────────────────────────
+  const gateL0Pass = (() => {
+    if (isCrash500) return ed_n30 >= 4;
+    if (isBoom500)  return ed_gap_s > 120 && ed_n30 >= 6;
+    if (isBoom600)  return ed_gap_s > 300 && ed_n30 < 3;
+    return true; // CRASH600: sin gate L0
+  })();
+  const gateRec1Pass = (() => {
+    if (isBoom500)  return ed_n30 >= 2;
+    if (isBoom600)  return ed_n30 < 6;
+    if (isCrash500) return ed_n30 >= 4 && ed_gap_prev >= 0 && ed_gap_prev < 300;
+    if (isCrash600) return !(ed_gap_prev >= 120 && ed_gap_prev < 300);
+    return true;
+  })();
+  const gatePass  = isRecovery ? gateRec1Pass : gateL0Pass;
+  const gateLabel = isRecovery ? (gatePass ? "REC✓" : "REC✗") : (gatePass ? "L0✓" : "L0✗");
+  const gateColor = gatePass ? "#22d3a3" : "#ff5d6c";
+  const n30Thresh = isCrash500 ? 4 : isBoom500 ? 6 : isBoom600 ? 3 : 0;
+  const n30Ok     = isBoom600 ? ed_n30 < 3 : ed_n30 >= n30Thresh;
+  const n30Color  = n30Thresh > 0 ? (n30Ok ? "#22d3a3" : "#ff5d6c") : "#94a3b8";
+
   // Texto de estado
   const statusText = isDayDone ? `DONE +$${sym_pnl_since_reset.toFixed(2)} ≥ $${DAILY_GATE}`
     : isStop ? "esperando spike…"
     : contract_id
-      ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $4${winAlert}`)
+      ? (peak_profit_500 >= 0.20 ? "FLOOR 85% activo" : `contrato ${(CONTRACT_S/60).toFixed(1)}m $${activeStake}${winAlert}`)
+      : isRecovery ? `RECOVERY L${ladder_recovery_level_500} → abre $${recStake} ${ladder_recovery_level_500 === 2 ? "30" : "20"}min`
       : isResting ? "REST 15m — abre al terminar"
       : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}${dzAlert}`
       : tierIdx < 0 && isBoom500 ? `sequía — esperando spike${dzAlert}`
@@ -803,6 +835,11 @@ function EntradaDiegoSection({ symbol }) {
         ) : isResting ? (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#a78bfa22", color: "#a78bfa", letterSpacing: "0.06em" }}>REST {_fmtS(restRemaining)}</span>
+        ) : isRecovery ? (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: "#f97316" + "33", color: "#f97316", letterSpacing: "0.06em" }}>
+            REC-{ladder_recovery_level_500} ${recStake}/{ladder_recovery_level_500 === 2 ? "30" : "20"}m
+          </span>
         ) : (
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: "#62d4ff18", color: "#62d4ff", letterSpacing: "0.06em" }}>
@@ -829,7 +866,7 @@ function EntradaDiegoSection({ symbol }) {
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
           const label   = isPausa
             ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
-            : `$4 · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? `${(crashCloseAt/60).toFixed(1)}m` : isBoom600 ? `${(boom6CloseAt/60).toFixed(1)}m` : isCrash600 ? `${(crash6CloseAt/60).toFixed(1)}m` : "7m"}`;
+            : `$${recStake} · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? `${(crashCloseAt/60).toFixed(1)}m` : isBoom600 ? `${(boom6CloseAt/60).toFixed(1)}m` : isCrash600 ? `${(crash6CloseAt/60).toFixed(1)}m` : "7m"}`;
           return (
             <span key={i} style={{
               flex: 1, textAlign: "center", fontSize: 8, fontWeight: active ? 800 : 600,
@@ -899,6 +936,30 @@ function EntradaDiegoSection({ symbol }) {
           </span>
         </div>
       )}
+
+      {/* Gate context: n30 · gap_s · gap_prev · gate status */}
+      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 3, alignItems: "center" }}>
+        <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
+          background: `${n30Color}18`, color: n30Color, fontWeight: 700 }}>
+          n30={ed_n30}
+        </span>
+        {ed_gap_s >= 0 && (
+          <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
+            background: "rgba(255,255,255,0.06)", color: "#94a3b8" }}>
+            gap={ago(ed_gap_s)}
+          </span>
+        )}
+        {(isCrash500 || isCrash600) && ed_gap_prev >= 0 && (
+          <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
+            background: "rgba(255,255,255,0.06)", color: "#94a3b8" }}>
+            prev={ago(ed_gap_prev)}
+          </span>
+        )}
+        <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, marginLeft: "auto",
+          background: `${gateColor}22`, color: gateColor, fontWeight: 800, letterSpacing: "0.04em" }}>
+          {gateLabel}
+        </span>
+      </div>
 
       {/* Gate $10 desde reset */}
       <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>

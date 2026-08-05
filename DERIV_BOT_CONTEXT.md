@@ -606,3 +606,148 @@ Sistema de auditoría de gates. Registra trades fantasma cuando un gate bloquea 
 ### 2026-06-06 — Analytics cards con deriv_market_context.json (commit previo)
 
 Endpoint `market-context/route.ts` lee el JSON del bot directamente (3.6MB, ~10k snapshots). Reemplazó APIs que consultaban `deriv_tick_snapshots` (tabla vacía).
+
+---
+
+## ANÁLISIS deriv_ed_analysis.jsonl
+
+### Sobre Deriv Boom/Crash — fundamento importante
+
+**Deriv es proceso Poisson sintético puro.** No hay mercado financiero, no hay liquidez, no hay sesiones de trading, no hay horario europeo ni americano. Los spikes son generados por un proceso Poisson independiente del reloj real. Memorylessness: el tiempo hasta el próximo spike no depende de cuánto tiempo ha pasado desde el último.
+
+### Schema completo: campos guardados en cada registro
+
+```
+ts              Timestamp Unix (segundos) del cierre del contrato
+sym             Símbolo: BOOM500/CRASH500/BOOM600/CRASH600/BOOM900/CRASH900/BOOM1000/CRASH1000
+strategy        "LADDER" (500/600s) o "K1000" (900/1000s)
+stake           Stake en dólares al momento de abrir
+pnl             PnL del contrato (positivo=ganancia)
+win             True si pnl > 0
+dur_s           Duración real del contrato en segundos
+hour_utc        Hora UTC al momento de apertura (0-23)
+power_open      Intensidad de actividad en ventana 30min al abrir
+rec_lvl         Nivel de escalada al momento de apertura (0=normal, 1+=escalado)
+had_spike       True si llegó spike durante el contrato
+close_type      FLOOR / SEQUIA / BROKER / TIMER / SPIKE_HOLD (desde deploy ~julio 2026)
+spikes_during_contract  Número de spikes que llegaron durante el contrato
+open_gap_s      Segundos desde el último spike al ABRIR el contrato
+open_gap_prev_s Segundos del intervalo anterior al último spike (ritmo)
+open_gap_3rd_s  Segundos del tercer intervalo hacia atrás
+open_n30/60/120/180/240  Número de spikes en ventanas 30/60/120/180/240 minutos al abrir
+open_max_r30/60/120      Ratio máximo de spike en ventana 30/60/120min al abrir
+open_med_r30/60/120      Ratio mediano de spike en ventana 30/60/120min al abrir
+open_cross_n10/n30       Total spikes en TODOS los símbolos en ventana 10/30min al abrir
+open_syms_in_sequia      Cuántos otros símbolos llevan >5min sin spike al abrir
+close_gap_s / close_gap_prev_s / close_gap_3rd_s   (mismos que open_* pero al CERRAR)
+close_n30..n240 / close_max_r* / close_med_r*      (mismos que open_* pero al CERRAR)
+```
+
+### Cómo correr análisis en servidor
+
+```bash
+ssh coolify-server "python3 << 'PYEOF'
+import json
+records = []
+with open('/data/deriv-logs/deriv_ed_analysis.jsonl') as f:
+    for line in f:
+        try: records.append(json.loads(line.strip()))
+        except: pass
+# filtrar por campo completo: solo registros con open_gap_s
+full = [r for r in records if 'open_gap_s' in r and 'open_n30' in r]
+print('Total:', len(records), '| Con contexto open:', len(full))
+PYEOF"
+```
+
+Registros con stake=$0 (~107) son inválidos: el contrato abrió antes de que `_ed_save_open` corriera. Filtrar siempre por `open_gap_s` o `stake > 0`.
+
+### Reglas de análisis — NUNCA inventar
+
+1. Reportar n exacto de cada subgrupo. Si n < 30, señalarlo como muestra insuficiente.
+2. Separar siempre LADDER de K1000 — estrategias distintas, escaladas distintas.
+3. Separar rec_lvl=0 de rec_lvl>=1. El escalado destruye cualquier señal.
+4. No mencionar horarios de mercado, liquidez, ni sesiones. Esto es Poisson sintético.
+5. Reportar spike%, PnL, y n para cada bucket. No reportar solo uno de los tres.
+6. Señal real = señal que predice PnL positivo, no solo que predice spike arrival.
+
+### Hallazgos verificados — muestra ~360 registros (2026-08-03)
+
+**rec_lvl: hallazgo más importante**
+- rec_lvl=0 (estado normal): WR=56%, PnL=+42 → único estado rentable
+- rec_lvl=1: WR=13%, catastrófico
+- rec_lvl>=2: WR=13%, catastrófico
+- El escalado en K1000 destruye todo el PnL. La señal de "cuándo operar" aplica solo a rec_lvl=0.
+
+**spikes_during_contract (campo nuevo)**
+- 0 spikes durante contrato: WR=17%, PnL=-119 → siempre pierde
+- 1 spike durante contrato: WR=100%, PnL=+31
+- 2+ spikes: WR=100%, PnL positivo
+- Señal definitoria: si el spike no llega, siempre se pierde. (Obvio en retrospectiva, pero confirma que la estrategia depende 100% de la llegada del spike.)
+
+**close_type (campo nuevo)**
+- FLOOR: 100% WR, PnL=+23 → única fuente real de ganancias en LADDER
+- SPIKE_HOLD: 86% WR, PnL=+7 → K1000 capturando spike
+- BROKER: 39% WR, PnL=-3
+- SEQUIA: 0% WR, PnL=-34 → siempre pierde
+- TIMER: 0% WR, PnL=-34 → siempre pierde
+
+**delta_n30 = close_n30 - open_n30** (campo calculado, no directo)
+- delta subió: 100% WR, PnL=+143
+- delta bajó: 0-39% WR, PnL=-135
+- No es gate de entrada (se mide al cerrar), pero confirma que la sequía creciente causa las pérdidas.
+
+**Paradoja Poisson P_teo = 1 - exp(-lambda_30 * dur_s)**
+- P_teo<40%: spike_real=100%, PnL=+97 → MÁS CONFIABLE que cuando Poisson dice "seguro"
+- P_teo>80% + dur_s<600s: spike=100%, PnL=+8 → ok
+- P_teo>80% + dur_s>600s: spike=75%, PnL=-79 → DESTRUCTOR
+- Explicación: dur_s largo = contrato en sequía activa = K1000 escalado perdiendo
+- El modelo Poisson no agrega valor. La duración del contrato es mejor señal que P_teo.
+
+**Lambda ratio: n30/1800 vs n120/7200 (tasa reciente vs tasa 2h)**
+- Estable (0.8-1.2x): spike=78%, PnL=-3 → mejor de los 5 buckets
+- Enfriando fuerte (<0.5x): spike=66%, PnL=-68 → peor
+- Acelerando fuerte (>2x): spike=57%, PnL=-23 → malo
+- Nota: todos los buckets tienen PnL negativo porque incluyen escalados K1000
+
+**Señal compuesta fuerte: rec_lvl=0 + cross_n30 entre 10-40**
+- n=45, spike=91%, PnL=+47
+- BOOM500 100% spike, CRASH500 100%, CRASH600 100%
+- 900s/1000s en este subgrupo: resultados pobres (n pequeño)
+
+**Intensidad spikes: max_r30 / med_r30 > 5x (hubo spike enorme recientemente)**
+- n=17, spike=76%, PnL=+19 → señal positiva
+- Uniforme (<2x): spike=69%, PnL=-44
+
+**gap × n30 → spike arrival** (señal de entrada)
+- Mejor ventana: gap 3-20min + n30=1-5 → spike llega 73-85%
+- gap >20min: spike llega 50-63%, PnL siempre negativo
+- gap <3min + n30 alto (>=6): spike llega 60%, peor de lo esperado
+
+**Ritmo (gap_actual vs gap_prev)**
+- Desacelerando (gap > 140% prev): PnL=-87 aunque spike llega 70% — DESTRUCTOR
+- Acelerando (gap < 70% prev): PnL=-2, neutral
+
+**3 gaps consecutivos (gap_3rd > gap_2 > gap_1 = bajando = acelerando)**
+- Ningún patrón claro. PnL negativo en todos los buckets.
+
+**open_syms_in_sequia (otros símbolos en sequía)**
+- 6-7 símbolos en sequía: WR bueno (n pequeño, no estadísticamente sólido)
+- Patrón inconsistente, necesita más datos (n=69 registros con este campo)
+
+### Campos NO analizados / pendientes
+
+- open_n180, open_n240 (pocas variaciones, separar de n30)
+- open_max_r60, open_max_r120, open_med_r60, open_med_r120
+- close_gap_prev_s, close_gap_3rd_s, close_n60-n240, close_max/med_r*
+- Señal cross_n30 vs cross_n10 separada (solo 69 registros)
+- Patrones por hora UTC (Poisson puro → no debería importar, pero validar)
+
+### Cuándo hacer el próximo análisis
+
+**Mínimo n=500 registros con campo open_gap_s** para:
+- Validar matriz gap×n30 con >30 en cada celda
+- Analizar cross_n30 con suficiente muestra
+- Separar por símbolo individualmente con n>=30 por símbolo
+- Buscar combinación gate de 3 variables (rec_lvl=0 + gap + n30 + lambda_ratio)
+
+**Mínimo n=1000** para proponer un gate real con confianza estadística.
