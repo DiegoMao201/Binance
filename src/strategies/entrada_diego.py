@@ -282,6 +282,11 @@ TP_RATCHET_MIN_PNL   = 15.0     # pnl mínimo en BROKER_CLOSE (no-FLOOR) para de
 TP_RATCHET_PAUSE_S   = 1800.0   # 30 min pausa global tras tp_or_ratchet (el mercado se revierte)
 # Si ≥N spikes llegan DURANTE el REST → mercado quemado → extender REST 20min más (se reinicia el contador)
 LADDER_REST_SPIKE_EXTEND = 4   # ≥4 spikes durante REST → +20min (aplica a 500s y 600s, BOOM y CRASH)
+# Cycle budget gate: no abrir cuando ciclo activo agotado (80%+ prob de secarse)
+_CYCLE_MEAN_RATIO: dict[str, float] = {
+    "BOOM500": 195.0, "CRASH500": 199.0, "BOOM600": 236.0, "CRASH600": 229.0,
+}
+_CYCLE_BUDGET_MAX = 10.0   # ≥80% ciclos activos terminados en este umbral (n=600+ ciclos)
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
 S500_STAKE_LOW        = 4.0      # tier2 = $4 (mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
@@ -409,6 +414,8 @@ class _SymState:
     day_start_ts_1000: float = 0.0         # epoch inicio día UTC vigente (900s/1000s)
     s500_drought_s1_ts:      float = 0.0   # epoch S1 post-sequía; 0 = sin drought recovery
     s500_cur_stake:          float = 0.0   # stake actual 500s; 0 = usar STAKE_500_FIXED
+    cycle_budget_norm: float = 0.0   # suma ratio-norm ciclo activo (gate agotamiento)
+    cycle_prev_quiet:  bool  = True  # último n30 fue quieto → Q→A resetea budget
     s500_pnl_counted_cid:    int   = 0     # contrato cuyo pnl ya fue sumado en PROFIT_CLOSE (evitar double-count en BROKER_CLOSE)
     spike_ts_buffer_500:      list  = field(default_factory=list)  # últimas 100 ts de spikes BOOM500 para p25/p50 dinámico
     boom500_p25:              float = 126.0  # p25 intervalo entre spikes (segundos) — fallback histórico 393 muestras
@@ -568,6 +575,8 @@ class _SymState:
             "dead_zone_spikes_500":         getattr(self, 'dead_zone_spikes_500', 0),
             "ladder_recovery_level_500":    getattr(self, 'ladder_recovery_level_500', 0),
             "ladder_last_closed_cid":       getattr(self, 'ladder_last_closed_cid', 0),
+            "cycle_budget_norm":            round(getattr(self, 'cycle_budget_norm', 0.0), 2),
+            "cycle_prev_quiet":             getattr(self, 'cycle_prev_quiet', True),
         }
         return d
 
@@ -1181,24 +1190,24 @@ class EntradaDiego:
                 return -1, 0.0
             return 0, 20.0
         if "CRASH" in sym and "500" in sym:
-            # Zona muerta 2min, cierre dinámico en p50+2min
+            # Sin zona muerta — abre inmediato al spike, cierre dinámico en p50+2min
             p50 = getattr(state, 'crash500_p50', 363.0) if state is not None else 363.0
             close_at = p50 + 120.0
-            if t_sin_spike < 120.0 or t_sin_spike >= close_at:
+            if t_sin_spike >= close_at:
                 return -1, 0.0
-            return 1, 4.0
+            return 1, 10.0
         if "BOOM" in sym and "600" in sym:
-            # Zona muerta 2min, cierre dinámico en p50+2min
+            # Sin zona muerta — abre inmediato al spike, cierre dinámico en p50+2min
             p50 = getattr(state, 'boom600_p50', 420.0) if state is not None else 420.0
             close_at = p50 + 120.0
-            if t_sin_spike < 120.0 or t_sin_spike >= close_at:
+            if t_sin_spike >= close_at:
                 return -1, 0.0
             return 0, 20.0
         if "CRASH" in sym and "600" in sym:
-            # Zona muerta 2min, cierre dinámico en p50+2min
+            # Sin zona muerta — abre inmediato al spike, cierre dinámico en p50+2min
             p50 = getattr(state, 'crash600_p50', 420.0) if state is not None else 420.0
             close_at = p50 + 120.0
-            if t_sin_spike < 120.0 or t_sin_spike >= close_at:
+            if t_sin_spike >= close_at:
                 return -1, 0.0
             return 1, 10.0
         if "600" in sym:
@@ -1293,6 +1302,17 @@ class EntradaDiego:
                 if _abs_jump_rest > 0:
                     state.power_window.append((_spk_check, _abs_jump_rest))
                     state.power_window = [(t, r) for t, r in state.power_window if t > now - 1800.0]
+                # Cycle budget durante REST
+                _ratio_rst = self._risk.get_last_spike_ratio(sym) or 0.0
+                _n30_rst   = sum(1 for t, _ in (self._ed_spike_hist.get(sym) or []) if _spk_check - t <= 1800)
+                _norm_rst  = _ratio_rst / _CYCLE_MEAN_RATIO.get(sym, 200.0)
+                if _n30_rst <= 2:
+                    state.cycle_prev_quiet = True
+                elif _n30_rst >= 4 and state.cycle_prev_quiet:
+                    state.cycle_budget_norm = 0.0
+                    state.cycle_prev_quiet  = False
+                if _n30_rst >= 4 and _norm_rst > 0:
+                    state.cycle_budget_norm = round(state.cycle_budget_norm + _norm_rst, 2)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s LADDER REST spike #%d (gap=%.0fs) pw=%.1f — acumulando en descanso",
                     sym, state.rest_spikes_500, _gap, self._get_power_30min(sym, now),
@@ -1330,6 +1350,22 @@ class EntradaDiego:
             if _abs_jump > 0:
                 state.power_window.append((_last_spk, _abs_jump))
                 state.power_window = [(t, r) for t, r in state.power_window if t > now - 1800.0]
+            # Cycle budget: acumular ratio-norm, detectar Q→A para reset
+            _ratio_spk = self._risk.get_last_spike_ratio(sym) or 0.0
+            _n30_bdg   = sum(1 for t, _ in (self._ed_spike_hist.get(sym) or []) if _last_spk - t <= 1800)
+            _norm_bdg  = _ratio_spk / _CYCLE_MEAN_RATIO.get(sym, 200.0)
+            if _n30_bdg <= 2:
+                state.cycle_prev_quiet = True
+            elif _n30_bdg >= 4 and state.cycle_prev_quiet:
+                state.cycle_budget_norm = 0.0
+                state.cycle_prev_quiet  = False
+                _LOGGER.info("[ENTRADA_DIEGO] %s CYCLE_RESET Q→A budget=0 (ciclo activo nuevo)", sym)
+            if _n30_bdg >= 4 and _norm_bdg > 0:
+                state.cycle_budget_norm = round(state.cycle_budget_norm + _norm_bdg, 2)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s CYCLE_BUDGET +%.2f → %.2f (n30=%d ratio=%.0fx)",
+                    sym, _norm_bdg, state.cycle_budget_norm, _n30_bdg, _ratio_spk,
+                )
             # Actualizar p50 dinámico por símbolo
             if "BOOM" in sym and "500" in sym:
                 self._update_boom500_percentiles(state, _last_spk)
@@ -1414,15 +1450,7 @@ class EntradaDiego:
             if _rl_pending == 1:
                 _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
                 _skip_rec1 = False
-                if "BOOM" in sym and "500" in sym:
-                    _skip_rec1 = _n30_rec < 2
-                elif "BOOM" in sym and "600" in sym:
-                    _skip_rec1 = _n30_rec >= 6
-                elif "CRASH" in sym and "500" in sym:
-                    _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                    if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                    _skip_rec1 = not (_n30_rec >= 4 and _gp_rec1 < 300.0)
-                elif "CRASH" in sym and "600" in sym:
+                if "CRASH" in sym and "600" in sym:
                     _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
                     if _gp_rec1 < 0: _gp_rec1 = 9999.0
                     _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
@@ -1507,15 +1535,7 @@ class EntradaDiego:
                 if _rl_seq == 1:
                     _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
                     _skip_rec1 = False
-                    if "BOOM" in sym and "500" in sym:
-                        _skip_rec1 = _n30_rec < 2
-                    elif "BOOM" in sym and "600" in sym:
-                        _skip_rec1 = _n30_rec >= 6
-                    elif "CRASH" in sym and "500" in sym:
-                        _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                        if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                        _skip_rec1 = not (_n30_rec >= 4 and _gp_rec1 < 300.0)
-                    elif "CRASH" in sym and "600" in sym:
+                    if "CRASH" in sym and "600" in sym:
                         _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
                         if _gp_rec1 < 0: _gp_rec1 = 9999.0
                         _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
@@ -1647,15 +1667,7 @@ class EntradaDiego:
         if _rec_lvl == 1:
             _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
             _skip_rec1 = False
-            if "BOOM" in sym and "500" in sym:
-                _skip_rec1 = _n30_rec < 2
-            elif "BOOM" in sym and "600" in sym:
-                _skip_rec1 = _n30_rec >= 6
-            elif "CRASH" in sym and "500" in sym:
-                _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                _skip_rec1 = not (_n30_rec >= 4 and _gp_rec1 < 300.0)
-            elif "CRASH" in sym and "600" in sym:
+            if "CRASH" in sym and "600" in sym:
                 _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
                 if _gp_rec1 < 0: _gp_rec1 = 9999.0
                 _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
@@ -1714,17 +1726,25 @@ class EntradaDiego:
         _n30_l0   = _ctx_l0["n30"]
         _gap_s_l0 = _ctx_l0["gap_s"] if _ctx_l0["gap_s"] >= 0 else 9999.0
         if "CRASH" in sym and "500" in sym:
-            if _n30_l0 < 4:
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<4", sym, _n30_l0)
+            if _n30_l0 < 2:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
                 return
         elif "BOOM" in sym and "500" in sym:
-            if not (_gap_s_l0 > 120.0 and _n30_l0 >= 6):
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip gap_s=%.0f n30=%d (need gap>120 n30>=6)", sym, _gap_s_l0, _n30_l0)
+            if _n30_l0 < 2:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
                 return
         elif "BOOM" in sym and "600" in sym:
-            if not (_gap_s_l0 > 300.0 and _n30_l0 < 3):
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip gap_s=%.0f n30=%d (need gap>300 n30<3)", sym, _gap_s_l0, _n30_l0)
+            if _n30_l0 >= 6:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d>=6", sym, _n30_l0)
                 return
+        # Gate ciclo agotado: no abrir si ratio-norm acumulado supera umbral (ciclo terminándose)
+        _cycle_bdg = getattr(state, 'cycle_budget_norm', 0.0)
+        if _cycle_bdg >= _CYCLE_BUDGET_MAX:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s GATE_CYCLE_BUDGET skip budget=%.2f>=%.1f (ciclo agotado — esperar Q→A)",
+                sym, _cycle_bdg, _CYCLE_BUDGET_MAX,
+            )
+            return
         await self._open(sym, state, now, stake_override=stake)
 
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
@@ -2532,6 +2552,7 @@ class EntradaDiego:
                 if sym in SYMBOLS_LADDER | SYMBOLS_K1000:
                     self._ed_save_open(sym, stake, now)
                 if sym in SYMBOLS_LADDER:
+                    self._ed_open_info[sym]["rec_lvl_at_open"] = state.ladder_recovery_level_500
                     state.current_stake_500 = stake  # guarda stake activo (500s: filtro REST; 600s: duración contrato $32→10min)
                 if sym in SYMBOLS_500:
                     state.spikes_in_contract_500     = 0
@@ -2859,6 +2880,8 @@ class EntradaDiego:
                             st.ladder_rest_until_500 = _rut if _rut > now else 0.0
                             st.rest_spikes_500       = int(s.get("rest_spikes_500", 0))
                             st.current_stake_500     = float(s.get("current_stake_500", 0.0))
+                            st.cycle_budget_norm     = float(s.get("cycle_budget_norm", 0.0))
+                            st.cycle_prev_quiet      = bool(s.get("cycle_prev_quiet", True))
                         if sym in SYMBOLS_K1000:
                             _k1000_ph_raw2 = s.get("k1000_phase", "WAIT")
                             _K1000_PM2 = {
@@ -2990,6 +3013,8 @@ class EntradaDiego:
                     st.ladder_recovery_level_500 = int(s.get("ladder_recovery_level_500", 0))
                     st.ladder_last_closed_cid    = int(s.get("ladder_last_closed_cid", 0))
                     st.ladder_active_contract_s  = float(s.get("ladder_active_contract_s", 0.0))
+                    st.cycle_budget_norm         = float(s.get("cycle_budget_norm", 0.0))
+                    st.cycle_prev_quiet          = bool(s.get("cycle_prev_quiet", True))
 
                     # ── Contadores de hora ────────────────────────────────────
                     st.hour_spike_count_500  = int(s.get("hour_spike_count_500", 0))
@@ -3183,7 +3208,7 @@ class EntradaDiego:
             "dur_s":     round(now - t_open, 1),
             "hour_utc":  info.get("hour_utc", int(now // 3600) % 24),
             "power_open": info.get("power", 0.0),
-            "rec_lvl":   rec_lvl,
+            "rec_lvl":   info.get("rec_lvl_at_open", rec_lvl),
             "had_spike": had_spk,
             "close_type": close_type,
             "spikes_during_contract": spikes_during,

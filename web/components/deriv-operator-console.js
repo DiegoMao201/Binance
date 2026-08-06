@@ -708,7 +708,8 @@ function EntradaDiegoSection({ symbol }) {
           ladder_active_contract_s = 0, day_pnl_500 = 0,
           dead_zone_spikes_500 = 0,
           ladder_recovery_level_500 = 0, current_stake_500 = 0,
-          ed_n30 = 0, ed_gap_s = -1, ed_gap_prev = -1 } = edState;
+          ed_n30 = 0, ed_gap_s = -1, ed_gap_prev = -1,
+          cycle_budget_norm = 0, cycle_prev_quiet = true } = edState;
   // L0 stake y recovery stake varían por símbolo
   const l0Stake  = (symbol === "CRASH500") ? 4 : (symbol === "CRASH600") ? 10 : 20;
   const rec1Stake = (symbol === "BOOM500" || symbol === "BOOM600") ? 10 : 20;
@@ -795,8 +796,17 @@ function EntradaDiegoSection({ symbol }) {
     if (isCrash600) return !(ed_gap_prev >= 120 && ed_gap_prev < 300);
     return true;
   })();
-  const gatePass  = isRecovery ? gateRec1Pass : gateL0Pass;
-  const gateLabel = isRecovery ? (gatePass ? "REC✓" : "REC✗") : (gatePass ? "L0✓" : "L0✗");
+  const CYCLE_BUDGET_MAX = 10.0;
+  const budgetBlocked = cycle_budget_norm >= CYCLE_BUDGET_MAX;
+  const budgetPct     = Math.min(100, (cycle_budget_norm / CYCLE_BUDGET_MAX) * 100);
+  const budgetColor   = cycle_budget_norm >= CYCLE_BUDGET_MAX ? "#ff5d6c"
+                      : cycle_budget_norm >= 7  ? "#f5c43c"
+                      : "#22d3a3";
+  const gatePass  = isRecovery ? gateRec1Pass : (gateL0Pass && !budgetBlocked);
+  const gateLabel = budgetBlocked
+    ? (isRecovery ? "REC✗" : "CICLO✗")
+    : isRecovery ? (gateRec1Pass ? "REC✓" : "REC✗")
+    : (gateL0Pass ? "L0✓" : "L0✗");
   const gateColor = gatePass ? "#22d3a3" : "#ff5d6c";
   const n30Thresh = isCrash500 ? 4 : isBoom500 ? 6 : isBoom600 ? 3 : 0;
   const n30Ok     = isBoom600 ? ed_n30 < 3 : ed_n30 >= n30Thresh;
@@ -958,6 +968,25 @@ function EntradaDiegoSection({ symbol }) {
         <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, marginLeft: "auto",
           background: `${gateColor}22`, color: gateColor, fontWeight: 800, letterSpacing: "0.04em" }}>
           {gateLabel}
+        </span>
+      </div>
+
+      {/* Cycle budget bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+        <span style={{ fontSize: 7, color: budgetColor, fontWeight: 700, minWidth: 26 }}>
+          {cycle_prev_quiet && !budgetBlocked ? "Q→A" : `bdg`}
+        </span>
+        <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{
+            width: `${budgetPct}%`, height: "100%",
+            background: budgetColor,
+            transition: "width 1s linear",
+            boxShadow: budgetBlocked ? `0 0 6px ${budgetColor}` : "none",
+          }} />
+        </div>
+        <span style={{ fontSize: 7, color: budgetColor, fontWeight: 800, minWidth: 34, textAlign: "right",
+          fontFamily: "monospace" }}>
+          {cycle_budget_norm.toFixed(1)}/{CYCLE_BUDGET_MAX}
         </span>
       </div>
 

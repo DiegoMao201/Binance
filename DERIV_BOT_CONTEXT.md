@@ -50,6 +50,7 @@ ssh coolify-server "cat /data/logs/audit-reports/MUESTRA_LIMPIA_ACTIVA.txt"
 | 2026-06-22 | ~08:58 | Pre-D7.4. Stake $10 flat, D70 buffers |
 | 2026-06-24 | 23:19 UTC | Pre-D10.1 dirección corregida. D10 activo con C1/C2/C3 |
 | 2026-07-12 | 19:12 UTC | Nueva máquina 4 niveles: S1($1,10m)→S10($10,15m)→S20($20,15m)→S40($40,15m). Drought gate, hour_change, gate S40≤5spk/h. BOOM500+CRASH500 activos. |
+| 2026-08-05 | 20:39 UTC | Gates completos por símbolo (H24). 8 gates L0+rec. ed_analysis.jsonl archivado → nueva muestra limpia con gates activos. Commit 350d824. |
 
 ---
 
