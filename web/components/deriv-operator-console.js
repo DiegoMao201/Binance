@@ -523,7 +523,7 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_SYMBOLS = new Set(["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
+const ED_SYMBOLS = new Set(["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 // 1000s ciclo simple (coincidir con entrada_diego.py)
 const K1000_WAIT_S         = 480;   // 8min espera 1000s
 const K1000_WAIT_900_S     = 480;   // 8min espera 900s
@@ -581,6 +581,9 @@ function EntradaDiegoSection({ symbol }) {
   const is1000     = symbol.includes("1000") || symbol.includes("900");
   const is900      = symbol.includes("900");
   const is600      = symbol.includes("600");
+  const is300N     = symbol === "BOOM300N" || symbol === "CRASH300N";
+  const isBoom300N = symbol === "BOOM300N";
+  const isCrash300N = symbol === "CRASH300N";
   const is500      = symbol === "BOOM500" || symbol === "CRASH500";
   const isCrash500 = symbol === "CRASH500";
   const isBoom500  = symbol === "BOOM500";
@@ -712,7 +715,7 @@ function EntradaDiegoSection({ symbol }) {
           cycle_budget_norm = 0, cycle_prev_quiet = true } = edState;
   // L0 stake y recovery stake varían por símbolo
   const l0Stake  = (symbol === "CRASH500") ? 4 : (symbol === "CRASH600") ? 10 : 20;
-  const rec1Stake = (symbol === "BOOM500" || symbol === "BOOM600") ? 10 : 20;
+  const rec1Stake = (symbol === "BOOM500" || symbol === "BOOM600" || symbol === "BOOM300N") ? 10 : 20;
   const recStake = ladder_recovery_level_500 >= 1 ? rec1Stake : l0Stake;
   const isRecovery = ladder_recovery_level_500 > 0;
   // p50 dinámico por símbolo
@@ -723,17 +726,26 @@ function EntradaDiegoSection({ symbol }) {
   const isCrash600     = symbol === "CRASH600";
   const boom600_p50    = isBoom600  ? (edState.boom600_p50  || 420) : 0;
   const crash600_p50   = isCrash600 ? (edState.crash600_p50 || 420) : 0;
+  const boom300n_p50   = isBoom300N ? (edState.boom300_p50  || 300) : 0;
+  const crash300n_p50  = isCrash300N ? (edState.crash300_p50 || 300) : 0;
   const boomCloseAt    = isBoom500  ? (boom500_p50  + 120) : 0;
   const crashCloseAt   = isCrash500 ? (crash500_p50 + 120) : 0;
   const boom6CloseAt   = isBoom600  ? (boom600_p50  + 120) : 0;
   const crash6CloseAt  = isCrash600 ? (crash600_p50 + 120) : 0;
+  const boom3CloseAt   = isBoom300N ? (boom300n_p50  + 120) : 0;
+  const crash3CloseAt  = isCrash300N ? (crash300n_p50 + 120) : 0;
   const closeAt600     = isBoom600 ? boom6CloseAt : isCrash600 ? crash6CloseAt : 540;
-  const TIER_DEFS  = isBoom500
+  const closeAt300N    = isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt : 420;
+  const TIER_DEFS  = isBoom300N
+    ? [[boom3CloseAt, 4]]                              // 300N BOOM: sin zona muerta, $20 desde t=0
+    : isCrash300N ? [[120, 0], [crash3CloseAt, 4]]    // 300N CRASH: zona muerta 2m
+    : isBoom500
     ? [[boomCloseAt, 4]]                               // sin zona muerta — $4 desde t=0
     : isCrash500 ? [[120, 0], [crashCloseAt, 4]]       // zona muerta 2m, cierre dinámico
     : is600      ? [[120, 0], [closeAt600, 4]]          // 600s: zona muerta 2m, p50+2min
     :              [[120, 0], [540, 4]];
-  const LADDER_CYCLE_S = isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : is600 ? closeAt600 : 540;
+  const LADDER_CYCLE_S = isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt
+    : isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : is600 ? closeAt600 : 540;
   const LADDER_REST_S  = 900;
   const FLOOR_PCT      = 0.85;
   const HAS_REST       = true;
@@ -751,6 +763,7 @@ function EntradaDiegoSection({ symbol }) {
   const currentTierIsPausa = currentTierStake === 0;
   // CONTRACT_S: del estado del bot (asignado al abrir) o fallback dinámico por símbolo
   const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s
+                   : isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt
                    : isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt
                    : isBoom600 ? boom6CloseAt : isCrash600 ? crash6CloseAt : 420;
   const isStop      = burst_phase === "STOP";
@@ -768,7 +781,10 @@ function EntradaDiegoSection({ symbol }) {
   const baseColor500  = isDayDone ? "#22d3a3" : isStop ? "#64748b" : isResting ? "#a78bfa" : isRecovery ? "#f97316" : burst_phase === "LADDER" ? "#62d4ff" : "#94a3b8";
 
   // Label del rango por símbolo (dinámico p50 para todos)
-  const rangeLabel = isBoom500
+  const rangeLabel = isBoom300N
+    ? `0–${(boom3CloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom300n_p50/60).toFixed(1)}m)`
+    : isCrash300N ? `2–${(crash3CloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash300n_p50/60).toFixed(1)}m)`
+    : isBoom500
     ? `0–${(boomCloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom500_p50/60).toFixed(1)}m)`
     : isCrash500 ? `2–${(crashCloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash500_p50/60).toFixed(1)}m)`
     : isBoom600  ? `2–${(boom6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom600_p50/60).toFixed(1)}m)`
@@ -785,6 +801,7 @@ function EntradaDiegoSection({ symbol }) {
   // ── Gates reales en entrada_diego.py ────────────────────────────────────
   // GATE_L0: n30 mínimo/máximo por símbolo
   const gateL0Pass = (() => {
+    if (is300N)      return ed_n30 >= 2;
     if (isCrash500 || isBoom500) return ed_n30 >= 2;
     if (isBoom600)  return ed_n30 < 6;
     return true; // CRASH600: sin gate L0
@@ -800,6 +817,7 @@ function EntradaDiegoSection({ symbol }) {
   // Recovery-1: solo GAP_PREV + n30 base
   const gateRec1Pass = (() => {
     if (!gateGapPrevPass) return false;
+    if (is300N) return ed_n30 >= 2;
     if (isBoom500 || isCrash500) return ed_n30 >= 2;
     if (isBoom600)  return ed_n30 < 6;
     if (isCrash600) return !(ed_gap_prev >= 120 && ed_gap_prev < 300);
@@ -2356,7 +2374,7 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
+  const SYMBOL_ORDER = ["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
@@ -2388,7 +2406,7 @@ export default function DerivOperatorConsole() {
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
   // Símbolos disponibles para filtro: unión de todos los que aparecen en datos reales
-  const _SYM_PREF = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
+  const _SYM_PREF = ["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
   const _spkSyms  = [...new Set(spikeTable.map(r => r.symbol))];
   const _feedSyms = [...new Set(confFeed.map(r => r.symbol))];
   const _allSyms  = [...new Set([..._SYM_PREF, ..._spkSyms, ..._feedSyms])].filter(Boolean);

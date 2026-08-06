@@ -40,12 +40,13 @@ from typing import Any, Optional
 
 _LOGGER = logging.getLogger("entrada_diego")
 
+SYMBOLS_300  = {"CRASH300N", "BOOM300N"}
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_600  = {"CRASH600",  "BOOM600"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
 SYMBOLS_900  = {"CRASH900",  "BOOM900"}
 SYMBOLS_R    = set()   # R_75 y JD75 suspendidos — no estudiados aún
-SYMBOLS_LADDER = SYMBOLS_500 | SYMBOLS_600   # todos usan lógica LADDER
+SYMBOLS_LADDER = SYMBOLS_300 | SYMBOLS_500 | SYMBOLS_600   # todos usan lógica LADDER
 SYMBOLS_K1000  = SYMBOLS_1000 | SYMBOLS_900  # todos usan ciclo K1000
 SYMBOLS_ED   = SYMBOLS_LADDER | SYMBOLS_K1000 | SYMBOLS_R
 
@@ -284,6 +285,7 @@ TP_RATCHET_PAUSE_S   = 1800.0   # 30 min pausa global tras tp_or_ratchet (el mer
 LADDER_REST_SPIKE_EXTEND = 4   # ≥4 spikes durante REST → +20min (aplica a 500s y 600s, BOOM y CRASH)
 # Cycle budget gate: no abrir cuando ciclo activo agotado (80%+ prob de secarse)
 _CYCLE_MEAN_RATIO: dict[str, float] = {
+    "BOOM300N": 200.0, "CRASH300N": 200.0,  # placeholder — calibrar con datos reales
     "BOOM500": 195.0, "CRASH500": 199.0, "BOOM600": 236.0, "CRASH600": 229.0,
 }
 _CYCLE_BUDGET_MAX = 10.0   # ≥80% ciclos activos terminados en este umbral (n=600+ ciclos)
@@ -291,6 +293,7 @@ _CYCLE_BUDGET_MAX = 10.0   # ≥80% ciclos activos terminados en este umbral (n=
 # Dato: BOOM500 n30=3 WR=62% vs n30=4 WR=30%; CRASH600 n30=3 WR=65% vs n30=4 WR=23%.
 # CRASH500/BOOM600 usan n30=1 (reset inmediato al primer spike post-sequía).
 _CYCLE_QA_MIN: dict[str, int] = {
+    "CRASH300N": 2, "BOOM300N": 2,  # placeholder conservador — ajustar con datos
     "CRASH500": 1, "BOOM500": 3, "CRASH600": 3, "BOOM600": 1,
 }
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
@@ -1188,6 +1191,20 @@ class EntradaDiego:
 
     def _ladder_tier_500(self, sym: str, t_sin_spike: float, state: Any = None) -> tuple[int, float]:
         """Retorna (tier_idx, stake). tier_idx=-1 si fuera de zona caliente o pausa programada."""
+        if "BOOM" in sym and "300" in sym:
+            # Spikes cada ~300 ticks (~5min). p50 inicial=300s — calibrar con datos reales.
+            p50 = getattr(state, 'boom300_p50', 300.0) if state is not None else 300.0
+            close_at = p50 + 120.0
+            if t_sin_spike >= close_at:
+                return -1, 0.0
+            return 0, 20.0
+        if "CRASH" in sym and "300" in sym:
+            # Spikes cada ~300 ticks (~5min). p50 inicial=300s — calibrar con datos reales.
+            p50 = getattr(state, 'crash300_p50', 300.0) if state is not None else 300.0
+            close_at = p50 + 120.0
+            if t_sin_spike >= close_at:
+                return -1, 0.0
+            return 1, 10.0
         if "BOOM" in sym and "500" in sym:
             # Abre inmediatamente al spike (t=0), cierra en p50+2min
             p50 = getattr(state, 'boom500_p50', 363.0) if state is not None else 363.0
@@ -1711,7 +1728,13 @@ class EntradaDiego:
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
         state.dead_zone_spikes_500   = 0  # entramos al mercado — reiniciar contador dead zone
-        if "BOOM" in sym and "600" in sym:
+        if "BOOM" in sym and "300" in sym:
+            _p50_b3 = getattr(state, 'boom300_p50', 300.0)
+            state.ladder_active_contract_s = max(30.0, (_p50_b3 + 120.0) - t_sin_spike)
+        elif "CRASH" in sym and "300" in sym:
+            _p50_c3 = getattr(state, 'crash300_p50', 300.0)
+            state.ladder_active_contract_s = max(30.0, (_p50_c3 + 120.0) - t_sin_spike)
+        elif "BOOM" in sym and "600" in sym:
             _p50_b6 = getattr(state, 'boom600_p50', 420.0)
             state.ladder_active_contract_s = max(30.0, (_p50_b6 + 120.0) - t_sin_spike)
         elif "CRASH" in sym and "600" in sym:
@@ -1733,7 +1756,15 @@ class EntradaDiego:
         _ctx_l0   = self._ed_ctx(sym, now)
         _n30_l0   = _ctx_l0["n30"]
         _gap_s_l0 = _ctx_l0["gap_s"] if _ctx_l0["gap_s"] >= 0 else 9999.0
-        if "CRASH" in sym and "500" in sym:
+        if "CRASH" in sym and "300" in sym:
+            if _n30_l0 < 2:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
+                return
+        elif "BOOM" in sym and "300" in sym:
+            if _n30_l0 < 2:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
+                return
+        elif "CRASH" in sym and "500" in sym:
             if _n30_l0 < 2:
                 _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
                 return

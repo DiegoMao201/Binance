@@ -1023,7 +1023,8 @@ class DerivDaemon:
         "CRASH500": 700.0,   # p75=649
         "CRASH600": 950.0,   # p75=913
         "CRASH900": 1200.0,  # p75=1104
-        "CRASH300": 420.0,   # conservative (no current data, ~75% of cycle 600)
+        "CRASH300N": 420.0,  # conservative (no current data, ~75% of cycle 600)
+        "BOOM300N":  420.0,
         "BOOM600":  950.0,
         "BOOM900":  1200.0,
         "BOOM1000": 1300.0,

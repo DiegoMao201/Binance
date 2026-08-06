@@ -61,11 +61,11 @@ SYMBOL_FAMILY: dict[str, str] = {
     "R_10":  "volatility", "R_25":  "volatility", "R_50":  "volatility",
     "R_75":  "volatility", "R_100": "volatility",
     # BOOM family — all variants
-    "BOOM300":  "boom_crash", "BOOM500":  "boom_crash",
+    "BOOM300N": "boom_crash", "BOOM500":  "boom_crash",
     "BOOM600":  "boom_crash", "BOOM900":  "boom_crash",
     "BOOM1000": "boom_crash",
     # CRASH family — all variants
-    "CRASH300":  "boom_crash", "CRASH500":  "boom_crash",
+    "CRASH300N": "boom_crash", "CRASH500":  "boom_crash",
     "CRASH600":  "boom_crash", "CRASH900":  "boom_crash",
     "CRASH1000": "boom_crash",
 }
@@ -73,7 +73,7 @@ SYMBOL_FAMILY: dict[str, str] = {
 # Approximate spike interval in ticks (1 tick ≈ 1 s on Deriv synthetics).
 # Used for max_hold and diagnostics: spike_family_interval field in logs.
 SPIKE_INTERVAL_TICKS: dict[str, int] = {
-    "BOOM300": 300,  "CRASH300": 300,
+    "BOOM300N": 300, "CRASH300N": 300,
     "BOOM500": 500,  "CRASH500": 500,
     "BOOM600": 600,  "CRASH600": 600,
     "BOOM900": 900,  "CRASH900": 900,
@@ -307,7 +307,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
     },
     # ── BOOM: asymmetric accumulation — BUY only / spike capture ─────────────
     # Spike markets: NO mean-reversion, NO breakout — only SMC + spike-hunter.
-    "BOOM300": {
+    "BOOM300N": {
         # 2026-05-29 user directive: solo BOOM500 + todos los CRASH. Resto OFF.
         "disabled": True,
         "type": "spike_boom",
@@ -416,7 +416,7 @@ ASSET_INTEL_PROFILES: dict[str, dict] = {
         "spike_min_post_sec": 280,
     },
     # ── CRASH: asymmetric accumulation — SELL only / spike capture ────────────
-    "CRASH300": {
+    "CRASH300N": {
         "type": "spike_crash",
         "strategy_mode": "spike",
         "forced_side": "MULTDOWN",
