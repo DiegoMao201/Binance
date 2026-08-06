@@ -1449,15 +1449,15 @@ class EntradaDiego:
             _rl_pending = getattr(state, 'ladder_recovery_level_500', 0)
             if _rl_pending == 1:
                 _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
-                _skip_rec1 = False
-                if "CRASH" in sym and "600" in sym:
-                    _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                    if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                    _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
-                if _skip_rec1:
-                    state.ladder_recovery_level_500 = 0
-                    _LOGGER.info("[ENTRADA_DIEGO] %s SKIP RECOVERY-1 n30=%d gate activo → ciclo natural", sym, _n30_rec)
-                    return
+                # Gate gap_prev CRASH: si ráfaga reciente, esperar mejor entrada (no cancelar rec_lvl)
+                if "CRASH" in sym:
+                    _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", -1.0)
+                    if 0 <= _gp_rec1 < 60.0:
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s REC1 HOLD gap_prev=%.0fs<60s (ráfaga — mantener rec_lvl=1)",
+                            sym, _gp_rec1,
+                        )
+                        return
                 state.burst_phase              = "LADDER"
                 state.burst_phase_started_at   = now
                 state.peak_profit_500          = 0.0
@@ -1530,19 +1530,19 @@ class EntradaDiego:
                 self._ed_log(sym, _pnl, _had_spk_rec, getattr(state, 'ladder_recovery_level_500', 0), now, close_type="SEQUIA")
                 if self._ladder_check_rest_500(sym, _pnl, now):
                     return
-                # Recovery tras sequía: solo si mercado activo (n30 > 2)
+                # Recovery tras sequía: abrir si mercado no en ráfaga
                 _rl_seq = getattr(state, 'ladder_recovery_level_500', 0)
                 if _rl_seq == 1:
                     _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
-                    _skip_rec1 = False
-                    if "CRASH" in sym and "600" in sym:
-                        _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                        if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                        _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
-                    if _skip_rec1:
-                        state.ladder_recovery_level_500 = 0
-                        _LOGGER.info("[ENTRADA_DIEGO] %s SKIP RECOVERY-1 n30=%d gate activo → ciclo natural", sym, _n30_rec)
-                        return
+                    # Gate gap_prev CRASH: si ráfaga reciente, esperar (no cancelar rec_lvl)
+                    if "CRASH" in sym:
+                        _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", -1.0)
+                        if 0 <= _gp_rec1 < 60.0:
+                            _LOGGER.info(
+                                "[ENTRADA_DIEGO] %s REC1 HOLD gap_prev=%.0fs<60s (ráfaga post-sequía — mantener rec_lvl=1)",
+                                sym, _gp_rec1,
+                            )
+                            return
                     state.burst_phase              = "LADDER"
                     state.burst_phase_started_at   = now
                     state.peak_profit_500          = 0.0
@@ -1662,19 +1662,19 @@ class EntradaDiego:
         # Guard: no abrir si REST todavía activo (caso contrato que se cerró durante REST)
         if state.ladder_rest_until_500 > 0 and now < state.ladder_rest_until_500:
             return
-        # Recovery: solo si mercado activo (n30 > 2) — gate sequía
+        # Recovery: abrir si mercado no en ráfaga
         _rec_lvl = getattr(state, 'ladder_recovery_level_500', 0)
         if _rec_lvl == 1:
             _n30_rec = len([t for t, _ in state.power_window if t > now - 1800.0])
-            _skip_rec1 = False
-            if "CRASH" in sym and "600" in sym:
-                _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", 9999.0)
-                if _gp_rec1 < 0: _gp_rec1 = 9999.0
-                _skip_rec1 = 120.0 <= _gp_rec1 < 300.0
-            if _skip_rec1:
-                state.ladder_recovery_level_500 = 0
-                _LOGGER.info("[ENTRADA_DIEGO] %s SKIP RECOVERY-1 n30=%d gate activo → ciclo natural", sym, _n30_rec)
-                return
+            # Gate gap_prev CRASH: este spike llegó muy rápido → ráfaga → esperar (mantener rec_lvl=1)
+            if "CRASH" in sym:
+                _gp_rec1 = self._ed_ctx(sym, now).get("gap_prev_s", -1.0)
+                if 0 <= _gp_rec1 < 60.0:
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s REC1 HOLD gap_prev=%.0fs<60s (ráfaga en spike — mantener rec_lvl=1)",
+                        sym, _gp_rec1,
+                    )
+                    return
             state.burst_phase            = "LADDER"
             state.burst_phase_started_at = now
             state.peak_profit_500        = 0.0
@@ -1737,6 +1737,15 @@ class EntradaDiego:
             if _n30_l0 >= 6:
                 _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d>=6", sym, _n30_l0)
                 return
+        # Gate gap_prev: no abrir si los dos últimos spikes llegaron en ráfaga (<60s entre ellos)
+        # Dato: n=25, WR=20%, ratio_sq/fl=4.0 — la ráfaga quema el ciclo y sigue sequía
+        _gap_prev_l0 = _ctx_l0.get("gap_prev_s", -1.0)
+        if 0 <= _gap_prev_l0 < 60.0:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s GATE_GAP_PREV skip gap_prev=%.0fs<60s (ráfaga — esperar ciclo)",
+                sym, _gap_prev_l0,
+            )
+            return
         # Gate ciclo agotado: no abrir si ratio-norm acumulado supera umbral (ciclo terminándose)
         _cycle_bdg = getattr(state, 'cycle_budget_norm', 0.0)
         if _cycle_bdg >= _CYCLE_BUDGET_MAX:
