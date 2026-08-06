@@ -287,6 +287,12 @@ _CYCLE_MEAN_RATIO: dict[str, float] = {
     "BOOM500": 195.0, "CRASH500": 199.0, "BOOM600": 236.0, "CRASH600": 229.0,
 }
 _CYCLE_BUDGET_MAX = 10.0   # ≥80% ciclos activos terminados en este umbral (n=600+ ciclos)
+# n30 mínimo para disparar Q→A (reset budget tras sequía).
+# Dato: BOOM500 n30=3 WR=62% vs n30=4 WR=30%; CRASH600 n30=3 WR=65% vs n30=4 WR=23%.
+# CRASH500/BOOM600 usan n30=1 (reset inmediato al primer spike post-sequía).
+_CYCLE_QA_MIN: dict[str, int] = {
+    "CRASH500": 1, "BOOM500": 3, "CRASH600": 3, "BOOM600": 1,
+}
 # Stake mínimo 500s (usado en _open() para LimitOrderAmountTooHigh guard)
 S500_STAKE_LOW        = 4.0      # tier2 = $4 (mínimo)
 # Target hora K1000 (reutilizado también en lógica K1000)
@@ -1306,12 +1312,13 @@ class EntradaDiego:
                 _ratio_rst = self._risk.get_last_spike_ratio(sym) or 0.0
                 _n30_rst   = sum(1 for t, _ in (self._ed_spike_hist.get(sym) or []) if _spk_check - t <= 1800)
                 _norm_rst  = _ratio_rst / _CYCLE_MEAN_RATIO.get(sym, 200.0)
-                if _n30_rst <= 2:
+                _qa_min_rst = _CYCLE_QA_MIN.get(sym, 3)
+                if _n30_rst < _qa_min_rst:
                     state.cycle_prev_quiet = True
-                elif _n30_rst >= 4 and state.cycle_prev_quiet:
+                elif _n30_rst >= _qa_min_rst and state.cycle_prev_quiet:
                     state.cycle_budget_norm = 0.0
                     state.cycle_prev_quiet  = False
-                if _n30_rst >= 4 and _norm_rst > 0:
+                if _n30_rst >= _qa_min_rst and _norm_rst > 0:
                     state.cycle_budget_norm = round(state.cycle_budget_norm + _norm_rst, 2)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s LADDER REST spike #%d (gap=%.0fs) pw=%.1f — acumulando en descanso",
@@ -1354,13 +1361,14 @@ class EntradaDiego:
             _ratio_spk = self._risk.get_last_spike_ratio(sym) or 0.0
             _n30_bdg   = sum(1 for t, _ in (self._ed_spike_hist.get(sym) or []) if _last_spk - t <= 1800)
             _norm_bdg  = _ratio_spk / _CYCLE_MEAN_RATIO.get(sym, 200.0)
-            if _n30_bdg <= 2:
+            _qa_min    = _CYCLE_QA_MIN.get(sym, 3)
+            if _n30_bdg < _qa_min:
                 state.cycle_prev_quiet = True
-            elif _n30_bdg >= 4 and state.cycle_prev_quiet:
+            elif _n30_bdg >= _qa_min and state.cycle_prev_quiet:
                 state.cycle_budget_norm = 0.0
                 state.cycle_prev_quiet  = False
-                _LOGGER.info("[ENTRADA_DIEGO] %s CYCLE_RESET Q→A budget=0 (ciclo activo nuevo)", sym)
-            if _n30_bdg >= 4 and _norm_bdg > 0:
+                _LOGGER.info("[ENTRADA_DIEGO] %s CYCLE_RESET Q→A budget=0 n30=%d qa_min=%d", sym, _n30_bdg, _qa_min)
+            if _n30_bdg >= _qa_min and _norm_bdg > 0:
                 state.cycle_budget_norm = round(state.cycle_budget_norm + _norm_bdg, 2)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s CYCLE_BUDGET +%.2f → %.2f (n30=%d ratio=%.0fx)",
@@ -1765,6 +1773,7 @@ class EntradaDiego:
         # Gate ciclo agotado: no abrir si ratio-norm acumulado supera umbral (ciclo terminándose)
         _cycle_bdg = getattr(state, 'cycle_budget_norm', 0.0)
         if _cycle_bdg >= _CYCLE_BUDGET_MAX:
+            state.cycle_prev_quiet = True  # armar Q→A para el primer spike post-sequía
             _LOGGER.info(
                 "[ENTRADA_DIEGO] %s GATE_CYCLE_BUDGET skip budget=%.2f>=%.1f (ciclo agotado — esperar Q→A)",
                 sym, _cycle_bdg, _CYCLE_BUDGET_MAX,
