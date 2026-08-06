@@ -782,17 +782,26 @@ function EntradaDiegoSection({ symbol }) {
     ? ` ${consec_wins_500}/2w` : "";
   const activeStake = current_stake_500 > 0 ? current_stake_500 : recStake;
 
-  // ── Gates: L0 y Recovery-1 ──────────────────────────────────────────────
+  // ── Gates reales en entrada_diego.py ────────────────────────────────────
+  // GATE_L0: n30 mínimo/máximo por símbolo
   const gateL0Pass = (() => {
-    if (isCrash500) return ed_n30 >= 4;
-    if (isBoom500)  return ed_gap_s > 120 && ed_n30 >= 6;
-    if (isBoom600)  return ed_gap_s > 300 && ed_n30 < 3;
+    if (isCrash500 || isBoom500) return ed_n30 >= 2;
+    if (isBoom600)  return ed_n30 < 6;
     return true; // CRASH600: sin gate L0
   })();
+  // GATE_GAP_PREV: ráfaga doble (<60s entre los dos spikes previos)
+  const gateGapPrevPass = !(ed_gap_prev >= 0 && ed_gap_prev < 60);
+  // GATE_GAP_DEAD: zona muerta 150-300s (transición hacia sequía)
+  const gateGapDeadPass = !(ed_gap_s >= 150 && ed_gap_s < 300);
+  // GATE_COOLING: ciclo enfriando — n30 moderado + spike tardío
+  const gateCoolingPass = !(ed_n30 >= 4 && ed_n30 < 7 && ed_gap_s >= 180 && ed_gap_s < 360);
+  // SYM_PNL info (gate desactivado en bot, solo informativo)
+  const symPnlNegative  = sym_pnl_since_reset <= -20;
+  // Recovery-1: solo GAP_PREV + n30 base
   const gateRec1Pass = (() => {
-    if (isBoom500)  return ed_n30 >= 2;
+    if (!gateGapPrevPass) return false;
+    if (isBoom500 || isCrash500) return ed_n30 >= 2;
     if (isBoom600)  return ed_n30 < 6;
-    if (isCrash500) return ed_n30 >= 4 && ed_gap_prev >= 0 && ed_gap_prev < 300;
     if (isCrash600) return !(ed_gap_prev >= 120 && ed_gap_prev < 300);
     return true;
   })();
@@ -802,15 +811,26 @@ function EntradaDiegoSection({ symbol }) {
   const budgetColor   = cycle_budget_norm >= CYCLE_BUDGET_MAX ? "#ff5d6c"
                       : cycle_budget_norm >= 7  ? "#f5c43c"
                       : "#22d3a3";
-  const gatePass  = isRecovery ? gateRec1Pass : (gateL0Pass && !budgetBlocked);
-  const gateLabel = budgetBlocked
-    ? (isRecovery ? "REC✗" : "CICLO✗")
-    : isRecovery ? (gateRec1Pass ? "REC✓" : "REC✗")
-    : (gateL0Pass ? "L0✓" : "L0✗");
+  // Gate bloqueante activo (en orden de prioridad)
+  const blockingGate = !gateL0Pass      ? "L0"
+    : !gateGapPrevPass   ? "GP_PREV"
+    : !gateGapDeadPass   ? "DEAD_ZN"
+    : !gateCoolingPass   ? "COOLING"
+    : budgetBlocked      ? "CICLO"
+    : null;
+  const gatePass = isRecovery
+    ? (gateRec1Pass)
+    : (gateL0Pass && gateGapPrevPass && gateGapDeadPass && gateCoolingPass && !budgetBlocked);
+  const gateLabel = isRecovery
+    ? (gateRec1Pass ? "REC✓" : `REC✗ GP`)
+    : gatePass ? "L0✓" : (blockingGate ? `${blockingGate}✗` : "L0✗");
   const gateColor = gatePass ? "#22d3a3" : "#ff5d6c";
-  const n30Thresh = isCrash500 ? 4 : isBoom500 ? 6 : isBoom600 ? 3 : 0;
-  const n30Ok     = isBoom600 ? ed_n30 < 3 : ed_n30 >= n30Thresh;
+  const n30Thresh = (isCrash500 || isBoom500) ? 2 : isBoom600 ? 6 : 0;
+  const n30Ok     = isBoom600 ? ed_n30 < 6 : (n30Thresh > 0 ? ed_n30 >= n30Thresh : true);
   const n30Color  = n30Thresh > 0 ? (n30Ok ? "#22d3a3" : "#ff5d6c") : "#94a3b8";
+  // Colores para gap_s y gap_prev basados en gates
+  const gapSColor = !gateGapDeadPass ? "#ff5d6c" : !gateCoolingPass ? "#f5c43c" : "#94a3b8";
+  const gapPrevColor = !gateGapPrevPass ? "#ff5d6c" : ed_gap_prev > 300 ? "#22d3a3" : "#94a3b8";
 
   // Texto de estado
   const statusText = isDayDone ? `DONE +$${sym_pnl_since_reset.toFixed(2)} ≥ $${DAILY_GATE}`
@@ -948,26 +968,50 @@ function EntradaDiegoSection({ symbol }) {
       )}
 
       {/* Gate context: n30 · gap_s · gap_prev · gate status */}
-      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 3, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 2, alignItems: "center" }}>
         <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
           background: `${n30Color}18`, color: n30Color, fontWeight: 700 }}>
           n30={ed_n30}
         </span>
         {ed_gap_s >= 0 && (
           <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
-            background: "rgba(255,255,255,0.06)", color: "#94a3b8" }}>
+            background: `${gapSColor}18`, color: gapSColor }}>
             gap={ago(ed_gap_s)}
           </span>
         )}
-        {(isCrash500 || isCrash600) && ed_gap_prev >= 0 && (
+        {ed_gap_prev >= 0 && (
           <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
-            background: "rgba(255,255,255,0.06)", color: "#94a3b8" }}>
+            background: `${gapPrevColor}18`, color: gapPrevColor }}>
             prev={ago(ed_gap_prev)}
           </span>
         )}
         <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, marginLeft: "auto",
           background: `${gateColor}22`, color: gateColor, fontWeight: 800, letterSpacing: "0.04em" }}>
           {gateLabel}
+        </span>
+      </div>
+      {/* Mini gate status — cada gate con ✓/✗ */}
+      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", marginBottom: 3, alignItems: "center" }}>
+        {[
+          { k: "L0",  pass: gateL0Pass       },
+          { k: "GP",  pass: gateGapPrevPass  },
+          { k: "DZ",  pass: gateGapDeadPass  },
+          { k: "CL",  pass: gateCoolingPass  },
+          { k: "BDG", pass: !budgetBlocked   },
+        ].map(g => (
+          <span key={g.k} style={{
+            fontSize: 7, padding: "0px 4px", borderRadius: 3, fontWeight: g.pass ? 500 : 800,
+            background: g.pass ? "rgba(255,255,255,0.04)" : "rgba(255,93,108,0.18)",
+            color: g.pass ? "#475569" : "#ff5d6c",
+          }}>{g.k}{g.pass ? "✓" : "✗"}</span>
+        ))}
+        {/* PNL acumulado — solo informativo (gate desactivado) */}
+        <span style={{
+          fontSize: 7, padding: "0px 4px", borderRadius: 3, fontWeight: symPnlNegative ? 700 : 400,
+          background: symPnlNegative ? "rgba(245,196,60,0.12)" : "rgba(255,255,255,0.04)",
+          color: symPnlNegative ? "#f5c43c" : "#475569", marginLeft: "auto",
+        }}>
+          pnl {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(1)}$
         </span>
       </div>
 

@@ -1746,6 +1746,22 @@ class EntradaDiego:
                 sym, _gap_prev_l0,
             )
             return
+        # Gate zona muerta: el spike disparador llegó 2.5-5min después del anterior
+        # Dato: n=130 (nuevos), WR=35%, sq/fl=1.89 — zona de transición hacia sequía
+        if 150.0 <= _gap_s_l0 < 300.0:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s GATE_GAP_DEAD skip gap_s=%.0fs (zona muerta 150-300s)",
+                sym, _gap_s_l0,
+            )
+            return
+        # Gate ciclo enfriando: actividad moderada + spike tardío = ciclo agotándose
+        # Dato: n=19 (nuevos), WR=26%, sq/fl=1.60 — mercado en enfriamiento post-burst
+        if 4 <= _n30_l0 < 7 and 180.0 <= _gap_s_l0 < 360.0:
+            _LOGGER.info(
+                "[ENTRADA_DIEGO] %s GATE_COOLING skip n30=%d+gap_s=%.0fs (ciclo enfriando)",
+                sym, _n30_l0, _gap_s_l0,
+            )
+            return
         # Gate ciclo agotado: no abrir si ratio-norm acumulado supera umbral (ciclo terminándose)
         _cycle_bdg = getattr(state, 'cycle_budget_norm', 0.0)
         if _cycle_bdg >= _CYCLE_BUDGET_MAX:
