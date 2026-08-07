@@ -1890,9 +1890,9 @@ class EntradaDiego:
                 # fall through → abrir nuevo
 
         # ── Abrir nuevo ACCU (stake fijo $2, 5% growth, TP $0.20) ────────────
-        _STAKE  = 2.0
+        _STAKE  = 10.0
         _GROWTH = 0.05
-        _TP     = round(_STAKE * 0.10, 2)   # $0.20
+        _TP     = 1.50          # 15% en $10 stake → ~3 ticks a 5% growth
         state.burst_phase            = "ACCU"
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
