@@ -874,20 +874,10 @@ function EntradaDiegoSection({ symbol }) {
     const _livePnl   = Number(current_profit) || 0;
     const _livePnlCol = _livePnl > 0 ? "#22d3a3" : _livePnl < 0 ? "#ff5d6c" : "#94a3b8";
     const _isOpen    = contract_id != null;
-    const _inWindow  = !_isOpen && tSinSpike >= 40 && tSinSpike <= 120;
-    const _inCooldown = !_isOpen && tSinSpike > 0 && tSinSpike < 40;
-    const _border = _isOpen ? "#22d3a330" : _inWindow ? "#f59e0b55" : _inCooldown ? "#94a3b822" : "#f59e0b22";
-    const _bg     = _isOpen ? "#22d3a308" : _inWindow ? "#f59e0b12" : "#f59e0b06";
-    const _windowSec = Math.max(0, 120 - tSinSpike);
-    const _cooldownSec = Math.max(0, 40 - tSinSpike);
-    const _statusTxt = _isOpen      ? "◉ ABIERTO"
-                     : _inWindow    ? `▶ EN VENTANA ${_windowSec.toFixed(0)}s`
-                     : _inCooldown  ? `⏳ DESCARGA ${_cooldownSec.toFixed(0)}s`
-                     : "○ ESPERA SPIKE";
-    const _statusCol = _isOpen     ? "#22d3a3"
-                     : _inWindow   ? "#f59e0b"
-                     : _inCooldown ? "#94a3b8"
-                     : "#57534e";
+    const _border = _isOpen ? "#22d3a330" : "#f59e0b22";
+    const _bg     = _isOpen ? "#22d3a308" : "#f59e0b06";
+    const _statusTxt = _isOpen ? "◉ ABIERTO" : "○ ABRIENDO...";
+    const _statusCol = _isOpen ? "#22d3a3"   : "#f59e0b";
     return (
       <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 6,
         fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
@@ -923,8 +913,8 @@ function EntradaDiegoSection({ symbol }) {
         <div style={{ display: "flex", gap: 8, fontSize: 8, color: "#57534e" }}>
           <span>n30:{ed_n30}</span>
           <span>gap:{_fmtS(tSinSpike)}</span>
-          <span style={{ marginLeft: "auto", color: _inWindow ? "#f59e0b" : _inCooldown ? "#64748b" : "#44403c" }}>
-            {_inWindow ? `ventana: ${_windowSec.toFixed(0)}s restantes` : _inCooldown ? `descarga: ${_cooldownSec.toFixed(0)}s` : "espera spike · 40–120s"}
+          <span style={{ marginLeft: "auto", color: "#44403c" }}>
+            {`gap:${_fmtS(tSinSpike)}`}
           </span>
         </div>
       </div>

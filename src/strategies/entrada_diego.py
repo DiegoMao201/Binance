@@ -1895,10 +1895,8 @@ class EntradaDiego:
                 self._persist(now)
                 # fall through → re-abrir si sigue en ventana
 
-        # ── Gate post-spike: ventana 40s–120s (esperar descarga inicial) ────────
-        _t_sin_spike = now - state.last_spike_ts_500
-        if state.last_spike_ts_500 == 0.0 or _t_sin_spike < 40.0 or _t_sin_spike > 120.0:
-            return  # fuera de ventana: muy temprano (descarga) o muy tarde
+        # ── Sin gate — siempre abierto para recolección de datos ────────────────
+        _t_sin_spike = now - state.last_spike_ts_500 if state.last_spike_ts_500 > 0 else -1.0
 
         # ── Abrir ACCU: $2, 2% growth, TP $0.20 ─────────────────────────────
         _STAKE  = 2.0
