@@ -704,6 +704,9 @@ class EntradaDiego:
         if sym in SYMBOLS_R:
             await self._process_r75(sym, tick)
             return
+        if sym in SYMBOLS_300:
+            await self._process_300n(sym)
+            return
         if sym in SYMBOLS_LADDER:  # 500 + 600
             await self._process_500_simple(sym)
             return
@@ -1812,6 +1815,105 @@ class EntradaDiego:
             return
         await self._open(sym, state, now, stake_override=stake)
 
+    # ── BOOM300N/CRASH300N: exploración libre, martingala 2→4→8→16→32, 5min ──
+
+    async def _process_300n(self, sym: str) -> None:
+        """ACCU data collection — BOOM300N/CRASH300N.
+
+        Stake fijo $2, growth_rate 5%, TP broker 10% ($0.20).
+        Abre siempre. Registra spikes para análisis de patrones.
+        """
+        state = self._states[sym]
+        now   = time.time()
+
+        # ── Spike tracking (siempre, para datos) ─────────────────────────────
+        _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
+        if state.last_spike_ts_500 == 0.0:
+            state.last_spike_ts_500 = _last_spk if _last_spk > 0 else now
+        if _last_spk > state.last_spike_ts_500 and _last_spk > 0:
+            _gap = _last_spk - state.last_spike_ts_500
+            state.last_spike_ts_500 = _last_spk
+            self._ed_push_spike(sym, _last_spk, self._risk.get_last_spike_ratio(sym) or 0.0)
+            _abs_jump = self._risk.get_last_spike_jump(sym)
+            if _abs_jump > 0:
+                state.power_window.append((_last_spk, _abs_jump))
+                state.power_window = [(t, r) for t, r in state.power_window if t > now - 1800.0]
+            _LOGGER.info("[ENTRADA_DIEGO] %s 300N spike gap=%.0fs jump=%.4f", sym, _gap, _abs_jump or 0.0)
+            self._persist(now)
+
+        # ── Verificar contrato ACCU abierto via proposal_open_contract ────────
+        if state.contract_id is not None:
+            try:
+                _poc_resp = await self._executor._client.proposal_open_contract(int(state.contract_id))
+            except Exception as _exc:
+                _LOGGER.warning("[ENTRADA_DIEGO] %s 300N poc error: %s", sym, _exc)
+                return
+            if "error" in _poc_resp:
+                # Contrato ya no existe en broker → registrar como pérdida
+                _pnl = state.current_profit
+                _LOGGER.info("[ENTRADA_DIEGO] %s 300N SPIKE/LOST cid=%s pnl=%.4f", sym, state.contract_id, _pnl)
+                state.hour_pnl_500 += _pnl
+                state.day_pnl_500  += _pnl
+                self._add_global_pnl(sym, _pnl, now)
+                state.last_close_profit = _pnl
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
+                self._ed_log(sym, _pnl, False, 0, now, close_type="SPIKE")
+                self._persist(now)
+                # fall through → abrir nuevo
+            else:
+                _poc = _poc_resp.get("proposal_open_contract", {})
+                _is_sold = bool(_poc.get("is_sold", 0))
+                _profit  = float(_poc.get("profit", 0.0) or 0.0)
+                if not _is_sold:
+                    state.current_profit = _profit
+                    if _profit > state.peak_profit_500:
+                        state.peak_profit_500 = _profit
+                    return  # activo, esperar
+                # Contrato cerrado (TP hit o spike)
+                _pnl = float(_poc.get("profit", state.current_profit) or state.current_profit)
+                _close_type = "TP" if _pnl > 0 else "SPIKE"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s 300N %s cid=%s pnl=%.4f",
+                    sym, _close_type, state.contract_id, _pnl,
+                )
+                state.hour_pnl_500 += _pnl
+                state.day_pnl_500  += _pnl
+                self._add_global_pnl(sym, _pnl, now)
+                state.last_close_profit = _pnl
+                state.contract_id     = None
+                state.current_profit  = 0.0
+                state.peak_profit_500 = 0.0
+                self._ed_log(sym, _pnl, False, 0, now, close_type=_close_type)
+                self._persist(now)
+                # fall through → abrir nuevo
+
+        # ── Abrir nuevo ACCU (stake fijo $2, 5% growth, TP $0.20) ────────────
+        _STAKE  = 2.0
+        _GROWTH = 0.05
+        _TP     = round(_STAKE * 0.10, 2)   # $0.20
+        state.burst_phase            = "ACCU"
+        state.burst_phase_started_at = now
+        state.peak_profit_500        = 0.0
+        state.pnl_accounted_by_floor = False
+        try:
+            _resp = await self._executor._client.buy_accu(
+                sym, _STAKE, growth_rate=_GROWTH, take_profit=_TP,
+            )
+            _cid = int(_resp.get("contract_id", 0) or 0)
+            if _cid:
+                state.contract_id    = _cid
+                state.current_profit = 0.0
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s 300N ACCU opened cid=%s stake=%.2f gr=%.0f%% tp=%.2f",
+                    sym, _cid, _STAKE, _GROWTH * 100, _TP,
+                )
+            else:
+                _LOGGER.error("[ENTRADA_DIEGO] %s 300N buy_accu sin cid: %s", sym, _resp)
+        except Exception as _exc:
+            _LOGGER.error("[ENTRADA_DIEGO] %s 300N buy_accu error: %s", sym, _exc)
+
     # ── R_75: bucle simple TP/SL ─────────────────────────────────────────────
 
     async def _process_r75(self, sym: str, tick: Any) -> None:
@@ -1871,7 +1973,7 @@ class EntradaDiego:
         _LOGGER.info("[ENTRADA_DIEGO] %s loop independiente terminado", sym)
 
     async def _500_watchdog_loop(self, sym: str) -> None:
-        """Dispara _process_500_simple cada 15s aunque el WS esté caído."""
+        """Dispara _process_500_simple/_process_300n cada 15s aunque el WS esté caído."""
         _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 500 iniciado (intervalo 15s)", sym)
         while self._enabled and sym not in SYMBOLS_ED_DISABLED:
             await asyncio.sleep(15)
@@ -1879,7 +1981,10 @@ class EntradaDiego:
                 break
             try:
                 async with self._locks[sym]:
-                    await self._process_500_simple(sym)
+                    if sym in SYMBOLS_300:
+                        await self._process_300n(sym)
+                    else:
+                        await self._process_500_simple(sym)
             except Exception as exc:
                 _LOGGER.error("[ENTRADA_DIEGO] %s watchdog error: %s", sym, exc)
         _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 500 terminado", sym)

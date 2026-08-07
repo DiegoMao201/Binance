@@ -469,6 +469,45 @@ class DerivClient:
             raise DerivClientError(f"buy error ({symbol} {ct}): {err}")
         return result.get("buy") or result
 
+    async def buy_accu(
+        self,
+        symbol: str,
+        stake_usdt: float,
+        growth_rate: float = 0.05,
+        take_profit: float | None = None,
+    ) -> dict[str, Any]:
+        """Buy an Accumulator (ACCU) contract for BOOM300N / CRASH300N.
+
+        ACCU contracts grow payout by growth_rate per tick while price stays
+        within ±barrier. A spike breaches the barrier → total loss of stake.
+        take_profit: broker-side auto-close in USD profit (e.g. 0.20 for 10% on $2 stake).
+        growth_rate: 0.01, 0.02, 0.03, 0.04, or 0.05 (1–5 % per tick).
+        """
+        stake = max(round(float(stake_usdt), 2), 1.0)
+        gr    = round(float(growth_rate), 2)
+        if gr not in {0.01, 0.02, 0.03, 0.04, 0.05}:
+            gr = 0.05
+        params: dict[str, Any] = {
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": "ACCU",
+            "currency": "USD",
+            "underlying_symbol": symbol,
+            "growth_rate": gr,
+        }
+        if take_profit is not None:
+            params["limit_order"] = {"take_profit": round(float(take_profit), 2)}
+        buy_req: dict[str, Any] = {"buy": "1", "price": 100, "parameters": params}
+        result = await self._request(buy_req)
+        if "error" in result:
+            err = result["error"]
+            _LOGGER.critical(
+                "[RECHAZO BROKER] buy_accu %s: %s | %s",
+                symbol, err.get("code", "?"), err.get("message", str(err)),
+            )
+            raise DerivClientError(f"buy_accu error ({symbol}): {err}")
+        return result.get("buy") or result
+
     async def sell(self, contract_id: int) -> dict[str, Any]:
         """Close an open contract at market."""
         result = await self._request({"sell": contract_id, "price": 0})
