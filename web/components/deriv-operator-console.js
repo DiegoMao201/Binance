@@ -879,7 +879,7 @@ function EntradaDiegoSection({ symbol }) {
         border: `1px solid ${_aC}44`, background: `${_aC}08` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ACCU</span>
-          <span style={{ fontSize: 8, color: "#78716c" }}>$10 · 2% · TP$1.50</span>
+          <span style={{ fontSize: 8, color: "#78716c" }}>$2 · 2% · TP$0.20 · post-spike 20s</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
             background: _isOpen ? `${_aC}25` : "rgba(255,255,255,0.04)",
             color: _isOpen ? _aC : "#57534e" }}>

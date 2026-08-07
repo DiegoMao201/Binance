@@ -40,7 +40,7 @@ from typing import Any, Optional
 
 _LOGGER = logging.getLogger("entrada_diego")
 
-SYMBOLS_300  = {"CRASH300N", "BOOM300N"}
+SYMBOLS_300  = {"CRASH300N", "BOOM300N"}   # ACCU post-spike 20s
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_600  = {"CRASH600",  "BOOM600"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
@@ -1818,15 +1818,16 @@ class EntradaDiego:
     # ── BOOM300N/CRASH300N: exploración libre, martingala 2→4→8→16→32, 5min ──
 
     async def _process_300n(self, sym: str) -> None:
-        """ACCU data collection — BOOM300N/CRASH300N.
+        """ACCU post-spike strategy — BOOM300N/CRASH300N.
 
-        Stake fijo $2, growth_rate 5%, TP broker 10% ($0.20).
-        Abre siempre. Registra spikes para análisis de patrones.
+        Abre 1 contrato ACCU por evento de spike, solo en los primeros 20s.
+        Stake $2, growth 2%, TP 10% ($0.20). Espera el siguiente spike para volver a abrir.
+        Registra t_sin_spike en JSONL para análisis de patrones de timing.
         """
         state = self._states[sym]
         now   = time.time()
 
-        # ── Spike tracking (siempre, para datos) ─────────────────────────────
+        # ── Spike tracking (siempre) ─────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
         if state.last_spike_ts_500 == 0.0:
             state.last_spike_ts_500 = _last_spk if _last_spk > 0 else now
@@ -1849,7 +1850,6 @@ class EntradaDiego:
                 _LOGGER.warning("[ENTRADA_DIEGO] %s 300N poc error: %s", sym, _exc)
                 return
             if "error" in _poc_resp:
-                # Contrato ya no existe en broker → registrar como pérdida
                 _pnl = state.current_profit
                 _LOGGER.info("[ENTRADA_DIEGO] %s 300N SPIKE/LOST cid=%s pnl=%.4f", sym, state.contract_id, _pnl)
                 state.hour_pnl_500 += _pnl
@@ -1859,9 +1859,9 @@ class EntradaDiego:
                 state.contract_id     = None
                 state.current_profit  = 0.0
                 state.peak_profit_500 = 0.0
-                self._ed_log(sym, _pnl, False, 0, now, close_type="SPIKE")
+                self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type="SPIKE")
                 self._persist(now)
-                # fall through → abrir nuevo
+                return  # esperar próximo spike para re-abrir
             else:
                 _poc = _poc_resp.get("proposal_open_contract", {})
                 _is_sold = bool(_poc.get("is_sold", 0))
@@ -1871,13 +1871,10 @@ class EntradaDiego:
                     if _profit > state.peak_profit_500:
                         state.peak_profit_500 = _profit
                     return  # activo, esperar
-                # Contrato cerrado (TP hit o spike)
+                # Cerrado (TP o spike)
                 _pnl = float(_poc.get("profit", state.current_profit) or state.current_profit)
                 _close_type = "TP" if _pnl > 0 else "SPIKE"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s 300N %s cid=%s pnl=%.4f",
-                    sym, _close_type, state.contract_id, _pnl,
-                )
+                _LOGGER.info("[ENTRADA_DIEGO] %s 300N %s cid=%s pnl=%.4f", sym, _close_type, state.contract_id, _pnl)
                 state.hour_pnl_500 += _pnl
                 state.day_pnl_500  += _pnl
                 self._add_global_pnl(sym, _pnl, now)
@@ -1885,14 +1882,24 @@ class EntradaDiego:
                 state.contract_id     = None
                 state.current_profit  = 0.0
                 state.peak_profit_500 = 0.0
-                self._ed_log(sym, _pnl, False, 0, now, close_type=_close_type)
+                self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type=_close_type)
                 self._persist(now)
-                # fall through → abrir nuevo
+                return  # esperar próximo spike para re-abrir
 
-        # ── Abrir nuevo ACCU (stake fijo $2, 5% growth, TP $0.20) ────────────
-        _STAKE  = 10.0
+        # ── Gate post-spike: solo abrir en primeros 20s ───────────────────────
+        _t_sin_spike = now - state.last_spike_ts_500
+        if state.last_spike_ts_500 == 0.0 or _t_sin_spike > 20.0:
+            return  # fuera de ventana, esperando próximo spike
+
+        # Un solo contrato por evento: si ya abrimos para este spike, esperar
+        _last_open_spike = getattr(state, 'accu_last_open_spike_ts', 0.0)
+        if abs(state.last_spike_ts_500 - _last_open_spike) < 1.0:
+            return  # ya operamos este spike
+
+        # ── Abrir ACCU: $2, 2% growth, TP $0.20 ─────────────────────────────
+        _STAKE  = 2.0
         _GROWTH = 0.02
-        _TP     = 1.50          # 15% en $10 stake → ~8 ticks a 2% growth
+        _TP     = round(_STAKE * 0.10, 2)   # $0.20 = 10%
         state.burst_phase            = "ACCU"
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
@@ -1903,11 +1910,12 @@ class EntradaDiego:
             )
             _cid = int(_resp.get("contract_id", 0) or 0)
             if _cid:
-                state.contract_id    = _cid
+                state.contract_id = _cid
                 state.current_profit = 0.0
+                state.accu_last_open_spike_ts = state.last_spike_ts_500   # marcar spike como operado
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s 300N ACCU opened cid=%s stake=%.2f gr=%.0f%% tp=%.2f",
-                    sym, _cid, _STAKE, _GROWTH * 100, _TP,
+                    "[ENTRADA_DIEGO] %s 300N ACCU opened cid=%s stake=%.2f gr=%.0f%% tp=%.2f t_sin=%.1fs",
+                    sym, _cid, _STAKE, _GROWTH * 100, _TP, _t_sin_spike,
                 )
             else:
                 _LOGGER.error("[ENTRADA_DIEGO] %s 300N buy_accu sin cid: %s", sym, _resp)
@@ -1973,10 +1981,11 @@ class EntradaDiego:
         _LOGGER.info("[ENTRADA_DIEGO] %s loop independiente terminado", sym)
 
     async def _500_watchdog_loop(self, sym: str) -> None:
-        """Dispara _process_500_simple/_process_300n cada 15s aunque el WS esté caído."""
-        _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 500 iniciado (intervalo 15s)", sym)
+        """Dispara _process_500_simple/_process_300n cada N segundos."""
+        _interval = 5 if sym in SYMBOLS_300 else 15
+        _LOGGER.info("[ENTRADA_DIEGO] %s watchdog 500 iniciado (intervalo %ds)", sym, _interval)
         while self._enabled and sym not in SYMBOLS_ED_DISABLED:
-            await asyncio.sleep(15)
+            await asyncio.sleep(_interval)
             if not self._enabled or sym in SYMBOLS_ED_DISABLED:
                 break
             try:
