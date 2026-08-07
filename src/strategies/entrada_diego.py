@@ -1818,16 +1818,25 @@ class EntradaDiego:
     # ── BOOM300N/CRASH300N: exploración libre, martingala 2→4→8→16→32, 5min ──
 
     async def _process_300n(self, sym: str) -> None:
-        """ACCU post-spike strategy — BOOM300N/CRASH300N.
+        """ACCU post-spike — BOOM300N/CRASH300N.
 
-        Abre 1 contrato ACCU por evento de spike, solo en los primeros 20s.
-        Stake $2, growth 2%, TP 10% ($0.20). Espera el siguiente spike para volver a abrir.
-        Registra t_sin_spike en JSONL para análisis de patrones de timing.
+        Abre contratos ACCU secuenciales dentro de ventana de 90s post-spike.
+        Stake $2, growth 2%, TP 10% ($0.20). Al cerrar re-abre si sigue en ventana.
         """
         state = self._states[sym]
         now   = time.time()
 
-        # ── Spike tracking (siempre) ─────────────────────────────────────────
+        # ── Mantener day_start_ts_500 / hour_start_ts_500 para persistencia ──
+        _cur_day_epoch  = float(int(now // 86400) * 86400)
+        _cur_hour_epoch = float(int(now // 3600)  * 3600)
+        if getattr(state, 'day_start_ts_500', 0.0) < _cur_day_epoch:
+            state.day_pnl_500      = 0.0
+            state.day_start_ts_500 = _cur_day_epoch
+        if getattr(state, 'hour_start_ts_500', 0.0) < _cur_hour_epoch:
+            state.hour_pnl_500      = 0.0
+            state.hour_start_ts_500 = _cur_hour_epoch
+
+        # ── Spike tracking ───────────────────────────────────────────────────
         _last_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
         if state.last_spike_ts_500 == 0.0:
             state.last_spike_ts_500 = _last_spk if _last_spk > 0 else now
@@ -1842,7 +1851,7 @@ class EntradaDiego:
             _LOGGER.info("[ENTRADA_DIEGO] %s 300N spike gap=%.0fs jump=%.4f", sym, _gap, _abs_jump or 0.0)
             self._persist(now)
 
-        # ── Verificar contrato ACCU abierto via proposal_open_contract ────────
+        # ── Verificar contrato ACCU abierto ──────────────────────────────────
         if state.contract_id is not None:
             try:
                 _poc_resp = await self._executor._client.proposal_open_contract(int(state.contract_id))
@@ -1856,12 +1865,12 @@ class EntradaDiego:
                 state.day_pnl_500  += _pnl
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
-                state.contract_id     = None
-                state.current_profit  = 0.0
+                state.contract_id    = None
+                state.current_profit = 0.0
                 state.peak_profit_500 = 0.0
                 self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type="SPIKE")
                 self._persist(now)
-                return  # esperar próximo spike para re-abrir
+                # fall through → re-abrir si sigue en ventana
             else:
                 _poc = _poc_resp.get("proposal_open_contract", {})
                 _is_sold = bool(_poc.get("is_sold", 0))
@@ -1879,22 +1888,17 @@ class EntradaDiego:
                 state.day_pnl_500  += _pnl
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
-                state.contract_id     = None
-                state.current_profit  = 0.0
+                state.contract_id    = None
+                state.current_profit = 0.0
                 state.peak_profit_500 = 0.0
                 self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type=_close_type)
                 self._persist(now)
-                return  # esperar próximo spike para re-abrir
+                # fall through → re-abrir si sigue en ventana
 
-        # ── Gate post-spike: solo abrir en primeros 20s ───────────────────────
+        # ── Gate post-spike: ventana 40s–120s (esperar descarga inicial) ────────
         _t_sin_spike = now - state.last_spike_ts_500
-        if state.last_spike_ts_500 == 0.0 or _t_sin_spike > 20.0:
-            return  # fuera de ventana, esperando próximo spike
-
-        # Un solo contrato por evento: si ya abrimos para este spike, esperar
-        _last_open_spike = getattr(state, 'accu_last_open_spike_ts', 0.0)
-        if abs(state.last_spike_ts_500 - _last_open_spike) < 1.0:
-            return  # ya operamos este spike
+        if state.last_spike_ts_500 == 0.0 or _t_sin_spike < 40.0 or _t_sin_spike > 120.0:
+            return  # fuera de ventana: muy temprano (descarga) o muy tarde
 
         # ── Abrir ACCU: $2, 2% growth, TP $0.20 ─────────────────────────────
         _STAKE  = 2.0
@@ -1910,9 +1914,8 @@ class EntradaDiego:
             )
             _cid = int(_resp.get("contract_id", 0) or 0)
             if _cid:
-                state.contract_id = _cid
+                state.contract_id    = _cid
                 state.current_profit = 0.0
-                state.accu_last_open_spike_ts = state.last_spike_ts_500   # marcar spike como operado
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s 300N ACCU opened cid=%s stake=%.2f gr=%.0f%% tp=%.2f t_sin=%.1fs",
                     sym, _cid, _STAKE, _GROWTH * 100, _TP, _t_sin_spike,
