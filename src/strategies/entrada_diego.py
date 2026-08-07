@@ -1898,10 +1898,10 @@ class EntradaDiego:
         # ── Sin gate — siempre abierto para recolección de datos ────────────────
         _t_sin_spike = now - state.last_spike_ts_500 if state.last_spike_ts_500 > 0 else -1.0
 
-        # ── Abrir ACCU: $2, 2% growth, TP $1.00 (50%) ───────────────────────
+        # ── Abrir ACCU: $2, 2% growth, TP $0.60 (30%) ───────────────────────
         _STAKE  = 2.0
         _GROWTH = 0.02
-        _TP     = round(_STAKE * 0.50, 2)   # $1.00 = 50%
+        _TP     = round(_STAKE * 0.30, 2)   # $0.60 = 30%
         state.burst_phase            = "ACCU"
         state.burst_phase_started_at = now
         state.peak_profit_500        = 0.0
