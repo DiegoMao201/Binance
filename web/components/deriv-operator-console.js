@@ -886,7 +886,7 @@ function EntradaDiegoSection({ symbol }) {
         {/* Header: estado + PnL en vivo o PnL del día */}
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ACCU</span>
-          <span style={{ fontSize: 8, color: "#78716c" }}>$2 · 2% · TP$0.20</span>
+          <span style={{ fontSize: 8, color: "#78716c" }}>$2 · 2% · TP$1.00 · 50%</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
             background: _isOpen ? "#22d3a322" : _inWindow ? "#f59e0b22" : "rgba(255,255,255,0.04)",
             color: _statusCol, letterSpacing: "0.02em" }}>
