@@ -871,24 +871,41 @@ function EntradaDiegoSection({ symbol }) {
     const _lastCol = _lastPnl > 0 ? "#22d3a3" : _lastPnl < 0 ? "#ff5d6c" : "#64748b";
     const _lastLabel = _lastPnl > 0 ? `TP +${_lastPnl.toFixed(2)}$`
                      : _lastPnl < 0 ? `SPIKE ${_lastPnl.toFixed(2)}$` : "–";
-    const _isOpen = contract_id != null;
-    const _aC = "#f59e0b";
+    const _livePnl   = Number(current_profit) || 0;
+    const _livePnlCol = _livePnl > 0 ? "#22d3a3" : _livePnl < 0 ? "#ff5d6c" : "#94a3b8";
+    const _isOpen    = contract_id != null;
+    const _inWindow  = !_isOpen && tSinSpike <= 20;
+    const _border = _isOpen ? "#22d3a330" : _inWindow ? "#f59e0b55" : "#f59e0b22";
+    const _bg     = _isOpen ? "#22d3a308" : _inWindow ? "#f59e0b12" : "#f59e0b06";
+    const _windowSec = Math.max(0, 20 - tSinSpike);
+    const _statusTxt = _isOpen    ? "◉ ABIERTO"
+                     : _inWindow  ? `▶ ABRE ${_windowSec.toFixed(0)}s`
+                     : "○ ESPERA SPIKE";
+    const _statusCol = _isOpen   ? "#22d3a3"
+                     : _inWindow ? "#f59e0b"
+                     : "#57534e";
     return (
       <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 6,
         fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-        border: `1px solid ${_aC}44`, background: `${_aC}08` }}>
+        border: `1px solid ${_border}`, background: _bg,
+        transition: "border-color 0.3s, background 0.3s" }}>
+        {/* Header: estado + PnL en vivo o PnL del día */}
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
           <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ACCU</span>
-          <span style={{ fontSize: 8, color: "#78716c" }}>$2 · 2% · TP$0.20 · post-spike 20s</span>
-          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-            background: _isOpen ? `${_aC}25` : "rgba(255,255,255,0.04)",
-            color: _isOpen ? _aC : "#57534e" }}>
-            {_isOpen ? "● ABIERTO" : "○ ESPERA"}
+          <span style={{ fontSize: 8, color: "#78716c" }}>$2 · 2% · TP$0.20</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+            background: _isOpen ? "#22d3a322" : _inWindow ? "#f59e0b22" : "rgba(255,255,255,0.04)",
+            color: _statusCol, letterSpacing: "0.02em" }}>
+            {_statusTxt}
           </span>
-          <span style={{ marginLeft: "auto", fontWeight: 700, fontSize: 13, color: _pnlCol }}>
-            {_dayPnl >= 0 ? "+" : ""}{_dayPnl.toFixed(2)}$
+          <span style={{ marginLeft: "auto", fontWeight: 700, fontSize: 15,
+            color: _isOpen ? _livePnlCol : _pnlCol }}>
+            {_isOpen
+              ? `${_livePnl >= 0 ? "+" : ""}${_livePnl.toFixed(3)}$`
+              : `${_dayPnl >= 0 ? "+" : ""}${_dayPnl.toFixed(2)}$`}
           </span>
         </div>
+        {/* Fila PnL resumida */}
         <div style={{ display: "flex", gap: 8, marginBottom: 4, fontSize: 9 }}>
           <span style={{ color: "#78716c" }}>Hoy</span>
           <span style={{ color: _pnlCol, fontWeight: 700 }}>{_dayPnl >= 0 ? "+" : ""}{_dayPnl.toFixed(2)}$</span>
@@ -898,10 +915,13 @@ function EntradaDiegoSection({ symbol }) {
           <span style={{ color: "#57534e", marginLeft: "auto" }}>último:</span>
           <span style={{ color: _lastCol, fontWeight: 700 }}>{_lastLabel}</span>
         </div>
+        {/* Footer */}
         <div style={{ display: "flex", gap: 8, fontSize: 8, color: "#57534e" }}>
           <span>n30:{ed_n30}</span>
           <span>gap:{_fmtS(tSinSpike)}</span>
-          <span style={{ marginLeft: "auto", color: "#44403c" }}>siempre abierto</span>
+          <span style={{ marginLeft: "auto", color: _inWindow ? "#f59e0b" : "#44403c" }}>
+            {_inWindow ? `ventana: ${_windowSec.toFixed(0)}s restantes` : "post-spike 20s"}
+          </span>
         </div>
       </div>
     );
