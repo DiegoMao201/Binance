@@ -523,7 +523,12 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_SYMBOLS = new Set(["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
+const ED_SYMBOLS = new Set(["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000",
+  "BOOM50", "CRASH50", "BOOM150N", "CRASH150N"]);
+const MULTI_NEW_SYMBOLS = ["BOOM50", "CRASH50", "BOOM150N", "CRASH150N", "BOOM300N", "CRASH300N"];
+const MULTI_MULTIPLIERS_MAP = { BOOM50: 1000, CRASH50: 1000, BOOM150N: 500, CRASH150N: 500, BOOM300N: 40, CRASH300N: 40 };
+const MULTI_STAKES_LIST = [1, 2, 4, 8, 16];
+const MULTI_PHASE_SECS  = 300;
 // 1000s ciclo simple (coincidir con entrada_diego.py)
 const K1000_WAIT_S         = 480;   // 8min espera 1000s
 const K1000_WAIT_900_S     = 480;   // 8min espera 900s
@@ -1149,6 +1154,124 @@ function K1000Panel() {
       <EntradaDiegoSection symbol="CRASH900" />
       <EntradaDiegoSection symbol="BOOM1000" />
       <EntradaDiegoSection symbol="CRASH1000" />
+    </div>
+  );
+}
+
+/* ── MULTI DATA PANEL (50/150/300 Multipliers) ───────────────── */
+function MultiDataPanel() {
+  const [edData, setEdData] = useState(null);
+  const [nowMs, setNowMs]   = useState(Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const doFetch = async () => {
+      try {
+        const res = await fetch("/api/deriv/analytics/entrada-diego-state", { cache: "no-store" });
+        if (!active) return;
+        const data = res.ok ? await res.json() : null;
+        if (data && data.enabled) setEdData(data);
+      } catch { /* noop */ }
+    };
+    doFetch();
+    const id = setInterval(doFetch, 2000);
+    return () => { active = false; clearInterval(id); };
+  }, []);
+
+  const nowSec = nowMs / 1000;
+  const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
+  const _pnlColor = v => v > 0 ? "#22d3a3" : v < 0 ? "#ff5d6c" : "#64748b";
+
+  const rows = MULTI_NEW_SYMBOLS.map(sym => {
+    const st = edData?.[sym];
+    const mult       = MULTI_MULTIPLIERS_MAP[sym];
+    const stake      = st?.multi_stake      ?? 0;
+    const phaseIdx   = st?.multi_phase_idx  ?? 0;
+    const phaseRem   = st?.multi_phase_rem_s ?? 0;
+    const curPnl     = st?.current_profit   ?? 0;
+    const dayPnl     = st?.day_pnl_500      ?? 0;
+    const hourPnl    = st?.hour_pnl_500     ?? 0;
+    const lastPnl    = st?.last_close_profit ?? 0;
+    const cid        = st?.contract_id;
+    const phaseElap  = MULTI_PHASE_SECS - phaseRem;
+    const phasePct   = Math.min(100, (phaseElap / MULTI_PHASE_SECS) * 100);
+
+    const isOpen     = !!cid;
+    const isBoom     = sym.startsWith("BOOM");
+    const accent     = isOpen ? (isBoom ? "#22d3a3" : "#ff5d6c") : "#475569";
+
+    return { sym, mult, stake, phaseIdx, phaseRem, curPnl, dayPnl, hourPnl, lastPnl, cid, phasePct, accent };
+  });
+
+  return (
+    <div style={{
+      background: T.panel, border: `1px solid ${T.border}`, borderRadius: 10,
+      padding: "10px 12px",
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: "#a78bfa", letterSpacing: "0.07em", marginBottom: 6 }}>
+        MULTIPLIERS — recolección 50/150/300
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {rows.map(({ sym, mult, stake, phaseIdx, phaseRem, curPnl, dayPnl, hourPnl, lastPnl, cid, phasePct, accent }) => (
+          <div key={sym} style={{
+            background: `${accent}0d`, border: `1px solid ${accent}44`,
+            borderRadius: 7, padding: "7px 9px", fontFamily: "'SF Mono','Fira Mono',monospace",
+          }}>
+            {/* Header row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+              <span style={{ fontWeight: 800, fontSize: 11, color: "#e2e8f0" }}>{sym}</span>
+              <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3,
+                background: `${accent}22`, color: accent, fontWeight: 700 }}>x{mult}</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: _pnlColor(curPnl) }}>
+                {cid ? (curPnl >= 0 ? "+" : "") + curPnl.toFixed(4) + "$" : "—"}
+              </span>
+            </div>
+
+            {/* Phase timer bar */}
+            <div style={{ width: "100%", height: 2, background: `${accent}22`, borderRadius: 2, overflow: "hidden", marginBottom: 3 }}>
+              <div style={{ width: `${phasePct}%`, height: "100%", background: accent, transition: "width 1s linear" }} />
+            </div>
+
+            {/* Stake pills */}
+            <div style={{ display: "flex", gap: 2, marginBottom: 4 }}>
+              {MULTI_STAKES_LIST.map((s, i) => (
+                <span key={i} style={{
+                  fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+                  background: i === phaseIdx ? `${accent}28` : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${i === phaseIdx ? accent : "rgba(255,255,255,0.09)"}`,
+                  color: i === phaseIdx ? accent : "rgba(255,255,255,0.2)",
+                }}>${s}</span>
+              ))}
+              <span style={{ fontSize: 8, color: "#475569", marginLeft: 2 }}>
+                {_fmtS(phaseRem)}
+              </span>
+            </div>
+
+            {/* Estado */}
+            <div style={{ fontSize: 9, color: "#94a3b8", marginBottom: 2 }}>
+              {cid ? `#${cid} · $${stake} · ${_fmtS(phaseRem)} → sig. stake` : `esperando ciclo · $${stake} próx`}
+            </div>
+
+            {/* PnL row */}
+            <div style={{ display: "flex", gap: 8, fontSize: 9, fontVariantNumeric: "tabular-nums" }}>
+              <span style={{ color: _pnlColor(hourPnl) }}>
+                1h {hourPnl >= 0 ? "+" : ""}{hourPnl.toFixed(2)}$
+              </span>
+              <span style={{ color: _pnlColor(dayPnl) }}>
+                día {dayPnl >= 0 ? "+" : ""}{dayPnl.toFixed(2)}$
+              </span>
+              <span style={{ color: _pnlColor(lastPnl), marginLeft: "auto" }}>
+                últ {lastPnl >= 0 ? "+" : ""}{lastPnl.toFixed(4)}$
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2526,6 +2649,7 @@ export default function DerivOperatorConsole() {
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
         <R75Card />
+        <MultiDataPanel />
       </div>
 
       {/* CONFIRMATION FEED */}

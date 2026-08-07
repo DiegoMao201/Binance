@@ -40,7 +40,7 @@ from typing import Any, Optional
 
 _LOGGER = logging.getLogger("entrada_diego")
 
-SYMBOLS_300  = {"CRASH300N", "BOOM300N"}   # ACCU post-spike 20s
+SYMBOLS_300  = set()   # ACCU 300N deshabilitado — WR 72.3% < BE 75.8% en 3676 trades
 SYMBOLS_500  = {"CRASH500",  "BOOM500"}
 SYMBOLS_600  = {"CRASH600",  "BOOM600"}
 SYMBOLS_1000 = {"CRASH1000", "BOOM1000"}
@@ -48,7 +48,13 @@ SYMBOLS_900  = {"CRASH900",  "BOOM900"}
 SYMBOLS_R    = set()   # R_75 y JD75 suspendidos — no estudiados aún
 SYMBOLS_LADDER = SYMBOLS_300 | SYMBOLS_500 | SYMBOLS_600   # todos usan lógica LADDER
 SYMBOLS_K1000  = SYMBOLS_1000 | SYMBOLS_900  # todos usan ciclo K1000
-SYMBOLS_ED   = SYMBOLS_LADDER | SYMBOLS_K1000 | SYMBOLS_R
+# Multipliers para recolección de datos: escalera $1→$2→$4→$8→$16, 5min/fase
+# Nombres reales Deriv API: 50=sin-N, 150/300=con-N (verificado empíricamente)
+SYMBOLS_MULTI_NEW  = {"BOOM50", "CRASH50", "BOOM150N", "CRASH150N", "BOOM300N", "CRASH300N"}
+MULTI_MULTIPLIERS  = {"BOOM50": 1000, "CRASH50": 1000, "BOOM150N": 500, "CRASH150N": 500, "BOOM300N": 40, "CRASH300N": 40}
+MULTI_STAKES       = [1.0, 2.0, 4.0, 8.0, 16.0]
+MULTI_PHASE_SECS   = 300.0
+SYMBOLS_ED   = SYMBOLS_LADDER | SYMBOLS_K1000 | SYMBOLS_R | SYMBOLS_MULTI_NEW
 
 _STAKE_LADDER_1000 = [10.0, 20.0, 20.0, 40.0, 40.0]   # reopen #0..4+
 # CRASH500 escalación gradual: $5 (sensor activo) → $20 (2do spike) → $40 (recovery) → $60 (máximo)
@@ -438,6 +444,7 @@ class _SymState:
     dead_zone_spikes_500:     int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 15min
     ladder_recovery_level_500: int  = 0      # 0=normal $4, 1=recovery $20/20m, 2=recovery $60/30m
     ladder_last_closed_cid:   int   = 0      # CID del último contrato cerrado por timer — ignora broker-close tardío
+    multi_phase_start_ts:     float = 0.0   # epoch inicio escalera MULTI; avanza MULTI_PHASE_SECS por nivel
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -586,6 +593,7 @@ class _SymState:
             "ladder_last_closed_cid":       getattr(self, 'ladder_last_closed_cid', 0),
             "cycle_budget_norm":            round(getattr(self, 'cycle_budget_norm', 0.0), 2),
             "cycle_prev_quiet":             getattr(self, 'cycle_prev_quiet', True),
+            "multi_phase_start_ts":         round(getattr(self, 'multi_phase_start_ts', 0.0), 3),
         }
         return d
 
@@ -672,6 +680,11 @@ class EntradaDiego:
                         if _sk not in SYMBOLS_ED_DISABLED and _sk not in self._watchdog_started:
                             self._watchdog_started.add(_sk)
                             asyncio.create_task(self._1000_watchdog_loop(_sk))
+                    # MULTI_NEW (50/150/300) watchdog de recolección — loop independiente
+                    for _sm in SYMBOLS_MULTI_NEW:
+                        if _sm not in SYMBOLS_ED_DISABLED and _sm not in self._watchdog_started:
+                            self._watchdog_started.add(_sm)
+                            asyncio.create_task(self._multi_watchdog_loop(_sm))
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -694,6 +707,14 @@ class EntradaDiego:
                     result[sym]["ed_n30"]     = _ctx["n30"]
                     result[sym]["ed_gap_s"]   = round(_ctx["gap_s"], 1)
                     result[sym]["ed_gap_prev"] = round(_ctx["gap_prev_s"], 1)
+                if sym in SYMBOLS_MULTI_NEW:
+                    _mps = st.multi_phase_start_ts
+                    _pidx = int((now - _mps) // MULTI_PHASE_SECS) % len(MULTI_STAKES) if _mps > 0 else 0
+                    _pelap = (now - _mps) % MULTI_PHASE_SECS if _mps > 0 else 0.0
+                    result[sym]["multi_phase_idx"]  = _pidx
+                    result[sym]["multi_stake"]      = MULTI_STAKES[_pidx]
+                    result[sym]["multi_multiplier"] = MULTI_MULTIPLIERS[sym]
+                    result[sym]["multi_phase_rem_s"] = round(MULTI_PHASE_SECS - _pelap, 1)
         return result
 
     # ── Máquina de estados ───────────────────────────────────────────────────
@@ -712,6 +733,9 @@ class EntradaDiego:
             return
         if sym in SYMBOLS_K1000:  # 1000 + 900
             await self._process_1000_scout(sym)
+            return
+        if sym in SYMBOLS_MULTI_NEW:
+            await self._process_multi_data(sym)
             return
         state = self._states[sym]
         now   = time.time()
@@ -1864,13 +1888,14 @@ class EntradaDiego:
                 state.hour_pnl_500 += _pnl
                 state.day_pnl_500  += _pnl
                 self._add_global_pnl(sym, _pnl, now)
-                state.last_close_profit = _pnl
+                state.last_close_profit  = _pnl
+                state.last_spike_ts_500  = now   # gate: spike detectado por pérdida
                 state.contract_id    = None
                 state.current_profit = 0.0
                 state.peak_profit_500 = 0.0
                 self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type="SPIKE")
                 self._persist(now)
-                # fall through → re-abrir si sigue en ventana
+                # fall through → gate bloqueará si spike reciente
             else:
                 _poc = _poc_resp.get("proposal_open_contract", {})
                 _is_sold = bool(_poc.get("is_sold", 0))
@@ -1888,17 +1913,21 @@ class EntradaDiego:
                 state.day_pnl_500  += _pnl
                 self._add_global_pnl(sym, _pnl, now)
                 state.last_close_profit = _pnl
+                if _close_type == "SPIKE":
+                    state.last_spike_ts_500 = now  # gate: spike detectado por cierre
                 state.contract_id    = None
                 state.current_profit = 0.0
                 state.peak_profit_500 = 0.0
                 self._ed_log(sym, _pnl, _pnl > 0, 2.0, now, close_type=_close_type)
                 self._persist(now)
-                # fall through → re-abrir si sigue en ventana
+                # fall through → gate bloqueará si spike reciente
 
-        # ── Sin gate — siempre abierto para recolección de datos ────────────────
+        # ── Gate post-spike: solo abrir si último spike > 45s (Poisson optimal) ──
         _t_sin_spike = now - state.last_spike_ts_500 if state.last_spike_ts_500 > 0 else -1.0
+        _GATE_S      = 45.0
+        if 0 <= _t_sin_spike < _GATE_S:  # 0 cubre spike en este mismo ciclo
+            return  # periodo post-spike activo, λ alta → skip
 
-        # ── Abrir ACCU: $2, 2% growth, TP $0.60 (30%) ───────────────────────
         _STAKE  = 2.0
         _GROWTH = 0.02
         _TP     = round(_STAKE * 0.30, 2)   # $0.60 = 30%
@@ -2015,6 +2044,149 @@ class EntradaDiego:
 
     async def _process_1000_scout(self, sym: str) -> None:
         await self._process_1000_simple(sym)
+
+    # ── MULTIPLIER data collection (50/150/300) ──────────────────────────────
+
+    async def _multi_watchdog_loop(self, sym: str) -> None:
+        _LOGGER.info("[ENTRADA_DIEGO] %s MULTI watchdog iniciado (15s)", sym)
+        while self._enabled and sym not in SYMBOLS_ED_DISABLED:
+            await asyncio.sleep(15)
+            if not self._enabled or sym in SYMBOLS_ED_DISABLED:
+                break
+            try:
+                async with self._locks[sym]:
+                    await self._process_multi_data(sym)
+            except Exception as _exc:
+                _LOGGER.error("[ENTRADA_DIEGO] %s MULTI watchdog error: %s", sym, _exc)
+        _LOGGER.info("[ENTRADA_DIEGO] %s MULTI watchdog terminado", sym)
+
+    async def _process_multi_data(self, sym: str) -> None:
+        """Abre/cierra contratos MULTIPLIER con escalera de stakes cada 5 min. Solo recolección de datos."""
+        state = self._states[sym]
+        now   = time.time()
+
+        # Reset día UTC (reutiliza day_pnl_500 / day_start_ts_500 del estado compartido)
+        _cur_day = float(int(now // 86400) * 86400)
+        if getattr(state, 'day_start_ts_500', 0.0) < _cur_day:
+            state.day_pnl_500   = 0.0
+            state.day_start_ts_500 = _cur_day
+
+        # Reset hora UTC
+        _cur_hour = float(int(now // 3600) * 3600)
+        if state.hour_start_ts_500 < _cur_hour:
+            state.hour_pnl_500  = 0.0
+            state.hour_start_ts_500 = _cur_hour
+
+        # Inicializar fase en primer llamado
+        if state.multi_phase_start_ts == 0.0:
+            state.multi_phase_start_ts = now
+
+        # Stake actual según fase (cicla indefinidamente)
+        _phase_idx = int((now - state.multi_phase_start_ts) // MULTI_PHASE_SECS) % len(MULTI_STAKES)
+        _stake     = MULTI_STAKES[_phase_idx]
+        _mult      = MULTI_MULTIPLIERS[sym]
+
+        # ── Contrato abierto ──────────────────────────────────────────────────
+        if state.contract_id is not None:
+            _profit = self._query_profit(state.contract_id)
+            if _profit is not None:
+                state.current_profit = _profit
+            else:
+                # Broker cerró el contrato (SL hit)
+                _pnl = state.current_profit
+                state.day_pnl_500   = round(state.day_pnl_500  + _pnl, 4)
+                state.hour_pnl_500  = round(state.hour_pnl_500 + _pnl, 4)
+                state.last_close_profit = _pnl
+                state.contract_id   = None
+                state.current_profit = 0.0
+                state.phase         = "IDLE"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s MULTI BROKER_CLOSE pnl=%.4f day=%.2f",
+                    sym, _pnl, state.day_pnl_500,
+                )
+                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="BROKER")
+                self._persist(now)
+                return
+
+            # Timer: cerrar al cumplir 5 min
+            if now - state.open_ts >= MULTI_PHASE_SECS:
+                _cid = int(state.contract_id)
+                state.contract_id   = None
+                try:
+                    await self._executor.close_contract(_cid)
+                except Exception as _e:
+                    _LOGGER.warning("[ENTRADA_DIEGO] %s MULTI close_contract error: %s", sym, _e)
+                _pnl = state.current_profit
+                state.day_pnl_500   = round(state.day_pnl_500  + _pnl, 4)
+                state.hour_pnl_500  = round(state.hour_pnl_500 + _pnl, 4)
+                state.last_close_profit = _pnl
+                state.current_profit = 0.0
+                state.phase         = "IDLE"
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s MULTI TIMER_CLOSE pnl=%.4f stake=$%.0f phase=%d day=%.2f",
+                    sym, _pnl, _stake, _phase_idx, state.day_pnl_500,
+                )
+                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="TIMER")
+                self._persist(now)
+            return
+
+        # ── Sin contrato abierto → abrir nuevo ───────────────────────────────
+        await self._open_multi(sym, _stake, _mult, _phase_idx, now)
+
+    async def _open_multi(
+        self, sym: str, stake: float, multiplier: int, phase_idx: int, now: float
+    ) -> None:
+        from src.execution.deriv_trader import DerivOrder
+        state = self._states[sym]
+        side  = "MULTDOWN" if "CRASH" in sym else "MULTUP"
+        _LOGGER.info(
+            "[ENTRADA_DIEGO] %s MULTI ABRIENDO %s $%.0f mult=%dx phase=%d",
+            sym, side, stake, multiplier, phase_idx,
+        )
+        try:
+            async with self._open_lock:
+                order = DerivOrder(
+                    symbol=sym,
+                    side=side,
+                    stake_usdt=stake,
+                    multiplier=multiplier,
+                    stop_loss_pct=0.80,
+                    take_profit_pct=0.0,
+                    max_hold_seconds=300.0,
+                    score_breakdown={
+                        "quality_tier": "entrada_diego",
+                        "setup":        "multi_data",
+                        "grade":        "ED",
+                        "score":        0.0,
+                        "entrada_diego": True,
+                        "skip_dpm":     True,
+                    },
+                )
+                result = await self._executor.execute(order)
+            if result and result.get("status") == "live":
+                cid = result.get("contract_id")
+                state.contract_id   = int(cid) if cid else None
+                state.open_ts       = now
+                state.current_profit = 0.0
+                state.phase         = "OPEN"
+                self._ed_save_open(sym, stake, now)
+                _LOGGER.info(
+                    "[ENTRADA_DIEGO] %s MULTI OPEN OK contract=%s $%.0f mult=%dx",
+                    sym, state.contract_id, stake, multiplier,
+                )
+            elif result and result.get("status") == "symbol_already_open":
+                _existing = result.get("open_contracts", [])
+                if _existing:
+                    state.contract_id = int(_existing[0])
+                    state.open_ts     = now
+                    state.phase       = "OPEN"
+                    _LOGGER.info("[ENTRADA_DIEGO] %s MULTI re-adjuntado %s", sym, state.contract_id)
+            else:
+                _LOGGER.warning("[ENTRADA_DIEGO] %s MULTI OPEN no-live %s", sym, result)
+            self._persist(now)
+        except Exception as exc:
+            _LOGGER.error("[ENTRADA_DIEGO] %s MULTI open error $%.0f: %s", sym, stake, exc)
+            self._persist(now)
 
     async def _process_1000_simple(self, sym: str) -> None:
         """
@@ -3377,7 +3549,7 @@ class EntradaDiego:
         t_open = info.get("t_open", now)
         h_sym = self._ed_spike_hist.get(sym, [])
         spikes_during = sum(1 for t, _ in h_sym if t_open <= t <= now)
-        strat = "LADDER" if sym in SYMBOLS_LADDER else "K1000"
+        strat = "LADDER" if sym in SYMBOLS_LADDER else ("MULTI" if sym in SYMBOLS_MULTI_NEW else "K1000")
         rec = {
             "ts":        round(now, 1),
             "sym":       sym,
