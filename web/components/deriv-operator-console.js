@@ -861,6 +861,52 @@ function EntradaDiegoSection({ symbol }) {
       : tierIdx < 0 && isBoom500 ? `sequía — esperando spike${dzAlert}`
       : `esperando spike → ${rangeLabel}${dzAlert}${winAlert}`;
 
+  // ── Tarjeta ACCU dedicada para BOOM300N / CRASH300N ──────────────────────
+  if (is300N) {
+    const _hrPnl   = edState.hour_pnl_500   || 0;
+    const _lastPnl = edState.last_close_profit || 0;
+    const _dayPnl  = day_pnl_500;
+    const _pnlCol  = _dayPnl  > 0 ? "#22d3a3" : _dayPnl  < 0 ? "#ff5d6c" : "#64748b";
+    const _hrCol   = _hrPnl   > 0 ? "#22d3a3" : _hrPnl   < 0 ? "#ff5d6c" : "#64748b";
+    const _lastCol = _lastPnl > 0 ? "#22d3a3" : _lastPnl < 0 ? "#ff5d6c" : "#64748b";
+    const _lastLabel = _lastPnl > 0 ? `TP +${_lastPnl.toFixed(2)}$`
+                     : _lastPnl < 0 ? `SPIKE ${_lastPnl.toFixed(2)}$` : "–";
+    const _isOpen = contract_id != null;
+    const _aC = "#f59e0b";
+    return (
+      <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 6,
+        fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+        border: `1px solid ${_aC}44`, background: `${_aC}08` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
+          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ACCU</span>
+          <span style={{ fontSize: 8, color: "#78716c" }}>$10 · 2% · TP$1.50</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+            background: _isOpen ? `${_aC}25` : "rgba(255,255,255,0.04)",
+            color: _isOpen ? _aC : "#57534e" }}>
+            {_isOpen ? "● ABIERTO" : "○ ESPERA"}
+          </span>
+          <span style={{ marginLeft: "auto", fontWeight: 700, fontSize: 13, color: _pnlCol }}>
+            {_dayPnl >= 0 ? "+" : ""}{_dayPnl.toFixed(2)}$
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 4, fontSize: 9 }}>
+          <span style={{ color: "#78716c" }}>Hoy</span>
+          <span style={{ color: _pnlCol, fontWeight: 700 }}>{_dayPnl >= 0 ? "+" : ""}{_dayPnl.toFixed(2)}$</span>
+          <span style={{ color: "#57534e" }}>·</span>
+          <span style={{ color: "#78716c" }}>Hora</span>
+          <span style={{ color: _hrCol, fontWeight: 700 }}>{_hrPnl >= 0 ? "+" : ""}{_hrPnl.toFixed(2)}$</span>
+          <span style={{ color: "#57534e", marginLeft: "auto" }}>último:</span>
+          <span style={{ color: _lastCol, fontWeight: 700 }}>{_lastLabel}</span>
+        </div>
+        <div style={{ display: "flex", gap: 8, fontSize: 8, color: "#57534e" }}>
+          <span>n30:{ed_n30}</span>
+          <span>gap:{_fmtS(tSinSpike)}</span>
+          <span style={{ marginLeft: "auto", color: "#44403c" }}>siempre abierto</span>
+        </div>
+      </div>
+    );
+  }
+
   const base500 = {
     marginTop: 8, padding: "8px 10px", borderRadius: 6,
     fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
