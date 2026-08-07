@@ -2557,7 +2557,8 @@ export default function DerivOperatorConsole() {
     return () => clearInterval(timer.current);
   }, [load, paused]);
 
-  const SYMBOL_ORDER = ["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
+  // CRASH300N/BOOM300N son ahora MULTI — se muestran en MultiDataPanel, no aquí
+  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
@@ -2648,8 +2649,8 @@ export default function DerivOperatorConsole() {
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
-        <R75Card />
         <MultiDataPanel />
+        <R75Card />
       </div>
 
       {/* CONFIRMATION FEED */}
