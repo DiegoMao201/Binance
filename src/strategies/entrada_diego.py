@@ -444,7 +444,7 @@ class _SymState:
     dead_zone_spikes_500:     int   = 0      # spikes llegados mientras sin contrato (dead zone) → ≥2 → REST 15min
     ladder_recovery_level_500: int  = 0      # 0=normal $4, 1=recovery $20/20m, 2=recovery $60/30m
     ladder_last_closed_cid:   int   = 0      # CID del último contrato cerrado por timer — ignora broker-close tardío
-    multi_phase_start_ts:     float = 0.0   # epoch inicio escalera MULTI; avanza MULTI_PHASE_SECS por nivel
+    multi_phase_idx:          int   = 0      # índice actual en MULTI_STAKES (0→$1 … 4→$16); avanza en loss
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN":
@@ -593,7 +593,7 @@ class _SymState:
             "ladder_last_closed_cid":       getattr(self, 'ladder_last_closed_cid', 0),
             "cycle_budget_norm":            round(getattr(self, 'cycle_budget_norm', 0.0), 2),
             "cycle_prev_quiet":             getattr(self, 'cycle_prev_quiet', True),
-            "multi_phase_start_ts":         round(getattr(self, 'multi_phase_start_ts', 0.0), 3),
+            "multi_phase_idx":              getattr(self, 'multi_phase_idx', 0),
         }
         return d
 
@@ -708,13 +708,12 @@ class EntradaDiego:
                     result[sym]["ed_gap_s"]   = round(_ctx["gap_s"], 1)
                     result[sym]["ed_gap_prev"] = round(_ctx["gap_prev_s"], 1)
                 if sym in SYMBOLS_MULTI_NEW:
-                    _mps = st.multi_phase_start_ts
-                    _pidx = int((now - _mps) // MULTI_PHASE_SECS) % len(MULTI_STAKES) if _mps > 0 else 0
-                    _pelap = (now - _mps) % MULTI_PHASE_SECS if _mps > 0 else 0.0
-                    result[sym]["multi_phase_idx"]  = _pidx
-                    result[sym]["multi_stake"]      = MULTI_STAKES[_pidx]
-                    result[sym]["multi_multiplier"] = MULTI_MULTIPLIERS[sym]
-                    result[sym]["multi_phase_rem_s"] = round(MULTI_PHASE_SECS - _pelap, 1)
+                    _pidx = getattr(st, 'multi_phase_idx', 0)
+                    _pelap = (now - st.open_ts) if st.phase == "OPEN" else 0.0
+                    result[sym]["multi_phase_idx"]   = _pidx
+                    result[sym]["multi_stake"]       = MULTI_STAKES[_pidx]
+                    result[sym]["multi_multiplier"]  = MULTI_MULTIPLIERS[sym]
+                    result[sym]["multi_phase_rem_s"] = round(max(0.0, MULTI_PHASE_SECS - _pelap), 1)
         return result
 
     # ── Máquina de estados ───────────────────────────────────────────────────
@@ -2061,28 +2060,24 @@ class EntradaDiego:
         _LOGGER.info("[ENTRADA_DIEGO] %s MULTI watchdog terminado", sym)
 
     async def _process_multi_data(self, sym: str) -> None:
-        """Abre/cierra contratos MULTIPLIER con escalera de stakes cada 5 min. Solo recolección de datos."""
+        """Abre/cierra contratos MULTIPLIER con escalera por outcome. Solo recolección de datos.
+        Escala (loss sin spike) → avanza un nivel. Profit → reset a $1."""
         state = self._states[sym]
         now   = time.time()
 
-        # Reset día UTC (reutiliza day_pnl_500 / day_start_ts_500 del estado compartido)
+        # Reset día UTC
         _cur_day = float(int(now // 86400) * 86400)
         if getattr(state, 'day_start_ts_500', 0.0) < _cur_day:
-            state.day_pnl_500   = 0.0
+            state.day_pnl_500      = 0.0
             state.day_start_ts_500 = _cur_day
 
         # Reset hora UTC
         _cur_hour = float(int(now // 3600) * 3600)
         if state.hour_start_ts_500 < _cur_hour:
-            state.hour_pnl_500  = 0.0
+            state.hour_pnl_500      = 0.0
             state.hour_start_ts_500 = _cur_hour
 
-        # Inicializar fase en primer llamado
-        if state.multi_phase_start_ts == 0.0:
-            state.multi_phase_start_ts = now
-
-        # Stake actual según fase (cicla indefinidamente)
-        _phase_idx = int((now - state.multi_phase_start_ts) // MULTI_PHASE_SECS) % len(MULTI_STAKES)
+        _phase_idx = getattr(state, 'multi_phase_idx', 0)
         _stake     = MULTI_STAKES[_phase_idx]
         _mult      = MULTI_MULTIPLIERS[sym]
 
@@ -2092,41 +2087,56 @@ class EntradaDiego:
             if _profit is not None:
                 state.current_profit = _profit
             else:
-                # Broker cerró el contrato (SL hit)
+                # Broker cerró el contrato (SL hit = loss)
                 _pnl = state.current_profit
-                state.day_pnl_500   = round(state.day_pnl_500  + _pnl, 4)
-                state.hour_pnl_500  = round(state.hour_pnl_500 + _pnl, 4)
+                state.day_pnl_500       = round(state.day_pnl_500  + _pnl, 4)
+                state.hour_pnl_500      = round(state.hour_pnl_500 + _pnl, 4)
                 state.last_close_profit = _pnl
-                state.contract_id   = None
-                state.current_profit = 0.0
-                state.phase         = "IDLE"
+                state.contract_id       = None
+                state.current_profit    = 0.0
+                state.phase             = "IDLE"
+                # SL hit = loss sin spike → escalar
+                _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
+                state.multi_phase_idx = _new_idx
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s MULTI BROKER_CLOSE pnl=%.4f day=%.2f",
-                    sym, _pnl, state.day_pnl_500,
+                    "[ENTRADA_DIEGO] %s MULTI SL_CLOSE pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
+                    sym, _pnl, _stake, _phase_idx, _new_idx, MULTI_STAKES[_new_idx], state.day_pnl_500,
                 )
-                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="BROKER")
+                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="SL")
                 self._persist(now)
                 return
 
             # Timer: cerrar al cumplir 5 min
             if now - state.open_ts >= MULTI_PHASE_SECS:
                 _cid = int(state.contract_id)
-                state.contract_id   = None
+                state.contract_id = None
                 try:
                     await self._executor.close_contract(_cid)
                 except Exception as _e:
                     _LOGGER.warning("[ENTRADA_DIEGO] %s MULTI close_contract error: %s", sym, _e)
                 _pnl = state.current_profit
-                state.day_pnl_500   = round(state.day_pnl_500  + _pnl, 4)
-                state.hour_pnl_500  = round(state.hour_pnl_500 + _pnl, 4)
+                state.day_pnl_500       = round(state.day_pnl_500  + _pnl, 4)
+                state.hour_pnl_500      = round(state.hour_pnl_500 + _pnl, 4)
                 state.last_close_profit = _pnl
-                state.current_profit = 0.0
-                state.phase         = "IDLE"
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s MULTI TIMER_CLOSE pnl=%.4f stake=$%.0f phase=%d day=%.2f",
-                    sym, _pnl, _stake, _phase_idx, state.day_pnl_500,
-                )
-                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="TIMER")
+                state.current_profit    = 0.0
+                state.phase             = "IDLE"
+                if _pnl >= 0:
+                    # Profit → reset a $1
+                    state.multi_phase_idx = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s MULTI TIMER_WIN pnl=%.4f stake=$%.0f → reset $1 day=%.2f",
+                        sym, _pnl, _stake, state.day_pnl_500,
+                    )
+                    self._ed_log(sym, _pnl, True, _phase_idx, now, close_type="TIMER_WIN")
+                else:
+                    # Loss sin SL hit → escalar (no hubo spike suficiente para cerrarnos)
+                    _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
+                    state.multi_phase_idx = _new_idx
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s MULTI TIMER_LOSS pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
+                        sym, _pnl, _stake, _phase_idx, _new_idx, MULTI_STAKES[_new_idx], state.day_pnl_500,
+                    )
+                    self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="TIMER_LOSS")
                 self._persist(now)
             return
 
@@ -2150,7 +2160,7 @@ class EntradaDiego:
                     side=side,
                     stake_usdt=stake,
                     multiplier=multiplier,
-                    stop_loss_pct=0.80,
+                    stop_loss_pct=0.15,
                     take_profit_pct=0.0,
                     max_hold_seconds=300.0,
                     score_breakdown={
