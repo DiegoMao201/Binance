@@ -773,7 +773,8 @@ function EntradaDiegoSection({ symbol }) {
     ? (() => { for (let i = 0; i < TIER_DEFS.length; i++) { if (tSinSpike < TIER_DEFS[i][0]) return i; } return -1; })()
     : -1;
   const currentTierStake   = tierIdx >= 0 ? TIER_DEFS[tierIdx][1] : 0;
-  const currentTierIsPausa = currentTierStake === 0;
+  // isPausa = en un tier de dead zone activo (stake=0 Y dentro del rango); tierIdx=-1 es "fuera de ventana", no pausa
+  const currentTierIsPausa = tierIdx >= 0 && currentTierStake === 0;
   // CONTRACT_S: del estado del bot (asignado al abrir) o fallback dinámico por símbolo
   const CONTRACT_S = ladder_active_contract_s > 0 ? ladder_active_contract_s
                    : isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt
@@ -866,7 +867,7 @@ function EntradaDiegoSection({ symbol }) {
       : isRecovery ? `RECOVERY L${ladder_recovery_level_500} → abre $${recStake} ${ladder_recovery_level_500 === 2 ? "30" : "20"}min`
       : isResting ? "REST 15m — abre al terminar"
       : currentTierIsPausa ? `zona muerta — espera ${_fmtS(TIER_DEFS[0][0] - tSinSpike)}${dzAlert}`
-      : tierIdx < 0 && isBoom500 ? `sequía — esperando spike${dzAlert}`
+      : tierIdx < 0 ? `sequía — esperando spike${dzAlert}`
       : `esperando spike → ${rangeLabel}${dzAlert}${winAlert}`;
 
   // ── Tarjeta ACCU dedicada para BOOM300N / CRASH300N ──────────────────────
