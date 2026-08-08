@@ -1105,7 +1105,7 @@ function EntradaDiegoSection({ symbol }) {
       {/* Cycle budget bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
         <span style={{ fontSize: 7, color: budgetColor, fontWeight: 700, minWidth: 26 }}>
-          {cycle_prev_quiet && !budgetBlocked ? "Q→A" : `bdg`}
+          {cycle_prev_quiet && budgetBlocked ? "Q→A⚡" : cycle_prev_quiet ? "Q→A" : "bdg"}
         </span>
         <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
           <div style={{
