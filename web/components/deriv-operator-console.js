@@ -716,10 +716,9 @@ function EntradaDiegoSection({ symbol }) {
   }
 
   // ── 500s/600s: configuración POR SÍMBOLO ──────────────────────────────────
-  // BOOM500: L0=$20 t=0 (gate gap>120 n30≥6), rec=$10
-  // CRASH500: L0=$4 zona muerta 2min (gate n30≥4), rec=$20 (gate n30≥4 prev<300s)
-  // BOOM600: L0=$20 zona muerta 2min (gate gap>300 n30<3), rec=$10 (gate n30<6)
-  // CRASH600: L0=$10 zona muerta 2min (sin gate), rec=$20 (gate prev∉[120,300))
+  // BOOM500/CRASH500/BOOM600/CRASH600: L0=$20 sin zona muerta (abre inmediato al spike)
+  // Gate real: 4≤n30<9, POWER≥10, GAP_PREV≥60s, GAP_DEAD fuera [150,300), COOLING, BUDGET
+  // Recovery-1: $20/20min, gate solo gap_prev<60 para CRASH; BOOM sin gate adicional
   const { last_spike_ts_500 = 0, burst_phase_started_at = 0, peak_profit_500 = 0,
           ladder_rest_until_500 = 0, consec_wins_500 = 0, rest_spikes_500 = 0,
           ladder_active_contract_s = 0, day_pnl_500 = 0,
@@ -727,9 +726,9 @@ function EntradaDiegoSection({ symbol }) {
           ladder_recovery_level_500 = 0, current_stake_500 = 0,
           ed_n30 = 0, ed_gap_s = -1, ed_gap_prev = -1,
           cycle_budget_norm = 0, cycle_prev_quiet = true } = edState;
-  // L0 stake y recovery stake varían por símbolo
-  const l0Stake  = (symbol === "CRASH500") ? 4 : (symbol === "CRASH600") ? 10 : 20;
-  const rec1Stake = (symbol === "BOOM500" || symbol === "BOOM600" || symbol === "BOOM300N") ? 10 : 20;
+  // L0 stake = $20 para todos los 500s/600s; recovery-1 también $20
+  const l0Stake  = 20;
+  const rec1Stake = (is300N) ? 10 : 20;  // 300N recovery=$10; 500s/600s recovery=$20
   const recStake = ladder_recovery_level_500 >= 1 ? rec1Stake : l0Stake;
   const isRecovery = ladder_recovery_level_500 > 0;
   // p50 dinámico por símbolo
@@ -751,13 +750,13 @@ function EntradaDiegoSection({ symbol }) {
   const closeAt600     = isBoom600 ? boom6CloseAt : isCrash600 ? crash6CloseAt : 540;
   const closeAt300N    = isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt : 420;
   const TIER_DEFS  = isBoom300N
-    ? [[boom3CloseAt, 4]]                              // 300N BOOM: sin zona muerta, $20 desde t=0
+    ? [[boom3CloseAt, 4]]                              // 300N BOOM: sin zona muerta
     : isCrash300N ? [[120, 0], [crash3CloseAt, 4]]    // 300N CRASH: zona muerta 2m
     : isBoom500
-    ? [[boomCloseAt, 4]]                               // sin zona muerta — $4 desde t=0
-    : isCrash500 ? [[120, 0], [crashCloseAt, 4]]       // zona muerta 2m, cierre dinámico
-    : is600      ? [[120, 0], [closeAt600, 4]]          // 600s: zona muerta 2m, p50+2min
-    :              [[120, 0], [540, 4]];
+    ? [[boomCloseAt, 4]]                               // sin zona muerta — abre t=0
+    : isCrash500 ? [[crashCloseAt, 4]]                 // sin zona muerta — abre t=0
+    : is600      ? [[closeAt600, 4]]                   // 600s: sin zona muerta — abre t=0
+    :              [[540, 4]];
   const LADDER_CYCLE_S = isBoom300N ? boom3CloseAt : isCrash300N ? crash3CloseAt
     : isBoom500 ? boomCloseAt : isCrash500 ? crashCloseAt : is600 ? closeAt600 : 540;
   const LADDER_REST_S  = 900;
@@ -800,10 +799,10 @@ function EntradaDiegoSection({ symbol }) {
     : isCrash300N ? `2–${(crash3CloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash300n_p50/60).toFixed(1)}m)`
     : isBoom500
     ? `0–${(boomCloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom500_p50/60).toFixed(1)}m)`
-    : isCrash500 ? `2–${(crashCloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash500_p50/60).toFixed(1)}m)`
-    : isBoom600  ? `2–${(boom6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom600_p50/60).toFixed(1)}m)`
-    : isCrash600 ? `2–${(crash6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash600_p50/60).toFixed(1)}m)`
-    : "2–9m $4";
+    : isCrash500 ? `0–${(crashCloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash500_p50/60).toFixed(1)}m)`
+    : isBoom600  ? `0–${(boom6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(boom600_p50/60).toFixed(1)}m)`
+    : isCrash600 ? `0–${(crash6CloseAt/60).toFixed(1)}m $${recStake} (p50=${(crash600_p50/60).toFixed(1)}m)`
+    : "0–9m $20";
   // Indicador de alerta dead-zone y racha wins para 500s
   const dzAlert = is500 && !contract_id && !isResting
     ? (dead_zone_spikes_500 >= 1 ? ` ⚡${dead_zone_spikes_500}/2dz` : "")
@@ -813,12 +812,10 @@ function EntradaDiegoSection({ symbol }) {
   const activeStake = current_stake_500 > 0 ? current_stake_500 : recStake;
 
   // ── Gates reales en entrada_diego.py ────────────────────────────────────
-  // GATE_L0: n30 mínimo/máximo por símbolo
+  // GATE_N30: 500s/600s requieren 4≤n30<9; 300N requieren n30≥2
   const gateL0Pass = (() => {
-    if (is300N)      return ed_n30 >= 2;
-    if (isCrash500 || isBoom500) return ed_n30 >= 2;
-    if (isBoom600)  return ed_n30 < 6;
-    return true; // CRASH600: sin gate L0
+    if (is300N) return ed_n30 >= 2;
+    return ed_n30 >= 4 && ed_n30 < 9;  // 500s y 600s: rango [4,9)
   })();
   // GATE_GAP_PREV: ráfaga doble (<60s entre los dos spikes previos)
   const gateGapPrevPass = !(ed_gap_prev >= 0 && ed_gap_prev < 60);
@@ -828,14 +825,11 @@ function EntradaDiegoSection({ symbol }) {
   const gateCoolingPass = !(ed_n30 >= 4 && ed_n30 < 7 && ed_gap_s >= 180 && ed_gap_s < 360);
   // SYM_PNL info (gate desactivado en bot, solo informativo)
   const symPnlNegative  = sym_pnl_since_reset <= -20;
-  // Recovery-1: solo GAP_PREV + n30 base
+  // Recovery-1: CRASH → solo gap_prev<60s bloquea; BOOM → sin gate adicional
   const gateRec1Pass = (() => {
-    if (!gateGapPrevPass) return false;
-    if (is300N) return ed_n30 >= 2;
-    if (isBoom500 || isCrash500) return ed_n30 >= 2;
-    if (isBoom600)  return ed_n30 < 6;
-    if (isCrash600) return !(ed_gap_prev >= 120 && ed_gap_prev < 300);
-    return true;
+    if (is300N) return ed_n30 >= 2 && gateGapPrevPass;
+    if (isCrash500 || isCrash600) return gateGapPrevPass;
+    return true;  // BOOM500/BOOM600: sin gate en recovery
   })();
   const CYCLE_BUDGET_MAX = 10.0;
   const budgetBlocked = cycle_budget_norm >= CYCLE_BUDGET_MAX;
@@ -857,9 +851,9 @@ function EntradaDiegoSection({ symbol }) {
     ? (gateRec1Pass ? "REC✓" : `REC✗ GP`)
     : gatePass ? "L0✓" : (blockingGate ? `${blockingGate}✗` : "L0✗");
   const gateColor = gatePass ? "#22d3a3" : "#ff5d6c";
-  const n30Thresh = (isCrash500 || isBoom500) ? 2 : isBoom600 ? 6 : 0;
-  const n30Ok     = isBoom600 ? ed_n30 < 6 : (n30Thresh > 0 ? ed_n30 >= n30Thresh : true);
-  const n30Color  = n30Thresh > 0 ? (n30Ok ? "#22d3a3" : "#ff5d6c") : "#94a3b8";
+  // n30 ok: 500s/600s requieren [4,9); 300N requiere ≥2
+  const n30Ok    = is300N ? ed_n30 >= 2 : (is500 || is600) ? (ed_n30 >= 4 && ed_n30 < 9) : true;
+  const n30Color = (is500 || is600 || is300N) ? (n30Ok ? "#22d3a3" : "#ff5d6c") : "#94a3b8";
   // Colores para gap_s y gap_prev basados en gates
   const gapSColor = !gateGapDeadPass ? "#ff5d6c" : !gateCoolingPass ? "#f5c43c" : "#94a3b8";
   const gapPrevColor = !gateGapPrevPass ? "#ff5d6c" : ed_gap_prev > 300 ? "#22d3a3" : "#94a3b8";
@@ -987,7 +981,7 @@ function EntradaDiegoSection({ symbol }) {
           const bg      = active ? activeBg : done ? "#62d4ff22" : "rgba(255,255,255,0.06)";
           const col     = active ? "#0f172a" : done ? "#62d4ff88" : "#475569";
           const label   = isPausa
-            ? (isCrash500 || is600 ? "espera 2m" : "PAUSA")
+            ? "PAUSA"
             : `$${recStake} · ${isBoom500 ? `${(boomCloseAt/60).toFixed(1)}m` : isCrash500 ? `${(crashCloseAt/60).toFixed(1)}m` : isBoom600 ? `${(boom6CloseAt/60).toFixed(1)}m` : isCrash600 ? `${(crash6CloseAt/60).toFixed(1)}m` : "7m"}`;
           return (
             <span key={i} style={{
