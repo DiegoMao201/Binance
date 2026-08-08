@@ -188,6 +188,14 @@ _INTER_TRADE_RACE_GUARD_SEC: float = float(
     os.getenv("DERIV_INTER_TRADE_RACE_GUARD_SEC", "0") or 0
 )
 
+# Símbolos gestionados EXCLUSIVAMENTE por entrada_diego — pipeline principal bloqueado
+_ED_EXCLUSIVE_SYMBOLS: frozenset[str] = frozenset({
+    "BOOM500", "CRASH500",
+    "BOOM600", "CRASH600",
+    "BOOM900", "CRASH900",
+    "BOOM1000", "CRASH1000",
+})
+
 # ─── Hard symbol disable list ─────────────────────────────────────────────
 # Runtime-safe kill switch. Defaults align with current operator request.
 _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
@@ -2548,11 +2556,8 @@ class DerivDaemon:
             )
             return
         async with lock:
-            # entrada_diego gestiona estos símbolos directamente — pipeline principal no opera
-            if (
-                self._entrada_diego.is_enabled()
-                and tick.symbol.upper() in {"BOOM500", "CRASH500", "BOOM1000", "CRASH1000"}
-            ):
+            # entrada_diego gestiona TODOS estos símbolos — pipeline principal no opera sobre ellos
+            if tick.symbol.upper() in _ED_EXCLUSIVE_SYMBOLS:
                 return
             try:
                 await self._pipeline(tick)
@@ -7278,6 +7283,9 @@ def _install_signal_handlers(daemon: DerivDaemon) -> None:
 
 async def _async_main() -> int:
     settings = load_deriv_settings()
+    # Ensure all ED-exclusive symbols are always subscribed for tick ingestion and
+    # spike detection regardless of DERIV_SYMBOLS env var (Coolify may have stale value).
+    settings.symbols = tuple(sorted(set(s.upper() for s in settings.symbols) | _ED_EXCLUSIVE_SYMBOLS))
     if not settings.api_token:
         _LOGGER.error(
             "[deriv-daemon] DERIV_API_TOKEN is missing in the .env — refusing to start."

@@ -2106,8 +2106,11 @@ class EntradaDiego:
                     )
                     self._ed_log(sym, _pnl, _had_spk, _phase_idx, now, close_type=_ct)
                 else:
-                    # Loss sin spike → escalar
-                    _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
+                    # Loss sin spike → escalar hasta $8 (fase 3); datos: fase 4 ($16) WR=17-35% → reset
+                    if _phase_idx >= 3:
+                        _new_idx = 0
+                    else:
+                        _new_idx = _phase_idx + 1
                     state.multi_phase_idx = _new_idx
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s MULTI SL_LOSS pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
@@ -2150,8 +2153,11 @@ class EntradaDiego:
                     )
                     self._ed_log(sym, _pnl, True, _phase_idx, now, close_type="TIMER_LOSS_SPK")
                 else:
-                    # Loss sin spike → escalar
-                    _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
+                    # Loss sin spike → escalar hasta $8 (fase 3); datos: fase 4 ($16) WR=17-35% → reset
+                    if _phase_idx >= 3:
+                        _new_idx = 0
+                    else:
+                        _new_idx = _phase_idx + 1
                     state.multi_phase_idx = _new_idx
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s MULTI TIMER_LOSS pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
@@ -2272,6 +2278,16 @@ class EntradaDiego:
         # WAIT: apertura inmediata sin espera
         # ────────────────────────────────────────────────────────────────────
         if phase == "WAIT":
+            # Gate sequia: BOOM1000/CRASH1000/BOOM900 pierden cuando ningún símbolo está en sequía
+            # Datos: BOOM1000 sequia=0 WR=18% PnL=-$38 (n=22); CRASH1000 WR=24% PnL=-$22 (n=21); BOOM900 WR=38% PnL=-$19 (n=26)
+            _sequia_gate_syms = SYMBOLS_1000 | {"BOOM900"}
+            if sym in _sequia_gate_syms and (now - state.k1000_phase_ts) < 3600:
+                _n_seq = sum(
+                    1 for s, h in self._ed_spike_hist.items()
+                    if s != sym and (not h or (now - max((t for t, _ in h), default=0.0)) > 300)
+                )
+                if _n_seq == 0:
+                    return  # WAIT — ningún símbolo en sequía, retry siguiente tick
             state.k1000_spike_triggered = False
             state.k1000_phase    = "IN_CONTRACT"
             state.k1000_phase_ts = now
@@ -2379,9 +2395,15 @@ class EntradaDiego:
                 state.day_pnl_1000 = getattr(state, 'day_pnl_1000', 0.0) + _pnl
                 _had_spk = getattr(state, 'k1000_had_spike', False)
                 state.k1000_had_spike = False
-                # Escalar SOLO si hubo loss sin spike; spike o win → reset a $10
-                _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
-                _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
+                # CRASH900/BOOM1000: no escalar a $20 — datos: CRASH900 $20 WR=29.7% (n=37); BOOM1000 $20 WR=42.9% (n=28)
+                # CRASH1000: sí escalar — datos: $20 WR=57.1% PnL=+$32 (positivo)
+                _no_escalate = sym in {"CRASH900", "BOOM1000"}
+                if _no_escalate:
+                    _next_idx = 0
+                    _reason = "no-escala-gate→reset"
+                else:
+                    _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
+                    _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
                 state.k1000_stake_idx   = _next_idx
                 state.k1000_cycle_stake = K1000_STAKES_1000[_next_idx]
                 state.k1000_phase_ts    = now
@@ -2411,9 +2433,15 @@ class EntradaDiego:
                     _LOGGER.error("[ENTRADA_DIEGO] %s K1000 contrato CLOSE error: %s", sym, _e)
                 _had_spk = getattr(state, 'k1000_had_spike', False)
                 state.k1000_had_spike = False
-                # Escalar SOLO si hubo loss sin spike; spike o win → reset a $10
-                _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
-                _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
+                # CRASH900/BOOM1000: no escalar a $20 — datos: CRASH900 $20 WR=29.7% (n=37); BOOM1000 $20 WR=42.9% (n=28)
+                # CRASH1000: sí escalar — datos: $20 WR=57.1% PnL=+$32 (positivo)
+                _no_escalate = sym in {"CRASH900", "BOOM1000"}
+                if _no_escalate:
+                    _next_idx = 0
+                    _reason = "no-escala-gate→reset"
+                else:
+                    _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
+                    _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
                 state.k1000_stake_idx      = _next_idx
                 state.k1000_cycle_stake    = K1000_STAKES_1000[_next_idx]
                 state.k1000_spike_triggered = False
