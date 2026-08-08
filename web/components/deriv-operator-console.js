@@ -535,8 +535,8 @@ const K1000_WAIT_900_S     = 480;   // 8min espera 900s
 const K1000_CONTRACT_S     = 1200;  // 20min duración contrato (timer-triggered)
 const K1000_SPIKE_CONTRACT_S = 240; // 4min duración contrato (spike-triggered)
 const K1000_SPIKE_HOLD_S   = 240;   // 4min espera post-spike
-const K1000_STAKE_START  = 20;    // stake inicial $20
-const K1000_STAKES_1000  = [10, 20, 20, 40, 40, 80, 80]; // escalera $10×1→$20×2→$40×2→$80×2
+const K1000_STAKE_START  = 10;    // stake inicial $10
+const K1000_STAKES_1000  = [10, 20, 20, 40, 40]; // escalera $10→$20×2→$40×2 (CRASH900/BOOM1000 nunca escalan)
 // POWER gate eliminado — 500s y 600s abren directo en spike
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
@@ -605,9 +605,10 @@ function EntradaDiegoSection({ symbol }) {
       k1000_spike_triggered  = false,
     } = edState;
 
+    const noEscalate = (symbol === "CRASH900" || symbol === "BOOM1000");
     const phase1k   = ["WAIT","IN_CONTRACT","SPIKE_HOLD"].includes(k1000_phase)
       ? k1000_phase : "WAIT";
-    const stakeIdx  = Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
+    const stakeIdx  = noEscalate ? 0 : Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
     const stake1k   = k1000_cycle_stake || K1000_STAKES_1000[stakeIdx];
 
     // Timer por fase (ambos 8min; contrato: 4min si spike, 20min si timer)
@@ -635,8 +636,10 @@ function EntradaDiegoSection({ symbol }) {
     };
 
     // Texto de estado por fase
+    const _nextContractLabel = k1000_spike_triggered
+      ? `${Math.round(K1000_SPIKE_CONTRACT_S/60)}min·spike` : `${Math.round(K1000_CONTRACT_S/60)}min·timer`;
     const stateText = phase1k === "WAIT"
-      ? `Post-spike · abrirá en ${_fmtS(phaseRem)} $${stake1k} (20min)`
+      ? `Post-spike · abrirá en ${_fmtS(phaseRem)} $${stake1k} (${_nextContractLabel})`
       : phase1k === "IN_CONTRACT"
         ? contract_id
           ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
@@ -652,6 +655,12 @@ function EntradaDiegoSection({ symbol }) {
             background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.06em" }}>
             {phase1k}
           </span>
+          {noEscalate && (
+            <span style={{ fontSize: 8, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+              background: "rgba(245,196,60,0.15)", color: "#f5c43c", letterSpacing: "0.04em" }}>
+              cap:$10
+            </span>
+          )}
           {(phase1k === "IN_CONTRACT" || phase1k === "SPIKE_HOLD") && contract_id && (
             <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
               {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
@@ -664,9 +673,9 @@ function EntradaDiegoSection({ symbol }) {
           <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
         </div>
 
-        {/* Stake pills $20×2 → $40×2 → $80×2 */}
+        {/* Stake pills: cap:$10 symbols only show $10; others show full ladder */}
         <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-          {K1000_STAKES_1000.map((s, i) => {
+          {(noEscalate ? [K1000_STAKES_1000[0]] : K1000_STAKES_1000).map((s, i) => {
             const active = i === stakeIdx;
             return (
               <span key={i} style={{
@@ -1149,7 +1158,7 @@ function K1000Panel() {
     }}>
       <div style={{
         fontSize: 11, fontWeight: 800, color: T.cyan, letterSpacing: "0.07em", marginBottom: 2,
-      }}>900s · 1000s — $20→$40→$80</div>
+      }}>900s · 1000s — $10→$20→$40 · CRASH900/BOOM1000 cap:$10</div>
       <EntradaDiegoSection symbol="BOOM900" />
       <EntradaDiegoSection symbol="CRASH900" />
       <EntradaDiegoSection symbol="BOOM1000" />
