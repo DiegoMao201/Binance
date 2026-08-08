@@ -734,7 +734,12 @@ class EntradaDiego:
             await self._process_1000_scout(sym)
             return
         if sym in SYMBOLS_MULTI_NEW:
-            await self._process_multi_data(sym)
+            # Los ticks solo rastrean spikes; la gestión de contratos queda en el watchdog (15s).
+            # Sin este split, cada tick haría una consulta de profit al broker (excesivo).
+            _ms_spk = float(self._risk.get_last_spike_ts(sym) or 0.0)
+            _ms_h   = self._ed_spike_hist.get(sym, [])
+            if _ms_spk > (_ms_h[-1][0] if _ms_h else 0.0) and _ms_spk > 0:
+                self._ed_push_spike(sym, _ms_spk, self._risk.get_last_spike_ratio(sym) or 0.0)
             return
         state = self._states[sym]
         now   = time.time()

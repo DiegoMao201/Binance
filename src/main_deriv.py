@@ -196,6 +196,14 @@ _ED_EXCLUSIVE_SYMBOLS: frozenset[str] = frozenset({
     "BOOM1000", "CRASH1000",
 })
 
+# Símbolos MULTI (50/150/300N) — necesitan suscripción WS para que ingest_tick()
+# detecte spikes y poblar _ed_spike_hist (open_n30, open_gap_s, etc. en logs).
+_ED_MULTI_SYMBOLS: frozenset[str] = frozenset({
+    "BOOM50", "CRASH50",
+    "BOOM150N", "CRASH150N",
+    "BOOM300N", "CRASH300N",
+})
+
 # ─── Hard symbol disable list ─────────────────────────────────────────────
 # Runtime-safe kill switch. Defaults align with current operator request.
 _FORCED_DISABLED_SYMBOLS: set[str] = _env_symbol_set(
@@ -7285,7 +7293,7 @@ async def _async_main() -> int:
     settings = load_deriv_settings()
     # Ensure all ED-exclusive symbols are always subscribed for tick ingestion and
     # spike detection regardless of DERIV_SYMBOLS env var (Coolify may have stale value).
-    settings.symbols = tuple(sorted(set(s.upper() for s in settings.symbols) | _ED_EXCLUSIVE_SYMBOLS))
+    settings.symbols = tuple(sorted(set(s.upper() for s in settings.symbols) | _ED_EXCLUSIVE_SYMBOLS | _ED_MULTI_SYMBOLS))
     if not settings.api_token:
         _LOGGER.error(
             "[deriv-daemon] DERIV_API_TOKEN is missing in the .env — refusing to start."
