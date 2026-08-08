@@ -89,7 +89,7 @@ K1000_STAKE_MAX     = float(os.getenv("K1000_STAKE_MAX",    "30.0"))  # (legacy 
 K1000_CONTRACT_S       = int(os.getenv("K1000_CONTRACT_S",     "1200"))  # 20 min duración contrato (timer-triggered)
 K1000_SPIKE_CONTRACT_S = 240                                            # 4 min duración contrato (spike-triggered)
 K1000_SPIKE_HOLD_S     = int(os.getenv("K1000_SPIKE_HOLD_S",  "240")) # 4 min espera post-spike antes de cerrar
-K1000_STAKES_1000   = [10.0, 20.0, 20.0, 40.0, 40.0, 80.0, 80.0]    # escalera: $10×1→$20×2→$40×2→$80×2
+K1000_STAKES_1000   = [10.0, 20.0]    # escalera: $10→$20; pérdida en $20 → reset a $10 (sin $40/$80)
 # Aliases para compatibilidad con to_dict y referencias externas
 K1000_SCOUT_STAKE = K1000_STAKE_START
 K1000_S20_STAKE   = K1000_STAKE_MID
@@ -1244,7 +1244,7 @@ class EntradaDiego:
             close_at = p50 + 120.0
             if t_sin_spike >= close_at:
                 return -1, 0.0
-            return 1, 10.0
+            return 1, 20.0
         if "BOOM" in sym and "600" in sym:
             # Sin zona muerta — abre inmediato al spike, cierre dinámico en p50+2min
             p50 = getattr(state, 'boom600_p50', 420.0) if state is not None else 420.0
@@ -1258,7 +1258,7 @@ class EntradaDiego:
             close_at = p50 + 120.0
             if t_sin_spike >= close_at:
                 return -1, 0.0
-            return 1, 10.0
+            return 1, 20.0
         if "600" in sym:
             tiers = LADDER_600_TIERS
         elif "CRASH" in sym:
@@ -1387,7 +1387,7 @@ class EntradaDiego:
                 state.peak_profit_500        = 0.0
                 state.dead_zone_spikes_500   = 0
                 state.ladder_active_contract_s = 420.0  # 7min fijo post-REST
-                await self._open(sym, state, now, stake_override=10.0)
+                await self._open(sym, state, now, stake_override=20.0)
             return
 
         # ── Spike tracking ────────────────────────────────────────────────────
@@ -1514,7 +1514,7 @@ class EntradaDiego:
                 state.peak_profit_500          = 0.0
                 state.dead_zone_spikes_500     = 0
                 state.ladder_active_contract_s = 1200.0
-                _rec1_stk = 10.0 if sym in ("BOOM500", "BOOM600") else 20.0
+                _rec1_stk = 20.0
                 _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-1 $%.0f/20min (retry sequía n30=%d)", sym, _rec1_stk, _n30_rec)
                 await self._open(sym, state, now, stake_override=_rec1_stk)
                 return
@@ -1525,7 +1525,7 @@ class EntradaDiego:
                 state.dead_zone_spikes_500     = 0
                 state.ladder_active_contract_s = 1800.0
                 _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-2 $60/30min (retry sequía)", sym)
-                await self._open(sym, state, now, stake_override=60.0)
+                await self._open(sym, state, now, stake_override=20.0)
                 return
 
         # ── >ciclo sin spike: sequía — cerrar contrato si aplica, esperar próximo spike ���─
@@ -1599,7 +1599,7 @@ class EntradaDiego:
                     state.peak_profit_500          = 0.0
                     state.dead_zone_spikes_500     = 0
                     state.ladder_active_contract_s = 1200.0
-                    _rec1_stk = 10.0 if sym in ("BOOM500", "BOOM600") else 20.0
+                    _rec1_stk = 20.0
                     _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-1 $%.0f/20min (sequía n30=%d activo)", sym, _rec1_stk, _n30_rec)
                     await self._open(sym, state, now, stake_override=_rec1_stk)
                     return
@@ -1731,7 +1731,7 @@ class EntradaDiego:
             state.peak_profit_500        = 0.0
             state.dead_zone_spikes_500   = 0
             state.ladder_active_contract_s = 1200.0  # 20 min
-            _rec1_stk = 10.0 if sym in ("BOOM500", "BOOM600") else 20.0
+            _rec1_stk = 20.0
             _LOGGER.info("[ENTRADA_DIEGO] %s LADDER RECOVERY-1 $%.0f/20min (n30=%d activo)", sym, _rec1_stk, _n30_rec)
             await self._open(sym, state, now, stake_override=_rec1_stk)
             return
@@ -1790,17 +1790,9 @@ class EntradaDiego:
             if _n30_l0 < 2:
                 _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
                 return
-        elif "CRASH" in sym and "500" in sym:
-            if _n30_l0 < 2:
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
-                return
-        elif "BOOM" in sym and "500" in sym:
-            if _n30_l0 < 2:
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d<2", sym, _n30_l0)
-                return
-        elif "BOOM" in sym and "600" in sym:
-            if _n30_l0 >= 6:
-                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_L0 skip n30=%d>=6", sym, _n30_l0)
+        elif "500" in sym or "600" in sym:
+            if _n30_l0 < 4 or _n30_l0 >= 9:
+                _LOGGER.info("[ENTRADA_DIEGO] %s GATE_N30 skip n30=%d (requiere 4≤n30<9)", sym, _n30_l0)
                 return
         # Gate gap_prev: no abrir si los dos últimos spikes llegaron en ráfaga (<60s entre ellos)
         # Dato: n=25, WR=20%, ratio_sq/fl=4.0 — la ráfaga quema el ciclo y sigue sequía
@@ -2388,7 +2380,7 @@ class EntradaDiego:
                 _had_spk = getattr(state, 'k1000_had_spike', False)
                 state.k1000_had_spike = False
                 # Escalar SOLO si hubo loss sin spike; spike o win → reset a $10
-                _next_idx = min(_sidx + 1, len(K1000_STAKES_1000) - 1) if (not _had_spk and _pnl < 0) else 0
+                _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
                 _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
                 state.k1000_stake_idx   = _next_idx
                 state.k1000_cycle_stake = K1000_STAKES_1000[_next_idx]
@@ -2420,7 +2412,7 @@ class EntradaDiego:
                 _had_spk = getattr(state, 'k1000_had_spike', False)
                 state.k1000_had_spike = False
                 # Escalar SOLO si hubo loss sin spike; spike o win → reset a $10
-                _next_idx = min(_sidx + 1, len(K1000_STAKES_1000) - 1) if (not _had_spk and _pnl < 0) else 0
+                _next_idx = (_sidx + 1 if _sidx < len(K1000_STAKES_1000) - 1 else 0) if (not _had_spk and _pnl < 0) else 0
                 _reason   = "loss-sin-spike→escala" if (not _had_spk and _pnl < 0) else "spike/win→reset"
                 state.k1000_stake_idx      = _next_idx
                 state.k1000_cycle_stake    = K1000_STAKES_1000[_next_idx]
