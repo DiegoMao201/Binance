@@ -2061,9 +2061,16 @@ class EntradaDiego:
 
     async def _process_multi_data(self, sym: str) -> None:
         """Abre/cierra contratos MULTIPLIER con escalera por outcome. Solo recolección de datos.
-        Escala (loss sin spike) → avanza un nivel. Profit → reset a $1."""
+        Escalada: loss sin spike → avanza nivel. Win o loss con spike → reset a $1."""
         state = self._states[sym]
         now   = time.time()
+
+        # ── Sincronizar spikes al historial (para spikes_during_contract en logs) ──
+        _cur_spk_ts = float(self._risk.get_last_spike_ts(sym) or 0.0)
+        _hist = self._ed_spike_hist.get(sym, [])
+        _hist_last_ts = _hist[-1][0] if _hist else 0.0
+        if _cur_spk_ts > _hist_last_ts:
+            self._ed_push_spike(sym, _cur_spk_ts, self._risk.get_last_spike_ratio(sym) or 0.0)
 
         # Reset día UTC
         _cur_day = float(int(now // 86400) * 86400)
@@ -2087,22 +2094,34 @@ class EntradaDiego:
             if _profit is not None:
                 state.current_profit = _profit
             else:
-                # Broker cerró el contrato (SL hit = loss)
+                # Broker cerró el contrato (SL hit)
                 _pnl = state.current_profit
+                _pre_spk = self._ed_open_info.get(sym, {}).get("pre_open_spike_ts", 0.0)
+                _had_spk = float(self._risk.get_last_spike_ts(sym) or 0.0) > _pre_spk
                 state.day_pnl_500       = round(state.day_pnl_500  + _pnl, 4)
                 state.hour_pnl_500      = round(state.hour_pnl_500 + _pnl, 4)
                 state.last_close_profit = _pnl
                 state.contract_id       = None
                 state.current_profit    = 0.0
                 state.phase             = "IDLE"
-                # SL hit = loss sin spike → escalar
-                _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
-                state.multi_phase_idx = _new_idx
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s MULTI SL_CLOSE pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
-                    sym, _pnl, _stake, _phase_idx, _new_idx, MULTI_STAKES[_new_idx], state.day_pnl_500,
-                )
-                self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="SL")
+                if _pnl >= 0 or _had_spk:
+                    # Win o loss+spike → reset a $1
+                    state.multi_phase_idx = 0
+                    _ct = "SL_WIN" if _pnl >= 0 else "SL_LOSS_SPK"
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s MULTI %s pnl=%.4f stake=$%.0f → reset $1 day=%.2f",
+                        sym, _ct, _pnl, _stake, state.day_pnl_500,
+                    )
+                    self._ed_log(sym, _pnl, _had_spk, _phase_idx, now, close_type=_ct)
+                else:
+                    # Loss sin spike → escalar
+                    _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
+                    state.multi_phase_idx = _new_idx
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s MULTI SL_LOSS pnl=%.4f stake=$%.0f → fase %d→%d ($%.0f) day=%.2f",
+                        sym, _pnl, _stake, _phase_idx, _new_idx, MULTI_STAKES[_new_idx], state.day_pnl_500,
+                    )
+                    self._ed_log(sym, _pnl, False, _phase_idx, now, close_type="SL_LOSS")
                 self._persist(now)
                 return
 
@@ -2115,21 +2134,31 @@ class EntradaDiego:
                 except Exception as _e:
                     _LOGGER.warning("[ENTRADA_DIEGO] %s MULTI close_contract error: %s", sym, _e)
                 _pnl = state.current_profit
+                _pre_spk = self._ed_open_info.get(sym, {}).get("pre_open_spike_ts", 0.0)
+                _had_spk = float(self._risk.get_last_spike_ts(sym) or 0.0) > _pre_spk
                 state.day_pnl_500       = round(state.day_pnl_500  + _pnl, 4)
                 state.hour_pnl_500      = round(state.hour_pnl_500 + _pnl, 4)
                 state.last_close_profit = _pnl
                 state.current_profit    = 0.0
                 state.phase             = "IDLE"
                 if _pnl >= 0:
-                    # Profit → reset a $1
+                    # Win → reset a $1
                     state.multi_phase_idx = 0
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s MULTI TIMER_WIN pnl=%.4f stake=$%.0f → reset $1 day=%.2f",
                         sym, _pnl, _stake, state.day_pnl_500,
                     )
                     self._ed_log(sym, _pnl, True, _phase_idx, now, close_type="TIMER_WIN")
+                elif _had_spk:
+                    # Loss con spike → reset a $1, no escalar
+                    state.multi_phase_idx = 0
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s MULTI TIMER_LOSS_SPK pnl=%.4f stake=$%.0f → reset $1 day=%.2f",
+                        sym, _pnl, _stake, state.day_pnl_500,
+                    )
+                    self._ed_log(sym, _pnl, True, _phase_idx, now, close_type="TIMER_LOSS_SPK")
                 else:
-                    # Loss sin SL hit → escalar (no hubo spike suficiente para cerrarnos)
+                    # Loss sin spike → escalar
                     _new_idx = min(_phase_idx + 1, len(MULTI_STAKES) - 1)
                     state.multi_phase_idx = _new_idx
                     _LOGGER.info(
@@ -3543,14 +3572,15 @@ class EntradaDiego:
             if s != sym and (not h or (now - max((t for t, _ in h), default=0.0)) > 300)
         )
         self._ed_open_info[sym] = {
-            "stake":          stake,
-            "t_open":         now,
-            "hour_utc":       int(now // 3600) % 24,
-            "power":          round(self._get_power_30min(sym, now), 1),
-            "ctx":            self._ed_ctx(sym, now),
-            "cross_n10":      cross_n10,
-            "cross_n30":      cross_n30,
-            "syms_in_sequia": syms_in_sequia,
+            "stake":              stake,
+            "t_open":             now,
+            "hour_utc":           int(now // 3600) % 24,
+            "power":              round(self._get_power_30min(sym, now), 1),
+            "ctx":                self._ed_ctx(sym, now),
+            "cross_n10":          cross_n10,
+            "cross_n30":          cross_n30,
+            "syms_in_sequia":     syms_in_sequia,
+            "pre_open_spike_ts":  float(self._risk.get_last_spike_ts(sym) or 0.0),
         }
 
     def _ed_log(self, sym: str, pnl: float, had_spk: bool, rec_lvl: int, now: float, close_type: str = "UNKNOWN") -> None:
