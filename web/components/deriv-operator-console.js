@@ -155,7 +155,7 @@ function CooldownBar({ cooldown }) {
 
 /* ── D.10.2 Slope Gate Section — 4 símbolos, grace countdown, triple lógica ── */
 /* ── Displacement Gate (6H price displacement) ───────────────── */
-const DISP_SYMBOLS = new Set(["BOOM500", "CRASH500"]);
+const DISP_SYMBOLS = new Set([]);
 
 /* ── ABRE / NO ABRE — señal maestra para operación manual ────── */
 function TradeSignalBadge({ symbol }) {
@@ -523,8 +523,7 @@ function SlopeGateSection({ symbol }) {
 }
 
 /* ── ENTRADA DIEGO — Segunda línea autónoma ──────────────────── */
-const ED_SYMBOLS = new Set(["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000",
-  "BOOM50", "CRASH50", "BOOM150N", "CRASH150N"]);
+const ED_SYMBOLS = new Set(["CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 const MULTI_NEW_SYMBOLS = ["BOOM50", "CRASH50", "BOOM150N", "CRASH150N", "BOOM300N", "CRASH300N"];
 const MULTI_MULTIPLIERS_MAP = { BOOM50: 1000, CRASH50: 1000, BOOM150N: 500, CRASH150N: 500, BOOM300N: 40, CRASH300N: 40 };
 const MULTI_STAKES_LIST = [1, 2, 4, 8, 16];
@@ -536,7 +535,7 @@ const K1000_CONTRACT_S     = 1200;  // 20min duración contrato (timer-triggered
 const K1000_SPIKE_CONTRACT_S = 240; // 4min duración contrato (spike-triggered)
 const K1000_SPIKE_HOLD_S   = 240;   // 4min espera post-spike
 const K1000_STAKE_START  = 10;    // stake inicial $10
-const K1000_STAKES_1000  = [10, 20, 20, 40, 40]; // escalera $10→$20×2→$40×2 (CRASH900/BOOM1000 nunca escalan)
+const K1000_STAKES_1000  = [10, 20]; // escalera $10→$20 para todos los símbolos
 // POWER gate eliminado — 500s y 600s abren directo en spike
 
 // 500s: S20 ventana fija (coincidir con entrada_diego.py)
@@ -594,123 +593,166 @@ function EntradaDiegoSection({ symbol }) {
   const isBoom500  = symbol === "BOOM500";
   const _fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${Math.ceil(s)}s`;
 
-  // ── 1000s: ciclo simple WAIT(15m) → IN_CONTRACT(10m) → SPIKE_HOLD(4m) ────
+  // ── 900s/1000s: WAIT(zona) → IN_CONTRACT(20min) → SPIKE_HOLD(4min) ────────
   if (is1000) {
     const {
-      k1000_phase          = "WAIT",
-      k1000_phase_ts       = 0,
-      k1000_stake_idx      = 0,
-      k1000_cycle_stake    = K1000_STAKE_START,
+      k1000_phase            = "WAIT",
+      k1000_phase_ts         = 0,
+      k1000_stake_idx        = 0,
+      k1000_cycle_stake      = 10,
       k1000_spike_hold_until = 0,
       k1000_spike_triggered  = false,
+      k1000_had_spike        = false,
+      ed_gap_s: edGap1k      = -1,
     } = edState;
 
-    const noEscalate = (symbol === "CRASH900" || symbol === "BOOM1000");
-    const phase1k   = ["WAIT","IN_CONTRACT","SPIKE_HOLD"].includes(k1000_phase)
-      ? k1000_phase : "WAIT";
-    const stakeIdx  = noEscalate ? 0 : Math.max(0, Math.min(k1000_stake_idx, K1000_STAKES_1000.length - 1));
-    const stake1k   = k1000_cycle_stake || K1000_STAKES_1000[stakeIdx];
+    // Zona por símbolo: CRASH1000 solo RIPE (380-760s); BOOM1000 RIPE+OVERDUE (380-1500s);
+    //   CRASH900/BOOM900 RIPE+OVERDUE (380-1593s)
+    const ZONE_MIN = 380;
+    const ZONE_MAX = symbol === "CRASH1000" ? 760
+                   : symbol === "BOOM1000"  ? 1500
+                   : 1593;
+    const ZONE_LABEL = symbol === "CRASH1000" ? "380–760s"
+                     : symbol === "BOOM1000"  ? "380–1500s"
+                     : "380–1593s";
 
-    // Timer por fase (ambos 8min; contrato: 4min si spike, 20min si timer)
-    const waitS        = is900 ? K1000_WAIT_900_S : K1000_WAIT_S;
+    const inZone    = edGap1k >= ZONE_MIN && edGap1k <= ZONE_MAX;
+    const zoneStatus = edGap1k < 0        ? "SIN DATOS"
+                     : edGap1k < ZONE_MIN ? "PRONTO ▶"
+                     : edGap1k > ZONE_MAX ? "SEQUIA ✗"
+                     : "EN ZONA ✓";
+    const zoneColor = edGap1k < 0        ? "#5b6473"
+                    : inZone             ? "#22d3a3"
+                    : edGap1k < ZONE_MIN ? "#f5c43c"
+                    : "#ff5d6c";
+
+    const STAKES_1K = [10, 20];
+    const phase1k   = ["WAIT","IN_CONTRACT","SPIKE_HOLD"].includes(k1000_phase) ? k1000_phase : "WAIT";
+    const stakeIdx  = Math.max(0, Math.min(k1000_stake_idx, STAKES_1K.length - 1));
+
+    // Timers — solo relevantes en IN_CONTRACT y SPIKE_HOLD
     const contractS1k  = k1000_spike_triggered ? K1000_SPIKE_CONTRACT_S : K1000_CONTRACT_S;
     const phaseElapsed = k1000_phase_ts > 0 ? Math.max(0, nowSec - k1000_phase_ts) : 0;
-    const phaseTotal   = phase1k === "WAIT" ? waitS
-      : phase1k === "IN_CONTRACT" ? contractS1k : K1000_SPIKE_HOLD_S;
-    const phaseRem   = phase1k === "SPIKE_HOLD" && k1000_spike_hold_until > 0
-      ? Math.max(0, k1000_spike_hold_until - nowSec)
-      : Math.max(0, phaseTotal - phaseElapsed);
-    const phasePct   = Math.min(100, (phaseElapsed / phaseTotal) * 100);
+    const contractRem  = Math.max(0, contractS1k - phaseElapsed);
+    const contractPct  = Math.min(100, (phaseElapsed / contractS1k) * 100);
+    const spikeHoldRem = k1000_spike_hold_until > 0 ? Math.max(0, k1000_spike_hold_until - nowSec) : 0;
+    const spikeHoldPct = Math.min(100, ((K1000_SPIKE_HOLD_S - spikeHoldRem) / K1000_SPIKE_HOLD_S) * 100);
 
-    // Colores por fase
+    // Color de borde/fondo por fase (WAIT: verde si en zona, gris si fuera)
     const phaseColor = phase1k === "IN_CONTRACT" ? "#22d3a3"
-      : phase1k === "SPIKE_HOLD"   ? "#f5c43c"
-      : "#64748b";
+                     : phase1k === "SPIKE_HOLD"  ? "#f5c43c"
+                     : inZone ? "#22d3a3" : "#64748b";
+    const pnlColor   = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
 
-    const pnl1kColor = current_profit > 0 ? "#22d3a3" : current_profit < 0 ? "#ff5d6c" : "#64748b";
+    // Qué pasa al cerrar
+    const closeLabel = k1000_had_spike ? "cerrar → $10 + WAIT zona"
+                     : stakeIdx === 0  ? "loss sin spike → $20"
+                     : "loss sin spike-$20 → WAIT zona";
+    const closeColor = k1000_had_spike ? "#22d3a3" : stakeIdx === 0 ? "#f5c43c" : "#ff5d6c";
 
-    const base1k = {
-      marginTop: 8, padding: "8px 10px", borderRadius: 6,
-      fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
-      border: `1px solid ${phaseColor}55`, background: `${phaseColor}0d`,
-    };
-
-    // Texto de estado por fase
-    const _nextContractLabel = k1000_spike_triggered
-      ? `${Math.round(K1000_SPIKE_CONTRACT_S/60)}min·spike` : `${Math.round(K1000_CONTRACT_S/60)}min·timer`;
-    const stateText = phase1k === "WAIT"
-      ? `Post-spike · abrirá en ${_fmtS(phaseRem)} $${stake1k} (${_nextContractLabel})`
-      : phase1k === "IN_CONTRACT"
-        ? contract_id
-          ? `$${stake1k} en mercado · cierra en ${_fmtS(phaseRem)}`
-          : `IN_CONTRACT — abriendo contrato...`
-        : `Spike! Cerrando en ${_fmtS(phaseRem)}`;
+    const d1k      = edState.day_pnl_1000 || 0;
+    const d1kColor = d1k > 0 ? "#22d3a3" : d1k < 0 ? "#ff5d6c" : "#475569";
 
     return (
-      <div style={base1k}>
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>ENTRADA DIEGO</span>
+      <div style={{
+        marginTop: 8, padding: "8px 10px", borderRadius: 6,
+        fontFamily: "'SF Mono','Fira Mono',monospace", fontSize: 11,
+        border: `1px solid ${phaseColor}55`, background: `${phaseColor}0d`,
+      }}>
+
+        {/* Header: fase + profit */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <span style={{ fontWeight: 700, color: "#e2e8f0", fontSize: 10 }}>K1000</span>
           <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
             background: `${phaseColor}25`, color: phaseColor, letterSpacing: "0.06em" }}>
             {phase1k}
           </span>
-          {noEscalate && (
-            <span style={{ fontSize: 8, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
-              background: "rgba(245,196,60,0.15)", color: "#f5c43c", letterSpacing: "0.04em" }}>
-              cap:$10
-            </span>
-          )}
           {(phase1k === "IN_CONTRACT" || phase1k === "SPIKE_HOLD") && contract_id && (
-            <span style={{ color: pnl1kColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
+            <span style={{ color: pnlColor, fontWeight: 700, marginLeft: "auto", fontSize: 12 }}>
               {current_profit >= 0 ? "+" : ""}{Number(current_profit).toFixed(2)}$
             </span>
           )}
         </div>
 
-        {/* Timer bar */}
-        <div style={{ width: "100%", height: 3, background: `${phaseColor}22`, borderRadius: 2, margin: "5px 0 3px", overflow: "hidden" }}>
-          <div style={{ width: `${phasePct}%`, height: "100%", background: phaseColor, transition: "width 1s linear" }} />
+        {/* Timer bar — solo IN_CONTRACT */}
+        {phase1k === "IN_CONTRACT" && (
+          <div style={{ marginBottom: 5 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8, color: "#475569", marginBottom: 2 }}>
+              <span style={{ color: "#22d3a3" }}>{k1000_spike_triggered ? "4min (spike)" : "20min"}</span>
+              <span style={{ color: "#22d3a3" }}>{_fmtS(contractRem)}</span>
+            </div>
+            <div style={{ height: 3, background: "#22d3a322", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{ width: `${contractPct}%`, height: "100%", background: "#22d3a3", transition: "width 1s linear" }} />
+            </div>
+          </div>
+        )}
+
+        {/* Timer bar — SPIKE_HOLD */}
+        {phase1k === "SPIKE_HOLD" && (
+          <div style={{ marginBottom: 5 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 8, marginBottom: 2 }}>
+              <span style={{ color: "#f5c43c", fontWeight: 800 }}>¡SPIKE! hold 4min</span>
+              <span style={{ color: "#f5c43c" }}>{_fmtS(spikeHoldRem)} → WAIT zona</span>
+            </div>
+            <div style={{ height: 3, background: "#f5c43c22", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{ width: `${spikeHoldPct}%`, height: "100%", background: "#f5c43c", transition: "width 1s linear" }} />
+            </div>
+          </div>
+        )}
+
+        {/* Zona + gap */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+          <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 4,
+            background: `${zoneColor}18`, color: zoneColor, border: `1px solid ${zoneColor}45` }}>
+            {zoneStatus}
+          </span>
+          {edGap1k >= 0 && (
+            <span style={{ fontSize: 9, color: zoneColor, fontWeight: 700 }}>{_fmtS(edGap1k)}</span>
+          )}
+          <span style={{ fontSize: 8, color: "#475569", marginLeft: "auto" }}>{ZONE_LABEL}</span>
         </div>
 
-        {/* Stake pills: cap:$10 symbols only show $10; others show full ladder */}
-        <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-          {(noEscalate ? [K1000_STAKES_1000[0]] : K1000_STAKES_1000).map((s, i) => {
+        {/* Stake pills: $10 → $20 → WAIT zona */}
+        <div style={{ display: "flex", gap: 3, alignItems: "center", marginBottom: 4 }}>
+          {STAKES_1K.map((s, i) => {
             const active = i === stakeIdx;
             return (
               <span key={i} style={{
                 fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
-                background: active ? `${phaseColor}28` : "rgba(255,255,255,0.03)",
+                background: active ? `${phaseColor}28` : "rgba(255,255,255,0.04)",
                 border: `1px solid ${active ? phaseColor : "rgba(255,255,255,0.09)"}`,
-                color: active ? phaseColor : "rgba(255,255,255,0.22)",
-                transition: "all 0.3s",
+                color: active ? phaseColor : "rgba(255,255,255,0.25)",
               }}>${s}</span>
             );
           })}
-          <span style={{ fontSize: 9, color: "#475569", marginLeft: 2 }}>
-            {phase1k === "IN_CONTRACT" ? `→spike:SPIKE_HOLD` : phase1k === "SPIKE_HOLD" ? `→4m:WAIT8m·$${K1000_STAKES_1000[0]}` : `→8m:abrir`}
+          <span style={{ fontSize: 8, color: "#475569", marginLeft: 4 }}>→ WAIT zona</span>
+        </div>
+
+        {/* Estado spike — solo cuando hay contrato */}
+        {(phase1k === "IN_CONTRACT" || phase1k === "SPIKE_HOLD") && contract_id && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+            <span style={{
+              fontSize: 9, fontWeight: 800, padding: "1px 5px", borderRadius: 3,
+              background: k1000_had_spike ? "#22d3a320" : "#f5c43c20",
+              color: k1000_had_spike ? "#22d3a3" : "#f5c43c",
+            }}>
+              {k1000_had_spike ? "spike ✓" : "sin spike"}
+            </span>
+            <span style={{ fontSize: 8, color: closeColor }}>→ {closeLabel}</span>
+          </div>
+        )}
+
+        {/* PnL día */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3 }}>
+          <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ width: `${Math.min(100, Math.max(0, (d1k / 20) * 100))}%`, height: "100%",
+              background: d1kColor, transition: "width 1s linear" }} />
+          </div>
+          <span style={{ fontSize: 8, color: d1kColor, fontWeight: 700, minWidth: 50, textAlign: "right" }}>
+            {d1k >= 0 ? "+" : ""}{d1k.toFixed(2)}$ hoy
           </span>
         </div>
 
-        {/* Línea de estado */}
-        <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>{stateText}</div>
-
-        {/* Gate diario $20 */}
-        {(() => {
-          const d1k = edState.day_pnl_1000 || 0;
-          const d1kColor = d1k >= 20 ? "#22d3a3" : d1k >= 10 ? "#f5c43c" : "#475569";
-          return (
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4 }}>
-              <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
-                <div style={{ width: `${Math.min(100, (d1k / 20) * 100)}%`, height: "100%",
-                  background: d1kColor, transition: "width 1s linear" }} />
-              </div>
-              <span style={{ fontSize: 8, color: d1kColor, fontWeight: 700, minWidth: 44, textAlign: "right" }}>
-                {d1k >= 0 ? "+" : ""}{d1k.toFixed(2)}/$20
-              </span>
-            </div>
-          );
-        })()}
       </div>
     );
   }
@@ -725,7 +767,8 @@ function EntradaDiegoSection({ symbol }) {
           dead_zone_spikes_500 = 0,
           ladder_recovery_level_500 = 0, current_stake_500 = 0,
           ed_n30 = 0, ed_gap_s = -1, ed_gap_prev = -1,
-          cycle_budget_norm = 0, cycle_prev_quiet = true } = edState;
+          cycle_budget_norm = 0, cycle_prev_quiet = true,
+          imminence_state = "UNKNOWN", imminence_score = 0 } = edState;
   // L0 stake = $20 para todos los 500s/600s; recovery-1 también $20
   const l0Stake  = 20;
   const rec1Stake = (is300N) ? 10 : 20;  // 300N recovery=$10; 500s/600s recovery=$20
@@ -812,52 +855,22 @@ function EntradaDiegoSection({ symbol }) {
     ? ` ${consec_wins_500}/2w` : "";
   const activeStake = current_stake_500 > 0 ? current_stake_500 : recStake;
 
-  // ── Gates reales en entrada_diego.py ────────────────────────────────────
-  // GATE_N30: 500s/600s requieren 4≤n30<9; 300N requieren n30≥2
-  const gateL0Pass = (() => {
-    if (is300N) return ed_n30 >= 2;
-    return ed_n30 >= 4 && ed_n30 < 9;  // 500s y 600s: rango [4,9)
-  })();
-  // GATE_GAP_PREV: ráfaga doble (<60s entre los dos spikes previos)
-  const gateGapPrevPass = !(ed_gap_prev >= 0 && ed_gap_prev < 60);
-  // GATE_GAP_DEAD: zona muerta 150-300s (transición hacia sequía)
-  const gateGapDeadPass = !(ed_gap_s >= 150 && ed_gap_s < 300);
-  // GATE_COOLING: ciclo enfriando — n30 moderado + spike tardío
-  const gateCoolingPass = !(ed_n30 >= 4 && ed_n30 < 7 && ed_gap_s >= 180 && ed_gap_s < 360);
-  // SYM_PNL info (gate desactivado en bot, solo informativo)
-  const symPnlNegative  = sym_pnl_since_reset <= -20;
-  // Recovery-1: CRASH → solo gap_prev<60s bloquea; BOOM → sin gate adicional
-  const gateRec1Pass = (() => {
-    if (is300N) return ed_n30 >= 2 && gateGapPrevPass;
-    if (isCrash500 || isCrash600) return gateGapPrevPass;
-    return true;  // BOOM500/BOOM600: sin gate en recovery
-  })();
-  const CYCLE_BUDGET_MAX = 10.0;
-  const budgetBlocked = cycle_budget_norm >= CYCLE_BUDGET_MAX;
-  const budgetPct     = Math.min(100, (cycle_budget_norm / CYCLE_BUDGET_MAX) * 100);
-  const budgetColor   = cycle_budget_norm >= CYCLE_BUDGET_MAX ? "#ff5d6c"
-                      : cycle_budget_norm >= 7  ? "#f5c43c"
-                      : "#22d3a3";
-  // Gate bloqueante activo (en orden de prioridad)
-  const blockingGate = !gateL0Pass      ? "L0"
-    : !gateGapPrevPass   ? "GP_PREV"
-    : !gateGapDeadPass   ? "DEAD_ZN"
-    : !gateCoolingPass   ? "COOLING"
-    : budgetBlocked      ? "CICLO"
-    : null;
-  const gatePass = isRecovery
-    ? (gateRec1Pass)
-    : (gateL0Pass && gateGapPrevPass && gateGapDeadPass && gateCoolingPass && !budgetBlocked);
-  const gateLabel = isRecovery
-    ? (gateRec1Pass ? "REC✓" : `REC✗ GP`)
-    : gatePass ? "L0✓" : (blockingGate ? `${blockingGate}✗` : "L0✗");
-  const gateColor = gatePass ? "#22d3a3" : "#ff5d6c";
-  // n30 ok: 500s/600s requieren [4,9); 300N requiere ≥2
-  const n30Ok    = is300N ? ed_n30 >= 2 : (is500 || is600) ? (ed_n30 >= 4 && ed_n30 < 9) : true;
-  const n30Color = (is500 || is600 || is300N) ? (n30Ok ? "#22d3a3" : "#ff5d6c") : "#94a3b8";
-  // Colores para gap_s y gap_prev basados en gates
-  const gapSColor = !gateGapDeadPass ? "#ff5d6c" : !gateCoolingPass ? "#f5c43c" : "#94a3b8";
-  const gapPrevColor = !gateGapPrevPass ? "#ff5d6c" : ed_gap_prev > 300 ? "#22d3a3" : "#94a3b8";
+  // ── Gate único: FASE del ciclo ───────────────────────────────────────────
+  const FASE_COLOR_MAP = {
+    FRESH: "#ff5d6c", BUILDING: "#f5c43c", RIPE: "#22d3a3",
+    OVERDUE: "#ff9f43", DRY: "#62d4ff", UNKNOWN: "#5b6473",
+  };
+  const FASE_LABEL_MAP = {
+    FRESH: "FRESCO", BUILDING: "CARGANDO", RIPE: "LISTO",
+    OVERDUE: "VENCIDO", DRY: "SECO", UNKNOWN: "SIN DATOS",
+  };
+  const faseColor = FASE_COLOR_MAP[imminence_state] || "#5b6473";
+  const faseLabel = FASE_LABEL_MAP[imminence_state] || imminence_state;
+  const FASE_BLOCKED = new Set(["FRESH", "BUILDING", "UNKNOWN"]);
+  const gatePass  = !FASE_BLOCKED.has(imminence_state);
+  const gateColor = gatePass ? "#22d3a3" : faseColor;
+  const gateLabel = gatePass ? `${faseLabel} ✓` : `${faseLabel} ✗`;
+  const symPnlNegative = sym_pnl_since_reset <= -20;
 
   // Texto de estado
   const statusText = isDayDone ? `DONE +$${sym_pnl_since_reset.toFixed(2)} ≥ $${DAILY_GATE}`
@@ -1054,70 +1067,38 @@ function EntradaDiegoSection({ symbol }) {
         </div>
       )}
 
-      {/* Gate context: n30 · gap_s · gap_prev · gate status */}
-      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 2, alignItems: "center" }}>
-        <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
-          background: `${n30Color}18`, color: n30Color, fontWeight: 700 }}>
-          n30={ed_n30}
+      {/* GATE FASE — único gate activo */}
+      <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 3, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, fontWeight: 800, padding: "2px 7px", borderRadius: 4,
+          background: `${faseColor}20`, color: faseColor, border: `1px solid ${faseColor}50`,
+          letterSpacing: "0.05em" }}>
+          {faseLabel}
         </span>
+        {imminence_score > 0 && (
+          <span style={{ fontSize: 8, color: faseColor, opacity: 0.7 }}>
+            {imminence_score.toFixed(2)}
+          </span>
+        )}
         {ed_gap_s >= 0 && (
           <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
-            background: `${gapSColor}18`, color: gapSColor }}>
-            gap={ago(ed_gap_s)}
+            background: "rgba(255,255,255,0.05)", color: "#94a3b8" }}>
+            gap {ago(ed_gap_s)}
           </span>
         )}
         {ed_gap_prev >= 0 && (
-          <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3,
-            background: `${gapPrevColor}18`, color: gapPrevColor }}>
-            prev={ago(ed_gap_prev)}
-          </span>
+          <span style={{ fontSize: 8, color: "#475569" }}>prev {ago(ed_gap_prev)}</span>
         )}
         <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, marginLeft: "auto",
-          background: `${gateColor}22`, color: gateColor, fontWeight: 800, letterSpacing: "0.04em" }}>
+          background: `${gateColor}20`, color: gateColor, fontWeight: 800 }}>
           {gateLabel}
         </span>
       </div>
-      {/* Mini gate status — cada gate con ✓/✗ */}
-      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", marginBottom: 3, alignItems: "center" }}>
-        {[
-          { k: "L0",  pass: gateL0Pass       },
-          { k: "GP",  pass: gateGapPrevPass  },
-          { k: "DZ",  pass: gateGapDeadPass  },
-          { k: "CL",  pass: gateCoolingPass  },
-          { k: "BDG", pass: !budgetBlocked   },
-        ].map(g => (
-          <span key={g.k} style={{
-            fontSize: 7, padding: "0px 4px", borderRadius: 3, fontWeight: g.pass ? 500 : 800,
-            background: g.pass ? "rgba(255,255,255,0.04)" : "rgba(255,93,108,0.18)",
-            color: g.pass ? "#475569" : "#ff5d6c",
-          }}>{g.k}{g.pass ? "✓" : "✗"}</span>
-        ))}
-        {/* PNL acumulado — solo informativo (gate desactivado) */}
-        <span style={{
-          fontSize: 7, padding: "0px 4px", borderRadius: 3, fontWeight: symPnlNegative ? 700 : 400,
-          background: symPnlNegative ? "rgba(245,196,60,0.12)" : "rgba(255,255,255,0.04)",
-          color: symPnlNegative ? "#f5c43c" : "#475569", marginLeft: "auto",
-        }}>
+      {/* Info row: n30 + pnl acumulado */}
+      <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 3, fontSize: 7 }}>
+        <span style={{ color: "#475569" }}>n30:{ed_n30}</span>
+        <span style={{ marginLeft: "auto",
+          color: symPnlNegative ? "#f5c43c" : "#475569", fontWeight: symPnlNegative ? 700 : 400 }}>
           pnl {sym_pnl_since_reset >= 0 ? "+" : ""}{sym_pnl_since_reset.toFixed(1)}$
-        </span>
-      </div>
-
-      {/* Cycle budget bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
-        <span style={{ fontSize: 7, color: budgetColor, fontWeight: 700, minWidth: 26 }}>
-          {cycle_prev_quiet && budgetBlocked ? "Q→A⚡" : cycle_prev_quiet ? "Q→A" : "bdg"}
-        </span>
-        <div style={{ flex: 1, height: 3, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-          <div style={{
-            width: `${budgetPct}%`, height: "100%",
-            background: budgetColor,
-            transition: "width 1s linear",
-            boxShadow: budgetBlocked ? `0 0 6px ${budgetColor}` : "none",
-          }} />
-        </div>
-        <span style={{ fontSize: 7, color: budgetColor, fontWeight: 800, minWidth: 34, textAlign: "right",
-          fontFamily: "monospace" }}>
-          {cycle_budget_norm.toFixed(1)}/{CYCLE_BUDGET_MAX}
         </span>
       </div>
 
@@ -1153,7 +1134,7 @@ function K1000Panel() {
     }}>
       <div style={{
         fontSize: 11, fontWeight: 800, color: T.cyan, letterSpacing: "0.07em", marginBottom: 2,
-      }}>900s · 1000s — $10→$20→$40 · CRASH900/BOOM1000 cap:$10</div>
+      }}>900s · 1000s — zona RIPE · $10→$20→WAIT</div>
       <EntradaDiegoSection symbol="BOOM900" />
       <EntradaDiegoSection symbol="CRASH900" />
       <EntradaDiegoSection symbol="BOOM1000" />
@@ -2562,7 +2543,7 @@ export default function DerivOperatorConsole() {
   }, [load, paused]);
 
   // CRASH300N/BOOM300N son ahora MULTI — se muestran en MultiDataPanel, no aquí
-  const SYMBOL_ORDER = ["CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
+  const SYMBOL_ORDER = ["CRASH900", "BOOM900", "BOOM1000", "CRASH1000"];
   const symbols = (data?.symbols || [])
     .filter((s) => SYMBOL_ORDER.includes(s.symbol))
     .slice()
@@ -2594,7 +2575,7 @@ export default function DerivOperatorConsole() {
   const feedRows = symFilter === "ALL" ? confFeed : confFeed.filter((s) => s.symbol === symFilter);
 
   // Símbolos disponibles para filtro: unión de todos los que aparecen en datos reales
-  const _SYM_PREF = ["CRASH300N", "BOOM300N", "CRASH500", "BOOM500", "CRASH600", "BOOM600", "CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
+  const _SYM_PREF = ["CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
   const _spkSyms  = [...new Set(spikeTable.map(r => r.symbol))];
   const _feedSyms = [...new Set(confFeed.map(r => r.symbol))];
   const _allSyms  = [...new Set([..._SYM_PREF, ..._spkSyms, ..._feedSyms])].filter(Boolean);
@@ -2603,7 +2584,7 @@ export default function DerivOperatorConsole() {
     return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
   });
 
-  const selectedSymbol = symFilter === "ALL" ? (symNames[0] || "CRASH500") : symFilter;
+  const selectedSymbol = symFilter === "ALL" ? (symNames[0] || "CRASH900") : symFilter;
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text, fontFamily: FONT_MONO, padding: "16px 18px" }}>
@@ -2653,8 +2634,6 @@ export default function DerivOperatorConsole() {
         gap: 12, marginBottom: 14,
       }}>
         {symbols.map((s) => <SymbolCard key={s.symbol} s={s} />)}
-        <MultiDataPanel />
-        <R75Card />
       </div>
 
       {/* CONFIRMATION FEED */}

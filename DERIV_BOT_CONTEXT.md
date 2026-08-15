@@ -51,6 +51,8 @@ ssh coolify-server "cat /data/logs/audit-reports/MUESTRA_LIMPIA_ACTIVA.txt"
 | 2026-06-24 | 23:19 UTC | Pre-D10.1 dirección corregida. D10 activo con C1/C2/C3 |
 | 2026-07-12 | 19:12 UTC | Nueva máquina 4 niveles: S1($1,10m)→S10($10,15m)→S20($20,15m)→S40($40,15m). Drought gate, hour_change, gate S40≤5spk/h. BOOM500+CRASH500 activos. |
 | 2026-08-05 | 20:39 UTC | Gates completos por símbolo (H24). 8 gates L0+rec. ed_analysis.jsonl archivado → nueva muestra limpia con gates activos. Commit 350d824. |
+| 2026-08-06 | 20:28 UTC | Q→A thresholds por símbolo: CRASH500=1, BOOM600=1, BOOM500=3, CRASH600=3. 884 contratos archivados (PnL total -$202.67). 961 registros JSONL archivados. Bot reiniciado. Commit 1f5fdff. |
+| 2026-08-15 | ~22:00 UTC | Arranque limpio K1000 puro. Símbolos activos: CRASH900/BOOM900/CRASH1000/BOOM1000. Frontend simplificado a 4 tarjetas. Gates WIN (+$10→12h) y LOSS (-$10→3h) implementados. Fix k1000_had_spike restore. Commit 34f154e. |
 
 ---
 
