@@ -157,13 +157,15 @@ export async function GET() {
   const d70BySymbol = (d70Raw && typeof d70Raw === "object") ? (d70Raw.symbols || {}) : {};
   const visionData = (visionRaw && typeof visionRaw === "object") ? visionRaw : {};
 
+  const K1000_SYMS = new Set(["CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
+
   const spikes = (Array.isArray(spikesRaw) ? spikesRaw : [])
-    .filter((s) => s && Number.isFinite(Number(s.ts)))
+    .filter((s) => s && Number.isFinite(Number(s.ts)) && K1000_SYMS.has(s.symbol))
     .map((s) => ({ ...s, ts: Number(s.ts) }))
     .sort((a, b) => a.ts - b.ts);
 
-  const openContracts = Array.isArray(openRaw) ? openRaw : [];
-  const closedContracts = Array.isArray(closedRaw) ? closedRaw : [];
+  const openContracts = (Array.isArray(openRaw) ? openRaw : []).filter((c) => K1000_SYMS.has(c.symbol));
+  const closedContracts = (Array.isArray(closedRaw) ? closedRaw : []).filter((c) => K1000_SYMS.has(c.symbol));
 
   // Live decision stream + tick/analyst context from the bot's status file.
   const lastDecisions = Array.isArray(status?.last_decisions) ? status.last_decisions : [];
@@ -377,7 +379,7 @@ export async function GET() {
   // most recent entry per (symbol, kind) so they don't flood the feed.
   const _seenNoisy = new Set();
   const confirmationFeed = decoratedDecisions
-    .filter((d) => d.level >= 2 && d.ts)
+    .filter((d) => d.level >= 2 && d.ts && K1000_SYMS.has(d.symbol))
     .sort((a, b) => b.ts - a.ts)
     .filter((d) => {
       if (d.kind === "SECO" || d.kind === "TREND_GATE" || d.kind === "AI_VETO") {
@@ -402,19 +404,6 @@ export async function GET() {
       secsAgo: nowSec - d.ts,
     }));
 
-  // Global spike feed (newest first).
-  const spikeFeed = spikes.slice(-40).reverse().map((s) => ({
-    ts: s.ts,
-    iso: s.iso,
-    symbol: s.symbol,
-    direction: s.direction,
-    ratio: s.ratio,
-    jump: s.jump,
-    bot_entered: s.bot_entered,
-    block_reason: s.block_reason,
-    had_open_pos: s.had_open_pos,
-    secsAgo: nowSec - s.ts,
-  }));
 
   // Enriched spike table — per spike: ordinal within the rolling last hour,
   // gap since previous spike of the same symbol, ticks-since-prev-spike.
@@ -481,12 +470,11 @@ export async function GET() {
       totals: {
         symbols: symbols.length,
         openPositions: openContracts.length,
-        spikes24h: spikes.filter((s) => nowSec - s.ts <= 24 * HOUR).length,
+        spikes24h: spikes.filter((s) => nowSec - s.ts <= 24 * HOUR && K1000_SYMS.has(s.symbol)).length,
       },
       symbols,
       openContracts,
       confirmationFeed,
-      spikeFeed,
       spikeTable,
     },
     { headers: { "Cache-Control": "no-store, max-age=0" } }
