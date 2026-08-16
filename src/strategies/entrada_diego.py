@@ -395,31 +395,33 @@ class EntradaDiego:
             _ctx_k = self._ed_ctx(sym, now)
             _gap_k = _ctx_k.get("gap_s", -1.0)
 
-            # ── Gate de zona por símbolo ──────────────────────────────────
+            # ── Gate de zona solo para entrada $10 (idx=0) ───────────────
+            # Escalada a $20 tras loss-sin-spike: abre inmediato, sin esperar zona.
             # CRASH900 / BOOM900 : RIPE+OVERDUE → gap 380-1593s
             # CRASH1000           : solo RIPE    → gap 380-760s
             # BOOM1000            : RIPE+OVERDUE → gap 380-1500s
-            if sym in {"CRASH900", "BOOM900"}:
-                if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 1593.0:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s GATE zona RIPE/OVERDUE (380-1593s): gap=%.0fs → esperar",
-                        sym, _gap_k,
-                    )
-                    return
-            elif sym == "CRASH1000":
-                if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 760.0:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s GATE zona RIPE (380-760s): gap=%.0fs → esperar",
-                        sym, _gap_k,
-                    )
-                    return
-            else:  # BOOM1000
-                if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 1500.0:
-                    _LOGGER.info(
-                        "[ENTRADA_DIEGO] %s GATE zona RIPE/OVERDUE (380-1500s): gap=%.0fs → esperar",
-                        sym, _gap_k,
-                    )
-                    return
+            if _sidx == 0:
+                if sym in {"CRASH900", "BOOM900"}:
+                    if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 1593.0:
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s GATE zona RIPE/OVERDUE (380-1593s): gap=%.0fs → esperar",
+                            sym, _gap_k,
+                        )
+                        return
+                elif sym == "CRASH1000":
+                    if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 760.0:
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s GATE zona RIPE (380-760s): gap=%.0fs → esperar",
+                            sym, _gap_k,
+                        )
+                        return
+                else:  # BOOM1000
+                    if _gap_k < 0 or _gap_k < 380.0 or _gap_k > 1500.0:
+                        _LOGGER.info(
+                            "[ENTRADA_DIEGO] %s GATE zona RIPE/OVERDUE (380-1500s): gap=%.0fs → esperar",
+                            sym, _gap_k,
+                        )
+                        return
 
             state.k1000_spike_triggered = False
             state.k1000_phase    = "IN_CONTRACT"
