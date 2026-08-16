@@ -604,6 +604,11 @@ function EntradaDiegoSection({ symbol }) {
       k1000_spike_triggered  = false,
       k1000_had_spike        = false,
       ed_gap_s: edGap1k      = -1,
+      k1000_rest_until       = 0,
+      k1000_blocked_until    = 0,
+      k1000_win_gate_triggered = false,
+      k1000_win_threshold    = 10,
+      k1000_loss_gate_floor  = 0,
     } = edState;
 
     // Zona por símbolo: CRASH1000 solo RIPE (380-760s); BOOM1000 RIPE+OVERDUE (380-1500s);
@@ -650,8 +655,14 @@ function EntradaDiegoSection({ symbol }) {
                      : "loss sin spike-$20 → WAIT zona";
     const closeColor = k1000_had_spike ? "#22d3a3" : stakeIdx === 0 ? "#f5c43c" : "#ff5d6c";
 
-    const d1k      = edState.day_pnl_1000 || 0;
-    const d1kColor = d1k > 0 ? "#22d3a3" : d1k < 0 ? "#ff5d6c" : "#475569";
+    const d1k        = edState.day_pnl_1000 || 0;
+    const d1kColor   = d1k > 0 ? "#22d3a3" : d1k < 0 ? "#ff5d6c" : "#475569";
+    const restRemS   = Math.max(0, k1000_rest_until - nowSec);
+    const blockRemS  = Math.max(0, k1000_blocked_until - nowSec);
+    const isResting  = restRemS > 0;
+    const isBlocked  = blockRemS > 0;
+    const nextThresh = k1000_win_threshold + 10;
+    const d1kBarPct  = Math.min(100, Math.max(0, (d1k / (k1000_win_threshold * 2)) * 100));
 
     return (
       <div style={{
@@ -700,6 +711,61 @@ function EntradaDiegoSection({ symbol }) {
           </div>
         )}
 
+        {/* REST / BLOCK banners — gates de PnL diario */}
+        {isResting && (
+          <div style={{
+            marginBottom: 5, padding: "5px 8px", borderRadius: 5,
+            background: "#a78bfa15", border: "1px solid #a78bfa40",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ fontSize: 9, fontWeight: 800, color: "#a78bfa", letterSpacing: "0.05em" }}>
+                ⏸ WIN REST
+              </span>
+              <span style={{ fontSize: 9, color: "#a78bfa", fontWeight: 700, marginLeft: "auto" }}>
+                {_fmtS(restRemS)} restante
+              </span>
+            </div>
+            <div style={{ marginTop: 3, height: 2, background: "#a78bfa22", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{
+                width: `${Math.min(100, (1 - restRemS / 43200) * 100)}%`,
+                height: "100%", background: "#a78bfa", transition: "width 5s linear",
+              }} />
+            </div>
+            <div style={{ marginTop: 3, fontSize: 8, color: "#94a3b8" }}>
+              PnL hoy <span style={{ color: "#22d3a3", fontWeight: 700 }}>+${d1k.toFixed(2)}</span>
+              {" "}alcanzó meta <span style={{ color: "#a78bfa", fontWeight: 700 }}>${k1000_win_threshold.toFixed(0)}</span>
+              {" "}→ al reanudar meta <span style={{ color: "#f5c43c", fontWeight: 700 }}>${nextThresh.toFixed(0)}</span>
+            </div>
+          </div>
+        )}
+        {isBlocked && !isResting && (
+          <div style={{
+            marginBottom: 5, padding: "5px 8px", borderRadius: 5,
+            background: "#ff5d6c15", border: "1px solid #ff5d6c40",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ fontSize: 9, fontWeight: 800, color: "#ff5d6c", letterSpacing: "0.05em" }}>
+                🔒 LOSS BLOCK 3h
+              </span>
+              <span style={{ fontSize: 9, color: "#ff5d6c", fontWeight: 700, marginLeft: "auto" }}>
+                {_fmtS(blockRemS)} restante
+              </span>
+            </div>
+            <div style={{ marginTop: 3, height: 2, background: "#ff5d6c22", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{
+                width: `${Math.min(100, (1 - blockRemS / 10800) * 100)}%`,
+                height: "100%", background: "#ff5d6c", transition: "width 5s linear",
+              }} />
+            </div>
+            <div style={{ marginTop: 3, fontSize: 8, color: "#94a3b8" }}>
+              PnL hoy <span style={{ color: "#ff5d6c", fontWeight: 700 }}>{d1k.toFixed(2)}$</span>
+              {" "}≤ floor <span style={{ color: "#ff5d6c", fontWeight: 700 }}>${k1000_loss_gate_floor.toFixed(0)}</span>
+              {" "}→ al reanudar stake <span style={{ color: "#f5c43c", fontWeight: 700 }}>${[10,20][Math.min(stakeIdx,1)].toFixed(0)}</span>
+              {" "}meta <span style={{ color: "#f5c43c", fontWeight: 700 }}>${k1000_win_threshold.toFixed(0)}</span>
+            </div>
+          </div>
+        )}
+
         {/* Zona + gap */}
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
           <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 7px", borderRadius: 4,
@@ -742,14 +808,17 @@ function EntradaDiegoSection({ symbol }) {
           </div>
         )}
 
-        {/* PnL día */}
+        {/* PnL día + meta ratchet */}
         <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3 }}>
           <div style={{ flex: 1, height: 2, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ width: `${Math.min(100, Math.max(0, (d1k / 20) * 100))}%`, height: "100%",
+            <div style={{ width: `${d1kBarPct}%`, height: "100%",
               background: d1kColor, transition: "width 1s linear" }} />
           </div>
           <span style={{ fontSize: 8, color: d1kColor, fontWeight: 700, minWidth: 50, textAlign: "right" }}>
             {d1k >= 0 ? "+" : ""}{d1k.toFixed(2)}$ hoy
+          </span>
+          <span style={{ fontSize: 8, color: "#475569" }}>
+            meta <span style={{ color: isResting ? "#a78bfa" : "#f5c43c", fontWeight: 700 }}>${k1000_win_threshold.toFixed(0)}</span>
           </span>
         </div>
 
