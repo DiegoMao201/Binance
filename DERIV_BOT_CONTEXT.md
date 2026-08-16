@@ -53,6 +53,7 @@ ssh coolify-server "cat /data/logs/audit-reports/MUESTRA_LIMPIA_ACTIVA.txt"
 | 2026-08-05 | 20:39 UTC | Gates completos por símbolo (H24). 8 gates L0+rec. ed_analysis.jsonl archivado → nueva muestra limpia con gates activos. Commit 350d824. |
 | 2026-08-06 | 20:28 UTC | Q→A thresholds por símbolo: CRASH500=1, BOOM600=1, BOOM500=3, CRASH600=3. 884 contratos archivados (PnL total -$202.67). 961 registros JSONL archivados. Bot reiniciado. Commit 1f5fdff. |
 | 2026-08-15 | ~22:00 UTC | Arranque limpio K1000 puro. Símbolos activos: CRASH900/BOOM900/CRASH1000/BOOM1000. Frontend simplificado a 4 tarjetas. Gates WIN (+$10→12h) y LOSS (-$10→3h) implementados. Fix k1000_had_spike restore. Commit 34f154e. |
+| 2026-08-16 | ~09:25 UTC | Incidente: bot caído. Coolify roto (unserialize env vars). Solución: `docker run` vía `ssh coolify-server` con env vars del contenedor -ai. Bot reiniciado con K1000 activo, todos a $10. NUNCA usar `POST /stop` de la API Coolify sin poder garantizar restart. |
 
 ---
 
@@ -87,6 +88,31 @@ Los dos contenedores del bot son **intencionales** — el `-ai` es el orquestado
 | `/data/logs` | `ghost_trades.json`, `deriv_ai_decisions.json`, `deriv_multi_accounts.json` |
 | `/data/deriv-logs` | `deriv_market_context.json` (~7MB, activo) · `deriv_vision.json` |
 | `/data/logs/deriv_vision.json` | Contexto 15m por símbolo generado por Vision LLM |
+
+### Reinicio de emergencia (cuando Coolify falla)
+
+Si el contenedor principal está caído y Coolify no puede reiniciarlo:
+
+```bash
+# 1. Verificar qué imagen existe
+ssh coolify-server "docker images | grep o4w1ns4cceccmn2"
+
+# 2. Recrear el contenedor con env vars del -ai (mismas credenciales)
+ssh coolify-server "docker run -d \
+  --name o4w1ns4cceccmn2ozqt7sol2 \
+  --restart unless-stopped \
+  --network coolify \
+  -v /data/deriv-logs:/data/logs \
+  $(docker inspect o4w1ns4cceccmn2ozqt7sol2-ai --format '{{range .Config.Env}}-e {{.}} {{end}}') \
+  o4w1ns4cceccmn2ozqt7sol2:f8619d80bbaaa733fd41fa2c573ccf1476fec103 \
+  /app/entrypoint.deriv.sh"
+
+# 3. Verificar
+ssh coolify-server "docker logs o4w1ns4cceccmn2ozqt7sol2 --tail 20"
+```
+
+**NUNCA usar `POST /api/v1/applications/{uuid}/stop` de Coolify sin poder garantizar restart.**
+El bot se para pero si Coolify tiene bug de env vars encriptadas, el container queda destruido.
 
 ### Deploy manual (Coolify NO auto-despliega en push)
 
