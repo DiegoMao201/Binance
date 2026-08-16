@@ -121,6 +121,7 @@ class _SymState:
     k1000_had_spike: bool = False
     k1000_last_closed_cid: Optional[int] = None
     k1000_win_gate_triggered: bool = False
+    k1000_win_threshold: float = 10.0      # ratchet: $10 → $20 → $30...
     k1000_loss_gate_floor: float = 0.0
     hour_pnl_1000: float = 0.0
     hour_start_ts_1000: float = 0.0
@@ -167,6 +168,7 @@ class _SymState:
             "k1000_spike_triggered":      self.k1000_spike_triggered,
             "k1000_had_spike":            self.k1000_had_spike,
             "k1000_win_gate_triggered":   self.k1000_win_gate_triggered,
+            "k1000_win_threshold":        round(self.k1000_win_threshold, 2),
             "k1000_loss_gate_floor":      round(self.k1000_loss_gate_floor, 2),
             "k1000_contract_s":       K1000_CONTRACT_S,
             "k1000_spike_contract_s": K1000_SPIKE_CONTRACT_S,
@@ -324,6 +326,7 @@ class EntradaDiego:
             state.day_pnl_1000          = 0.0
             state.day_start_ts_1000     = _cur_day_epoch
             state.k1000_win_gate_triggered = False
+            state.k1000_win_threshold      = SYM_PNL_WIN_GATE_USD
             state.k1000_loss_gate_floor    = 0.0
             _LOGGER.info("[ENTRADA_DIEGO] %s K1000 nuevo día UTC → day_pnl=0 gates reset", sym)
 
@@ -360,19 +363,29 @@ class EntradaDiego:
         # WAIT: verificar gate de fase y abrir contrato
         # ────────────────────────────────────────────────────────────────────
         if phase == "WAIT":
-            # ── WIN gate: primera vez que day_pnl ≥ +$10 → pausa 12h ─────
-            if state.day_pnl_1000 >= SYM_PNL_WIN_GATE_USD:
+            # ── WIN gate ratchet: $10 → $20 → $30... pausa entre niveles ──
+            _win_thresh = getattr(state, 'k1000_win_threshold', SYM_PNL_WIN_GATE_USD)
+            if state.day_pnl_1000 >= _win_thresh:
                 if not getattr(state, 'k1000_win_gate_triggered', False):
                     state.k1000_win_gate_triggered = True
                     state.k1000_rest_until = now + SYM_PNL_WIN_PAUSE_H * 3600.0
                     self._persist(now)
                     _LOGGER.info(
                         "[ENTRADA_DIEGO] %s K1000 WIN GATE day=+$%.2f ≥ +$%.0f → pausa %.0fh hasta %s UTC",
-                        sym, state.day_pnl_1000, SYM_PNL_WIN_GATE_USD, SYM_PNL_WIN_PAUSE_H,
+                        sym, state.day_pnl_1000, _win_thresh, SYM_PNL_WIN_PAUSE_H,
                         datetime.datetime.utcfromtimestamp(state.k1000_rest_until).strftime('%H:%M'),
                     )
                 if state.k1000_rest_until > now:
                     return
+                # Pausa expirada → avanzar ratchet al siguiente nivel
+                if state.k1000_win_gate_triggered:
+                    _next_thresh = _win_thresh + SYM_PNL_WIN_GATE_USD
+                    state.k1000_win_threshold      = _next_thresh
+                    state.k1000_win_gate_triggered = False
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s K1000 WIN REST expiró → nivel $%.0f alcanzado, próxima meta $%.0f",
+                        sym, _win_thresh, _next_thresh,
+                    )
 
             # ── LOSS gate: cada -$10 adicional acumulado → pausa 3h ──────
             _loss_floor = getattr(state, 'k1000_loss_gate_floor', 0.0)
@@ -856,6 +869,7 @@ class EntradaDiego:
                         st.k1000_cycle_stake      = K1000_STAKES_1000[max(0, min(st.k1000_stake_idx, len(K1000_STAKES_1000) - 1))]
                         st.k1000_had_spike        = bool(s.get("k1000_had_spike", False))
                         st.k1000_win_gate_triggered = bool(s.get("k1000_win_gate_triggered", False))
+                        st.k1000_win_threshold    = float(s.get("k1000_win_threshold", SYM_PNL_WIN_GATE_USD))
                         st.k1000_loss_gate_floor  = float(s.get("k1000_loss_gate_floor", 0.0))
                         st.day_pnl_1000           = float(s.get("day_pnl_1000", 0.0))
                         st.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
@@ -902,6 +916,7 @@ class EntradaDiego:
                 _st_1k.k1000_cycle_stake      = K1000_STAKES_1000[max(0, min(_st_1k.k1000_stake_idx, len(K1000_STAKES_1000) - 1))]
                 _st_1k.k1000_had_spike        = bool(s.get("k1000_had_spike", False))
                 _st_1k.k1000_win_gate_triggered = bool(s.get("k1000_win_gate_triggered", False))
+                _st_1k.k1000_win_threshold    = float(s.get("k1000_win_threshold", SYM_PNL_WIN_GATE_USD))
                 _st_1k.k1000_loss_gate_floor  = float(s.get("k1000_loss_gate_floor", 0.0))
                 _st_1k.day_pnl_1000           = float(s.get("day_pnl_1000", 0.0))
                 _st_1k.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
