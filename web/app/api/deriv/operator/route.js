@@ -17,6 +17,7 @@ const VISION_FILE = path.join(DERIV_LOGS, "deriv_vision.json");
 const COOLDOWN_FILE = path.join(DERIV_LOGS, "d6_cooldown_state.json");
 const D67_REGIME_FILE = path.join(DERIV_LOGS, "d67_regime_state.json");
 const D70_REGIME_FILE = path.join(DERIV_LOGS, "d70_regime_state.json");
+const ED_STATE_FILE = path.join(DERIV_LOGS, "entrada_diego_state.json");
 
 async function readJson(file, fallback) {
   try {
@@ -141,7 +142,7 @@ function classifyDecision(d) {
 export async function GET() {
   const nowSec = Date.now() / 1000;
 
-  const [spikesRaw, openRaw, closedRaw, status, session, visionRaw, cooldownRaw, d67Raw, d70Raw] = await Promise.all([
+  const [spikesRaw, openRaw, closedRaw, status, session, visionRaw, cooldownRaw, d67Raw, d70Raw, edStateRaw] = await Promise.all([
     readJson(SPIKE_FILE, []),
     readJson(OPEN_FILE, []),
     readJson(CLOSED_FILE, []),
@@ -151,7 +152,9 @@ export async function GET() {
     readJson(COOLDOWN_FILE, {}),
     readJson(D67_REGIME_FILE, {}),
     readJson(D70_REGIME_FILE, {}),
+    readJson(ED_STATE_FILE, {}),
   ]);
+  const edState = edStateRaw && typeof edStateRaw === "object" ? edStateRaw : {};
   const cooldownBySymbol = (cooldownRaw && typeof cooldownRaw === "object") ? (cooldownRaw.symbols || {}) : {};
   const d67BySymbol = (d67Raw && typeof d67Raw === "object") ? (d67Raw.symbols || {}) : {};
   const d70BySymbol = (d70Raw && typeof d70Raw === "object") ? (d70Raw.symbols || {}) : {};
@@ -476,6 +479,7 @@ export async function GET() {
       openContracts,
       confirmationFeed,
       spikeTable,
+      ed: edState,
     },
     { headers: { "Cache-Control": "no-store, max-age=0" } }
   );
