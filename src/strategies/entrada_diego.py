@@ -182,6 +182,7 @@ class _SymState:
             "hour_pnl_1000":          round(self.hour_pnl_1000, 4),
             "hour_start_ts_1000":     round(self.hour_start_ts_1000, 3),
             "day_pnl_1000":           round(self.day_pnl_1000, 4),
+            "day_start_ts_1000":      round(self.day_start_ts_1000, 3),
         }
 
 
@@ -854,6 +855,7 @@ class EntradaDiego:
                         st.k1000_win_gate_triggered = bool(s.get("k1000_win_gate_triggered", False))
                         st.k1000_loss_gate_floor  = float(s.get("k1000_loss_gate_floor", 0.0))
                         st.day_pnl_1000           = float(s.get("day_pnl_1000", 0.0))
+                        st.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
                         st.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
                         st.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
@@ -890,6 +892,7 @@ class EntradaDiego:
                 _st_1k.k1000_win_gate_triggered = bool(s.get("k1000_win_gate_triggered", False))
                 _st_1k.k1000_loss_gate_floor  = float(s.get("k1000_loss_gate_floor", 0.0))
                 _st_1k.day_pnl_1000           = float(s.get("day_pnl_1000", 0.0))
+                _st_1k.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
                 _st_1k.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
                 _st_1k.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
                 # Restaurar REST/BLOCK si estaban activos
