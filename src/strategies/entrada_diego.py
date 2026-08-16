@@ -179,6 +179,7 @@ class _SymState:
             "k1000_scout_s":          K1000_SCOUT_S,
             "k1000_hold_s":           K1000_HOLD_S,
             "k1000_blocked_until":    round(self.k1000_blocked_until, 3),
+            "k1000_rest_until":       round(self.k1000_rest_until, 3),
             "hour_pnl_1000":          round(self.hour_pnl_1000, 4),
             "hour_start_ts_1000":     round(self.hour_start_ts_1000, 3),
             "day_pnl_1000":           round(self.day_pnl_1000, 4),
@@ -860,6 +861,15 @@ class EntradaDiego:
                         st.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
                         st.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
                         st.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
+                        # Restaurar REST/BLOCK si estaban activos (igual que ruta sin contrato)
+                        _rut_c = float(s.get("k1000_rest_until", 0.0))
+                        if _rut_c > now:
+                            st.k1000_rest_until       = _rut_c
+                            st.k1000_rest_spike_ref   = float(s.get("k1000_rest_spike_ref", 0.0))
+                            st.k1000_rest_good_spikes = int(s.get("k1000_rest_good_spikes", 0))
+                        _but_c = float(s.get("k1000_blocked_until", 0.0))
+                        if _but_c > now:
+                            st.k1000_blocked_until    = _but_c
                         if phase == "PROFIT_TIMER" and float(s.get("profit_positive_ts", 0.0)) > 0:
                             st.phase              = "PROFIT_TIMER"
                             st.profit_positive_ts = float(s["profit_positive_ts"])
