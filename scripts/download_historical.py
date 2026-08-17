@@ -87,11 +87,16 @@ def head_url(url: str, timeout: int = 10) -> int:
         return 0
 
 
-def download_bytes(url: str, timeout: int = 60) -> Optional[bytes]:
+def download_bytes(url: str, timeout: int = 60, silent_404: bool = False) -> Optional[bytes]:
     try:
         req = Request(url, headers={"User-Agent": "binance-downloader/1.0"})
         with urlopen(req, timeout=timeout) as resp:
             return resp.read()
+    except HTTPError as e:
+        if silent_404 and e.code in (400, 404):
+            return None  # symbol not listed in this period — expected, not an error
+        print(f"    ERROR downloading {url}: HTTP {e.code}", file=sys.stderr)
+        return None
     except Exception as e:
         print(f"    ERROR downloading {url}: {e}", file=sys.stderr)
         return None
@@ -336,7 +341,7 @@ def download_tardis_samples(symbol: str, start: date, end: date, out_dir: Path) 
             continue
 
         url = f"{TARDIS_BASE}/{year}/{month:02d}/01/{sym_lower}.csv.gz"
-        data = download_bytes(url)
+        data = download_bytes(url, silent_404=True)  # 400/404 = symbol not listed yet
         if data is None:
             stats["failed"] += 1
             continue
