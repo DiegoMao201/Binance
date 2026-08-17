@@ -20,6 +20,7 @@ from ..recorder.state import MarketState
 from .fill_simulator import FillSimulator, OpenOrder
 from .markout import MarkoutTracker
 from .strategy_random import BaselineRandom, STRATEGY_NAME
+from .strategy_burnin import BurnIn
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,9 @@ class ShadowMotor:
 
         self._tracker = MarkoutTracker(db, state)
         self._sim = FillSimulator(db, state, self._tracker)
-        self._strategies: List[BaselineRandom] = [
-            BaselineRandom(symbols, state, self._sim)
+        self._strategies = [
+            BaselineRandom(symbols, state, self._sim),
+            BurnIn(symbols, state, self._sim),
         ]
 
     def tasks(self) -> list:

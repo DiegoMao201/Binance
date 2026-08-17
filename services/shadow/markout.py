@@ -131,11 +131,12 @@ class MarkoutTracker:
                 # History not in memory — try DB snapshot (after restart)
                 mid = await self._mid_from_db(pm.symbol, target_us)
             if mid is None:
-                # Still no data — use current mid only if well past the horizon
-                if elapsed_s > h + 5:
-                    mid = self._state.get_mid(pm.symbol)
-            if mid is None:
-                still_pending.append(h)
+                # No data available — never fall back to current mid.
+                # NULL is honest ("we don't know"); current mid would bias toward 0,
+                # masking adverse selection. Give up after 5 min and leave as NULL.
+                if elapsed_s < h + 300:
+                    still_pending.append(h)
+                # else: column stays NULL in DB — correct, not silence
                 continue
 
             sign = Decimal(1) if pm.side == "BUY" else Decimal(-1)

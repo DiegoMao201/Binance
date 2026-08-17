@@ -21,6 +21,7 @@ import sys
 import asyncpg
 
 from .config import RecorderConfig
+from .disk_guard import DiskGuardLoop, check_disk
 from .health import HealthMonitor
 from .rest_poller import RestPoller
 from .state import MarketState
@@ -43,6 +44,10 @@ async def run() -> None:
 
     os.makedirs(cfg.raw_dir, exist_ok=True)
     os.makedirs(cfg.parquet_dir, exist_ok=True)
+
+    # Disk guard — startup check before doing anything else
+    check_disk(cfg.data_dir, warn_pct=25.0, stop_pct=10.0)
+    logger.info("disk guard: OK")
 
     db: asyncpg.Pool = await asyncpg.create_pool(cfg.database_url, min_size=2, max_size=8)
 
@@ -82,6 +87,12 @@ async def run() -> None:
         all_tasks.append(
             asyncio.create_task(poller.run_mark_prices_rest(), name="rest-mark-prices")
         )
+    all_tasks.append(
+        asyncio.create_task(
+            DiskGuardLoop(cfg.data_dir, warn_pct=25.0, stop_pct=10.0).run(),
+            name="disk-guard",
+        )
+    )
 
     stop_event = asyncio.Event()
 
