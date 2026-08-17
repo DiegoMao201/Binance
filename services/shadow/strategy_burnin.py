@@ -14,7 +14,7 @@ import asyncio
 import logging
 import random
 from decimal import Decimal
-from typing import List, Optional
+from typing import List
 
 from ..recorder.state import MarketState
 from .fill_simulator import FillSimulator
@@ -22,9 +22,9 @@ from .fill_simulator import FillSimulator
 logger = logging.getLogger(__name__)
 
 STRATEGY_NAME = "baseline_burnin"
-SIGNAL_INTERVAL_S = 5.0      # 5s per symbol → ~72 attempts/min across 6 symbols
+SIGNAL_INTERVAL_S = 5.0      # 5s per symbol, no single-order gate → many concurrent per symbol
 ORDER_NOTIONAL = 10.0
-BURNIN_FILL_TARGET = 500     # auto-stop after 500 fills
+BURNIN_FILL_TARGET = 2000    # auto-stop after 2000 fills (min for statistical conclusions)
 
 
 class BurnIn:
@@ -42,7 +42,7 @@ class BurnIn:
         self._symbols = symbols
         self._state = state
         self._sim = simulator
-        self._active: dict[str, Optional[int]] = {s: None for s in symbols}
+        self._active: dict[str, set[int]] = {s: set() for s in symbols}
         self._fill_count = 0
         self._stopped = False
 
@@ -66,8 +66,9 @@ class BurnIn:
             if self._stopped:
                 break
             try:
-                if self._active[symbol] is not None:
-                    continue
+                # No single-order gate: place every 5s regardless of pending count.
+                # Multiple concurrent pending orders per symbol increase fill throughput
+                # toward the 2000-fill statistical minimum.
                 await self._place_signal(symbol)
             except asyncio.CancelledError:
                 break
@@ -104,12 +105,12 @@ class BurnIn:
             qty=qty,
         )
         if trade_id is not None:
-            self._active[symbol] = trade_id
+            self._active[symbol].add(trade_id)
 
     def on_order_resolved(self, trade_id: int, filled: bool) -> None:
-        for sym, active_id in self._active.items():
-            if active_id == trade_id:
-                self._active[sym] = None
+        for sym, active_ids in self._active.items():
+            if trade_id in active_ids:
+                active_ids.discard(trade_id)
                 if filled:
                     self._fill_count += 1
                     if self._fill_count >= BURNIN_FILL_TARGET:

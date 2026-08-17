@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 
 HORIZONS_S = [1, 5, 30, 60]   # seconds
 HORIZON_COLS = {1: "markout_1s", 5: "markout_5s", 30: "markout_30s", 60: "markout_60s"}
+# bps columns: markout_h_bps = half_spread_captured_bps + adverse_drift_h_bps
+HORIZON_BPS_COLS   = {1: "markout_1s_bps",       5: "markout_5s_bps",
+                      30: "markout_30s_bps",     60: "markout_60s_bps"}
+HORIZON_DRIFT_COLS = {1: "adverse_drift_1s_bps", 5: "adverse_drift_5s_bps",
+                      30: "adverse_drift_30s_bps", 60: "adverse_drift_60s_bps"}
 
 
 @dataclass
@@ -40,6 +45,7 @@ class PendingMarkout:
     side: str              # "BUY" or "SELL"
     fill_price: Decimal
     fill_ts_us: int        # microseconds, monotonic-derived
+    mid_at_fill: Optional[Decimal]   # mid price at fill instant, for bps decomposition
     remaining_horizons: List[int] = field(default_factory=lambda: list(HORIZONS_S))
 
 
@@ -60,10 +66,11 @@ class MarkoutTracker:
         symbol: str,
         side: str,
         fill_price: Decimal,
+        mid_at_fill: Optional[Decimal] = None,
     ) -> None:
         fill_ts_us = time.time_ns() // 1000
         self._pending.append(
-            PendingMarkout(trade_id, symbol, side, fill_price, fill_ts_us)
+            PendingMarkout(trade_id, symbol, side, fill_price, fill_ts_us, mid_at_fill)
         )
 
     async def backfill_on_startup(self) -> None:
@@ -74,7 +81,7 @@ class MarkoutTracker:
         """
         rows = await self._db.fetch(
             """
-            SELECT id, symbol, side, fill_price,
+            SELECT id, symbol, side, fill_price, mid_at_fill,
                    extract(epoch from fill_ts) * 1e6 AS fill_ts_us
             FROM shadow_trades
             WHERE fill_ts IS NOT NULL
@@ -83,6 +90,7 @@ class MarkoutTracker:
             """
         )
         for row in rows:
+            mid_at_fill = Decimal(str(row["mid_at_fill"])) if row["mid_at_fill"] is not None else None
             self._pending.append(
                 PendingMarkout(
                     trade_id=row["id"],
@@ -90,6 +98,7 @@ class MarkoutTracker:
                     side=row["side"],
                     fill_price=Decimal(str(row["fill_price"])),
                     fill_ts_us=int(row["fill_ts_us"]),
+                    mid_at_fill=mid_at_fill,
                 )
             )
         if rows:
@@ -117,6 +126,7 @@ class MarkoutTracker:
 
         updates: Dict[str, float] = {}
         still_pending: List[int] = []
+        sign = Decimal(1) if pm.side == "BUY" else Decimal(-1)
 
         for h in pm.remaining_horizons:
             elapsed_s = (now_us - pm.fill_ts_us) / 1_000_000
@@ -139,10 +149,22 @@ class MarkoutTracker:
                 # else: column stays NULL in DB — correct, not silence
                 continue
 
-            sign = Decimal(1) if pm.side == "BUY" else Decimal(-1)
-            markout = float(sign * (mid - pm.fill_price))
-            col = HORIZON_COLS[h]
-            updates[col] = markout
+            # Raw markout (legacy columns, kept for backward compatibility)
+            raw_markout = float(sign * (mid - pm.fill_price))
+            updates[HORIZON_COLS[h]] = raw_markout
+
+            # bps markout: 10000 * sign * (mid_h - fill_price) / fill_price
+            if pm.fill_price > 0:
+                updates[HORIZON_BPS_COLS[h]] = float(
+                    10_000 * sign * (mid - pm.fill_price) / pm.fill_price
+                )
+
+            # bps adverse drift: 10000 * sign * (mid_h - mid_at_fill) / mid_at_fill
+            # Only meaningful when we have mid_at_fill; NULL is correct otherwise.
+            if pm.mid_at_fill is not None and pm.mid_at_fill > 0:
+                updates[HORIZON_DRIFT_COLS[h]] = float(
+                    10_000 * sign * (mid - pm.mid_at_fill) / pm.mid_at_fill
+                )
 
         pm.remaining_horizons = still_pending
 

@@ -157,11 +157,21 @@ class FillSimulator:
             sigma = compute_realized_vol(self._state, order.symbol)
             vpin = compute_vpin_bucket(self._state, order.symbol)
 
+            # Compute half-spread captured at fill time (bps).
+            # mid_at_fill is the mid price the moment the order fills;
+            # half_spread = how far our limit was from mid at that instant.
+            half_spread_bps = None
+            if mid is not None and mid > 0:
+                sign = Decimal(1) if order.side == "BUY" else Decimal(-1)
+                half_spread_bps = float(10_000 * sign * (mid - order.price) / mid)
+
             await self._db.execute(
                 """
                 UPDATE shadow_trades SET
                     fill_ts = NOW(), fill_price = $2, status = 'FILLED',
                     queue_pos_at_fill = 0,
+                    mid_at_fill = $5,
+                    half_spread_captured_bps = $6,
                     sigma_realized_60m = $3, vpin_bucket = $4
                 WHERE id = $1
                 """,
@@ -169,12 +179,15 @@ class FillSimulator:
                 float(order.price),
                 sigma,
                 vpin,
+                float(mid) if mid is not None else None,
+                half_spread_bps,
             )
             self._mo.register(
                 trade_id=order.db_id,
                 symbol=order.symbol,
                 side=order.side,
                 fill_price=order.price,
+                mid_at_fill=mid,
             )
             logger.debug(f"fill [{order.strategy_name}] {order.symbol} {order.side} @ {order.price}")
 

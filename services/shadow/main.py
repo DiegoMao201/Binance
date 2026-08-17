@@ -88,13 +88,34 @@ class ShadowMotor:
 
     async def _equity_loop(self) -> None:
         """Snapshot equity curve and order budget into DB every 60 s."""
+        _liq_check_ticks = 0
         while True:
             await asyncio.sleep(60.0)
             try:
                 await self._snapshot_equity()
                 await self._sim.flush_order_budget()
+                _liq_check_ticks += 1
+                if _liq_check_ticks >= 30:   # every 30 min
+                    _liq_check_ticks = 0
+                    await self._check_liquidations_alert()
             except Exception as e:
                 logger.warning(f"equity snapshot: {e}")
+
+    async def _check_liquidations_alert(self) -> None:
+        """Log an error if no liquidation events have been recorded in 6 hours.
+        The market is never that quiet — this means the futures WS is not delivering data."""
+        try:
+            row = await self._db.fetchrow(
+                "SELECT COUNT(*) AS cnt FROM binance_liquidations "
+                "WHERE ts > NOW() - INTERVAL '6 hours'"
+            )
+            if row is not None and row["cnt"] == 0:
+                logger.error(
+                    "LIQUIDATIONS_ALERT: no liquidation events in 6h — "
+                    "futures WS likely geo-blocked or disconnected"
+                )
+        except Exception as e:
+            logger.warning(f"liquidations alert check: {e}")
 
     async def _snapshot_equity(self) -> None:
         ts = datetime.now(tz=timezone.utc)
