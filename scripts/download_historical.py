@@ -50,9 +50,28 @@ SYMBOLS_FUTURES = [
 
 LIQ_END_DATE = date(2024, 3, 31)    # last known date for liquidationSnapshot
 LIQ_START_DATE = date(2020, 1, 1)
-OI_START_DATE = date(2020, 1, 1)
-AGG_START_DATE = date(2019, 1, 1)
+OI_START_DATE = date(2020, 9, 1)    # metrics start 2020-09-01 per S3 listing
+AGG_START_DATE = date(2020, 1, 1)
 TARDIS_START = date(2020, 1, 1)
+
+# Known crisis months worth downloading for cascade analysis (saves 95% of disk)
+CRISIS_MONTHS = [
+    (2020, 3),   # COVID crash
+    (2021, 5),   # crypto crash
+    (2021, 9),   # China ban
+    (2022, 5),   # LUNA collapse
+    (2022, 11),  # FTX collapse
+    (2023, 3),   # USDC depeg / SVB
+    (2023, 8),   # regulatory sell-off
+    (2024, 1),   # ETF approval (high OI delta)
+    (2024, 3),   # post-ETF crash
+]
+
+# Estimated compressed file sizes (MB), for storage checks
+AGG_MB_PER_MONTH = {
+    "BTCUSDT": 800, "ETHUSDT": 400, "SOLUSDT": 120,
+    "XRPUSDT": 100, "DOGEUSDT": 80, "LINKUSDT": 60, "BNBUSDT": 150,
+}
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -104,43 +123,90 @@ def iter_days(start: date, end: date) -> Iterator[date]:
 
 # ── Range verification ────────────────────────────────────────────────────────
 
-def check_liq_snapshot_range(symbol: str) -> dict:
-    """Probe the actual available date range for liquidationSnapshot."""
-    prefix = f"data/futures/um/daily/liquidationSnapshot/{symbol}"
-    result = {"symbol": symbol, "first_date": None, "last_date": None, "sample_count": 0}
+def s3_list(prefix: str, max_keys: int = 10) -> List[str]:
+    """Return S3 object keys under prefix using XML listing."""
+    url = (
+        f"https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+        f"?delimiter=/&prefix={prefix}&max-keys={max_keys}"
+    )
+    data = download_bytes(url, timeout=15)
+    if not data:
+        return []
+    text = data.decode()
+    import re
+    return re.findall(r"<Key>(.*?)</Key>", text)
 
-    # probe known boundary
-    last_known = LIQ_END_DATE
-    while last_known >= date(2024, 1, 1):
-        url = f"{BASE_URL}/{prefix}/{symbol}-liquidationSnapshot-{last_known.isoformat()}.zip"
-        status = head_url(url)
-        if status == 200:
-            result["last_date"] = last_known.isoformat()
-            break
-        last_known -= timedelta(days=1)
 
-    # probe start
-    first = LIQ_START_DATE
-    while first <= date(2021, 1, 1):
-        url = f"{BASE_URL}/{prefix}/{symbol}-liquidationSnapshot-{first.isoformat()}.zip"
-        status = head_url(url)
-        if status == 200:
-            result["first_date"] = first.isoformat()
-            break
-        first += timedelta(days=1)
-
-    return result
+def check_liquidation_snapshot_exists() -> bool:
+    """Fast check: does the liquidationSnapshot dataset still exist in S3?"""
+    keys = s3_list("data/futures/um/daily/liquidationSnapshot/BTCUSDT/", max_keys=3)
+    return len(keys) > 0
 
 
 def check_ranges(symbols: List[str]) -> dict:
+    """Check available date ranges for all datasets via S3 listing."""
     print("Checking available date ranges…")
-    info = {}
-    for sym in symbols:
-        print(f"  {sym}…", end=" ", flush=True)
-        r = check_liq_snapshot_range(sym)
-        info[sym] = r
-        print(f"  liq: {r['first_date']} → {r['last_date']}")
-        time.sleep(0.3)
+    info: dict = {}
+
+    # liquidationSnapshot
+    liq_exists = check_liquidation_snapshot_exists()
+    if not liq_exists:
+        print("  ⚠ liquidationSnapshot: GONE from S3 (removed without notice)")
+        info["liquidationSnapshot"] = {"status": "GONE", "note": "Removed from data.binance.vision"}
+    else:
+        # find actual date range via S3 listing
+        for sym in symbols[:1]:  # just check BTCUSDT
+            keys = s3_list(f"data/futures/um/daily/liquidationSnapshot/{sym}/", max_keys=5)
+            dates = sorted(k.split("-liquidationSnapshot-")[1].replace(".zip","")
+                           for k in keys if "liquidationSnapshot" in k and ".zip" in k and "CHECKSUM" not in k)
+            if dates:
+                info["liquidationSnapshot"] = {"first": dates[0], "sample": dates[:3]}
+        print(f"  liquidationSnapshot: {'found' if liq_exists else 'NOT FOUND'}")
+
+    # metrics — check first and last available date
+    for sym in symbols[:1]:
+        keys_first = s3_list(f"data/futures/um/daily/metrics/{sym}/", max_keys=3)
+        first_dates = sorted(k.split(f"-metrics-")[1].replace(".zip","").replace(".CHECKSUM","")
+                             for k in keys_first if "metrics" in k and "CHECKSUM" not in k and ".zip" in k)
+        # get last
+        last_marker = f"data/futures/um/daily/metrics/{sym}/{sym}-metrics-2026-07-30.zip"
+        url = (
+            f"https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+            f"?delimiter=/&prefix=data/futures/um/daily/metrics/{sym}/&max-keys=5"
+            f"&marker={last_marker}"
+        )
+        data = download_bytes(url, timeout=15)
+        import re
+        last_keys = re.findall(r"<Key>(.*?)</Key>", data.decode() if data else "")
+        last_dates = sorted(k.split(f"-metrics-")[1].replace(".zip","").replace(".CHECKSUM","")
+                            for k in last_keys if "metrics" in k and "CHECKSUM" not in k and ".zip" in k)
+        info["metrics"] = {
+            "first": first_dates[0] if first_dates else "unknown",
+            "last": last_dates[-1] if last_dates else "unknown",
+        }
+        print(f"  metrics: {info['metrics']['first']} → {info['metrics']['last']}")
+
+    # aggTrades monthly
+    for sym in symbols[:1]:
+        keys_first = s3_list(f"data/futures/um/monthly/aggTrades/{sym}/", max_keys=3)
+        first_mo = sorted(k.split(f"-aggTrades-")[1].replace(".zip","").replace(".CHECKSUM","")
+                          for k in keys_first if "aggTrades" in k and "CHECKSUM" not in k and ".zip" in k)
+        last_marker = f"data/futures/um/monthly/aggTrades/{sym}/{sym}-aggTrades-2026-05.zip"
+        url2 = (
+            f"https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+            f"?delimiter=/&prefix=data/futures/um/monthly/aggTrades/{sym}/&max-keys=5"
+            f"&marker={last_marker}"
+        )
+        data2 = download_bytes(url2, timeout=15)
+        last_mo_keys = re.findall(r"<Key>(.*?)</Key>", data2.decode() if data2 else "")
+        last_mo = sorted(k.split(f"-aggTrades-")[1].replace(".zip","").replace(".CHECKSUM","")
+                         for k in last_mo_keys if "aggTrades" in k and "CHECKSUM" not in k and ".zip" in k)
+        info["aggTrades"] = {
+            "first": first_mo[0] if first_mo else "unknown",
+            "last": last_mo[-1] if last_mo else "unknown",
+        }
+        print(f"  aggTrades: {info['aggTrades']['first']} → {info['aggTrades']['last']}")
+
     return info
 
 
@@ -302,14 +368,28 @@ def write_informe(report: dict) -> Path:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def disk_free_gb(path: Path) -> float:
+    import shutil
+    stat = shutil.disk_usage(path)
+    return stat.free / 1024**3
+
+
+def estimate_agg_gb(symbols: List[str], months: List[tuple]) -> float:
+    """Rough estimate of compressed GB for the given symbols × months."""
+    mb_per_month = sum(AGG_MB_PER_MONTH.get(s, 100) for s in symbols)
+    return mb_per_month * len(months) / 1024
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download Binance historical datasets")
     parser.add_argument("--check-range", action="store_true", help="Only probe date ranges")
-    parser.add_argument("--liq",    action="store_true", help="Download liquidationSnapshot")
-    parser.add_argument("--oi",     action="store_true", help="Download OI metrics")
-    parser.add_argument("--agg",    action="store_true", help="Download aggTrades (monthly)")
+    parser.add_argument("--liq",    action="store_true", help="Download liquidationSnapshot (likely gone)")
+    parser.add_argument("--oi",     action="store_true", help="Download OI metrics (recommended first step)")
+    parser.add_argument("--agg",    action="store_true", help="Download aggTrades monthly")
     parser.add_argument("--tardis", action="store_true", help="Download Tardis free day-1 samples")
-    parser.add_argument("--all",    action="store_true", help="Download all datasets")
+    parser.add_argument("--all",    action="store_true", help="Download oi + agg + tardis (skips liq if gone)")
+    parser.add_argument("--crisis-only", action="store_true",
+                        help="For --agg: download only known crisis months instead of all")
     parser.add_argument(
         "--symbols", nargs="+", default=SYMBOLS_FUTURES,
         help="Futures symbols to download",
@@ -317,7 +397,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if not any([args.check_range, args.liq, args.oi, args.agg, args.tardis, args.all]):
-        args.all = True
+        # Default: range check + OI metrics only (safe, small)
+        args.check_range = True
+        args.oi = True
 
     symbols = args.symbols
     today = date.today()
@@ -327,6 +409,10 @@ def main() -> int:
         "datasets": {},
     }
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    free_gb = disk_free_gb(DATA_DIR)
+    print(f"Disk free: {free_gb:.1f} GB on {DATA_DIR}")
+
     t0 = time.time()
 
     if args.check_range or args.all:
@@ -334,50 +420,76 @@ def main() -> int:
         report["date_ranges"] = ranges
 
     if args.liq or args.all:
-        print(f"\nDownloading liquidationSnapshot ({LIQ_START_DATE} → {LIQ_END_DATE})")
-        for sym in symbols:
-            print(f"  {sym}…")
-            out = DATA_DIR / "liquidationSnapshot" / sym
-            stats = download_liq_snapshot(sym, LIQ_START_DATE, LIQ_END_DATE, out)
-            report["datasets"].setdefault("liquidationSnapshot", {})[sym] = stats
-            print(f"    ✓ {stats['downloaded']} downloaded, {stats['skipped']} skipped, "
-                  f"{stats['events']} events, {bytes_human(stats['bytes'])}")
+        liq_exists = check_liquidation_snapshot_exists()
+        if not liq_exists:
+            print("\n⚠  liquidationSnapshot: GONE from S3 — skipping")
+            print("   Dataset was removed without notice. Use OI+aggTrades cascade proxy instead.")
+            report["datasets"]["liquidationSnapshot"] = {"status": "GONE_FROM_S3"}
+        else:
+            print(f"\nDownloading liquidationSnapshot ({LIQ_START_DATE} → {LIQ_END_DATE})")
+            for sym in symbols:
+                print(f"  {sym}…")
+                out = DATA_DIR / "liquidationSnapshot" / sym
+                stats = download_liq_snapshot(sym, LIQ_START_DATE, LIQ_END_DATE, out)
+                report["datasets"].setdefault("liquidationSnapshot", {})[sym] = stats
+                print(f"    ✓ {stats['downloaded']} downloaded, {stats['skipped']} skipped, "
+                      f"{stats['events']} events, {bytes_human(stats['bytes'])}")
 
     if args.oi or args.all:
         print(f"\nDownloading OI metrics ({OI_START_DATE} → {today})")
+        est_mb = 2 * len(symbols) * (today - OI_START_DATE).days / 30  # ~2KB/day/symbol
+        print(f"  Estimated size: ~{est_mb:.0f} MB for {len(symbols)} symbols")
         for sym in symbols:
-            print(f"  {sym}…")
+            print(f"  {sym}…", end=" ", flush=True)
             out = DATA_DIR / "metrics" / sym
             stats = download_oi_metrics(sym, OI_START_DATE, today, out)
             report["datasets"].setdefault("metrics", {})[sym] = stats
-            print(f"    ✓ {stats['downloaded']} downloaded, {stats['skipped']} skipped, "
-                  f"{bytes_human(stats['bytes'])}")
+            print(f"✓ {stats['downloaded']}↓ {stats['skipped']}= {bytes_human(stats['bytes'])}")
 
     if args.agg or args.all:
-        print(f"\nDownloading aggTrades monthly ({AGG_START_DATE} → {today})")
+        if args.crisis_only:
+            months = CRISIS_MONTHS
+            est_gb = estimate_agg_gb(symbols, months)
+            print(f"\nDownloading aggTrades (crisis months only: {len(months)} months × {len(symbols)} symbols)")
+            print(f"  Estimated: ~{est_gb:.1f} GB compressed")
+        else:
+            months = list(iter_months(AGG_START_DATE, today))
+            est_gb = estimate_agg_gb(symbols, months)
+            print(f"\nDownloading ALL aggTrades monthly ({AGG_START_DATE} → {today})")
+            print(f"  Estimated: ~{est_gb:.1f} GB compressed — need {est_gb:.0f} GB free (have {free_gb:.1f} GB)")
+            if est_gb > free_gb * 0.8:
+                print("  ⚠  Not enough disk space for full download. Use --crisis-only instead.")
+                if not input("  Continue anyway? [y/N] ").strip().lower().startswith("y"):
+                    print("  Aborted.")
+                    return 1
+
         for sym in symbols:
             print(f"  {sym}…")
             out = DATA_DIR / "aggTrades" / sym
-            stats = download_agg_trades(sym, AGG_START_DATE, today, out)
-            report["datasets"].setdefault("aggTrades", {})[sym] = stats
-            print(f"    ✓ {stats['downloaded']} downloaded, {stats['skipped']} skipped, "
-                  f"{bytes_human(stats['bytes'])}")
+            for year, month in months:
+                start_m = date(year, month, 1)
+                end_m = date(year, month, 1)
+                s = download_agg_trades(sym, start_m, end_m, out)
+                if s["downloaded"]:
+                    print(f"    {year}-{month:02d}: {bytes_human(s['bytes'])}")
+                elif s["failed"]:
+                    print(f"    {year}-{month:02d}: failed ({s['failed']} errors)")
+            report["datasets"].setdefault("aggTrades", {})[sym] = {"months": len(months)}
 
     if args.tardis or args.all:
         print(f"\nDownloading Tardis free samples (day-1 monthly, {TARDIS_START} → today)")
         for sym in symbols:
-            print(f"  {sym}…")
+            print(f"  {sym}…", end=" ", flush=True)
             out = DATA_DIR / "tardis" / sym
             stats = download_tardis_samples(sym, TARDIS_START, today, out)
             report["datasets"].setdefault("tardis", {})[sym] = stats
-            print(f"    ✓ {stats['downloaded']} downloaded, {stats['skipped']} skipped, "
-                  f"{bytes_human(stats['bytes'])}")
+            print(f"✓ {stats['downloaded']}↓ {stats['skipped']}= {stats['failed']} failed")
 
     elapsed = time.time() - t0
     total_bytes = sum(
-        stats.get("bytes", 0)
+        (stats.get("bytes", 0) if isinstance(stats, dict) else 0)
         for ds in report["datasets"].values()
-        for stats in ds.values()
+        for stats in (ds.values() if isinstance(ds, dict) else [])
     )
     report["summary"] = {
         "elapsed_s": round(elapsed, 1),
