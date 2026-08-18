@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 LAB_API_PORT = int(os.getenv("LAB_API_PORT", "8765"))
 HYPOTHESES_PATH = os.getenv(
     "HYPOTHESES_PATH",
-    "/data/historical/thesis_results/hypotheses_lab.jsonl",
+    "/app/services/lab_api/hypotheses.jsonl",
 )
 HTML_PATH = Path(__file__).parent / "lab_terminal.html"
 TARGET_SECONDS = 7 * 24 * 3600  # 7-day run
@@ -125,13 +125,16 @@ def _ram_pct() -> Optional[float]:
 
 
 def _load_hypotheses() -> List[dict]:
+    """Load only entries that have a 'strategy' key — excludes note/meta lines."""
     try:
         out = []
         with open(HYPOTHESES_PATH) as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    out.append(json.loads(line))
+                    obj = json.loads(line)
+                    if "strategy" in obj:
+                        out.append(obj)
         return out
     except Exception:
         return []
@@ -192,8 +195,9 @@ class LabAPIServer:
 
     async def _summary(self, _: web.Request) -> web.Response:
         hyp = _load_hypotheses()
-        n_non_ctrl = sum(1 for h in hyp if h.get("strategy") not in CONTROL_NAMES)
-        t_thr = _t_threshold(n_non_ctrl)
+        # Bonferroni N = total registered strategies (controls + non-controls).
+        # More conservative than N=non-control only; matches document's intent.
+        t_thr = _t_threshold(len(hyp))
 
         agg = await self._db.fetchrow("""
             SELECT
@@ -272,7 +276,7 @@ class LabAPIServer:
 
         return self._json({
             "symbols": 6,
-            "strategies_registered": len(hyp),
+            "strategies_registered": len(hyp),  # only entries with "strategy" key
             "t_threshold": t_thr,
             "elapsed_s": elapsed_s,
             "target_s": TARGET_SECONDS,
@@ -332,10 +336,9 @@ class LabAPIServer:
             row = byname.get(self._ctrl_name(is_taker))
             return float(row["net_bps"]) if row and row["net_bps"] is not None else None
 
-        # Bonferroni threshold
+        # Bonferroni threshold — N = total registered (same as /summary)
         hyp = _load_hypotheses()
-        n_non_ctrl = sum(1 for h in hyp if h.get("strategy") not in CONTROL_NAMES)
-        t_thr = _t_threshold(n_non_ctrl) or 2.0
+        t_thr = _t_threshold(len(hyp)) or 2.0
 
         result = []
         for row in agg_rows:
