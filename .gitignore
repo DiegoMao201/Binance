@@ -4,6 +4,8 @@
 
 # Todo markdown y reportes quedan solo locales
 *.md
+!DECISIONES_TECNICAS.md
+!README.md
 # Contexto local — NO se pushea al repo
 DERIV_BOT_CONTEXT.md
 .venv/

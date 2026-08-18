@@ -122,34 +122,41 @@ class ShadowMotor:
             logger.warning(f"liquidations alert check: {e}")
 
     async def _snapshot_equity(self) -> None:
+        # net_pnl_bps = markout_60s_bps − fee_bps_paid (10 bps for TAKER, 0 for MAKER).
+        # fee_bps_paid is stored in feature_snapshot JSONB for TAKER fills.
+        # Assumed exit: maker (no additional fee). Total TAKER cost = 10 bps entry only.
         ts = datetime.now(tz=timezone.utc)
-        row = await self._db.fetchrow(
+        rows = await self._db.fetch(
             """
             SELECT
-                COUNT(*) FILTER (WHERE status='FILLED') AS fill_count,
-                COUNT(*) FILTER (WHERE status LIKE 'REJECTED%') AS reject_count,
-                COUNT(*) AS trade_count,
-                COALESCE(SUM(markout_60s), 0) AS realized_pnl
+                strategy_name,
+                COUNT(*) FILTER (WHERE status='FILLED')              AS fill_count,
+                COUNT(*) FILTER (WHERE status LIKE 'REJECTED%%')     AS reject_count,
+                COUNT(*)                                              AS trade_count,
+                COALESCE(
+                    SUM(
+                        markout_60s_bps
+                        - COALESCE((feature_snapshot->>'fee_bps_paid')::numeric, 0)
+                    ) FILTER (WHERE status='FILLED' AND markout_60s_bps IS NOT NULL),
+                    0
+                ) AS net_pnl_bps
             FROM shadow_trades
-            WHERE strategy_name = $1
+            GROUP BY strategy_name
             """,
-            STRATEGY_NAME,
         )
-        if row is None:
-            return
-
-        await self._db.execute(
-            """
-            INSERT INTO shadow_equity
-                (ts, strategy_name, equity, realized_pnl, trade_count, fill_count, reject_count)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
-            ON CONFLICT (ts, strategy_name) DO NOTHING
-            """,
-            ts,
-            STRATEGY_NAME,
-            float(row["realized_pnl"] or 0),
-            float(row["realized_pnl"] or 0),
-            int(row["trade_count"] or 0),
-            int(row["fill_count"] or 0),
-            int(row["reject_count"] or 0),
-        )
+        for row in rows:
+            await self._db.execute(
+                """
+                INSERT INTO shadow_equity
+                    (ts, strategy_name, equity, realized_pnl, trade_count, fill_count, reject_count)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                ON CONFLICT (ts, strategy_name) DO NOTHING
+                """,
+                ts,
+                row["strategy_name"],
+                float(row["net_pnl_bps"] or 0),
+                float(row["net_pnl_bps"] or 0),
+                int(row["trade_count"] or 0),
+                int(row["fill_count"] or 0),
+                int(row["reject_count"] or 0),
+            )

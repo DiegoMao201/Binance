@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 ORDER_NOTIONAL = 10.0     # USD per order, matches baseline_random
 SIGNAL_INTERVAL_S = 15.0  # check cadence per symbol
+COOLDOWN_S = 300.0        # 5 min per (strategy, symbol) — prevents correlated event runs
 
 # Spot → futures symbol mapping for OI signal
 _SPOT_TO_FUT: Dict[str, str] = {
@@ -108,6 +109,7 @@ class LabStrategyBase:
         self._state = state
         self._sim = sim
         self._active: Dict[str, Optional[int]] = {s: None for s in symbols}
+        self._last_signal: Dict[str, float] = {s: 0.0 for s in symbols}
 
     @property
     def strategy_name(self) -> str:
@@ -132,7 +134,11 @@ class LabStrategyBase:
         while True:
             await asyncio.sleep(SIGNAL_INTERVAL_S)
             try:
-                if self._mode == "MAKER" and self._active[symbol] is not None:
+                # Block if MAKER order is still pending
+                if self._active[symbol] is not None:
+                    continue
+                # Cooldown applies to both modes: prevents correlated event runs
+                if time.monotonic() - self._last_signal[symbol] < COOLDOWN_S:
                     continue
                 signal = self.compute_signal(symbol)
                 if signal is None:
@@ -175,9 +181,11 @@ class LabStrategyBase:
                 price=price,
                 qty=qty,
                 feature_snapshot=snapshot,
+                max_hold_s=900,
             )
             if trade_id is not None:
                 self._active[symbol] = trade_id
+                self._last_signal[symbol] = time.monotonic()
         else:
             await self._sim.submit_taker(
                 strategy_name=self._name,
@@ -187,6 +195,7 @@ class LabStrategyBase:
                 qty=qty,
                 feature_snapshot=snapshot,
             )
+            self._last_signal[symbol] = time.monotonic()
 
     def on_order_resolved(self, trade_id: int, filled: bool) -> None:
         if self._mode == "TAKER":
@@ -223,7 +232,7 @@ class LabStrategyBase:
             t_end = now_us - (i - 1) * 60_000_000
             t_start = t_end - 60_000_000
             close = None
-            for s in reversed(list(history)):
+            for s in reversed(history):
                 if s.ts_us < t_start:
                     break
                 if t_start <= s.ts_us < t_end:
@@ -238,9 +247,9 @@ class LabStrategyBase:
         trades = self._state.agg_trades.get(symbol, [])
         now_ms = time.time_ns() // 1_000_000
         total = 0.0
-        for t in trades:
+        for t in reversed(trades):
             if now_ms - t.ts_ms > window_ms:
-                continue
+                break  # deque is oldest-first; everything beyond is also out of window
             if buyer_maker is None or t.is_buyer_maker == buyer_maker:
                 total += float(t.qty)
         return total
@@ -449,7 +458,7 @@ class OiDelta(LabStrategyBase):
         now_us = history[-1].ts_us
         lookback_us = 5 * 60 * 1_000_000  # 5 min
         past_price = None
-        for s in reversed(list(history)):
+        for s in reversed(history):
             if now_us - s.ts_us >= lookback_us:
                 past_price = float(s.mid)
                 break
