@@ -9,7 +9,7 @@
 
 # 0 · Reglas que no se negocian
 
-1. **Aislamiento total respecto al bot de Deriv.** Deriv opera 24/7 con dinero real. Ningún cambio en Binance puede tocarlo. Contenedor Deriv: `o4w1ns4cceccmn2ozqt7sol2`. Estrategia `entrada_diego.py`, estado en `/data/deriv-logs/`.
+1. **Aislamiento total respecto al bot de Deriv.** Deriv opera en **cuenta demo** (saldo de prueba, sin dinero real). Las reglas de aislamiento se mantienen iguales — tocar su contenedor o datos arruina el dataset, no las finanzas. Contenedor Deriv: `o4w1ns4cceccmn2ozqt7sol2`. Estrategia `entrada_diego.py`, estado en `/data/deriv-logs/`.
 2. **`DRY_RUN=true` siempre**, hasta que exista una estrategia que haya pasado el protocolo de validación completo.
 3. **Ningún cambio va a producción sin evidencia.** Toda afirmación sobre el comportamiento del sistema se acompaña de log con timestamp. Lo no verificado ejecutando se declara como hipótesis.
 4. **El simulador nunca regala fills.** Ante ambigüedad, elige siempre el resultado peor para nosotros.
@@ -44,6 +44,10 @@ Motivo: es el único camino con 0% de comisión en Binance a agosto 2026. No hac
 | Límites | 6.000 weight/min · 50 órdenes/10s · 160.000/día | Docs API |
 | Spreads reales (16-ago-2026) | BTC y ETH clavados en **1 tick** · LINK 4.25 bps (el mejor) | `bookTicker` en vivo |
 | **Market making** | **Descartado por aritmética**: techo de $0.004 por round-trip perfecto de $10 | cálculo propio |
+| **Market making puro — medido en vivo** | **Descartado con datos propios.** 247 fills en 6 pares (17-ago-2026): deriva adversa 60s entre 1,2× y 38× mayor que el medio spread capturado. Todos los símbolos negativos. La mediana ≤ media en todos — firma de cola izquierda. Coincide con Gatto 2026 (−0,022 bps neto en 353.387 fills reales CME). Ver §8 Test 0. | shadow_trades 17-ago-2026 |
+| **Spread capturado ≠ spread observado** | Solo hay fill cuando hay flujo; cuando hay flujo el spread ya se cerró. Discrepancia medida: LINK spread observado 4,25 bps, spread efectivo en fill 0,64 bps (15% del observado). SOL: 1,34 bps → 0,68 bps (51%). ETH: 0,05 bps → 0,02 bps. El sesgo va siempre en contra del maker pasivo. | shadow_trades 17-ago-2026 |
+| **Estrategia pasiva es estructuralmente contraria a la tendencia** | El fill pasivo solo llega cuando el precio viene hacia la orden — i.e., cuando el mercado se mueve en contra. Medido en vivo: LINK cae −19 bps → 100% fills son COMPRA. ETH sube +11 bps → 74% fills son VENTA. BNB sube +11 bps → 63% fills son VENTA. Consecuencia: **cualquier estrategia pasiva que construyamos necesita gestión de inventario y un filtro de tendencia**, no solo una señal de entrada. Sin ellos, acumula inventario en la dirección perdedora por construcción. | shadow_trades 17-ago-2026 |
+| **fstream.binance.com (futures WS) bloqueado para IPs de datacenter** | Testado 17-ago-2026 con DO en 3 regiones (blr1/sgp1/syd1): todos dan 101 Switching Protocols pero **cero data frames en 15s**. La restricción es por tipo de IP (cloud datacenter), no solo geográfica. El spot WS (stream.binance.com) funciona desde el mismo servidor. **Solución permanente: proxy residencial o REST fallback.** Actualmente: `FUTURES_WS_ENABLED=false`, mark prices via REST `/fapi/v1/premiumIndex`. Liquidaciones en tiempo real no disponibles por WS — fuente alternativa: Tardis día-1 o Coinalyze REST. | prueba directa 17-ago-2026, do:blr1/sgp1/syd1 |
 | FDUSD | ~0.9979 vs USDT. Se despegó a $0.87 en abr-2025. Cap −90% desde el pico | mercado + reportes |
 
 **Riesgo FDUSD:** nunca dejar saldo parado fuera de horas de operación. Monitorizar `FDUSDUSDT` en cada ciclo. **Liquidar todo a USDT y parar si cae por debajo de 0.9950.**

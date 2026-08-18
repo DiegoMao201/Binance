@@ -47,6 +47,11 @@ class RecorderConfig:
         default_factory=lambda: os.getenv("FUTURES_WS_ENABLED", "true").lower() != "false"
     )
 
+    # Port for the in-process lab API server (aiohttp)
+    lab_api_port: int = field(
+        default_factory=lambda: int(os.getenv("LAB_API_PORT", "8765"))
+    )
+
     # Set DEPTH_ENABLED=false to drop @depth@100ms streams (~77GB/month bandwidth).
     # Order book state becomes unavailable; book_imbalance signals use @bookTicker only.
     depth_enabled: bool = field(

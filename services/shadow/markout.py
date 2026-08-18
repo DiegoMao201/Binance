@@ -29,13 +29,22 @@ from ..recorder.state import MarketState
 
 logger = logging.getLogger(__name__)
 
-HORIZONS_S = [1, 5, 30, 60]   # seconds
+HORIZONS_S = [1, 5, 30, 60, 300, 900, 1800, 3600]   # seconds; long = 5m/15m/30m/60m
+# Raw legacy columns — short horizons only (kept for backward compat)
 HORIZON_COLS = {1: "markout_1s", 5: "markout_5s", 30: "markout_30s", 60: "markout_60s"}
 # bps columns: markout_h_bps = half_spread_captured_bps + adverse_drift_h_bps
-HORIZON_BPS_COLS   = {1: "markout_1s_bps",       5: "markout_5s_bps",
-                      30: "markout_30s_bps",     60: "markout_60s_bps"}
-HORIZON_DRIFT_COLS = {1: "adverse_drift_1s_bps", 5: "adverse_drift_5s_bps",
-                      30: "adverse_drift_30s_bps", 60: "adverse_drift_60s_bps"}
+HORIZON_BPS_COLS = {
+    1: "markout_1s_bps",    5: "markout_5s_bps",
+    30: "markout_30s_bps",  60: "markout_60s_bps",
+    300: "markout_5m_bps",  900: "markout_15m_bps",
+    1800: "markout_30m_bps", 3600: "markout_60m_bps",
+}
+HORIZON_DRIFT_COLS = {
+    1: "adverse_drift_1s_bps",   5: "adverse_drift_5s_bps",
+    30: "adverse_drift_30s_bps", 60: "adverse_drift_60s_bps",
+    300: "adverse_drift_5m_bps",  900: "adverse_drift_15m_bps",
+    1800: "adverse_drift_30m_bps", 3600: "adverse_drift_60m_bps",
+}
 
 
 @dataclass
@@ -75,9 +84,10 @@ class MarkoutTracker:
 
     async def backfill_on_startup(self) -> None:
         """
-        On startup, find fills from the last 5 minutes with NULL markouts
-        and re-queue them. Uses binance_mid_snapshots for price lookup
-        (stored at 5s resolution — fills in the same window are recoverable).
+        On startup, find fills with pending markouts and re-queue them.
+        Window: 65 minutes (covers the full 60m horizon plus a buffer).
+        Condition: markout_60s NULL (short horizons not yet computed) OR
+                   markout_60m_bps NULL (long horizons not yet computed).
         """
         rows = await self._db.fetch(
             """
@@ -85,8 +95,10 @@ class MarkoutTracker:
                    extract(epoch from fill_ts) * 1e6 AS fill_ts_us
             FROM shadow_trades
             WHERE fill_ts IS NOT NULL
-              AND markout_60s IS NULL
-              AND fill_ts > NOW() - INTERVAL '5 minutes'
+              AND (markout_60s IS NULL
+                   OR markout_60m_bps IS NULL
+                   OR markout_5m_bps  IS NULL)
+              AND fill_ts > NOW() - INTERVAL '65 minutes'
             """
         )
         for row in rows:
@@ -149,9 +161,10 @@ class MarkoutTracker:
                 # else: column stays NULL in DB — correct, not silence
                 continue
 
-            # Raw markout (legacy columns, kept for backward compatibility)
             raw_markout = float(sign * (mid - pm.fill_price))
-            updates[HORIZON_COLS[h]] = raw_markout
+            # Raw legacy columns exist only for short horizons
+            if h in HORIZON_COLS:
+                updates[HORIZON_COLS[h]] = raw_markout
 
             # bps markout: 10000 * sign * (mid_h - fill_price) / fill_price
             if pm.fill_price > 0:
@@ -191,15 +204,16 @@ class MarkoutTracker:
                 """
                 SELECT mid FROM binance_mid_snapshots
                 WHERE symbol = $1
-                  AND ts BETWEEN $2 - INTERVAL '30 seconds'
-                             AND $2 + INTERVAL '30 seconds'
-                ORDER BY abs(extract(epoch from (ts - $2)))
+                  AND ts BETWEEN $2::timestamptz - INTERVAL '30 seconds'
+                             AND $2::timestamptz + INTERVAL '30 seconds'
+                ORDER BY abs(extract(epoch from (ts - $2::timestamptz)))
                 LIMIT 1
                 """,
                 symbol, target_ts,
             )
             return Decimal(str(row["mid"])) if row else None
-        except Exception:
+        except Exception as e:
+            logger.warning(f"_mid_from_db [{symbol} t={target_ts}]: {type(e).__name__}: {e}")
             return None
 
 

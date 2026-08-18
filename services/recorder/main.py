@@ -27,6 +27,7 @@ from .rest_poller import RestPoller
 from .state import MarketState
 from .streams import StreamHandler
 from ..shadow.main import ShadowMotor
+from ..lab_api.server import LabAPIServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +60,7 @@ async def run() -> None:
 
     streams = StreamHandler(cfg, db, state, health)
     shadow = ShadowMotor(db, state, cfg.spot_symbols)
+    lab_server = LabAPIServer(db, health, cfg.data_dir)
 
     # Wire aggTrade events from recorder → shadow motor
     streams.set_agg_trade_hook(shadow.on_agg_trade)
@@ -98,6 +100,9 @@ async def run() -> None:
             DiskGuardLoop(cfg.data_dir, warn_pct=25.0, stop_pct=10.0).run(),
             name="disk-guard",
         )
+    )
+    all_tasks.append(
+        asyncio.create_task(lab_server.run(), name="lab-api")
     )
 
     stop_event = asyncio.Event()
