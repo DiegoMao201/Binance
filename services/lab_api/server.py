@@ -153,6 +153,11 @@ class LabAPIServer:
         self._health = health
         self._data_dir = data_dir
 
+        # Leaderboard is expensive (bootstrap CI for 18 strategies).
+        # Serve from cache; background task recomputes every 60 s.
+        self._leaderboard_cache: List[dict] = []
+        self._leaderboard_ts: float = 0.0
+
         self._app = web.Application()
         self._app.router.add_get("/", self._html)
         self._app.router.add_get("/lab", self._html)
@@ -212,6 +217,9 @@ class LabAPIServer:
         """)
 
         # n_ef per non-control strategy (for n_ef_min banner)
+        # Only count strategies that have produced at least one fill —
+        # strategies with 0 fills (e.g. oi_delta while OI data is sparse) are
+        # tracked separately and would otherwise pin n_ef_min permanently at 0.
         nef_rows = await self._db.fetch("""
             SELECT strategy_name,
                 COUNT(DISTINCT fill_event_id) FILTER (WHERE status = 'FILLED') AS n_ef
@@ -222,8 +230,12 @@ class LabAPIServer:
         non_ctrl_nef = [
             int(r["n_ef"] or 0)
             for r in nef_rows
-            if r["strategy_name"] not in CONTROL_NAMES
+            if r["strategy_name"] not in CONTROL_NAMES and int(r["n_ef"] or 0) > 0
         ]
+        # Count how many non-control strategies in the file have zero fills yet
+        registered_names = {h["strategy"] for h in _load_hypotheses() if "strategy" in h}
+        db_names_with_fills = {r["strategy_name"] for r in nef_rows if int(r["n_ef"] or 0) > 0}
+        n_zero = len([n for n in registered_names if n not in CONTROL_NAMES and n not in db_names_with_fills])
         n_ef_min = min(non_ctrl_nef) if non_ctrl_nef else 0
 
         # Hourly fill histogram (UTC)
@@ -284,6 +296,7 @@ class LabAPIServer:
             "fills": int(agg["fills"] or 0) if agg else 0,
             "n_ef_total": int(agg["n_ef_total"] or 0) if agg else 0,
             "n_ef_min": n_ef_min,
+            "n_zero_strategies": n_zero,
             "hours_covered": int(agg["hours_covered"] or 0) if agg else 0,
             "hour_hist": hour_hist,
             "candidates": 0,  # expensive to compute — see /leaderboard
@@ -298,6 +311,19 @@ class LabAPIServer:
     # ── /api/lab/leaderboard ──────────────────────────────────────────────────
 
     async def _leaderboard(self, _: web.Request) -> web.Response:
+        if self._leaderboard_cache:
+            return self._json(self._leaderboard_cache)
+        # Cache not ready yet (first request after startup) — compute now
+        try:
+            data = await self._compute_leaderboard()
+            self._leaderboard_cache = data
+            self._leaderboard_ts = time.monotonic()
+        except Exception as e:
+            logger.warning("leaderboard on-demand: %s", e)
+            data = []
+        return self._json(data)
+
+    async def _compute_leaderboard(self) -> List[dict]:
         fee_expr = "COALESCE((feature_snapshot->>'fee_bps_paid')::numeric, 0)"
 
         # Per-strategy aggregate
@@ -395,7 +421,7 @@ class LabAPIServer:
 
         order = {"CANDIDATA": 0, "CONTROL": 1, "DESCARTADA": 2, "INSUFICIENTE": 3}
         result.sort(key=lambda x: (order.get(x["verdict"], 4), -(x["n_ef"] or 0)))
-        return self._json(result)
+        return result
 
     # ── /api/lab/curve ────────────────────────────────────────────────────────
 
@@ -485,12 +511,25 @@ class LabAPIServer:
                 "mode": "TAKER" if self._is_taker(r["strategy_name"]) else "MAKER",
                 "symbol": r["symbol"],
                 "side": r["side"],
-                "fill_price": str(r["fill_price"]) if r["fill_price"] else None,
+                # :.8g removes float-representation noise (e.g. 0.07015000000000000401…)
+                "fill_price": f"{float(r['fill_price']):.8g}" if r["fill_price"] else None,
                 "status": r["status"],
                 "net_bps": net_bps,
             })
 
         return self._json(out)
+
+    # ── Background leaderboard refresh ───────────────────────────────────────
+
+    async def _leaderboard_refresh_loop(self) -> None:
+        while True:
+            try:
+                data = await self._compute_leaderboard()
+                self._leaderboard_cache = data
+                self._leaderboard_ts = time.monotonic()
+            except Exception as e:
+                logger.warning("leaderboard refresh: %s", e)
+            await asyncio.sleep(60)
 
     # ── Runner ────────────────────────────────────────────────────────────────
 
@@ -500,8 +539,10 @@ class LabAPIServer:
         site = web.TCPSite(runner, "0.0.0.0", LAB_API_PORT)
         await site.start()
         logger.info("lab API listening on port %d", LAB_API_PORT)
+        refresh = asyncio.create_task(self._leaderboard_refresh_loop())
         try:
             while True:
                 await asyncio.sleep(3600)
         finally:
+            refresh.cancel()
             await runner.cleanup()

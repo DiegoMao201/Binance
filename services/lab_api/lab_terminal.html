@@ -50,7 +50,7 @@
   .bar>i{display:block;height:100%;background:var(--s1);border-radius:2px}
 
   /* layout */
-  .cols{display:grid;grid-template-columns:1fr 380px;gap:14px;align-items:start}
+  .cols{display:grid;grid-template-columns:1fr 460px;gap:14px;align-items:start}
   @media (max-width:1100px){.cols{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
   .card>.hd{padding:12px 16px;border-bottom:1px solid var(--line);
@@ -94,7 +94,7 @@
   .sd.buy{background:rgba(57,135,229,.15);color:#7fb2f0}
   .sd.sell{background:rgba(217,89,38,.15);color:#eb9a72}
   .row .sy{font-family:var(--mono);font-size:11px;color:var(--ink);flex:none;width:78px}
-  .row .st{font-size:11px;color:var(--ink3);flex:1;overflow:hidden;text-overflow:ellipsis}
+  .row .st{font-size:11px;color:var(--ink3);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .row .rs{font-family:var(--mono);font-size:11px;flex:none;text-align:right;width:70px}
   .tag{font-family:var(--mono);font-size:9px;padding:1.5px 5px;border-radius:3px;flex:none;
     background:var(--line);color:var(--ink3);letter-spacing:.04em}
@@ -206,6 +206,15 @@ async function get(p){
 }
 
 async function load(){
+  // Show loading placeholders on first render (before any data arrives)
+  if(!state.s){
+    ['#lb','#chart','#cov','#health'].forEach(id=>{
+      const n=document.querySelector(id);
+      if(n) n.innerHTML='<div class="empty">Cargando…</div>';
+    });
+    const tp=document.getElementById('tape');
+    if(tp) tp.innerHTML='<div class="empty">Cargando…</div>';
+  }
   try{
     const [s,l,c,t] = await Promise.all([
       get('/summary'), get('/leaderboard'), get('/curve'), get('/tape?limit=60')
@@ -239,12 +248,22 @@ function banners(s){
   let h = '';
   if(DEMO) h += `<div class="banner crit">⚠ <b>DATOS DE EJEMPLO.</b>
     El API <code>/api/lab/*</code> no responde — nada de lo que ves aquí es real. Es solo la maqueta del diseño.</div>`;
-  const ready = (s.n_ef_min||0) >= 30 && (s.hours_covered||0) >= 24;
-  if(!ready) h += `<div class="banner warn">◐ <b>MUESTRA INSUFICIENTE.</b>
-    La clasificación es informativa, no concluyente. Faltan
-    <b>${Math.max(0,30-(s.n_ef_min||0))}</b> eventos independientes y
-    <b>${Math.max(0,24-(s.hours_covered||0))}h</b> de cobertura.
-    Con ${s.strategies_registered||0} estrategias probadas a la vez, el listón es <b>|t| &gt; ${(s.t_threshold||2.94).toFixed(2)}</b>.</div>`;
+
+  const nefOk = (s.n_ef_min||0) >= 30;
+  const covOk = (s.hours_covered||0) >= 24;
+  if(!nefOk || !DEMO){
+    // Build the insufficiency details
+    const parts = [];
+    if(!nefOk) parts.push(`faltan <b>${Math.max(0,30-(s.n_ef_min||0))}</b> eventos independientes en la estrategia más lenta`);
+    if(!covOk) parts.push(`faltan <b>${Math.max(0,24-(s.hours_covered||0))}h</b> de cobertura UTC`);
+    const zeroNote = (s.n_zero_strategies||0) > 0
+      ? ` · <b>${s.n_zero_strategies}</b> estrategia${s.n_zero_strategies>1?'s':''} aún sin ningún fill.`
+      : '';
+    if(parts.length)
+      h += `<div class="banner warn">◐ <b>MUESTRA INSUFICIENTE.</b>
+        La clasificación es informativa, no concluyente. ${parts.join(' · ')}.${zeroNote}
+        Con ${s.strategies_registered||0} estrategias registradas, el listón es <b>|t| &gt; ${(s.t_threshold||2.99).toFixed(2)}</b>.</div>`;
+  }
   document.getElementById('banner-slot').innerHTML = h;
 }
 
@@ -366,17 +385,18 @@ function tape(t){
   const el = document.getElementById('tape');
   if(!t || !t.length){ el.innerHTML='<div class="empty">Esperando la primera señal…</div>'; return; }
   el.innerHTML = t.map(r=>{
-    const st = r.status==='FILLED' ? `fill ${r.fill_price}` :
-               r.status==='EXPIRED' ? 'expiró sin llenarse' :
+    const st = r.status==='FILLED' ? `fill ${r.fill_price||'?'}` :
+               r.status==='EXPIRED' ? 'expiró sin fill' :
                r.status==='PENDING' ? 'esperando fill' :
                r.status==='REJECTED_WOULD_TAKE' ? 'rechazada −2010' : r.status.toLowerCase();
     const res = r.net_bps!=null ? `<span class="${cls(r.net_bps)}">${fmt(r.net_bps,1)}</span>` :
                 r.status==='FILLED' ? '<span style="color:var(--ink3)">midiendo…</span>' : '—';
-    return `<div class="row">
+    const shortName = r.strategy.replace(/_(maker|taker)$/,'');
+    return `<div class="row" title="${r.strategy} · ${st}">
       <span class="tm">${r.ts}</span>
       <span class="sd ${r.side==='BUY'?'buy':'sell'}">${r.side==='BUY'?'CMP':'VTA'}</span>
       <span class="sy">${r.symbol.replace('FDUSD','')}</span>
-      <span class="st">${r.strategy.replace(/_(maker|taker)$/,'')} · ${st}</span>
+      <span class="st" title="${r.strategy}">${shortName} · ${st}</span>
       <span class="tag">${r.mode[0]}</span>
       <span class="rs">${res}</span></div>`;
   }).join('');
