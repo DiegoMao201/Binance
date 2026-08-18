@@ -73,16 +73,22 @@ async def run() -> None:
         logger.info("fetching initial depth snapshots…")
         await poller.apply_depth_snapshots()
 
+    if not cfg.depth_enabled:
+        logger.info("DEPTH_ENABLED=false — skipping @depth@100ms streams and book sync")
+
     all_tasks = [
         *streams.tasks(),
         *shadow.tasks(),
-        asyncio.create_task(_initial_depth_sync(), name="initial-depth-sync"),
         asyncio.create_task(health.run(), name="health-flush"),
         asyncio.create_task(poller.run_oi_poll(), name="rest-oi-poll"),
-        asyncio.create_task(poller.run_depth_resync(), name="rest-depth-resync"),
         asyncio.create_task(poller.run_exchange_info(), name="rest-exchange-info"),
         asyncio.create_task(poller.run_mid_snapshots(), name="rest-mid-snapshots"),
     ]
+    if cfg.depth_enabled:
+        all_tasks += [
+            asyncio.create_task(_initial_depth_sync(), name="initial-depth-sync"),
+            asyncio.create_task(poller.run_depth_resync(), name="rest-depth-resync"),
+        ]
     if not cfg.futures_ws_enabled:
         all_tasks.append(
             asyncio.create_task(poller.run_mark_prices_rest(), name="rest-mark-prices")
