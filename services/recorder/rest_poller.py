@@ -148,6 +148,12 @@ class RestPoller:
                     try:
                         data = await self._fetch_oi_for_symbol(sym)
                         await self._upsert_oi(ts, sym, data)
+                        oi_raw = data.get("oi") or {}
+                        oi_val = float(oi_raw.get("openInterestValue", 0) or 0)
+                        if oi_val > 0 and sym in self._state.oi_snapshots:
+                            self._state.oi_snapshots[sym].append(
+                                (int(ts.timestamp() * 1_000_000), oi_val)
+                            )
                     except Exception as e:
                         logger.warning(f"OI poll [{sym}]: {e}")
             except asyncio.CancelledError:

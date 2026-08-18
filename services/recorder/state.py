@@ -5,7 +5,7 @@ Consumed by both the recorder streams and the shadow motor.
 
 from collections import deque
 from decimal import Decimal
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple  # noqa: F401
 
 from .book import OrderBook
 
@@ -36,10 +36,10 @@ class MarketState:
         # Latest bookTicker snapshots per symbol (also fdusdusdt)
         self.book_tickers: Dict[str, dict] = {}
 
-        # Mid price history, one sample per bookTicker update (~every 100ms)
-        # maxlen=3600 ≈ 10 min of history at 6 updates/s
+        # Mid price history. At ~1.2 samples/s (bookTicker-driven), maxlen=7200 covers
+        # ~100 minutes — enough for the 60m markout horizon with headroom.
         self.mid_history: Dict[str, Deque[MidSample]] = {
-            s: deque(maxlen=3600) for s in spot_symbols
+            s: deque(maxlen=7200) for s in spot_symbols
         }
 
         # Recent aggTrades per symbol — shadow motor uses these to drain queue
@@ -50,6 +50,12 @@ class MarketState:
         # Exchange info cache (refreshed daily via REST)
         self.exchange_info: Dict[str, Dict[str, Any]] = {
             s: {} for s in spot_symbols
+        }
+
+        # OI snapshots per futures symbol — updated by RestPoller.run_oi_poll()
+        # Each entry: (ts_us, open_interest_value_usd)
+        self.oi_snapshots: Dict[str, Deque[Tuple[int, float]]] = {
+            s: deque(maxlen=24) for s in futures_symbols  # 24 × 5min ≈ 2h
         }
 
         # FDUSD peg monitor

@@ -74,11 +74,19 @@ def check_limit_maker_rejection(
 
     BUY at price P: rejected if P >= best_ask (would be a taker).
     SELL at price P: rejected if P <= best_bid (would be a taker).
+
+    Falls back to bookTicker when depth@100ms is disabled (books not synced).
     """
     book = state.books.get(symbol)
     if book is None or not book.is_synced:
-        # Conservative: if we don't know the spread, treat as rejected
-        return True
+        bt = state.book_tickers.get(symbol)
+        if not bt:
+            return True
+        bid = Decimal(str(bt.get("b", 0)))
+        ask = Decimal(str(bt.get("a", 0)))
+        if bid <= 0 or ask <= 0:
+            return True
+        return price >= ask if side == "BUY" else price <= bid
 
     if side == "BUY":
         ask = book.best_ask
@@ -100,11 +108,22 @@ def build_queue_position(
 ) -> Optional[QueuePosition]:
     """
     Create a QueuePosition for a new resting order.
-    Returns None if the book is unsynced (order cannot be placed safely).
+    Returns None if the book is unsynced and no bookTicker fallback available.
+
+    When depth@100ms is disabled, uses queue_at_entry=1 so the order fills
+    on the first aggTrade at our exact price (optimistic but functional for lab).
     """
     book = state.books.get(symbol)
     if book is None or not book.is_synced:
-        return None
+        bt = state.book_tickers.get(symbol)
+        if not bt:
+            return None
+        return QueuePosition(
+            symbol=symbol,
+            side=side,
+            price=price,
+            queue_at_entry=Decimal("1"),
+        )
 
     level_qty = book.qty_at_level(side, price)
     return QueuePosition(

@@ -31,6 +31,11 @@ from .queue_model import (
 
 logger = logging.getLogger(__name__)
 
+# 0.10% — Binance VIP0 standard taker fee (from binance.com/en/fee/schedule).
+# Not verified via API (no HMAC auth available in recorder).
+# Actual fees may be lower if the account has BNB discounts or a VIP tier.
+TAKER_FEE_BPS: float = 10.0
+
 
 @dataclass
 class OpenOrder:
@@ -82,10 +87,14 @@ class FillSimulator:
         price: Decimal,
         qty: Decimal,
         feature_snapshot: Optional[dict] = None,
+        offset_bps: Optional[int] = None,
+        max_hold_s: float = 30.0,
     ) -> Optional[int]:
         """
         Simulate submitting a LIMIT_MAKER order.
         Returns the shadow_trades.id if accepted, None if rejected (-2010).
+        offset_bps: ladder rung distance from mid at detection (cascade_shadow / baseline_ladder).
+        max_hold_s: order expiry time. Use 900 for deep-book ladder orders.
         """
         notional = float(price * qty)
 
@@ -95,6 +104,7 @@ class FillSimulator:
                 strategy_name, symbol, side, price, qty, notional,
                 "REJECTED_2010", "-2010: would cross spread",
                 feature_snapshot=feature_snapshot,
+                offset_bps=offset_bps,
             )
             return None
 
@@ -104,6 +114,7 @@ class FillSimulator:
                 strategy_name, symbol, side, price, qty, notional,
                 "REJECTED_2010", "book not synced",
                 feature_snapshot=feature_snapshot,
+                offset_bps=offset_bps,
             )
             return None
 
@@ -112,6 +123,7 @@ class FillSimulator:
             "PENDING", None,
             queue_initial=float(queue.queue_at_entry),
             feature_snapshot=feature_snapshot,
+            offset_bps=offset_bps,
         )
 
         self._record_order_count()
@@ -126,9 +138,111 @@ class FillSimulator:
                 notional=notional,
                 placed_ts_us=time.time_ns() // 1000,
                 queue=queue,
+                max_hold_s=max_hold_s,
             )
         )
         return trade_id
+
+    async def submit_taker(
+        self,
+        strategy_name: str,
+        symbol: str,
+        side: str,
+        price: Decimal,
+        qty: Decimal,
+        feature_snapshot: Optional[dict] = None,
+    ) -> Optional[int]:
+        """
+        Simulate an immediate TAKER fill at best_ask (BUY) or best_bid (SELL).
+
+        Fee: TAKER_FEE_BPS (see module constant — 0.10% VIP0 standard, undiscounted).
+        No queue wait. Order records as FILLED at call time.
+        Immediately enqueues into MarkoutTracker.
+        """
+        notional = float(price * qty)
+        mid = self._state.get_mid(symbol)
+
+        # half_spread_captured_bps is negative for TAKER: we cross the spread, paying it.
+        half_spread_bps = None
+        if mid is not None and mid > 0:
+            sign = Decimal(1) if side == "BUY" else Decimal(-1)
+            half_spread_bps = float(-10_000 * sign * (price - mid) / mid)
+
+        if feature_snapshot is not None:
+            feature_snapshot = {**feature_snapshot, "fee_bps_paid": TAKER_FEE_BPS}
+
+        sigma = compute_realized_vol(self._state, symbol)
+        vpin = compute_vpin_bucket(self._state, symbol)
+        fill_event_id = int(time.time())
+
+        trade_id = await self._db_insert_taker(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            side=side,
+            fill_price=price,
+            qty=qty,
+            notional=notional,
+            mid_at_fill=float(mid) if mid is not None else None,
+            half_spread_bps=half_spread_bps,
+            sigma=sigma,
+            vpin=vpin,
+            fill_event_id=fill_event_id,
+            feature_snapshot=feature_snapshot,
+        )
+
+        self._record_order_count()
+        self._mo.register(
+            trade_id=trade_id,
+            symbol=symbol,
+            side=side,
+            fill_price=price,
+            mid_at_fill=mid,
+        )
+        logger.debug(f"taker-fill [{strategy_name}] {symbol} {side} @ {price}")
+        return trade_id
+
+    async def _db_insert_taker(
+        self,
+        strategy_name: str,
+        symbol: str,
+        side: str,
+        fill_price: Decimal,
+        qty: Decimal,
+        notional: float,
+        mid_at_fill: Optional[float],
+        half_spread_bps: Optional[float],
+        sigma: Optional[float],
+        vpin: Optional[float],
+        fill_event_id: int,
+        feature_snapshot: Optional[dict] = None,
+    ) -> int:
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc)
+        row = await self._db.fetchrow(
+            """
+            INSERT INTO shadow_trades
+                (strategy_name, signal_ts, symbol, side, signal_price,
+                 qty, notional, queue_pos_initial, status, reject_reason,
+                 fill_ts, fill_price, queue_pos_at_fill,
+                 mid_at_fill, half_spread_captured_bps,
+                 sigma_realized_60m, vpin_bucket, fill_event_id,
+                 feature_snapshot, offset_bps)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+            RETURNING id
+            """,
+            strategy_name, now, symbol, side,
+            float(fill_price),           # signal_price = fill_price for TAKER
+            float(qty), notional,
+            0.0,                         # queue_pos_initial (no queue)
+            "FILLED", None,              # status, reject_reason
+            now, float(fill_price),      # fill_ts, fill_price
+            0.0,                         # queue_pos_at_fill
+            mid_at_fill, half_spread_bps,
+            sigma, vpin, fill_event_id,
+            json.dumps(feature_snapshot) if feature_snapshot else None,
+            None,                        # offset_bps
+        )
+        return row["id"]
 
     def on_agg_trade(self, symbol: str, trade: AggTradeSample) -> List[OpenOrder]:
         """
@@ -148,6 +262,9 @@ class FillSimulator:
 
     async def process_fills(self, filled_orders: List[OpenOrder]) -> None:
         now_us = time.time_ns() // 1000
+        # All orders in this batch share one 1-second event bucket.
+        # Clusters of fills from the same aggTrade sweep count as one independent event.
+        fill_event_id = int(time.time())
         for order in filled_orders:
             try:
                 self._orders.remove(order)
@@ -172,7 +289,8 @@ class FillSimulator:
                     queue_pos_at_fill = 0,
                     mid_at_fill = $5,
                     half_spread_captured_bps = $6,
-                    sigma_realized_60m = $3, vpin_bucket = $4
+                    sigma_realized_60m = $3, vpin_bucket = $4,
+                    fill_event_id = $7
                 WHERE id = $1
                 """,
                 order.db_id,
@@ -181,6 +299,7 @@ class FillSimulator:
                 vpin,
                 float(mid) if mid is not None else None,
                 half_spread_bps,
+                fill_event_id,
             )
             self._mo.register(
                 trade_id=order.db_id,
@@ -258,14 +377,16 @@ class FillSimulator:
         reject_reason: Optional[str],
         queue_initial: Optional[float] = None,
         feature_snapshot: Optional[dict] = None,
+        offset_bps: Optional[int] = None,
     ) -> int:
         from datetime import datetime, timezone
         row = await self._db.fetchrow(
             """
             INSERT INTO shadow_trades
                 (strategy_name, signal_ts, symbol, side, signal_price,
-                 qty, notional, queue_pos_initial, status, reject_reason, feature_snapshot)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 qty, notional, queue_pos_initial, status, reject_reason,
+                 feature_snapshot, offset_bps)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING id
             """,
             strategy_name,
@@ -279,5 +400,6 @@ class FillSimulator:
             status,
             reject_reason,
             json.dumps(feature_snapshot) if feature_snapshot else None,
+            offset_bps,
         )
         return row["id"]

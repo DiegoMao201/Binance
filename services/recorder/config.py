@@ -47,6 +47,12 @@ class RecorderConfig:
         default_factory=lambda: os.getenv("FUTURES_WS_ENABLED", "true").lower() != "false"
     )
 
+    # Set DEPTH_ENABLED=false to drop @depth@100ms streams (~77GB/month bandwidth).
+    # Order book state becomes unavailable; book_imbalance signals use @bookTicker only.
+    depth_enabled: bool = field(
+        default_factory=lambda: os.getenv("DEPTH_ENABLED", "true").lower() != "false"
+    )
+
     @property
     def raw_dir(self) -> str:
         return os.path.join(self.data_dir, "raw")
@@ -67,7 +73,10 @@ class RecorderConfig:
         streams = []
         for sym in self.spot_symbols:
             s = sym.lower()
-            streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@depth@100ms"])
+            base = [f"{s}@bookTicker", f"{s}@aggTrade"]
+            if self.depth_enabled:
+                base.append(f"{s}@depth@100ms")
+            streams.extend(base)
         streams.append("fdusdusdt@bookTicker")
         # Port 443 used instead of 9443: proxy (tinyproxy) ACL only allows :443
         return "wss://stream.binance.com:443/stream?streams=" + "/".join(streams)

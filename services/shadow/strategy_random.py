@@ -80,20 +80,11 @@ class BaselineRandom:
     async def _place_signal(self, symbol: str) -> None:
         side = random.choice(["BUY", "SELL"])
 
-        book = self._state.books.get(symbol)
-        if book is None or not book.is_synced:
+        # get_bid_ask falls back to bookTicker when depth@100ms is disabled
+        bid, ask = self._state.get_bid_ask(symbol)
+        if bid is None or ask is None:
             return
-
-        if side == "BUY":
-            level = book.best_bid
-            if level is None:
-                return
-            price = level[0]
-        else:
-            level = book.best_ask
-            if level is None:
-                return
-            price = level[0]
+        price = bid if side == "BUY" else ask
 
         # Size: ORDER_NOTIONAL / price, rounded to step_size
         info = self._state.exchange_info.get(symbol, {})
@@ -135,24 +126,15 @@ class BaselineRandom:
                 break
 
     def _build_snapshot(self, symbol: str) -> dict:
-        """
-        Capture complete market state at signal time.
-        'Ante la duda, guarda de más' — include everything.
-        """
-        book = self._state.books.get(symbol)
-        bid = book.best_bid if book else None
-        ask = book.best_ask if book else None
+        bid, ask = self._state.get_bid_ask(symbol)
         mid = self._state.get_mid(symbol)
-        snapshot = {
-            "ts_us": 0,  # filled by caller via time.time_ns()
+        return {
+            "ts_us": 0,
             "symbol": symbol,
-            "best_bid_price": float(bid[0]) if bid else None,
-            "best_bid_qty":   float(bid[1]) if bid else None,
-            "best_ask_price": float(ask[0]) if ask else None,
-            "best_ask_qty":   float(ask[1]) if ask else None,
+            "best_bid_price": float(bid) if bid else None,
+            "best_ask_price": float(ask) if ask else None,
             "mid":            float(mid) if mid else None,
             "fdusd_peg":      self._state.fdusd_peg,
             "mark_prices":    dict(self._state.mark_prices),
             "agg_trade_count": len(self._state.agg_trades.get(symbol, [])),
         }
-        return snapshot

@@ -21,6 +21,8 @@ from .fill_simulator import FillSimulator, OpenOrder
 from .markout import MarkoutTracker
 from .strategy_random import BaselineRandom, STRATEGY_NAME
 from .strategy_burnin import BurnIn
+from .strategy_baseline_ladder import BaselineLadder
+from .strategy_lab import make_lab_strategies
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,8 @@ class ShadowMotor:
         self._strategies = [
             BaselineRandom(symbols, state, self._sim),
             BurnIn(symbols, state, self._sim),
+            BaselineLadder(symbols, state, self._sim),
+            *make_lab_strategies(symbols, state, self._sim),
         ]
 
     def tasks(self) -> list:
