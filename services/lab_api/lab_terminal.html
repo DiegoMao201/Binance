@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OptiFerre · Laboratorio de Señales</title>
+<style>
+  :root{
+    --bg:#0a0d13; --panel:#111620; --panel2:#0d121a;
+    --line:#1e2634; --line2:#2a3444;
+    --ink:#e8ecf3; --ink2:#9aa7bb; --ink3:#63708a;
+    --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181;
+    --ctrl:#8b98ad;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1500px;margin:0 auto;padding:0 20px 60px}
+
+  /* top bar */
+  .top{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:var(--bg);z-index:20;flex-wrap:wrap}
+  .brand{font-weight:650;font-size:15px;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--good);
+    box-shadow:0 0 0 3px rgba(12,163,12,.15)}
+  .dot.off{background:var(--critical);box-shadow:0 0 0 3px rgba(208,59,59,.15)}
+  .sep{color:var(--ink3);font-size:12px}
+  .top .right{margin-left:auto;display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px;color:var(--ink2)}
+
+  /* banner */
+  .banner{margin:16px 0 0;padding:11px 16px;border-radius:9px;font-size:13.5px;
+    display:flex;align-items:center;gap:10px;border:1px solid}
+  .banner.warn{background:rgba(250,178,25,.07);border-color:rgba(250,178,25,.35);color:#f5cd7a}
+  .banner.crit{background:rgba(208,59,59,.08);border-color:rgba(208,59,59,.4);color:#e8918f}
+  .banner b{color:inherit}
+
+  h2{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);
+    font-weight:650;margin:32px 0 12px}
+
+  /* tiles */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+  .tile .v{font-family:var(--mono);font-size:21px;font-weight:600;letter-spacing:-.02em;line-height:1.15}
+  .tile .u{font-size:11.5px;color:var(--ink3);font-weight:500;margin-left:3px}
+  .tile .l{font-size:11px;color:var(--ink3);margin-top:5px;text-transform:uppercase;letter-spacing:.06em}
+  .bar{height:3px;border-radius:2px;background:var(--line2);margin-top:9px;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--s1);border-radius:2px}
+
+  /* layout */
+  .cols{display:grid;grid-template-columns:1fr 380px;gap:14px;align-items:start}
+  @media (max-width:1100px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  .card>.hd{padding:12px 16px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:10px}
+  .card>.hd .t{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);font-weight:650}
+  .card>.hd .r{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3)}
+  .card>.bd{padding:14px 16px}
+
+  /* table */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;font-weight:600;color:var(--ink3);font-size:9.5px;text-transform:uppercase;
+    letter-spacing:.08em;padding:0 9px 9px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  th.n,td.n{text-align:right}
+  td{padding:8px 9px;border-bottom:1px solid var(--line);color:var(--ink2);white-space:nowrap}
+  td.n{font-family:var(--mono);font-size:12px;color:var(--ink)}
+  tr:last-child td{border-bottom:none}
+  tr.ctrl td{background:rgba(139,152,173,.05)}
+  tr.ctrl+tr:not(.ctrl) td{border-top:2px solid var(--line2)}
+  .nm{color:var(--ink);font-weight:550}
+  .swatch{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:7px;vertical-align:1px}
+  .pos{color:#5fbf5f} .neg{color:#e08a84}
+
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:650;
+    letter-spacing:.05em;padding:3px 8px;border-radius:5px;text-transform:uppercase;font-family:var(--mono)}
+  .pill i{width:6px;height:6px;border-radius:50%;display:block;flex:none}
+  .p-cand{background:rgba(12,163,12,.12);color:#5fbf5f} .p-cand i{background:var(--good)}
+  .p-ins{background:rgba(250,178,25,.12);color:#f5cd7a} .p-ins i{background:var(--warning)}
+  .p-desc{background:rgba(208,59,59,.1);color:#e08a84}  .p-desc i{background:var(--critical)}
+  .p-ctrl{background:rgba(139,152,173,.13);color:var(--ctrl)} .p-ctrl i{background:var(--ctrl)}
+
+  /* tape */
+  .tape{max-height:560px;overflow-y:auto}
+  .tape::-webkit-scrollbar{width:7px}
+  .tape::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+  .row{display:flex;align-items:center;gap:9px;padding:8px 16px;border-bottom:1px solid var(--line);
+    font-size:12px;animation:slide .35s ease}
+  @keyframes slide{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
+  .row .tm{font-family:var(--mono);font-size:10.5px;color:var(--ink3);flex:none;width:52px}
+  .row .sd{font-family:var(--mono);font-size:10px;font-weight:700;flex:none;width:34px;text-align:center;
+    padding:2px 0;border-radius:3px}
+  .sd.buy{background:rgba(57,135,229,.15);color:#7fb2f0}
+  .sd.sell{background:rgba(217,89,38,.15);color:#eb9a72}
+  .row .sy{font-family:var(--mono);font-size:11px;color:var(--ink);flex:none;width:78px}
+  .row .st{font-size:11px;color:var(--ink3);flex:1;overflow:hidden;text-overflow:ellipsis}
+  .row .rs{font-family:var(--mono);font-size:11px;flex:none;text-align:right;width:70px}
+  .tag{font-family:var(--mono);font-size:9px;padding:1.5px 5px;border-radius:3px;flex:none;
+    background:var(--line);color:var(--ink3);letter-spacing:.04em}
+
+  /* chart */
+  .chart{position:relative}
+  svg{display:block;width:100%;height:auto;overflow:visible}
+  .grid{stroke:var(--line);stroke-width:1}
+  .zero{stroke:var(--line2);stroke-width:1.5;stroke-dasharray:3 3}
+  .ax{fill:var(--ink3);font-family:var(--mono);font-size:10px}
+  .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  .ln.ctl{stroke:var(--ctrl);stroke-dasharray:5 4;stroke-width:1.5}
+  .dl{font-family:var(--mono);font-size:10px;font-weight:600}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 16px;padding:12px 4px 0;font-size:11.5px;color:var(--ink2)}
+  .legend span{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .legend span.off{opacity:.35}
+  .lswatch{width:14px;height:2.5px;border-radius:2px;display:block}
+  .lswatch.dash{background:none;border-top:2px dashed var(--ctrl);height:0}
+
+  .empty{padding:44px 20px;text-align:center;color:var(--ink3);font-size:13px}
+  .hint{font-size:11.5px;color:var(--ink3);margin-top:9px;line-height:1.5}
+  .hbars{display:flex;align-items:flex-end;gap:3px;height:54px;margin-top:4px}
+  .hbars .b{flex:1;background:var(--s1);border-radius:2px 2px 0 0;min-height:2px;opacity:.85}
+  .hbars .b.z{background:var(--line2)}
+  .hlab{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;color:var(--ink3);margin-top:5px}
+  .hl{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:12px}
+  .hl:last-child{border-bottom:none}
+  .hl .k{color:var(--ink2)} .hl .v{font-family:var(--mono);color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div class="brand"><span class="dot" id="live-dot"></span> OptiFerre · Laboratorio</div>
+    <span class="sep" id="sub">—</span>
+    <div class="right">
+      <span id="clock">--:--:--</span>
+      <span>·</span>
+      <span id="refresh">actualiza en 30s</span>
+    </div>
+  </div>
+
+  <div id="banner-slot"></div>
+
+  <h2>Estado del experimento</h2>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="cols" style="margin-top:26px">
+    <div>
+      <div class="card">
+        <div class="hd"><span class="t">Clasificación de estrategias</span>
+          <span class="r" id="lb-note">—</span></div>
+        <div class="bd" style="padding:14px 8px 6px" id="lb"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="hd"><span class="t">Markout por horizonte</span>
+          <span class="r">bps · neto de comisión</span></div>
+        <div class="bd" id="chart"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="hd"><span class="t">Cobertura horaria de la muestra</span>
+          <span class="r" id="cov-note">—</span></div>
+        <div class="bd" id="cov"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="hd"><span class="t">Operaciones simuladas</span>
+          <span class="r" id="tape-note">en vivo</span></div>
+        <div class="tape" id="tape"></div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="hd"><span class="t">Salud del sistema</span></div>
+        <div class="bd" id="health"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────────
+   ENDPOINTS que el backend debe exponer (ver spec en el documento adjunto):
+     GET /api/lab/summary
+     GET /api/lab/leaderboard
+     GET /api/lab/curve
+     GET /api/lab/tape?limit=60
+   Si no responden, la página entra en MODO EJEMPLO y lo avisa en rojo.
+   ────────────────────────────────────────────────────────────────────────── */
+
+const API = '/api/lab';
+const SERIES = ['#3987e5','#d95926','#199e70','#c98500','#d55181'];  // paleta validada
+const HZ = ['1s','5s','30s','60s','5m','15m','30m','60m'];
+let DEMO = false, hidden = new Set(), state = {};
+
+const fmt = (v,d=2)=> v===null||v===undefined||Number.isNaN(v) ? '—' : (v>0?'+':'')+v.toFixed(d);
+const int = v => v===null||v===undefined ? '—' : v.toLocaleString('es');
+const cls = v => v===null||v===undefined ? '' : (v>0?'pos':v<0?'neg':'');
+
+async function get(p){
+  const r = await fetch(API+p, {cache:'no-store'});
+  if(!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function load(){
+  try{
+    const [s,l,c,t] = await Promise.all([
+      get('/summary'), get('/leaderboard'), get('/curve'), get('/tape?limit=60')
+    ]);
+    DEMO=false; state={s,l,c,t};
+  }catch(e){
+    DEMO=true; state=demo();
+  }
+  render();
+}
+
+/* ── render ──────────────────────────────────────────────────────────────── */
+
+function render(){
+  const {s,l,c,t} = state;
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('es',{hour12:false});
+  document.getElementById('live-dot').className = 'dot' + (DEMO||!s.streams_ok ? ' off':'');
+  document.getElementById('sub').textContent =
+    `${s.symbols||6} símbolos · ${s.strategies_registered||0} estrategias · día ${Math.floor((s.elapsed_s||0)/86400)+1} de 7`;
+
+  banners(s);
+  tiles(s);
+  leaderboard(l, s);
+  chart(c);
+  coverage(s);
+  tape(t);
+  health(s);
+}
+
+function banners(s){
+  let h = '';
+  if(DEMO) h += `<div class="banner crit">⚠ <b>DATOS DE EJEMPLO.</b>
+    El API <code>/api/lab/*</code> no responde — nada de lo que ves aquí es real. Es solo la maqueta del diseño.</div>`;
+  const ready = (s.n_ef_min||0) >= 30 && (s.hours_covered||0) >= 24;
+  if(!ready) h += `<div class="banner warn">◐ <b>MUESTRA INSUFICIENTE.</b>
+    La clasificación es informativa, no concluyente. Faltan
+    <b>${Math.max(0,30-(s.n_ef_min||0))}</b> eventos independientes y
+    <b>${Math.max(0,24-(s.hours_covered||0))}h</b> de cobertura.
+    Con ${s.strategies_registered||0} estrategias probadas a la vez, el listón es <b>|t| &gt; ${(s.t_threshold||2.94).toFixed(2)}</b>.</div>`;
+  document.getElementById('banner-slot').innerHTML = h;
+}
+
+function tiles(s){
+  const pct = Math.min(100, (s.elapsed_s||0)/(s.target_s||604800)*100);
+  const d = [
+    ['Progreso', (pct).toFixed(0), '%', pct, 'de los 7 días'],
+    ['Señales', int(s.signals), '', null, 'generadas'],
+    ['Fills', int(s.fills), '', null, 'simulados'],
+    ['n efectivo', int(s.n_ef_total), '', null, 'eventos independientes'],
+    ['Cobertura', int(s.hours_covered), '/24', Math.min(100,(s.hours_covered||0)/24*100), 'franjas horarias'],
+    ['Candidatas', int(s.candidates), '', null, 'cumplen los 3 criterios'],
+  ];
+  document.getElementById('tiles').innerHTML = d.map(([l,v,u,bar,sub])=>`
+    <div class="tile">
+      <div class="v">${v}<span class="u">${u}</span></div>
+      <div class="l">${l}</div>
+      ${bar!==null?`<div class="bar"><i style="width:${bar}%"></i></div>`:''}
+      <div class="l" style="text-transform:none;letter-spacing:0;margin-top:6px;color:var(--ink3)">${sub}</div>
+    </div>`).join('');
+}
+
+function leaderboard(l, s){
+  if(!l || !l.length){ document.getElementById('lb').innerHTML='<div class="empty">Sin datos todavía.</div>'; return; }
+  const ctrls = l.filter(r=>r.is_control), rest = l.filter(r=>!r.is_control)
+    .sort((a,b)=>(b.net_bps??-1e9)-(a.net_bps??-1e9));
+  const colorOf = {}; let i=0;
+  rest.slice(0,5).forEach(r=>{ colorOf[r.strategy]=SERIES[i++]; });
+
+  const row = r=>{
+    const v = r.is_control ? ['p-ctrl','CONTROL']
+      : r.verdict==='CANDIDATA' ? ['p-cand','CANDIDATA']
+      : r.verdict==='INSUFICIENTE' ? ['p-ins','INSUFICIENTE'] : ['p-desc','DESCARTADA'];
+    const sw = colorOf[r.strategy] ? `<span class="swatch" style="background:${colorOf[r.strategy]}"></span>` : '';
+    return `<tr class="${r.is_control?'ctrl':''}">
+      <td><span class="nm">${sw}${r.strategy}</span></td>
+      <td><span class="tag">${r.mode}</span></td>
+      <td class="n">${int(r.signals)}</td>
+      <td class="n">${int(r.fills)}</td>
+      <td class="n">${int(r.n_ef)}</td>
+      <td class="n ${cls(r.net_bps)}">${fmt(r.net_bps)}</td>
+      <td class="n">${r.ci_low==null?'—':fmt(r.ci_low)}</td>
+      <td class="n ${cls(r.vs_control)}">${r.is_control?'—':fmt(r.vs_control)}</td>
+      <td class="n">${r.t_stat==null?'—':Math.abs(r.t_stat).toFixed(2)}</td>
+      <td><span class="pill ${v[0]}"><i></i>${v[1]}</span></td></tr>`;
+  };
+
+  document.getElementById('lb').innerHTML = `<table>
+    <thead><tr><th>Estrategia</th><th>Modo</th><th class="n">Señales</th><th class="n">Fills</th>
+    <th class="n">n_ef</th><th class="n">Neto bps</th><th class="n">CI95 inf</th>
+    <th class="n">vs ctrl</th><th class="n">|t|</th><th>Veredicto</th></tr></thead>
+    <tbody>${ctrls.map(row).join('')}${rest.map(row).join('')}</tbody></table>
+    <div class="hint" style="padding:0 9px">
+      CANDIDATA exige las tres: vs control &gt; 10 bps · n_ef ≥ 30 · CI95 inferior &gt; 0 ·
+      y |t| &gt; ${(s.t_threshold||2.94).toFixed(2)} por probar ${s.strategies_registered||0} a la vez.</div>`;
+}
+
+function chart(c){
+  const el = document.getElementById('chart');
+  if(!c || !c.series || !c.series.length){ el.innerHTML='<div class="empty">Aún no hay markouts resueltos.</div>'; return; }
+
+  const W=760,H=300,mL=48,mR=64,mT=14,mB=30;
+  const vis = c.series.filter(s=>!hidden.has(s.strategy));
+  const all = vis.flatMap(s=>s.values).filter(v=>v!=null);
+  if(!all.length){ el.innerHTML='<div class="empty">Aún no hay markouts resueltos.</div>'; return; }
+  let lo=Math.min(0,...all), hi=Math.max(0,...all);
+  const pad=(hi-lo)*0.15||1; lo-=pad; hi+=pad;
+  const X=i=>mL+i*(W-mL-mR)/(HZ.length-1);
+  const Y=v=>mT+(hi-v)*(H-mT-mB)/(hi-lo);
+
+  let sIdx=0; const col = s => s.is_control ? null : SERIES[(sIdx++)%SERIES.length];
+  const colors = {}; c.series.forEach(s=>{ colors[s.strategy]= s.is_control?null:SERIES[Object.keys(colors).filter(k=>colors[k]).length%SERIES.length]; });
+
+  const ticks=4, gl=[];
+  for(let i=0;i<=ticks;i++){ const v=lo+(hi-lo)*i/ticks;
+    gl.push(`<line class="grid" x1="${mL}" y1="${Y(v)}" x2="${W-mR}" y2="${Y(v)}"/>
+      <text class="ax" x="${mL-8}" y="${Y(v)+3}" text-anchor="end">${v.toFixed(1)}</text>`); }
+
+  const paths = vis.map(s=>{
+    const pts = s.values.map((v,i)=> v==null?null:[X(i),Y(v)]).filter(Boolean);
+    if(pts.length<2) return '';
+    const d = pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+    const last = pts[pts.length-1];
+    const c2 = colors[s.strategy];
+    return `<path class="ln${s.is_control?' ctl':''}" d="${d}" ${c2?`stroke="${c2}"`:''}/>
+      <text class="dl" x="${last[0]+7}" y="${last[1]+3}" fill="${c2||'var(--ctrl)'}">${s.strategy.replace(/_(maker|taker)$/,'')}</text>`;
+  }).join('');
+
+  el.innerHTML = `<div class="chart"><svg viewBox="0 0 ${W} ${H}">
+    ${gl.join('')}
+    <line class="zero" x1="${mL}" y1="${Y(0)}" x2="${W-mR}" y2="${Y(0)}"/>
+    <text class="ax" x="${W-mR+4}" y="${Y(0)-5}">0</text>
+    ${HZ.map((h,i)=>`<text class="ax" x="${X(i)}" y="${H-8}" text-anchor="middle">${h}</text>`).join('')}
+    ${paths}</svg>
+    <div class="legend">${c.series.map(s=>`
+      <span class="${hidden.has(s.strategy)?'off':''}" data-s="${s.strategy}">
+        <i class="lswatch ${s.is_control?'dash':''}" style="${s.is_control?'':'background:'+colors[s.strategy]}"></i>
+        ${s.strategy}</span>`).join('')}</div>
+    <div class="hint">Los controles van en trazo discontinuo. Una señal solo importa si su línea
+      queda por encima del control de su mismo modo de ejecución.</div></div>`;
+
+  el.querySelectorAll('.legend span').forEach(n=>n.onclick=()=>{
+    const k=n.dataset.s; hidden.has(k)?hidden.delete(k):hidden.add(k); chart(state.c);
+  });
+}
+
+function coverage(s){
+  const h = s.hour_hist || new Array(24).fill(0);
+  const mx = Math.max(1,...h);
+  document.getElementById('cov-note').textContent = `${h.filter(x=>x>0).length} de 24 horas con datos`;
+  document.getElementById('cov').innerHTML = `
+    <div class="hbars">${h.map(v=>`<div class="b ${v?'':'z'}" style="height:${Math.max(2,v/mx*100)}%" title="${v} fills"></div>`).join('')}</div>
+    <div class="hlab"><span>00 UTC</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+    <div class="hint">La muestra no es interpretable si los fills se concentran en pocas franjas,
+      por muy alto que sea el n_ef.</div>`;
+}
+
+function tape(t){
+  const el = document.getElementById('tape');
+  if(!t || !t.length){ el.innerHTML='<div class="empty">Esperando la primera señal…</div>'; return; }
+  el.innerHTML = t.map(r=>{
+    const st = r.status==='FILLED' ? `fill ${r.fill_price}` :
+               r.status==='EXPIRED' ? 'expiró sin llenarse' :
+               r.status==='PENDING' ? 'esperando fill' :
+               r.status==='REJECTED_WOULD_TAKE' ? 'rechazada −2010' : r.status.toLowerCase();
+    const res = r.net_bps!=null ? `<span class="${cls(r.net_bps)}">${fmt(r.net_bps,1)}</span>` :
+                r.status==='FILLED' ? '<span style="color:var(--ink3)">midiendo…</span>' : '—';
+    return `<div class="row">
+      <span class="tm">${r.ts}</span>
+      <span class="sd ${r.side==='BUY'?'buy':'sell'}">${r.side==='BUY'?'CMP':'VTA'}</span>
+      <span class="sy">${r.symbol.replace('FDUSD','')}</span>
+      <span class="st">${r.strategy.replace(/_(maker|taker)$/,'')} · ${st}</span>
+      <span class="tag">${r.mode[0]}</span>
+      <span class="rs">${res}</span></div>`;
+  }).join('');
+}
+
+function health(s){
+  const rows = [
+    ['Streams activos', (s.streams||[]).map(x=>x.name).join(', ')||'—'],
+    ['Último mensaje', (s.streams||[]).length? Math.max(...s.streams.map(x=>x.last_msg_age_s))+'s':'—'],
+    ['Gaps de reconexión', int(s.gaps)],
+    ['Disco libre', (s.disk_free_pct??'—')+'%'],
+    ['RAM del contenedor', (s.ram_pct??'—')+'% del límite'],
+    ['Bot de Deriv', s.deriv_ok?'corriendo':'sin confirmar'],
+  ];
+  document.getElementById('health').innerHTML = rows.map(([k,v])=>
+    `<div class="hl"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+}
+
+/* ── modo ejemplo (solo maqueta; se marca en rojo) ───────────────────────── */
+function demo(){
+  const names = [
+    ['ctrl_random_taker','TAKER',true],['ctrl_random_maker','MAKER',true],
+    ['taker_flow','TAKER',false],['book_imbalance','TAKER',false],
+    ['volume_breakout','TAKER',false],['rsi_reversion','MAKER',false],
+    ['ema_cross','TAKER',false],['bollinger_reversion','MAKER',false],
+  ];
+  const l = names.map((n,i)=>({
+    strategy:n[0], mode:n[1], is_control:n[2],
+    signals:[8640,8640,412,388,96,180,64,140][i], fills:[1728,86,340,300,74,12,52,9][i],
+    n_ef:[288,14,58,51,12,2,9,1][i],
+    net_bps:[-10.4,-1.2,-6.1,-8.9,-9.7,-2.4,-11.2,-3.1][i],
+    ci_low:[-11.8,-3.0,-8.4,-11.2,-14.1,null,-16.0,null][i],
+    vs_control:[null,null,4.3,1.5,0.7,-1.2,-0.8,-1.9][i],
+    t_stat:[-14.2,-1.6,-5.1,-6.2,-3.9,null,-4.1,null][i],
+    verdict:n[2]?'CONTROL':(i===2?'DESCARTADA':i>=5?'INSUFICIENTE':'DESCARTADA')
+  }));
+  const mk = a => ({values:a});
+  const c = {series:[
+    {strategy:'ctrl_random_taker',is_control:true, values:[-10.0,-10.1,-10.3,-10.4,-10.6,-10.9,-11.2,-11.0]},
+    {strategy:'ctrl_random_maker',is_control:true, values:[0.3,-0.2,-0.9,-1.2,-1.6,-1.9,-2.2,-2.0]},
+    {strategy:'taker_flow',is_control:false, values:[-9.8,-9.2,-8.4,-7.9,-7.1,-6.4,-6.1,-6.3]},
+    {strategy:'book_imbalance',is_control:false, values:[-10.1,-9.9,-9.4,-9.1,-8.8,-8.9,-8.9,-9.2]},
+    {strategy:'volume_breakout',is_control:false, values:[-10.2,-10.0,-9.8,-9.6,-9.7,-9.9,-9.7,-10.1]},
+    {strategy:'rsi_reversion',is_control:false, values:[0.2,-0.4,-1.4,-1.9,-2.2,-2.5,-2.4,-2.6]},
+  ]};
+  const sym=['ETHFDUSD','SOLFDUSD','XRPFDUSD','DOGEFDUSD','LINKFDUSD','BNBFDUSD'];
+  const stg=['taker_flow_taker','book_imbalance_taker','ctrl_random_taker','rsi_reversion_maker','volume_breakout_taker'];
+  const sts=['FILLED','FILLED','FILLED','EXPIRED','PENDING','REJECTED_WOULD_TAKE'];
+  const t=[]; const now=Date.now();
+  for(let i=0;i<40;i++){
+    const st=sts[i%sts.length];
+    t.push({ts:new Date(now-i*47000).toLocaleTimeString('es',{hour12:false}).slice(0,5),
+      strategy:stg[i%stg.length], mode:i%3?'TAKER':'MAKER', symbol:sym[i%sym.length],
+      side:i%2?'BUY':'SELL', fill_price:(100+i%37).toFixed(2), status:st,
+      net_bps: st==='FILLED' ? (Math.sin(i*2.3)*9-4) : null});
+  }
+  const hh=new Array(24).fill(0); for(let i=3;i<9;i++) hh[i]=40+((i*37)%60);
+  return {s:{symbols:6,strategies_registered:15,t_threshold:2.94,elapsed_s:19*3600,target_s:604800,
+    signals:18560,fills:2601,n_ef_total:435,n_ef_min:1,hours_covered:6,candidates:0,
+    hour_hist:hh,gaps:2,disk_free_pct:41,ram_pct:63,deriv_ok:true,streams_ok:true,
+    streams:[{name:'bookTicker',last_msg_age_s:0},{name:'aggTrade',last_msg_age_s:1}]}, l, c, t};
+}
+
+load(); setInterval(load, 30000);
+let n=30; setInterval(()=>{ n=n<=1?30:n-1;
+  document.getElementById('refresh').textContent=`actualiza en ${n}s`; },1000);
+</script>
+</body>
+</html>
