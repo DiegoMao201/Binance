@@ -423,13 +423,16 @@ class DerivClient:
                         symbol, _intended_stake, broker_limit,
                     )
                     buy_req["parameters"]["amount"] = broker_limit
-                    # Recalculate SL/TP for the adjusted stake
+                    # Recalculate SL for the adjusted stake; only set TP if pct > 0
                     buy_req["parameters"]["limit_order"]["stop_loss"] = round(
                         max(broker_limit * float(stop_loss_pct), 0.20), 2
                     )
-                    buy_req["parameters"]["limit_order"]["take_profit"] = round(
-                        max(broker_limit * float(take_profit_pct), 1.00), 2
-                    )
+                    if float(take_profit_pct) > 0:
+                        buy_req["parameters"]["limit_order"]["take_profit"] = round(
+                            max(broker_limit * float(take_profit_pct), 1.00), 2
+                        )
+                    else:
+                        buy_req["parameters"]["limit_order"].pop("take_profit", None)
                     result = await self._request(buy_req)
                     # Tag the result so the executor can store the actual stake
                     if "buy" in result:
@@ -438,7 +441,28 @@ class DerivClient:
                 except (ValueError, IndexError, KeyError):
                     pass  # fall through to original error handling
 
-        # Second retry: LimitOrderAmountTooLow on the SL/TP after stake adjustment.
+        # Second retry: LimitOrderAmountTooHigh — SL exceeds the broker's per-contract cap.
+        # code_args[0] is the broker's maximum allowed SL; retry clamped to that value.
+        if "error" in result:
+            err = result["error"]
+            if err.get("subcode") == "LimitOrderAmountTooHigh" and err.get("code_args"):
+                try:
+                    max_sl = round(float(err["code_args"][0]) - 0.01, 2)
+                    cur_stake = float(buy_req["parameters"]["amount"])
+                    buy_req["parameters"]["limit_order"]["stop_loss"] = max_sl
+                    _LOGGER.info(
+                        "[deriv-client] %s SL clamped to broker max-0.01: %.2f (stake=%.2f, requested=%.2f)",
+                        symbol, max_sl, cur_stake,
+                        float(buy_req["parameters"]["limit_order"].get("stop_loss", max_sl)),
+                    )
+                    result = await self._request(buy_req)
+                    if "buy" in result:
+                        result["buy"]["_actual_stake_usdt"] = cur_stake
+                        result["buy"]["_intended_stake_usdt"] = _intended_stake
+                except (ValueError, IndexError, KeyError):
+                    pass
+
+        # Third retry: LimitOrderAmountTooLow on the SL/TP after stake adjustment.
         # Broker reports the minimum acceptable amount in code_args[0]; we use it
         # as the new floor for both SL and TP (TP gets +50% headroom).
         if "error" in result:
