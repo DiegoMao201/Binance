@@ -52,10 +52,12 @@ K1000_DUR_ARMS: dict[str, list[int]] = {
 }
 K1000_HOLD_ARMS: list[int] = [0, 240]
 
-def _assign_arms(sym: str, contract_id: int) -> tuple[int, int]:
-    """Deterministic arm assignment: (arm_dur_s, arm_hold_s) from contract_id % 8."""
-    k = int(contract_id) % 8
-    return K1000_DUR_ARMS[sym][k % 4], K1000_HOLD_ARMS[k // 4]
+def _assign_arms(sym: str, counter: int) -> tuple[int, int, int]:
+    """Deterministic arm assignment from a per-symbol counter (NOT contract_id).
+    contract_id % 8 only ever yields 3 or 7 because Deriv IDs advance by 20.
+    Returns (arm_dur_s, arm_hold_s, k)."""
+    k = int(counter) % 8
+    return K1000_DUR_ARMS[sym][k % 4], K1000_HOLD_ARMS[k // 4], k
 
 # Flat stake — no escalation
 K1000_STAKES_1000 = [10.0]
@@ -129,6 +131,8 @@ class _SymState:
     # Factorial experiment fields
     k1000_arm_dur_s: int = 240
     k1000_arm_hold_s: int = 240
+    k1000_arm_k: int = 0           # celda 0-7 del último contrato abierto
+    k1000_arm_counter: int = 0     # contador propio por símbolo; persisted; avanza en cada apertura exitosa
     k1000_profit_at_spike: float = 0.0    # profit en el PRIMER spike (no se sobrescribe)
     k1000_spike_ts_first: float = 0.0     # timestamp del primer spike en el contrato
     k1000_spike_details: list = field(default_factory=list)  # [{jump, ratio, offset_s}]
@@ -175,6 +179,8 @@ class _SymState:
             "k1000_loss_gate_floor":      0.0,
             "k1000_arm_dur_s":        self.k1000_arm_dur_s,
             "k1000_arm_hold_s":       self.k1000_arm_hold_s,
+            "k1000_arm_k":            self.k1000_arm_k,
+            "k1000_arm_counter":      self.k1000_arm_counter,
             "k1000_blocked_until":    0.0,
             "k1000_rest_until":       0.0,
             "hour_pnl_1000":          round(self.hour_pnl_1000, 4),
@@ -537,13 +543,15 @@ class EntradaDiego:
         from src.execution.deriv_trader import DerivOrder
         stake = 10.0
         side  = "MULTDOWN" if "CRASH" in sym else "MULTUP"
-        # Broker safety timeout: max possible arm_dur + max arm_hold + margin
-        _sym_max_dur  = max(K1000_DUR_ARMS.get(sym, [1200]))
-        _sym_max_hold = max(K1000_HOLD_ARMS)
-        max_hold_s    = _sym_max_dur + _sym_max_hold + 60
+        # Assign arms from per-symbol counter BEFORE building the order.
+        # Using contract_id % 8 is broken: Deriv IDs advance by 20, so % 8 only yields 3 or 7.
+        _counter = state.k1000_arm_counter
+        dur_s, hold_s, arm_k = _assign_arms(sym, _counter)
+        # Broker safety timeout: specific arm + hold + margin
+        max_hold_s = dur_s + hold_s + 60
         _LOGGER.info(
-            "[ENTRADA_DIEGO] %s ABRIENDO %s $%.0f max_hold=%ds",
-            sym, side, stake, max_hold_s,
+            "[ENTRADA_DIEGO] %s ABRIENDO %s $%.0f arm=%d/%d k=%d counter=%d max_hold=%ds",
+            sym, side, stake, dur_s, hold_s, arm_k, _counter, max_hold_s,
         )
         try:
             async with self._open_lock:
@@ -567,14 +575,11 @@ class EntradaDiego:
                 result = await self._executor.execute(order)
             if result and result.get("status") == "live":
                 cid = result.get("contract_id")
-                state.contract_id    = int(cid) if cid else None
-                # Asignar brazos factoriales desde contract_id
-                if state.contract_id is not None:
-                    dur_s, hold_s = _assign_arms(sym, state.contract_id)
-                else:
-                    dur_s, hold_s = K1000_DUR_ARMS.get(sym, [240])[0], K1000_HOLD_ARMS[0]
+                state.contract_id      = int(cid) if cid else None
                 state.k1000_arm_dur_s  = dur_s
                 state.k1000_arm_hold_s = hold_s
+                state.k1000_arm_k      = arm_k
+                state.k1000_arm_counter = _counter + 1
                 state.k1000_spike_details   = []
                 state.k1000_profit_at_spike = 0.0
                 state.k1000_spike_ts_first  = 0.0
@@ -586,11 +591,11 @@ class EntradaDiego:
                 _oc = self._query_contract(state.contract_id) if state.contract_id else None
                 _entry_price = float(_oc.get("entry_price", 0.0)) if _oc else 0.0
                 self._ed_save_open(sym, stake, now, side=side, cid=state.contract_id,
-                                   dur_s=dur_s, hold_s=hold_s, entry_price=_entry_price)
+                                   dur_s=dur_s, hold_s=hold_s, entry_price=_entry_price,
+                                   arm_k=arm_k, arm_counter=_counter)
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s OPEN OK cid=%s $%.0f arm=%d/%d (k=%d)",
-                    sym, state.contract_id, stake, dur_s, hold_s,
-                    (int(cid) % 8) if cid else -1,
+                    "[ENTRADA_DIEGO] %s OPEN OK cid=%s $%.0f arm=%d/%d k=%d counter=%d",
+                    sym, state.contract_id, stake, dur_s, hold_s, arm_k, _counter,
                 )
             elif result and result.get("status") == "symbol_already_open":
                 _existing = result.get("open_contracts", [])
@@ -598,11 +603,11 @@ class EntradaDiego:
                     state.contract_id = int(_existing[0])
                     state.open_ts     = now
                     state.phase       = "OPEN"
-                    # Recompute arms from recovered contract_id
-                    dur_s, hold_s = _assign_arms(sym, state.contract_id)
+                    # Keep the pre-assigned arms; counter NOT incremented (no new contract opened)
                     state.k1000_arm_dur_s  = dur_s
                     state.k1000_arm_hold_s = hold_s
-                    _LOGGER.info("[ENTRADA_DIEGO] %s re-adjuntado cid=%s arm=%d/%d", sym, state.contract_id, dur_s, hold_s)
+                    state.k1000_arm_k      = arm_k
+                    _LOGGER.info("[ENTRADA_DIEGO] %s re-adjuntado cid=%s arm=%d/%d k=%d", sym, state.contract_id, dur_s, hold_s, arm_k)
             else:
                 _res_str = str(result)
                 if "max_open_contracts" in _res_str:
@@ -738,14 +743,11 @@ class EntradaDiego:
                         st.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
                         st.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
                         st.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
-                        # Restore arm assignments — always derivable from contract_id
-                        if sym in K1000_DUR_ARMS:
-                            dur_s, hold_s = _assign_arms(sym, int(contract_id))
-                            st.k1000_arm_dur_s  = dur_s
-                            st.k1000_arm_hold_s = hold_s
-                        else:
-                            st.k1000_arm_dur_s  = int(s.get("k1000_arm_dur_s", 240))
-                            st.k1000_arm_hold_s = int(s.get("k1000_arm_hold_s", 240))
+                        # Restore arm assignments from persisted values (counter-based, not cid)
+                        st.k1000_arm_dur_s   = int(s.get("k1000_arm_dur_s", 240))
+                        st.k1000_arm_hold_s  = int(s.get("k1000_arm_hold_s", 0))
+                        st.k1000_arm_k       = int(s.get("k1000_arm_k", 0))
+                        st.k1000_arm_counter = int(s.get("k1000_arm_counter", 0))
                         st.phase              = "OPEN"
                         st.profit_positive_ts = 0.0
                         _LOGGER.info(
@@ -775,9 +777,11 @@ class EntradaDiego:
                 _st.day_start_ts_1000      = float(s.get("day_start_ts_1000", 0.0))
                 _st.hour_pnl_1000          = float(s.get("hour_pnl_1000", 0.0))
                 _st.hour_start_ts_1000     = float(s.get("hour_start_ts_1000", 0.0))
+                _st.k1000_arm_counter      = int(s.get("k1000_arm_counter", 0))
+                _st.k1000_arm_k            = int(s.get("k1000_arm_k", 0))
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s RESTAURADO sin contrato → phase=%s day_pnl=%.2f",
-                    sym, _st.k1000_phase, _st.day_pnl_1000,
+                    "[ENTRADA_DIEGO] %s RESTAURADO sin contrato → phase=%s day_pnl=%.2f counter=%d",
+                    sym, _st.k1000_phase, _st.day_pnl_1000, _st.k1000_arm_counter,
                 )
 
         except Exception as exc:
@@ -866,7 +870,8 @@ class EntradaDiego:
     def _ed_save_open(self, sym: str, stake: float, now: float,
                       side: str = "", cid: Optional[int] = None,
                       dur_s: int = 0, hold_s: int = 0,
-                      entry_price: float = 0.0) -> None:
+                      entry_price: float = 0.0,
+                      arm_k: int = -1, arm_counter: int = -1) -> None:
         idle_before_s = 0.0
         _prev_close = self._last_close_ts.get(sym, 0.0)
         if _prev_close > 0:
@@ -886,6 +891,8 @@ class EntradaDiego:
             "atr_at_open":    round(atr_at_open, 6),
             "idle_before_s":  idle_before_s,
             "entry_price":    entry_price,
+            "arm_k":          arm_k,
+            "arm_counter":    arm_counter,
             "ctx":            self._ed_ctx(sym, now),
             "pre_open_spike_ts": float(self._risk.get_last_spike_ts(sym) or 0.0),
         }
@@ -910,7 +917,10 @@ class EntradaDiego:
             "sym":           sym,
             "contract_id":   info.get("contract_id"),
             "strategy":      "K1000_FACTORIAL",
-            # Brazos factoriales
+            # Brazos factoriales — v2 usa counter propio, no contract_id % 8
+            "exp_version":   "v2",
+            "arm_k":         info.get("arm_k", -1),
+            "arm_counter":   info.get("arm_counter", -1),
             "arm_dur_s":     info.get("arm_dur_s", getattr(state, "k1000_arm_dur_s", 0)),
             "arm_hold_s":    info.get("arm_hold_s", getattr(state, "k1000_arm_hold_s", 0)),
             # Contrato
