@@ -583,8 +583,10 @@ class EntradaDiego:
                 state.phase          = "OPEN"
                 state.k1000_phase_ts = now
                 state.k1000_had_spike = False
+                _oc = self._query_contract(state.contract_id) if state.contract_id else None
+                _entry_price = float(_oc.get("entry_price", 0.0)) if _oc else 0.0
                 self._ed_save_open(sym, stake, now, side=side, cid=state.contract_id,
-                                   dur_s=dur_s, hold_s=hold_s)
+                                   dur_s=dur_s, hold_s=hold_s, entry_price=_entry_price)
                 _LOGGER.info(
                     "[ENTRADA_DIEGO] %s OPEN OK cid=%s $%.0f arm=%d/%d (k=%d)",
                     sym, state.contract_id, stake, dur_s, hold_s,
@@ -665,6 +667,19 @@ class EntradaDiego:
         except Exception:
             pass
         return None
+
+    def _get_closed_prices(self, cid: Optional[int]) -> tuple[float, float]:
+        if not cid:
+            return 0.0, 0.0
+        try:
+            path = self._logs_dir / "deriv_closed_contracts.json"
+            contracts = json.loads(path.read_text())
+            for c in reversed(contracts):
+                if c.get("contract_id") == cid:
+                    return float(c.get("entry_price", 0.0)), float(c.get("exit_price", 0.0))
+        except Exception:
+            pass
+        return 0.0, 0.0
 
     def _query_profit(self, contract_id: int) -> Optional[float]:
         try:
@@ -850,7 +865,8 @@ class EntradaDiego:
 
     def _ed_save_open(self, sym: str, stake: float, now: float,
                       side: str = "", cid: Optional[int] = None,
-                      dur_s: int = 0, hold_s: int = 0) -> None:
+                      dur_s: int = 0, hold_s: int = 0,
+                      entry_price: float = 0.0) -> None:
         idle_before_s = 0.0
         _prev_close = self._last_close_ts.get(sym, 0.0)
         if _prev_close > 0:
@@ -869,6 +885,7 @@ class EntradaDiego:
             "arm_hold_s":     hold_s,
             "atr_at_open":    round(atr_at_open, 6),
             "idle_before_s":  idle_before_s,
+            "entry_price":    entry_price,
             "ctx":            self._ed_ctx(sym, now),
             "pre_open_spike_ts": float(self._risk.get_last_spike_ts(sym) or 0.0),
         }
@@ -904,8 +921,8 @@ class EntradaDiego:
             "closed_at_ts":  round(now, 3),
             "dur_s":         round(now - t_open, 1),
             "idle_before_s": info.get("idle_before_s", 0.0),
-            "entry_price":   0.0,   # no expuesto por executor actualmente
-            "exit_price":    0.0,   # no expuesto por executor actualmente
+            "entry_price":   info.get("entry_price", 0.0),
+            "exit_price":    self._get_closed_prices(info.get("contract_id"))[1],
             "pnl":           round(pnl, 4),
             "win":           pnl > 0,
             "close_reason":  close_type,
