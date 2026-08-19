@@ -160,7 +160,7 @@ export async function GET() {
   const d70BySymbol = (d70Raw && typeof d70Raw === "object") ? (d70Raw.symbols || {}) : {};
   const visionData = (visionRaw && typeof visionRaw === "object") ? visionRaw : {};
 
-  const K1000_SYMS = new Set(["CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
+  const K1000_SYMS = new Set(["BOOM500","CRASH500","BOOM600","CRASH600","CRASH900", "BOOM900", "CRASH1000", "BOOM1000"]);
 
   const spikes = (Array.isArray(spikesRaw) ? spikesRaw : [])
     .filter((s) => s && Number.isFinite(Number(s.ts)) && K1000_SYMS.has(s.symbol))
@@ -196,7 +196,7 @@ export async function GET() {
   // Restrict to the symbols the bot is actively trading (drops stale BOOM500 etc).
   // Discover symbols from active list first, fall back to live data.
   // Always include ED symbols so new symbols with no spikes/contracts still get a card.
-  const ED_ALWAYS = ["CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
+  const ED_ALWAYS = ["BOOM500","CRASH500","BOOM600","CRASH600","CRASH900", "BOOM900", "CRASH1000", "BOOM1000"];
   const symbolSet = new Set(ED_ALWAYS);
   if (activeSymbols.length) {
     for (const s of activeSymbols) symbolSet.add(s);
