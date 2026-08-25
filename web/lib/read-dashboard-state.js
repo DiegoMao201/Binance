@@ -8,6 +8,10 @@ const LOGS = process.env.BOT_STATE_DIR || path.join(ROOT, "logs");
 // si está montado, si no caer al mismo dir que Binance (modo dev local).
 const DERIV_LOGS = process.env.DERIV_STATE_DIR || LOGS;
 
+// Per-worker in-memory cache: avoids reading 17 JSON files on every request.
+const _CACHE_TTL = 20_000; // 20 s
+let _cache = null;
+
 
 async function readJson(fileName, fallback, baseDir = LOGS) {
   try {
@@ -22,6 +26,9 @@ async function readJson(fileName, fallback, baseDir = LOGS) {
 
 
 export async function readDashboardState() {
+  const now = Date.now();
+  if (_cache && now - _cache.ts < _CACHE_TTL) return _cache.data;
+
   const [state, status, control, orderHistory, signalHistory, scanHistory, openPositions, closedTrades, equityHistory, preFlight, tradeMonitorLog, recoveryStatus, derivStatus, derivOpenContracts, derivClosedContracts, derivSession, d10PanelState] = await Promise.all([
     readJson("bot_state.json", {}),
     readJson("status.json", {}),
@@ -42,7 +49,15 @@ export async function readDashboardState() {
     readJson("d10_panel_state.json", null, DERIV_LOGS),
   ]);
 
-  return {
+  // Truncate large arrays before sending to the client.
+  // last_decisions can grow to hundreds of entries; 50 is enough for the feed display.
+  const derivStatusTrimmed = derivStatus
+    ? { ...derivStatus, last_decisions: (derivStatus.last_decisions || []).slice(-50) }
+    : derivStatus;
+  // derivClosedContracts grows without bound; 200 entries covers the visible trade history.
+  const derivClosedTrimmed = (Array.isArray(derivClosedContracts) ? derivClosedContracts : []).slice(-200);
+
+  const data = {
     state,
     status,
     control,
@@ -55,12 +70,15 @@ export async function readDashboardState() {
     preFlight,
     tradeMonitorLog,
     recoveryStatus,
-    derivStatus,
+    derivStatus: derivStatusTrimmed,
     derivOpenContracts,
-    derivClosedContracts,
+    derivClosedContracts: derivClosedTrimmed,
     // Phase 31: session management — null = show all-time stats
     derivSession,
     d10PanelState,
     serverTime: new Date().toISOString(),
   };
+
+  _cache = { ts: now, data };
+  return data;
 }

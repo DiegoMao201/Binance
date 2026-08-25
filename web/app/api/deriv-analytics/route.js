@@ -10,6 +10,25 @@ const TICK_RECENT_WINDOW_SEC = Math.max(900, Number(process.env.DERIV_TICK_RECEN
 const TICK_BASELINE_WINDOW_SEC = Math.max(TICK_RECENT_WINDOW_SEC + 1800, Number(process.env.DERIV_TICK_BASELINE_WINDOW_SEC || 21600));
 const UI_DECISION_FEED_MAX = Math.max(50, Number(process.env.DERIV_UI_DECISIONS_MAX || 500));
 
+// Per-worker caches — avoids re-reading large files on every request.
+const _MKT_CTX_TTL = 10_000; // 10 s — same as individual symbol routes
+let _mktCtxCache = null;
+const _ANALYTICS_TTL = 30_000; // 30 s — full computation result
+let _analyticsCache = null;
+
+async function loadMarketCtx() {
+  const _now = Date.now();
+  if (_mktCtxCache && _now - _mktCtxCache.ts < _MKT_CTX_TTL) return _mktCtxCache.data;
+  try {
+    const raw = await fs.readFile(path.join(DERIV_LOGS, "deriv_market_context.json"), "utf8");
+    const data = JSON.parse(raw);
+    _mktCtxCache = { ts: _now, data };
+    return data;
+  } catch {
+    return _mktCtxCache?.data ?? [];
+  }
+}
+
 async function readJson(fileName, fallback, dir = DERIV_LOGS) {
   try {
     const content = await fs.readFile(path.join(dir, fileName), "utf8");
@@ -218,12 +237,17 @@ function pearson(x, y) {
 }
 
 export async function GET() {
+  const _reqTs = Date.now();
+  if (_analyticsCache && _reqTs - _analyticsCache.ts < _ANALYTICS_TTL) {
+    return Response.json(_analyticsCache.data, { headers: { "Cache-Control": "no-store, max-age=0" } });
+  }
+
   const [status, open, closed, sessionFile, marketCtx] = await Promise.all([
     readJson("deriv_status.json", {}),
     readJson("deriv_open_contracts.json", []),
     readJson("deriv_closed_contracts.json", []),
     readJson("deriv_session.json", null, LOGS),
-    readJson("deriv_market_context.json", [], DERIV_LOGS),
+    loadMarketCtx(),
   ]);
   const allClosed = (Array.isArray(closed) ? closed : []).slice().sort((a, b) => tsOf(a) - tsOf(b));
   // Session filter: only for global KPIs (SESSION, WIN%, PF, TRADES). Reports unaffected.
@@ -421,8 +445,8 @@ export async function GET() {
     rejection_count[k] = (rejection_count[k] || 0) + 1;
   }
 
-  return Response.json({
-    ts: Date.now(),
+  const _analyticsResult = {
+    ts: _reqTs,
     status: {
       balance: status?.balance ?? null,
       floating_pnl: status?.floating_pnl ?? null,
@@ -440,6 +464,9 @@ export async function GET() {
     decisions: { recent, last_by_symbol, rejection_count },
     symbol_tick_telemetry: tickTelemetryBySymbol,
     open_contracts: openContracts,
-    closed_contracts: allClosed,
-  }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+    // Send only the last 200 closed contracts for display; full history via /export
+    closed_contracts: allClosed.slice(-200),
+  };
+  _analyticsCache = { ts: _reqTs, data: _analyticsResult };
+  return Response.json(_analyticsResult, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }

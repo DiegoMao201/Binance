@@ -44,11 +44,24 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def _tail_lines(path: Path, max_lines: int) -> list[str]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if len(lines) <= max_lines:
-        return lines
-    return lines[-max_lines:]
+    # Read only the last 256 KB to avoid loading multi-MB JSONL files entirely.
+    # JSONL entries are ~200-500 bytes each; 256 KB covers 500+ lines comfortably.
+    _CHUNK = 256 * 1024
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as _f:
+            if size > _CHUNK:
+                _f.seek(-_CHUNK, 2)
+                raw = _f.read()
+                # First line after seek is likely incomplete — drop it.
+                first_nl = raw.find(b"\n")
+                raw = raw[first_nl + 1:] if first_nl >= 0 else raw
+            else:
+                raw = _f.read()
+    except OSError:
+        raw = b""
+    lines = [ln for ln in raw.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+    return lines[-max_lines:] if len(lines) > max_lines else lines
 
 
 async def _check_db_guardrails(database_url: str, min_symbols: int) -> CheckResult:
