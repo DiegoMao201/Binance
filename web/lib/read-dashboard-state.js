@@ -52,34 +52,29 @@ export async function readDashboardState() {
   // Truncate large arrays before sending to the client.
   // last_decisions can grow to hundreds of entries; 50 is enough for the feed display.
   const derivStatusTrimmed = derivStatus
-    ? { ...derivStatus, last_decisions: (derivStatus.last_decisions || []).slice(-50) }
+    ? { ...derivStatus, last_decisions: (derivStatus.last_decisions || []).slice(-20) }
     : derivStatus;
-  // derivClosedContracts grows without bound; 200 entries covers the visible trade history.
-  const derivClosedTrimmed = (Array.isArray(derivClosedContracts) ? derivClosedContracts : []).slice(-200);
+  // derivClosedContracts grows without bound; 100 entries covers the visible trade history.
+  const derivClosedTrimmed = (Array.isArray(derivClosedContracts) ? derivClosedContracts : []).slice(-100);
 
-  // bot_state.json duplicates closed_trades/order_history/signal_history as sub-arrays;
-  // cap them here so the same data isn't sent twice at full size.
+  // bot_state.json duplicates closed_trades/order_history/signal_history as large sub-arrays;
+  // strip them here because they are already available at the top level with proper caps.
   const stateTrimmed = state
-    ? {
-        ...state,
-        closed_trades: (state.closed_trades || []).slice(-100),
-        order_history: (state.order_history || []).slice(-100),
-        signal_history: (state.signal_history || []).slice(-100),
-      }
+    ? { ...state, closed_trades: [], order_history: [], signal_history: [] }
     : state;
 
   const data = {
     state: stateTrimmed,
     status,
     control,
-    orderHistory: (Array.isArray(orderHistory) ? orderHistory : []).slice(-100),
-    signalHistory: (Array.isArray(signalHistory) ? signalHistory : []).slice(-100),
-    scanHistory: (Array.isArray(scanHistory) ? scanHistory : []).slice(-20),
+    orderHistory: (Array.isArray(orderHistory) ? orderHistory : []).slice(-50),
+    signalHistory: (Array.isArray(signalHistory) ? signalHistory : []).slice(-50),
+    scanHistory: (Array.isArray(scanHistory) ? scanHistory : []).slice(-10),
     openPositions,
-    closedTrades: (Array.isArray(closedTrades) ? closedTrades : []).slice(-100),
-    equityHistory,
+    closedTrades: (Array.isArray(closedTrades) ? closedTrades : []).slice(-50),
+    equityHistory: (Array.isArray(equityHistory) ? equityHistory : []).slice(-200),
     preFlight,
-    tradeMonitorLog: (Array.isArray(tradeMonitorLog) ? tradeMonitorLog : []).slice(-100),
+    tradeMonitorLog: (Array.isArray(tradeMonitorLog) ? tradeMonitorLog : []).slice(-50),
     recoveryStatus,
     derivStatus: derivStatusTrimmed,
     derivOpenContracts,
