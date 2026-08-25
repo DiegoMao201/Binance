@@ -27,6 +27,11 @@ from typing import Any, Optional
 
 _LOGGER = logging.getLogger("entrada_diego")
 
+# Sentinel returned by _query_profit when the WS list is non-empty but does
+# NOT contain our contract → broker genuinely closed it.
+# Distinguished from None (=WS gap / empty list / exception = uncertain).
+_BROKER_CLOSED = object()
+
 SYMBOLS_500  = {"BOOM500",  "CRASH500"}
 SYMBOLS_600  = {"BOOM600",  "CRASH600"}
 SYMBOLS_900  = {"CRASH900", "BOOM900"}
@@ -133,9 +138,10 @@ class _SymState:
     k1000_arm_hold_s: int = 240
     k1000_arm_k: int = 0           # celda 0-7 del último contrato abierto
     k1000_arm_counter: int = 0     # contador propio por símbolo; persisted; avanza en cada apertura exitosa
-    k1000_profit_at_spike: float = 0.0    # profit en el PRIMER spike (no se sobrescribe)
+    k1000_profit_at_spike: float = 0.0    # profit en el PRIMER spike que calificó (no se sobrescribe)
     k1000_spike_ts_first: float = 0.0     # timestamp del primer spike en el contrato
-    k1000_spike_details: list = field(default_factory=list)  # [{jump, ratio, offset_s}]
+    k1000_spike_details: list = field(default_factory=list)  # [{jump, ratio, offset_s, profit}]
+    k1000_reopen_after: float = 0.0       # no reabrir antes de este ts (cooldown post-cierre)
 
     def remaining_s(self, now: float) -> float:
         if self.phase == "OPEN" and self.k1000_arm_dur_s > 0:
@@ -216,6 +222,9 @@ class EntradaDiego:
         self._global_pnl: float = 0.0
         self._global_pause_until: float = 0.0
         self._watchdog_started: set[str] = set()
+        self._recon_started: bool = False       # reconciliation loop started?
+        self._recon_last_ts: float = 0.0        # last reconciliation run
+        self._orphan_retry: set = set()         # cids que fallaron close — reintento permanente cada ciclo
 
         if self._enabled:
             active = sorted(SYMBOLS_ED - SYMBOLS_ED_DISABLED)
@@ -248,6 +257,9 @@ class EntradaDiego:
                         if _sk not in SYMBOLS_ED_DISABLED and _sk not in self._watchdog_started:
                             self._watchdog_started.add(_sk)
                             asyncio.create_task(self._1000_watchdog_loop(_sk))
+                    if not self._recon_started:
+                        self._recon_started = True
+                        asyncio.create_task(self._reconciliation_loop())
         async with self._locks[sym]:
             await self._process(sym, tick)
 
@@ -303,6 +315,98 @@ class EntradaDiego:
     async def _process_1000_scout(self, sym: str) -> None:
         await self._process_1000_simple(sym)
 
+    # ── Reconciliación contra Deriv portfolio ─────────────────────────────────
+
+    async def _reconciliation_loop(self) -> None:
+        """Every 30s: compare bot state vs Deriv portfolio and close orphans.
+
+        Orphan = a contract Deriv has open that the bot no longer tracks.
+        Ghost  = a contract the bot thinks is open that Deriv already closed.
+        Both can arise from WS disconnections that caused _query_profit to
+        return None while the bot erroneously released the contract.
+        """
+        _LOGGER.info("[ENTRADA_DIEGO] reconciliation loop iniciado (intervalo 30s)")
+        await asyncio.sleep(15)  # let WS stabilize after startup
+        while self._enabled:
+            await asyncio.sleep(30)
+            if not self._enabled:
+                break
+            try:
+                await self._reconcile_once()
+            except Exception as exc:
+                _LOGGER.error("[ENTRADA_DIEGO] reconciliation error: %s", exc)
+        _LOGGER.info("[ENTRADA_DIEGO] reconciliation loop terminado")
+
+    async def _reconcile_once(self) -> None:
+        """Single reconciliation pass."""
+        now = time.time()
+        self._recon_last_ts = now
+
+        broker_cids: list[int] = await self._executor.get_portfolio_cids()
+        if not broker_cids and self._executor.get_portfolio_cids_sync_hint() > 0:
+            # Portfolio API returned empty but executor has locally tracked contracts.
+            # Likely a transient WS issue — skip this cycle.
+            _LOGGER.debug("[ENTRADA_DIEGO] recon: broker portfolio empty but local=%d — skip",
+                          self._executor.get_portfolio_cids_sync_hint())
+            return
+
+        broker_set = set(broker_cids)
+        # Build bot-tracked set from all sym states
+        bot_cids: dict[int, str] = {}
+        for sym, st in self._states.items():
+            if st.contract_id is not None:
+                bot_cids[st.contract_id] = sym
+
+        # Limpiar pending que el broker ya cerró por su cuenta
+        _gone = self._orphan_retry - broker_set
+        if _gone:
+            _LOGGER.info("[ENTRADA_DIEGO] recon: pending orphans cerrados por broker: %s", sorted(_gone))
+            self._orphan_retry -= _gone
+
+        orphans = (broker_set - set(bot_cids.keys())) | (self._orphan_retry & broker_set)
+        ghosts  = set(bot_cids.keys()) - broker_set
+
+        n_open_deriv = len(broker_set)
+        if orphans or ghosts:
+            _LOGGER.warning(
+                "[ENTRADA_DIEGO] recon: deriv=%d bot=%d orphans=%s ghosts=%s",
+                n_open_deriv, len(bot_cids), sorted(orphans), sorted(ghosts),
+            )
+
+        # Close orphans — reintento permanente en cada ciclo hasta confirmar cierre
+        for cid in sorted(orphans):
+            _is_retry = cid in self._orphan_retry
+            _LOGGER.warning("[ENTRADA_DIEGO] recon: ORPHAN cid=%d — closing%s", cid, " (retry)" if _is_retry else "")
+            try:
+                await self._executor.close_contract(cid)
+                _LOGGER.info("[ENTRADA_DIEGO] recon: ORPHAN cid=%d closed OK", cid)
+                self._orphan_retry.discard(cid)
+            except Exception as _e:
+                _LOGGER.error("[ENTRADA_DIEGO] recon: ORPHAN cid=%d close error: %s — reintentará en 30s", cid, _e)
+                self._orphan_retry.add(cid)
+
+        # Reconcile ghosts: broker closed the contract, bot still tracks it
+        for cid, sym in list(bot_cids.items()):
+            if cid not in broker_set:
+                _LOGGER.warning("[ENTRADA_DIEGO] recon: GHOST %s cid=%d — marking closed", sym, cid)
+                async with self._locks[sym]:
+                    st = self._states[sym]
+                    if st.contract_id == cid:
+                        _pnl = st.current_profit
+                        _had_spk = getattr(st, "k1000_had_spike", False)
+                        st.contract_id      = None
+                        st.current_profit   = 0.0
+                        st.k1000_phase      = "WAIT"
+                        st.k1000_phase_ts   = now
+                        st.k1000_reopen_after = now + 1.0
+                        self._ed_log(sym, _pnl, _had_spk, 0, now, close_type="RECON_GHOST")
+                        st.k1000_had_spike = False
+                        self._persist(now)
+
+        if orphans or ghosts:
+            _LOGGER.info("[ENTRADA_DIEGO] recon: done orphans_closed=%d ghosts_fixed=%d n_open_deriv=%d",
+                         len(orphans), len(ghosts), n_open_deriv)
+
     # ── K1000 state machine ──────────────────────────────────────────────────
 
     async def _process_1000_simple(self, sym: str) -> None:
@@ -340,6 +444,10 @@ class EntradaDiego:
         # WAIT: abrir inmediatamente, sin condiciones
         # ────────────────────────────────────────────────────────────────────
         if phase == "WAIT":
+            # Cooldown post-cierre: dar 8s para que el WS close event llegue a deriv_trader
+            # y evite la race condition SYMBOL_ALREADY_OPEN.
+            if now < state.k1000_reopen_after:
+                return
             state.k1000_phase    = "IN_CONTRACT"
             state.k1000_phase_ts = now
             state.k1000_had_spike       = False
@@ -366,11 +474,12 @@ class EntradaDiego:
             _broker_closed = False
             _ic_prev_cid   = state.contract_id
             _qp = self._query_profit(state.contract_id)
-            if _qp is not None:
-                state.current_profit = _qp
-            else:
+            if _qp is _BROKER_CLOSED:
                 _broker_closed = True
                 state.contract_id = None
+            elif _qp is not None:
+                state.current_profit = _qp
+            # else: _qp is None = WS gap → skip cycle, keep contract
 
             # Ventana post-spike: profit aún negativo → chequear 5s
             _spk_chk = self._k1000_spike_check.get(sym, 0.0)
@@ -401,7 +510,8 @@ class EntradaDiego:
                     pass
                 _ratio    = float(self._risk.get_last_spike_ratio(sym) or 0.0)
                 _offset_s = round(now - state.k1000_phase_ts, 1)
-                state.k1000_spike_details.append({"jump": round(_jump_abs, 6), "ratio": round(_ratio, 2), "offset_s": _offset_s})
+                _cur_pnl  = round(state.current_profit, 4)
+                state.k1000_spike_details.append({"jump": round(_jump_abs, 6), "ratio": round(_ratio, 2), "offset_s": _offset_s, "profit": _cur_pnl})
                 # Primer spike: guardar profit_at_spike (no se sobrescribe)
                 if state.k1000_spike_ts_first == 0.0:
                     state.k1000_profit_at_spike = state.current_profit
@@ -439,39 +549,32 @@ class EntradaDiego:
                 _had_spk = getattr(state, "k1000_had_spike", False)
                 state.day_pnl_1000 = getattr(state, "day_pnl_1000", 0.0) + _pnl
                 state.last_close_profit = _pnl
-                state.k1000_phase       = "WAIT"
-                state.k1000_phase_ts    = now
                 self._ed_log(sym, _pnl, _had_spk, 0, now, close_type="BROKER")
-                state.k1000_had_spike = False
-                _LOGGER.info("[ENTRADA_DIEGO] %s broker-close pnl=%.4f day=%.2f → WAIT", sym, _pnl, state.day_pnl_1000)
+                # _ed_log resets spike_details/profit_at_spike/spike_ts_first
+                state.k1000_had_spike       = False
+                state.k1000_phase           = "IN_CONTRACT"
+                state.k1000_phase_ts        = now
+                state.k1000_reopen_after    = 0.0
+                _LOGGER.info("[ENTRADA_DIEGO] %s broker-close pnl=%.4f day=%.2f → REOPEN inline", sym, _pnl, state.day_pnl_1000)
                 if _ic_prev_cid is not None:
                     state.k1000_last_closed_cid = int(_ic_prev_cid)
                 self._persist(now)
+                await self._open_1000_simple(sym, state, now)
                 return
 
-            # Timer del contrato cumplido
-            if now >= state.k1000_phase_ts + state.k1000_arm_dur_s:
-                _cid  = int(state.contract_id)
-                _pnl  = state.current_profit
-                _had_spk = getattr(state, "k1000_had_spike", False)
-                state.contract_id    = None
-                state.current_profit = 0.0
-                try:
-                    await self._executor.close_contract(_cid)
-                except Exception as _e:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s TIMER close error: %s", sym, _e)
-                state.day_pnl_1000 = getattr(state, "day_pnl_1000", 0.0) + _pnl
-                state.last_close_profit = _pnl
-                state.k1000_phase       = "WAIT"
-                state.k1000_phase_ts    = now
-                self._ed_log(sym, _pnl, _had_spk, 0, now, close_type="TIMER")
-                state.k1000_had_spike = False
-                _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s TIMER %ds pnl=%.4f day=%.2f → WAIT",
-                    sym, state.k1000_arm_dur_s, _pnl, state.day_pnl_1000,
-                )
-                state.k1000_last_closed_cid = _cid
-                self._persist(now)
+            # Diagnostic: possible ghost contract — WS not yet delivering broker close event.
+            # Fires every 120s while contract is deeply negative to help diagnose long idle_before_s.
+            if not _broker_closed and state.contract_id is not None:
+                _age_s = now - state.k1000_phase_ts
+                if _age_s > 120 and state.current_profit <= -6.5:
+                    _warn_n = int(_age_s / 120)
+                    _prev_n = int((_age_s - 5) / 120)
+                    if _warn_n > _prev_n:
+                        _LOGGER.warning(
+                            "[ENTRADA_DIEGO] ENTRY_BLOCKED_BY=possible_ghost %s cid=%s profit=%.4f age=%.0fs",
+                            sym, state.contract_id, state.current_profit, _age_s,
+                        )
+            # v6: no timer — solo SL (broker) o spike positivo cierran el contrato
             return
 
         # ────────────────────────────────────────────────────────────────────
@@ -483,11 +586,12 @@ class EntradaDiego:
             _sh_prev_cid = state.contract_id
             if state.contract_id is not None:
                 _qp = self._query_profit(state.contract_id)
-                if _qp is not None:
-                    state.current_profit = _qp
-                else:
+                if _qp is _BROKER_CLOSED:
                     _broker_closed_sh = True
                     state.contract_id = None
+                elif _qp is not None:
+                    state.current_profit = _qp
+                # else: None = WS gap → skip cycle, keep contract
 
             # Seguir acumulando spike_details (NO actualizar profit_at_spike/spike_ts_first)
             if _new_spike and not _broker_closed_sh:
@@ -498,43 +602,67 @@ class EntradaDiego:
                     pass
                 _ratio    = float(self._risk.get_last_spike_ratio(sym) or 0.0)
                 _offset_s = round(now - state.k1000_phase_ts, 1)
-                state.k1000_spike_details.append({"jump": round(_jump_abs, 6), "ratio": round(_ratio, 2), "offset_s": _offset_s})
+                _cur_pnl  = round(state.current_profit, 4)
+                state.k1000_spike_details.append({"jump": round(_jump_abs, 6), "ratio": round(_ratio, 2), "offset_s": _offset_s, "profit": _cur_pnl})
 
             if _broker_closed_sh or state.contract_id is None:
                 _pnl = state.current_profit
                 state.day_pnl_1000 = getattr(state, "day_pnl_1000", 0.0) + _pnl
                 state.last_close_profit = _pnl
-                state.k1000_phase       = "WAIT"
-                state.k1000_phase_ts    = now
                 self._ed_log(sym, _pnl, True, 0, now, close_type="BROKER")
-                state.k1000_had_spike = False
-                _LOGGER.info("[ENTRADA_DIEGO] %s SPIKE_HOLD broker-close pnl=%.4f → WAIT", sym, _pnl)
+                # _ed_log resets spike_details/profit_at_spike/spike_ts_first
+                state.k1000_had_spike       = False
+                state.k1000_phase           = "IN_CONTRACT"
+                state.k1000_phase_ts        = now
+                state.k1000_reopen_after    = 0.0
+                _LOGGER.info("[ENTRADA_DIEGO] %s SPIKE_HOLD broker-close pnl=%.4f → REOPEN inline", sym, _pnl)
                 if _sh_prev_cid is not None:
                     state.k1000_last_closed_cid = int(_sh_prev_cid)
                 self._persist(now)
+                await self._open_1000_simple(sym, state, now)
                 return
 
             if now >= state.k1000_spike_hold_until:
                 _cid  = int(state.contract_id)
                 _pnl  = state.current_profit
-                state.contract_id    = None
-                state.current_profit = 0.0
+                # Capturar exit_price ANTES de cerrar
+                _oc_sh = self._query_contract(_cid)
+                if _oc_sh:
+                    _info_sh = self._ed_open_info.get(sym, {})
+                    _ep_sh   = float(_oc_sh.get("entry_price", _info_sh.get("entry_price", 0.0)))
+                    _fp_sh   = float(_oc_sh.get("floating_pnl", _pnl))
+                    _side_sh = _info_sh.get("side", "")
+                    _sign_sh = 1 if "UP" in _side_sh.upper() else -1
+                    if _ep_sh > 0:
+                        self._ed_open_info.setdefault(sym, {})["exit_price"] = round(
+                            _ep_sh + _sign_sh * _fp_sh / (10.0 * MULTIPLIER) * _ep_sh, 6)
+                        self._ed_open_info.setdefault(sym, {})["entry_price"] = _ep_sh
+                _t_close_sent_sh = time.time()
                 try:
                     await self._executor.close_contract(_cid)
                 except Exception as _e:
-                    _LOGGER.error("[ENTRADA_DIEGO] %s SPIKE_HOLD close error: %s", sym, _e)
+                    _LOGGER.error("[ENTRADA_DIEGO] %s SPIKE_HOLD close error: %s — keeping contract, retry next cycle", sym, _e)
+                    self._persist(now)
+                    return
+                _t_close_confirmed_sh = time.time()
+                _close_lat_sh = round(_t_close_confirmed_sh - _t_close_sent_sh, 3)
+                state.contract_id    = None
+                state.current_profit = 0.0
                 state.day_pnl_1000 = getattr(state, "day_pnl_1000", 0.0) + _pnl
                 state.last_close_profit = _pnl
-                state.k1000_phase       = "WAIT"
-                state.k1000_phase_ts    = now
-                self._ed_log(sym, _pnl, True, 0, now, close_type="SPIKE_HOLD")
-                state.k1000_had_spike = False
+                self._ed_log(sym, _pnl, True, 0, now, close_type="SPIKE_HOLD", close_latency_s=_close_lat_sh)
+                # _ed_log resets spike_details/profit_at_spike/spike_ts_first
+                state.k1000_had_spike       = False
+                state.k1000_phase           = "IN_CONTRACT"
+                state.k1000_phase_ts        = _t_close_confirmed_sh
+                state.k1000_reopen_after    = 0.0
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s SPIKE_HOLD END hold=%.0fs pnl=%.4f day=%.2f → WAIT",
-                    sym, state.k1000_arm_hold_s, _pnl, state.day_pnl_1000,
+                    "[ENTRADA_DIEGO] %s SPIKE_HOLD END hold=%.0fs pnl=%.4f day=%.2f → REOPEN inline (close_lat=%.3fs)",
+                    sym, state.k1000_arm_hold_s, _pnl, state.day_pnl_1000, _close_lat_sh,
                 )
                 state.k1000_last_closed_cid = _cid
-                self._persist(now)
+                self._persist(_t_close_confirmed_sh)
+                await self._open_1000_simple(sym, state, _t_close_confirmed_sh)
 
     async def _open_1000_scout(self, sym: str, state: "_SymState", now: float) -> None:
         await self._open_1000_simple(sym, state, now)
@@ -547,8 +675,32 @@ class EntradaDiego:
         # Using contract_id % 8 is broken: Deriv IDs advance by 20, so % 8 only yields 3 or 7.
         _counter = state.k1000_arm_counter
         dur_s, hold_s, arm_k = _assign_arms(sym, _counter)
-        # Broker safety timeout: specific arm + hold + margin
-        max_hold_s = dur_s + hold_s + 60
+        hold_s = 0  # v5: cerrar en el primer spike positivo, sin espera
+        # Broker backstop (2h) — en v5 solo SL cierra contratos perdedores
+        max_hold_s = 7200
+
+        # Pre-open check: verify no tracked contract for this symbol exists.
+        # This prevents opening a duplicate when the bot already tracks a contract
+        # (e.g. from the WAIT→IN_CONTRACT retry loop with cid=None after a WS gap).
+        _tracked = self._executor.get_open_contracts_for_status()
+        for _oc in _tracked:
+            if str(_oc.get("symbol", "")).upper() == sym and _oc.get("contract_id"):
+                _existing_cid = _oc["contract_id"]
+                _LOGGER.warning(
+                    "[ENTRADA_DIEGO] %s PRE-OPEN BLOCKED: executor ya rastrea cid=%s — adoptando",
+                    sym, _existing_cid,
+                )
+                state.contract_id      = int(_existing_cid)
+                state.k1000_arm_dur_s  = dur_s
+                state.k1000_arm_hold_s = hold_s
+                state.k1000_arm_k      = arm_k
+                state.open_ts          = float(_oc.get("opened_at_ts", now))
+                state.phase            = "OPEN"
+                state.k1000_phase      = "IN_CONTRACT"
+                state.k1000_phase_ts   = state.open_ts
+                self._persist(now)
+                return
+
         _LOGGER.info(
             "[ENTRADA_DIEGO] %s ABRIENDO %s $%.0f arm=%d/%d k=%d counter=%d max_hold=%ds",
             sym, side, stake, dur_s, hold_s, arm_k, _counter, max_hold_s,
@@ -573,6 +725,7 @@ class EntradaDiego:
                     },
                 )
                 result = await self._executor.execute(order)
+            _t_confirmed = time.time()   # wall-clock when bot received open confirmation
             if result and result.get("status") == "live":
                 cid = result.get("contract_id")
                 state.contract_id      = int(cid) if cid else None
@@ -588,14 +741,34 @@ class EntradaDiego:
                 state.phase          = "OPEN"
                 state.k1000_phase_ts = now
                 state.k1000_had_spike = False
+                _listen_start_s = round(_t_confirmed - now, 3)
+                # Seed any spikes DB recorded while bot was in handshake (blind spot).
+                try:
+                    _blind = await self._risk.query_spikes_in_window(sym, now, _t_confirmed)
+                except AttributeError:
+                    _blind = []
+                for _bs in _blind:
+                    _boff = round(float(_bs["ts"]) - now, 3)
+                    state.k1000_spike_details.append({
+                        "jump":      round(abs(float(_bs["jump"])), 6),
+                        "ratio":     round(float(_bs["ratio"]), 2),
+                        "offset_s":  max(0.0, _boff),
+                        "profit":    0.0,
+                        "db_seeded": True,
+                    })
+                    _LOGGER.info(
+                        "[ENTRADA_DIEGO] %s blind-spot spike seeded jump=%.3f offset=%.3fs",
+                        sym, abs(float(_bs["jump"])), _boff,
+                    )
                 _oc = self._query_contract(state.contract_id) if state.contract_id else None
                 _entry_price = float(_oc.get("entry_price", 0.0)) if _oc else 0.0
                 self._ed_save_open(sym, stake, now, side=side, cid=state.contract_id,
                                    dur_s=dur_s, hold_s=hold_s, entry_price=_entry_price,
-                                   arm_k=arm_k, arm_counter=_counter)
+                                   arm_k=arm_k, arm_counter=_counter,
+                                   listen_start_offset_s=_listen_start_s)
                 _LOGGER.info(
-                    "[ENTRADA_DIEGO] %s OPEN OK cid=%s $%.0f arm=%d/%d k=%d counter=%d",
-                    sym, state.contract_id, stake, dur_s, hold_s, arm_k, _counter,
+                    "[ENTRADA_DIEGO] %s OPEN OK cid=%s $%.0f arm=%d/%d k=%d counter=%d listen_start=%.3fs",
+                    sym, state.contract_id, stake, dur_s, hold_s, arm_k, _counter, _listen_start_s,
                 )
             elif result and result.get("status") == "symbol_already_open":
                 _existing = result.get("open_contracts", [])
@@ -686,17 +859,28 @@ class EntradaDiego:
             pass
         return 0.0, 0.0
 
-    def _query_profit(self, contract_id: int) -> Optional[float]:
+    def _query_profit(self, contract_id: int):
+        """Return floating PnL for contract_id, or a sentinel:
+
+        float         — contract is tracked by executor, pnl returned
+        _BROKER_CLOSED — contract is absent from a non-empty list (genuinely closed)
+        None           — WS gap / empty list / exception (cannot determine state)
+        """
         try:
-            for oc in self._executor.get_open_contracts_for_status():
+            contracts = self._executor.get_open_contracts_for_status()
+            for oc in contracts:
                 if oc.get("contract_id") == contract_id:
                     pnl = oc.get("floating_pnl")
                     if pnl is None:
                         pnl = oc.get("profit", 0.0)
                     return float(pnl)
+            # Contract not found. Only signal broker-close if the list is non-empty
+            # (meaning the WS is active and reporting contracts for other positions).
+            # An empty list means the WS is either down or all others also closed —
+            # too ambiguous to release the contract.
+            return _BROKER_CLOSED if contracts else None
         except Exception:
-            pass
-        return None
+            return None
 
     # ── Restore desde disco ───────────────────────────────────────────────────
 
@@ -871,7 +1055,8 @@ class EntradaDiego:
                       side: str = "", cid: Optional[int] = None,
                       dur_s: int = 0, hold_s: int = 0,
                       entry_price: float = 0.0,
-                      arm_k: int = -1, arm_counter: int = -1) -> None:
+                      arm_k: int = -1, arm_counter: int = -1,
+                      listen_start_offset_s: float = 0.0) -> None:
         idle_before_s = 0.0
         _prev_close = self._last_close_ts.get(sym, 0.0)
         if _prev_close > 0:
@@ -880,6 +1065,7 @@ class EntradaDiego:
             atr_at_open = float(self._risk.get_last_atr(sym) or 0.0)
         except AttributeError:
             atr_at_open = 0.0
+        _n_open_deriv = len(self._executor.get_open_contracts_for_status())
         self._ed_open_info[sym] = {
             "stake":          stake,
             "t_open":         now,
@@ -893,12 +1079,14 @@ class EntradaDiego:
             "entry_price":    entry_price,
             "arm_k":          arm_k,
             "arm_counter":    arm_counter,
+            "listen_start_offset_s": round(listen_start_offset_s, 3),
+            "n_open_deriv_at_open": _n_open_deriv,
             "ctx":            self._ed_ctx(sym, now),
             "pre_open_spike_ts": float(self._risk.get_last_spike_ts(sym) or 0.0),
         }
 
     def _ed_log(self, sym: str, pnl: float, had_spk: bool, rec_lvl: int,
-                now: float, close_type: str = "UNKNOWN") -> None:
+                now: float, close_type: str = "UNKNOWN", close_latency_s: float = 0.0) -> None:
         info  = self._ed_open_info.pop(sym, {})
         state = self._states[sym]
         ctx_open = info.get("ctx", {})
@@ -918,7 +1106,7 @@ class EntradaDiego:
             "contract_id":   info.get("contract_id"),
             "strategy":      "K1000_FACTORIAL",
             # Brazos factoriales — v2 usa counter propio, no contract_id % 8
-            "exp_version":   "v2",
+            "exp_version":   "v6",
             "arm_k":         info.get("arm_k", -1),
             "arm_counter":   info.get("arm_counter", -1),
             "arm_dur_s":     info.get("arm_dur_s", getattr(state, "k1000_arm_dur_s", 0)),
@@ -930,9 +1118,14 @@ class EntradaDiego:
             "opened_at_ts":  round(t_open, 3),
             "closed_at_ts":  round(now, 3),
             "dur_s":         round(now - t_open, 1),
-            "idle_before_s": info.get("idle_before_s", 0.0),
+            "idle_before_s":          info.get("idle_before_s", 0.0),
+            "listen_start_offset_s":  info.get("listen_start_offset_s", 0.0),
+            "close_latency_s":        close_latency_s,
+            "n_open_deriv_at_open":   info.get("n_open_deriv_at_open", -1),
             "entry_price":   info.get("entry_price", 0.0),
-            "exit_price":    self._get_closed_prices(info.get("contract_id"))[1],
+            # exit_price: preferir el que se capturó al momento del cierre (antes de cerrar el contrato).
+            # Si no está, intentar deriv_closed_contracts.json (puede no estar aún).
+            "exit_price":    info.get("exit_price") or self._get_closed_prices(info.get("contract_id"))[1],
             "pnl":           round(pnl, 4),
             "win":           pnl > 0,
             "close_reason":  close_type,
@@ -947,6 +1140,7 @@ class EntradaDiego:
             "spike_jumps":           [d.get("jump", 0.0) for d in spike_details],
             "spike_ratios":          [d.get("ratio", 0.0) for d in spike_details],
             "spike_offsets_s":       [d.get("offset_s", 0.0) for d in spike_details],
+            "spike_profits":         [d.get("profit", 0.0) for d in spike_details],
             # ATR y gap
             "atr_at_open":   info.get("atr_at_open", 0.0),
             "open_gap_s":    ctx_open.get("gap_s", -1.0),

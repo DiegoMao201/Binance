@@ -470,6 +470,7 @@ class DerivDaemon:
             _dyn_enabled_raw in {"1", "true", "yes", "on"}
             and bool(self._dynamic_db_url)
         )
+        self._dynamic_pool: Any = None  # asyncpg.Pool; created on first refresh, reused
         self._dynamic_refresh_sec = max(
             5,
             int(os.getenv("DERIV_DYNAMIC_CONFIG_REFRESH_SEC", "15") or 15),
@@ -1565,8 +1566,13 @@ class DerivDaemon:
             self._dynamic_enabled = False
             return
 
-        conn = await asyncio.wait_for(asyncpg.connect(self._dynamic_db_url), timeout=8.0)
-        try:
+        if self._dynamic_pool is None:
+            self._dynamic_pool = await asyncio.wait_for(
+                asyncpg.create_pool(self._dynamic_db_url, min_size=1, max_size=2,
+                                    command_timeout=8.0),
+                timeout=10.0,
+            )
+        async with self._dynamic_pool.acquire() as conn:
             _query_with_dep = """
                 SELECT symbol, market_regime, spike_pre_filter_target,
                        zero_peak_grace_sec, score_min_override,
@@ -1617,8 +1623,6 @@ class DerivDaemon:
                 _LOGGER.warning(
                     "[dynamic-config] DEP columns unavailable (migration pending) — using PASSIVE defaults"
                 )
-        finally:
-            await conn.close()
 
         _new: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -1715,7 +1719,7 @@ class DerivDaemon:
                 if (_now - self._dynamic_last_error_ts) > 30:
                     _LOGGER.warning(
                         "[dynamic-config] refresh failed: %s — keeping last in-memory snapshot",
-                        exc,
+                        repr(exc),
                     )
                     self._dynamic_last_error_ts = _now
             try:
