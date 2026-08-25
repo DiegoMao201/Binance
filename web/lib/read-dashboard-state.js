@@ -57,18 +57,29 @@ export async function readDashboardState() {
   // derivClosedContracts grows without bound; 200 entries covers the visible trade history.
   const derivClosedTrimmed = (Array.isArray(derivClosedContracts) ? derivClosedContracts : []).slice(-200);
 
+  // bot_state.json duplicates closed_trades/order_history/signal_history as sub-arrays;
+  // cap them here so the same data isn't sent twice at full size.
+  const stateTrimmed = state
+    ? {
+        ...state,
+        closed_trades: (state.closed_trades || []).slice(-100),
+        order_history: (state.order_history || []).slice(-100),
+        signal_history: (state.signal_history || []).slice(-100),
+      }
+    : state;
+
   const data = {
-    state,
+    state: stateTrimmed,
     status,
     control,
-    orderHistory,
-    signalHistory,
-    scanHistory,
+    orderHistory: (Array.isArray(orderHistory) ? orderHistory : []).slice(-100),
+    signalHistory: (Array.isArray(signalHistory) ? signalHistory : []).slice(-100),
+    scanHistory: (Array.isArray(scanHistory) ? scanHistory : []).slice(-20),
     openPositions,
-    closedTrades,
+    closedTrades: (Array.isArray(closedTrades) ? closedTrades : []).slice(-100),
     equityHistory,
     preFlight,
-    tradeMonitorLog,
+    tradeMonitorLog: (Array.isArray(tradeMonitorLog) ? tradeMonitorLog : []).slice(-100),
     recoveryStatus,
     derivStatus: derivStatusTrimmed,
     derivOpenContracts,
